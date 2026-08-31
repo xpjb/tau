@@ -4,6 +4,7 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@drawable/ic_tau"
         android:label="Tau"
         android:supportsRtl="true"
         android:theme="@style/Theme.Tau"

@@ -1,3 +1,7 @@
+import java.util.Properties
+import org.gradle.api.file.DuplicatesStrategy
+import org.gradle.api.tasks.Sync
+import org.gradle.jvm.tasks.Jar
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -45,6 +49,21 @@ kotlin {
     }
 }
 
+val localProperties = Properties().apply {
+    val propertiesFile = rootProject.file("local.properties")
+    if (propertiesFile.isFile) propertiesFile.inputStream().use(::load)
+}
+val releaseStoreFile = localProperties.getProperty("tau.signing.storeFile")
+val releaseStorePassword = localProperties.getProperty("tau.signing.storePassword")
+val releaseKeyAlias = localProperties.getProperty("tau.signing.keyAlias")
+val releaseKeyPassword = localProperties.getProperty("tau.signing.keyPassword")
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "app.tau"
     compileSdk = 35
@@ -57,8 +76,20 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("tauRelease") {
+                storeFile = rootProject.file(checkNotNull(releaseStoreFile))
+                storePassword = checkNotNull(releaseStorePassword)
+                keyAlias = checkNotNull(releaseKeyAlias)
+                keyPassword = checkNotNull(releaseKeyPassword)
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("tauRelease")
             isMinifyEnabled = false
         }
     }
@@ -76,6 +107,27 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+}
+
+val windowsSkiko by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+
+dependencies {
+    windowsSkiko("org.jetbrains.skiko:skiko-awt-runtime-windows-x64:0.8.18")
+}
+
+tasks.register<Sync>("prepareWindowsApp") {
+    dependsOn(tasks.named("desktopJar"))
+    into(layout.buildDirectory.dir("windows/app/lib"))
+    from(tasks.named<Jar>("desktopJar"))
+    from(configurations.named("desktopRuntimeClasspath")) {
+        exclude("skiko-awt-runtime-linux-*.jar")
+    }
+    from(windowsSkiko)
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
 compose.desktop {

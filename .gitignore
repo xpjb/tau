@@ -1,4 +1,6 @@
 /target/
+/windows/target/
+/dist/
 /app/.gradle/
 /app/build/
 /app/composeApp/build/

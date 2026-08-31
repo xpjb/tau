@@ -1,3 +1,4 @@
 [workspace]
 members = ["daemon"]
+exclude = ["windows"]
 resolver = "2"
