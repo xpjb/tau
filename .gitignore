@@ -1,0 +1,13 @@
+/target/
+/app/.gradle/
+/app/build/
+/app/composeApp/build/
+/app/local.properties
+*.jks
+*.keystore
+*.apk
+*.zip
+*.exe
+*.msi
+*.tmp
+.DS_Store
