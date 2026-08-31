@@ -9,13 +9,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -88,7 +89,7 @@ fun TauApp(controller: TauController) {
             if (state.editingSettings) {
                 ConnectionScreen(state, controller)
             } else {
-                Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+                Box(Modifier.fillMaxSize().systemBarsPadding().displayCutoutPadding()) {
                     BoxWithConstraints(Modifier.fillMaxSize()) {
                         if (maxWidth >= 760.dp) {
                             Row(Modifier.fillMaxSize()) {
@@ -153,7 +154,10 @@ private fun ConnectionScreen(state: TauUiState, controller: TauController) {
     var token by remember(state.settings, state.editingSettings) {
         mutableStateOf(state.settings.token)
     }
-    Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier.fillMaxSize().systemBarsPadding().displayCutoutPadding(),
+        contentAlignment = Alignment.Center,
+    ) {
         Card(Modifier.padding(24.dp).widthIn(max = 520.dp).fillMaxWidth()) {
             Column(
                 Modifier.padding(24.dp),
