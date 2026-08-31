@@ -23,7 +23,8 @@ fi
 chmod 0600 /etc/tau.env
 
 systemctl daemon-reload
-systemctl enable --now tau.service
+systemctl enable tau.service
+systemctl restart tau.service
 for _ in $(seq 1 50); do
     if curl --fail --silent http://127.0.0.1:8787/v1/health >/dev/null; then
         break
