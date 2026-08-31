@@ -66,11 +66,11 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
             .ok()
             .and_then(|value| Version::parse(value.trim()).ok())
     });
-    if current_version.as_ref().is_some_and(|current| current > &bundled_version) {
+    if let Some(current) = current_version.as_ref()
+        && current > &bundled_version
+    {
         return Ok(format!(
-            "Tau {} is already installed, which is newer than this {} setup.",
-            current_version.expect("checked above"),
-            bundled_version,
+            "Tau {current} is already installed, which is newer than this {bundled_version} setup.",
         ));
     }
 

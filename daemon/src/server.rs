@@ -61,13 +61,19 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
         .with_graceful_shutdown(async {
             #[cfg(unix)]
             {
-                let mut terminate = tokio::signal::unix::signal(
+                match tokio::signal::unix::signal(
                     tokio::signal::unix::SignalKind::terminate(),
-                )
-                .expect("failed to install SIGTERM listener");
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
+                ) {
+                    Ok(mut terminate) => {
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {}
+                            _ = terminate.recv() => {}
+                        }
+                    }
+                    Err(error) => {
+                        warn!(%error, "failed to install Tau SIGTERM listener");
+                        let _ = tokio::signal::ctrl_c().await;
+                    }
                 }
             }
             #[cfg(not(unix))]
