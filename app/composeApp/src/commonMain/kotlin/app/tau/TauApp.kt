@@ -37,6 +37,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -53,6 +54,27 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
 
+private val TauDarkColors = darkColorScheme(
+    primary = Color(0xFF67D4FF),
+    onPrimary = Color(0xFF003546),
+    primaryContainer = Color(0xFF164E63),
+    onPrimaryContainer = Color(0xFFC7F0FF),
+    secondary = Color(0xFFA5B4FC),
+    secondaryContainer = Color(0xFF303A66),
+    tertiary = Color(0xFF5EEAD4),
+    tertiaryContainer = Color(0xFF134E4A),
+    background = Color(0xFF090D12),
+    onBackground = Color(0xFFE5EAF0),
+    surface = Color(0xFF0E141B),
+    onSurface = Color(0xFFE5EAF0),
+    surfaceVariant = Color(0xFF18212B),
+    onSurfaceVariant = Color(0xFFB7C2CE),
+    outline = Color(0xFF526170),
+    outlineVariant = Color(0xFF2A3541),
+    error = Color(0xFFFFB4AB),
+    errorContainer = Color(0xFF7F1D1D),
+)
+
 @Composable
 fun TauApp(controller: TauController) {
     val state by controller.state.collectAsState()
@@ -61,7 +83,7 @@ fun TauApp(controller: TauController) {
         onDispose(controller::dispose)
     }
 
-    MaterialTheme {
+    MaterialTheme(colorScheme = TauDarkColors) {
         Surface(Modifier.fillMaxSize()) {
             if (state.editingSettings) {
                 ConnectionScreen(state, controller)
