@@ -572,6 +572,10 @@ impl AgentManager {
                     );
                 }
                 Some("agent_settled") => {
+                    let _guard = runtime.operation.lock().await;
+                    if !self.runtime_owns(&runtime, &process).await {
+                        break;
+                    }
                     self.set_runtime_state(&id, &runtime, SessionStatus::Idle, None);
                     if let Err(error) = self.persist_session_file(&id, &process).await {
                         warn!(session = %id, %error, "failed to persist settled Pi session path");
