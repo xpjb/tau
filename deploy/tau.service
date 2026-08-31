@@ -1,0 +1,27 @@
+[Unit]
+Description=Tau Tailnet gateway for Pi coding agents
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root
+Environment=HOME=/root
+Environment=RUST_LOG=info
+Environment=TAU_CWD=/root
+Environment=TAU_PI_COMMAND=/usr/bin/pi
+Environment=TAU_STATE_PATH=/var/lib/tau/state.json
+Environment=TAU_SESSION_DIR=/var/lib/tau/pi-sessions
+Environment=TAU_TELEMETRY_PATH=/var/lib/tau/client-crashes.jsonl
+EnvironmentFile=/etc/tau.env
+ExecStart=/usr/local/bin/taud
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=75s
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
