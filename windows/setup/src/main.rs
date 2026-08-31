@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(windows)]
-static PAYLOAD: &[u8] = include_bytes!(env!("TAU_PAYLOAD_ZIP"));
+static PAYLOAD: &[u8] = include_bytes!(env!("TAU_PAYLOAD_ARCHIVE"));
 #[cfg(windows)]
 static LAUNCHER: &[u8] = include_bytes!(env!("TAU_LAUNCHER_EXE"));
 #[cfg(windows)]
@@ -27,8 +27,8 @@ fn main() {
 #[cfg(windows)]
 fn install() -> Result<String, Box<dyn std::error::Error>> {
     use std::fs;
-    use std::io::{Cursor, Write};
-    use std::path::PathBuf;
+    use std::io::{BufReader, BufWriter, Cursor, Write};
+    use std::path::{Component, PathBuf};
 
     use semver::Version;
     use sha2::{Digest, Sha256};
@@ -102,26 +102,39 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
         }
         fs::create_dir_all(&staging)?;
         let extraction = (|| {
-            let mut archive = zip::ZipArchive::new(Cursor::new(PAYLOAD))?;
+            let tar_path = staging.join(".payload.tar");
+            {
+                let mut input = BufReader::new(Cursor::new(PAYLOAD));
+                let mut output = BufWriter::new(fs::File::create(&tar_path)?);
+                lzma_rs::lzma_decompress(&mut input, &mut output)?;
+                output.flush()?;
+            }
+            let mut archive = tar::Archive::new(fs::File::open(&tar_path)?);
             let mut expanded_bytes = 0_u64;
-            for index in 0..archive.len() {
-                let mut entry = archive.by_index(index)?;
-                let relative = entry
-                    .enclosed_name()
-                    .ok_or_else(|| format!("unsafe payload path: {}", entry.name()))?
-                    .to_owned();
-                if entry
-                    .unix_mode()
-                    .is_some_and(|mode| mode & 0o170000 == 0o120000)
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                let relative = entry.path()?.into_owned();
+                if relative.is_absolute()
+                    || relative
+                        .components()
+                        .any(|component| !matches!(component, Component::Normal(_)))
                 {
-                    return Err(format!("payload contains a symbolic link: {}", entry.name()).into());
+                    return Err(format!("unsafe payload path: {}", relative.display()).into());
+                }
+                let entry_type = entry.header().entry_type();
+                if !entry_type.is_file() && !entry_type.is_dir() {
+                    return Err(format!(
+                        "payload contains unsupported entry: {}",
+                        relative.display()
+                    )
+                    .into());
                 }
                 expanded_bytes = expanded_bytes.saturating_add(entry.size());
                 if expanded_bytes > 512 * 1024 * 1024 {
                     return Err("Tau payload exceeds its extraction limit".into());
                 }
                 let output = staging.join(relative);
-                if entry.is_dir() {
+                if entry_type.is_dir() {
                     fs::create_dir_all(&output)?;
                     continue;
                 }
@@ -132,6 +145,8 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
                 std::io::copy(&mut entry, &mut file)?;
                 file.flush()?;
             }
+            drop(archive);
+            fs::remove_file(tar_path)?;
             if !staging.join("runtime").join("bin").join("javaw.exe").is_file() {
                 return Err("Tau payload has no Windows Java runtime".into());
             }

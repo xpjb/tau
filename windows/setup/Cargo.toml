@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+lzma-rs = "0.3"
 semver = "1"
 sha2 = "0.10"
-zip = { version = "2", default-features = false, features = ["lzma"] }
+tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
