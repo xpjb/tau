@@ -122,7 +122,7 @@ class TauController {
         val text = mutableState.value.drafts[sessionId].orEmpty()
         if (text.isBlank()) return
         val id = nextRequestId()
-        pending[id] = PendingAction.Normal
+        pending[id] = PendingAction.Prompt(sessionId, text)
         scope.launch {
             try {
                 client.send(Prompt(id, sessionId, text))
@@ -137,7 +137,16 @@ class TauController {
                 throw cancelled
             } catch (error: Throwable) {
                 pending.remove(id)
-                mutableState.update { it.copy(error = error.message ?: "Message was not sent.") }
+                mutableState.update {
+                    it.copy(
+                        drafts = if (it.drafts[sessionId].isNullOrEmpty()) {
+                            it.drafts + (sessionId to text)
+                        } else {
+                            it.drafts
+                        },
+                        error = error.message ?: "Message was not sent.",
+                    )
+                }
             }
         }
     }
@@ -236,6 +245,7 @@ class TauController {
                     }
                 }
                 openedSessions.clear()
+                pending.clear()
                 mutableState.update {
                     it.copy(connectionStatus = ConnectionStatus.Offline, daemonVersion = null)
                 }
@@ -272,7 +282,16 @@ class TauController {
                 if (!message.ok) {
                     if (action is PendingAction.Open) openedSessions.remove(action.sessionId)
                     mutableState.update {
-                        it.copy(error = message.error ?: "Tau rejected the request.")
+                        it.copy(
+                            drafts = if (action is PendingAction.Prompt
+                                && it.drafts[action.sessionId].isNullOrEmpty()
+                            ) {
+                                it.drafts + (action.sessionId to action.text)
+                            } else {
+                                it.drafts
+                            },
+                            error = message.error ?: "Tau rejected the request.",
+                        )
                     }
                 } else if (action == PendingAction.SelectSession && message.sessionId != null) {
                     val sessionId = message.sessionId
@@ -376,5 +395,6 @@ class TauController {
         data object Normal : PendingAction
         data object SelectSession : PendingAction
         data class Open(val sessionId: String) : PendingAction
+        data class Prompt(val sessionId: String, val text: String) : PendingAction
     }
 }

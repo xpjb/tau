@@ -309,13 +309,6 @@ async fn download_attachment(
             return StatusCode::NOT_FOUND.into_response();
         }
     };
-    let file = match fs::File::open(&attachment.path).await {
-        Ok(file) => file,
-        Err(error) => {
-            warn!(path = %attachment.path.display(), %error, "failed to open Tau attachment");
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    };
     let safe_name = attachment
         .file_name
         .chars()
@@ -335,7 +328,7 @@ async fn download_attachment(
         Ok(value) => value,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
+    let mut response = Response::new(Body::from_stream(ReaderStream::new(attachment.file)));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,

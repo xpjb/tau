@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::fs;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, warn};
 
@@ -23,7 +23,7 @@ const IMAGE_LIMIT: u64 = 10_000_000;
 const FILE_LIMIT: u64 = 50_000_000;
 
 pub struct ResolvedAttachment {
-    pub path: PathBuf,
+    pub file: fs::File,
     pub file_name: String,
     pub mime_type: &'static str,
     pub size: u64,
@@ -304,7 +304,8 @@ impl AgentManager {
         if !path.starts_with(&root) {
             bail!("attachment is outside the Tau outbox");
         }
-        let metadata = fs::metadata(&path).await?;
+        let mut file = fs::File::open(&path).await?;
+        let metadata = file.metadata().await?;
         if !metadata.is_file() {
             bail!("attachment is not a regular file");
         }
@@ -318,9 +319,9 @@ impl AgentManager {
         let mime_type = match request.kind {
             AttachmentKind::File => "application/octet-stream",
             AttachmentKind::Image => {
-                let mut file = fs::File::open(&path).await?;
                 let mut header = [0_u8; 12];
                 let length = file.read(&mut header).await?;
+                file.seek(std::io::SeekFrom::Start(0)).await?;
                 if length >= 8 && header[..8] == [137, 80, 78, 71, 13, 10, 26, 10] {
                     "image/png"
                 } else if length >= 3 && header[..3] == [0xff, 0xd8, 0xff] {
@@ -341,7 +342,7 @@ impl AgentManager {
             .filter(|name| !name.is_empty())
             .context("attachment has no file name")?;
         Ok(ResolvedAttachment {
-            path,
+            file,
             file_name,
             mime_type,
             size: metadata.len(),
