@@ -40,6 +40,7 @@ kotlin {
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation("io.ktor:ktor-client-cio:3.0.3")
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
             }
         }
         commonTest.dependencies {
@@ -71,8 +72,8 @@ android {
         applicationId = "app.tau"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
     }
 
     signingConfigs {

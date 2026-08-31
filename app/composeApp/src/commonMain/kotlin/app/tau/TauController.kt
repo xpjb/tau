@@ -1,8 +1,8 @@
 package app.tau
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -38,8 +38,8 @@ data class TauUiState(
     val error: String? = null,
 )
 
-class TauController {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+class TauController(dispatcher: CoroutineDispatcher) {
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val client = TauClient()
     private val mutableState = MutableStateFlow(TauUiState())
     private val pending = mutableMapOf<String, PendingAction>()

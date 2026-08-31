@@ -51,7 +51,7 @@ actual object PlatformServices {
     } else {
         "desktop"
     }
-    actual val appVersion: String = "0.1.0"
+    actual val appVersion: String = "0.1.1"
     actual val osVersion: String = (
         System.getProperty("os.name").orEmpty() + " " + System.getProperty("os.version").orEmpty()
     ).trim()

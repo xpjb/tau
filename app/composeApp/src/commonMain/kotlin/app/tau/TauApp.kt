@@ -54,7 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
 
 @Composable
-fun TauApp(controller: TauController = remember { TauController() }) {
+fun TauApp(controller: TauController) {
     val state by controller.state.collectAsState()
     DisposableEffect(controller) {
         controller.start()
