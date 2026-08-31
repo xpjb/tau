@@ -1,7 +1,6 @@
 import java.util.Properties
 import org.gradle.api.file.DuplicatesStrategy
 import org.gradle.api.tasks.Sync
-import org.gradle.jvm.tasks.Jar
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -120,10 +119,9 @@ dependencies {
 }
 
 tasks.register<Sync>("prepareWindowsApp") {
-    dependsOn(tasks.named("desktopJar"))
+    dependsOn(tasks.named("proguardReleaseJars"))
     into(layout.buildDirectory.dir("windows/app/lib"))
-    from(tasks.named<Jar>("desktopJar"))
-    from(configurations.named("desktopRuntimeClasspath")) {
+    from(layout.buildDirectory.dir("compose/tmp/main-release/proguard")) {
         exclude("skiko-awt-runtime-linux-*.jar")
     }
     from(windowsSkiko)

@@ -9,9 +9,9 @@ bundle="$work/bundle"
 payload="$work/tau-windows-payload.zip"
 launcher="$root/windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe"
 output="$root/dist/Tau-$version-windows-x64.exe"
-jre_archive="$cache/OpenJDK17U-jre_x64_windows_hotspot_17.0.20.1_1.zip"
-jre_sha256=bc21a93923103cdaac93ee337b0ae4365e739fde36df823dd456bc67c8a9d352
-jre_url='https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jre_x64_windows_hotspot_17.0.20.1_1.zip'
+jdk_archive="$cache/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip"
+jdk_sha256=e53a79c3c3d86865bd7e787903884331068e71321714ffd44f145785affc7cb0
+jdk_url='https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip'
 
 mkdir -p "$cache" "$root/dist"
 rm -rf "$work"
@@ -21,25 +21,36 @@ mkdir -p "$bundle"
 mkdir -p "$bundle/app"
 cp -a "$root/app/composeApp/build/windows/app/lib" "$bundle/app/lib"
 
-if [[ ! -s "$jre_archive" ]]; then
-    temporary="$jre_archive.tmp"
+if [[ ! -s "$jdk_archive" ]]; then
+    temporary="$jdk_archive.tmp"
     rm -f "$temporary"
-    curl --fail --location --retry 3 "$jre_url" --output "$temporary"
-    echo "$jre_sha256  $temporary" | sha256sum --check --status
-    mv "$temporary" "$jre_archive"
+    curl --fail --location --retry 3 "$jdk_url" --output "$temporary"
+    echo "$jdk_sha256  $temporary" | sha256sum --check --status
+    mv "$temporary" "$jdk_archive"
 fi
-echo "$jre_sha256  $jre_archive" | sha256sum --check --status
+echo "$jdk_sha256  $jdk_archive" | sha256sum --check --status
 
-mkdir -p "$work/jre"
-unzip -q "$jre_archive" -d "$work/jre"
-javaw=$(find "$work/jre" -type f -path '*/bin/javaw.exe' -print -quit)
-if [[ -z "$javaw" ]]; then
-    echo "Windows JRE archive has no javaw.exe" >&2
+mkdir -p "$work/jdk"
+unzip -q "$jdk_archive" -d "$work/jdk"
+jmods=$(find "$work/jdk" -type d -name jmods -print -quit)
+if [[ -z "$jmods" ]]; then
+    echo "Windows JDK archive has no jmods directory" >&2
     exit 1
 fi
-runtime_root=$(dirname "$(dirname "$javaw")")
-mkdir -p "$bundle/runtime"
-cp -a "$runtime_root"/. "$bundle/runtime"/
+jlink=$(dirname "$(readlink -f "$(command -v java)")")/jlink
+"$jlink" \
+    --module-path "$jmods" \
+    --add-modules java.desktop,java.instrument,java.management,jdk.unsupported \
+    --strip-debug \
+    --no-header-files \
+    --no-man-pages \
+    --compress=2 \
+    --output "$bundle/runtime"
+rm -f \
+    "$bundle/runtime/bin/java.exe" \
+    "$bundle/runtime/bin/keytool.exe" \
+    "$bundle/runtime/lib/jawt.lib" \
+    "$bundle/runtime/lib/jvm.lib"
 
 cargo xwin build \
     --manifest-path "$root/windows/Cargo.toml" \
@@ -50,17 +61,17 @@ cargo xwin build \
 BUNDLE="$bundle" PAYLOAD="$payload" python - <<'PY'
 import os
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+from zipfile import ZIP_LZMA, ZipFile, ZipInfo
 
 bundle = Path(os.environ["BUNDLE"])
 payload = Path(os.environ["PAYLOAD"])
-with ZipFile(payload, "w", ZIP_DEFLATED, compresslevel=9) as archive:
+with ZipFile(payload, "w", ZIP_LZMA) as archive:
     for path in sorted(bundle.rglob("*")):
         if not path.is_file():
             continue
         relative = path.relative_to(bundle).as_posix()
         info = ZipInfo(relative, (2025, 1, 1, 0, 0, 0))
-        info.compress_type = ZIP_DEFLATED
+        info.compress_type = ZIP_LZMA
         info.external_attr = 0o100600 << 16
         with path.open("rb") as source, archive.open(info, "w") as target:
             while chunk := source.read(1024 * 1024):

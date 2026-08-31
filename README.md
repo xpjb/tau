@@ -48,7 +48,7 @@ The APK is written below `app/composeApp/build/outputs/apk/debug`. Release build
 ./scripts/build-windows-sfx.sh
 ```
 
-The build runs on Linux and produces `dist/Tau-<version>-windows-x64.exe`. The EXE contains the app, the Windows Compose native runtime, and a pinned Windows JRE.
+The build runs on Linux and produces `dist/Tau-<version>-windows-x64.exe`. The EXE contains the app, the Windows Compose native runtime, and a small Windows runtime image built from a checksum-pinned JDK.
 
 On Windows it installs without UAC under `%LOCALAPPDATA%\Tau\versions`, writes a stable `%LOCALAPPDATA%\Tau\Tau.exe` launcher, and adds Tau directly to the user's Start Menu. Running the same setup again performs no extraction and reports that the version is already installed. A newer setup installs beside the old version and switches `current.txt` only after extraction completes.
 
