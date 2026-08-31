@@ -15,6 +15,8 @@ Environment=TAU_PI_COMMAND=/usr/bin/pi
 Environment=TAU_STATE_PATH=/var/lib/tau/state.json
 Environment=TAU_SESSION_DIR=/var/lib/tau/pi-sessions
 Environment=TAU_TELEMETRY_PATH=/var/lib/tau/client-crashes.jsonl
+Environment=TAU_PI_EXTENSION=/usr/local/lib/tau/send-media.ts
+Environment=TAU_ATTACHMENT_ROOT=/root/.local/share/tau/outbox
 EnvironmentFile=/etc/tau.env
 ExecStart=/usr/local/bin/taud
 Restart=on-failure

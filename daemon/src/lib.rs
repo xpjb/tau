@@ -28,6 +28,23 @@ pub async fn run(config: Config) -> Result<()> {
                 config.session_dir.display()
             )
         })?;
+    fs::create_dir_all(&config.attachment_root)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create attachment directory {}",
+                config.attachment_root.display()
+            )
+        })?;
+    if !fs::metadata(&config.pi_extension_path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        bail!(
+            "Pi extension {} is missing",
+            config.pi_extension_path.display()
+        );
+    }
     if let Some(parent) = config.state_path.parent() {
         fs::create_dir_all(parent)
             .await

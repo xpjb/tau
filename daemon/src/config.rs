@@ -13,6 +13,8 @@ pub struct Config {
     pub state_path: PathBuf,
     pub session_dir: PathBuf,
     pub telemetry_path: PathBuf,
+    pub pi_extension_path: PathBuf,
+    pub attachment_root: PathBuf,
 }
 
 impl Config {
@@ -44,11 +46,19 @@ impl Config {
         let telemetry_path = std::env::var_os("TAU_TELEMETRY_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/var/lib/tau/client-crashes.jsonl".into());
+        let pi_extension_path = std::env::var_os("TAU_PI_EXTENSION")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "/usr/local/lib/tau/send-media.ts".into());
+        let attachment_root = std::env::var_os("TAU_ATTACHMENT_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "/root/.local/share/tau/outbox".into());
 
         if !cwd.is_absolute()
             || !state_path.is_absolute()
             || !session_dir.is_absolute()
             || !telemetry_path.is_absolute()
+            || !pi_extension_path.is_absolute()
+            || !attachment_root.is_absolute()
         {
             bail!("Tau paths must be absolute");
         }
@@ -61,6 +71,8 @@ impl Config {
             state_path,
             session_dir,
             telemetry_path,
+            pi_extension_path,
+            attachment_root,
         })
     }
 }

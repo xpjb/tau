@@ -34,6 +34,7 @@ data class TauUiState(
     val partials: Map<String, String> = emptyMap(),
     val drafts: Map<String, String> = emptyMap(),
     val mobileChatVisible: Boolean = false,
+    val notice: String? = null,
     val error: String? = null,
 )
 
@@ -176,8 +177,34 @@ class TauController {
         send(CloneSession(id, sessionId))
     }
 
+    fun downloadAttachment(message: ChatMessage) {
+        val sessionId = mutableState.value.selectedSessionId ?: return
+        val attachment = message.attachment ?: return
+        scope.launch {
+            try {
+                val location = client.downloadAttachment(
+                    mutableState.value.settings,
+                    sessionId,
+                    message.entryId,
+                    attachment.fileName,
+                )
+                mutableState.update { it.copy(notice = "Saved to $location", error = null) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update {
+                    it.copy(error = error.message ?: "Attachment download failed.")
+                }
+            }
+        }
+    }
+
     fun dismissError() {
         mutableState.update { it.copy(error = null) }
+    }
+
+    fun dismissNotice() {
+        mutableState.update { it.copy(notice = null) }
     }
 
     fun dispose() {

@@ -1,21 +1,39 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, warn};
 
 use crate::config::Config;
 use crate::pi::RpcProcess;
 use crate::protocol::{
-    ChatMessage, ChatRole, ServerMessage, SessionStatus, SessionSummary, MAX_TITLE_CHARS,
+    AttachmentKind, ChatAttachment, ChatMessage, ChatRole, ServerMessage, SessionStatus,
+    SessionSummary, MAX_TITLE_CHARS,
 };
 use crate::state::StateStore;
 
 const EVENT_BUFFER: usize = 2048;
+const IMAGE_LIMIT: u64 = 10_000_000;
+const FILE_LIMIT: u64 = 50_000_000;
+
+pub struct ResolvedAttachment {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub mime_type: &'static str,
+    pub size: u64,
+}
+
+struct AttachmentRequest {
+    kind: AttachmentKind,
+    path: PathBuf,
+    caption: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct AgentManager {
@@ -256,6 +274,78 @@ impl AgentManager {
         self.branch_session(id, BranchOperation::Clone)
             .await
             .map(|(child, _)| child)
+    }
+
+    pub async fn resolve_attachment(
+        &self,
+        id: &str,
+        entry_id: &str,
+    ) -> Result<ResolvedAttachment> {
+        let runtime = self.runtime(id).await?;
+        let _guard = runtime.operation.lock().await;
+        let process = self.ensure_process(id, &runtime).await?;
+        let response = process.request(json!({ "type": "get_entries" })).await?;
+        let entries = response
+            .get("data")
+            .and_then(|data| data.get("entries"))
+            .and_then(Value::as_array)
+            .context("Pi entries response had no entries")?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+            .with_context(|| format!("attachment entry {entry_id} does not exist"))?;
+        let request = attachment_request(entry).context("entry has no Tau attachment")?;
+        let root = fs::canonicalize(&self.inner.config.attachment_root)
+            .await
+            .context("Tau attachment root is unavailable")?;
+        let path = fs::canonicalize(&request.path)
+            .await
+            .with_context(|| format!("attachment {} is unavailable", request.path.display()))?;
+        if !path.starts_with(&root) {
+            bail!("attachment is outside the Tau outbox");
+        }
+        let metadata = fs::metadata(&path).await?;
+        if !metadata.is_file() {
+            bail!("attachment is not a regular file");
+        }
+        let limit = match request.kind {
+            AttachmentKind::Image => IMAGE_LIMIT,
+            AttachmentKind::File => FILE_LIMIT,
+        };
+        if metadata.len() > limit {
+            bail!("attachment exceeds the {} byte limit", limit);
+        }
+        let mime_type = match request.kind {
+            AttachmentKind::File => "application/octet-stream",
+            AttachmentKind::Image => {
+                let mut file = fs::File::open(&path).await?;
+                let mut header = [0_u8; 12];
+                let length = file.read(&mut header).await?;
+                if length >= 8 && header[..8] == [137, 80, 78, 71, 13, 10, 26, 10] {
+                    "image/png"
+                } else if length >= 3 && header[..3] == [0xff, 0xd8, 0xff] {
+                    "image/jpeg"
+                } else if length >= 12
+                    && &header[..4] == b"RIFF"
+                    && &header[8..12] == b"WEBP"
+                {
+                    "image/webp"
+                } else {
+                    bail!("attachment is not a supported image");
+                }
+            }
+        };
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .context("attachment has no file name")?;
+        Ok(ResolvedAttachment {
+            path,
+            file_name,
+            mime_type,
+            size: metadata.len(),
+        })
     }
 
     async fn branch_session(
@@ -701,19 +791,45 @@ fn active_chat_messages(entries: &[Value], leaf_id: Option<&str>) -> Result<Vec<
         .filter_map(|entry| {
             let entry_id = entry.get("id")?.as_str()?.to_owned();
             let entry_type = entry.get("type")?.as_str()?;
-            if entry_type == "custom_message" && entry.get("display").and_then(Value::as_bool) == Some(true) {
+            if entry_type == "custom_message"
+                && entry.get("display").and_then(Value::as_bool) == Some(true)
+            {
                 let text = content_text(entry.get("content")?);
                 return (!text.is_empty()).then_some(ChatMessage {
                     entry_id,
                     role: ChatRole::System,
                     text,
                     timestamp_ms: None,
+                    attachment: None,
                 });
             }
             if entry_type != "message" {
                 return None;
             }
             let message = entry.get("message")?;
+            if message.get("role").and_then(Value::as_str) == Some("toolResult") {
+                let request = attachment_request(entry)?;
+                let file_name = request
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())?;
+                let text = request.caption.clone().unwrap_or_else(|| match request.kind {
+                    AttachmentKind::Image => format!("Image: {file_name}"),
+                    AttachmentKind::File => format!("File: {file_name}"),
+                });
+                return Some(ChatMessage {
+                    entry_id,
+                    role: ChatRole::System,
+                    text,
+                    timestamp_ms: message.get("timestamp").and_then(Value::as_u64),
+                    attachment: Some(ChatAttachment {
+                        kind: request.kind,
+                        file_name,
+                        caption: request.caption,
+                    }),
+                });
+            }
             let role = match message.get("role")?.as_str()? {
                 "user" => ChatRole::User,
                 "assistant" => ChatRole::Assistant,
@@ -732,9 +848,40 @@ fn active_chat_messages(entries: &[Value], leaf_id: Option<&str>) -> Result<Vec<
                 role,
                 text,
                 timestamp_ms: message.get("timestamp").and_then(Value::as_u64),
+                attachment: None,
             })
         })
         .collect())
+}
+
+fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
+    if entry.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let message = entry.get("message")?;
+    if message.get("role").and_then(Value::as_str) != Some("toolResult") {
+        return None;
+    }
+    let attachment = message.get("details")?.get("tauAttachment")?;
+    if attachment.get("version").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
+    let kind = match attachment.get("kind").and_then(Value::as_str)? {
+        "image" => AttachmentKind::Image,
+        "file" => AttachmentKind::File,
+        _ => return None,
+    };
+    let caption = attachment
+        .get("caption")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|caption| !caption.is_empty())
+        .map(|caption| bounded(caption, 1024));
+    Some(AttachmentRequest {
+        kind,
+        path: PathBuf::from(attachment.get("path")?.as_str()?),
+        caption,
+    })
 }
 
 fn content_text(content: &Value) -> String {
@@ -772,16 +919,18 @@ mod tests {
             json!({"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"text","text":"First"}],"timestamp":2}}),
             json!({"type":"message","id":"old","parentId":"a1","message":{"role":"user","content":"Old branch","timestamp":3}}),
             json!({"type":"message","id":"u2","parentId":"a1","message":{"role":"user","content":[{"type":"text","text":"New branch"}],"timestamp":4}}),
-            json!({"type":"message","id":"a2","parentId":"u2","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Result"},{"type":"toolCall","name":"bash"}],"timestamp":5}}),
+            json!({"type":"message","id":"a2","parentId":"u2","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Result"},{"type":"toolCall","name":"send_file"}],"timestamp":5}}),
+            json!({"type":"message","id":"t1","parentId":"a2","message":{"role":"toolResult","content":[{"type":"text","text":"queued"}],"details":{"tauAttachment":{"version":1,"kind":"file","path":"/tmp/outbox/result.zip","caption":"Build"}},"timestamp":6}}),
         ];
-        let messages = active_chat_messages(&entries, Some("a2")).unwrap();
+        let messages = active_chat_messages(&entries, Some("t1")).unwrap();
         assert_eq!(
             messages,
             vec![
-                ChatMessage { entry_id: "u1".to_owned(), role: ChatRole::User, text: "Start".to_owned(), timestamp_ms: Some(1) },
-                ChatMessage { entry_id: "a1".to_owned(), role: ChatRole::Assistant, text: "First".to_owned(), timestamp_ms: Some(2) },
-                ChatMessage { entry_id: "u2".to_owned(), role: ChatRole::User, text: "New branch".to_owned(), timestamp_ms: Some(4) },
-                ChatMessage { entry_id: "a2".to_owned(), role: ChatRole::Assistant, text: "Result".to_owned(), timestamp_ms: Some(5) },
+                ChatMessage { entry_id: "u1".to_owned(), role: ChatRole::User, text: "Start".to_owned(), timestamp_ms: Some(1), attachment: None },
+                ChatMessage { entry_id: "a1".to_owned(), role: ChatRole::Assistant, text: "First".to_owned(), timestamp_ms: Some(2), attachment: None },
+                ChatMessage { entry_id: "u2".to_owned(), role: ChatRole::User, text: "New branch".to_owned(), timestamp_ms: Some(4), attachment: None },
+                ChatMessage { entry_id: "a2".to_owned(), role: ChatRole::Assistant, text: "Result".to_owned(), timestamp_ms: Some(5), attachment: None },
+                ChatMessage { entry_id: "t1".to_owned(), role: ChatRole::System, text: "Build".to_owned(), timestamp_ms: Some(6), attachment: Some(ChatAttachment { kind: AttachmentKind::File, file_name: "result.zip".to_owned(), caption: Some("Build".to_owned()) }) },
             ]
         );
     }
@@ -859,6 +1008,8 @@ for line in sys.stdin:
             state_path: root.join("state.json"),
             session_dir,
             telemetry_path: root.join("crashes.jsonl"),
+            pi_extension_path: root.join("unused-extension.ts"),
+            attachment_root: root.join("outbox"),
         };
         let state = StateStore::load(config.state_path.clone()).await.unwrap();
         let manager = AgentManager::new(config, state);

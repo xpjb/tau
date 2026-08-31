@@ -17,6 +17,7 @@ Tau creates one Pi RPC process per open chat. Chats resume from Pi's own JSONL s
 - Send prompts, steer an active run, and abort.
 - Clone the active branch.
 - Fork from any visible user message.
+- Download images and files produced through Pi's `send_image` and `send_file` tools.
 - Use the same chats from Android and Windows.
 
 ## Daemon installation
@@ -30,7 +31,7 @@ sudo ./scripts/install-daemon.sh
 
 The installer generates `/etc/tau.env` once with a random bearer token, binds `taud` to `127.0.0.1:8787`, and publishes that loopback listener through Tailscale Serve on Tailnet port 8787. It prints the URL and token required by the clients. Tailnet traffic is already encrypted; no public listener is created. This works with both kernel and userspace Tailscale networking.
 
-Tau state is stored under `/var/lib/tau`. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
+Tau state is stored under `/var/lib/tau`. Pi stages outgoing files under `/root/.local/share/tau/outbox`; `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
 
 ## Android
 

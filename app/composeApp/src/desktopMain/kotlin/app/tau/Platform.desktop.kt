@@ -150,6 +150,37 @@ actual object PlatformServices {
             Files.deleteIfExists(dataDirectory.resolve("client-crash.pending.json"))
         }
     }
+
+    actual fun saveDownload(fileName: String, bytes: ByteArray): String {
+        val safeName = fileName
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+            .map { character ->
+                if (character.code < 32 || character in "<>:\"/\\|?*") '_' else character
+            }
+            .joinToString("")
+            .take(160)
+            .ifBlank { "tau-attachment" }
+        val directory = Path.of(System.getProperty("user.home"), "Downloads", "Tau")
+        Files.createDirectories(directory)
+        val extensionIndex = safeName.lastIndexOf('.').takeIf { it > 0 } ?: safeName.length
+        val stem = safeName.substring(0, extensionIndex)
+        val extension = safeName.substring(extensionIndex)
+        var target = directory.resolve(safeName)
+        var suffix = 2
+        while (Files.exists(target)) {
+            target = directory.resolve("$stem ($suffix)$extension")
+            suffix += 1
+        }
+        val temporary = directory.resolve(".${target.fileName}.tmp-${UUID.randomUUID()}")
+        Files.write(temporary, bytes)
+        try {
+            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: Throwable) {
+            Files.move(temporary, target)
+        }
+        return target.toString()
+    }
 }
 
 actual fun platformHttpEngine(): HttpClientEngine = CIO.create()

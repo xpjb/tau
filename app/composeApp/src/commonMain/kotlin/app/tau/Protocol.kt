@@ -142,7 +142,21 @@ data class ChatMessage(
     val role: ChatRole,
     val text: String,
     val timestampMs: Long? = null,
+    val attachment: ChatAttachment? = null,
 )
+
+@Serializable
+data class ChatAttachment(
+    val kind: AttachmentKind,
+    val fileName: String,
+    val caption: String? = null,
+)
+
+@Serializable
+enum class AttachmentKind {
+    @SerialName("image") Image,
+    @SerialName("file") File,
+}
 
 @Serializable
 enum class ChatRole {

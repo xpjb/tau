@@ -122,6 +122,23 @@ pub struct ChatMessage {
     pub role: ChatRole,
     pub text: String,
     pub timestamp_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<ChatAttachment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAttachment {
+    pub kind: AttachmentKind,
+    pub file_name: String,
+    pub caption: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+    File,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

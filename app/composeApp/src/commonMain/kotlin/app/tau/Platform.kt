@@ -19,6 +19,7 @@ expect object PlatformServices {
     fun installCrashHandler()
     fun pendingCrashReport(): String?
     fun clearPendingCrashReport()
+    fun saveDownload(fileName: String, bytes: ByteArray): String
 }
 
 expect fun platformHttpEngine(): HttpClientEngine

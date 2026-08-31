@@ -1,9 +1,11 @@
 package app.tau
 
 import io.ktor.client.HttpClient
+import io.ktor.client.call.body
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
+import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -60,6 +62,24 @@ class TauClient {
         val active = socketGate.withLock { socket }
             ?: error("Tau is not connected")
         active.send(Frame.Text(TauJson.encodeToString<ClientRequest>(request)))
+    }
+
+    suspend fun downloadAttachment(
+        settings: ConnectionSettings,
+        sessionId: String,
+        entryId: String,
+        fileName: String,
+    ): String {
+        val baseUrl = settings.serverUrl.trim().trimEnd('/')
+        val response = client.get("$baseUrl/v1/sessions/$sessionId/attachments/$entryId") {
+            header(HttpHeaders.Authorization, "Bearer ${settings.token}")
+        }
+        if (!response.status.isSuccess()) {
+            error("Attachment download failed with HTTP ${response.status.value}")
+        }
+        val bytes = response.body<ByteArray>()
+        if (bytes.size > 50_000_000) error("Attachment exceeds Tau's download limit")
+        return PlatformServices.saveDownload(fileName, bytes)
     }
 
     suspend fun uploadPendingCrash(settings: ConnectionSettings) {

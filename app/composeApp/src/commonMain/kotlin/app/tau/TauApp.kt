@@ -98,17 +98,23 @@ fun TauApp(controller: TauController = remember { TauController() }) {
                             )
                         }
                     }
-                    state.error?.let { error ->
+                    (state.error ?: state.notice)?.let { message ->
                         Snackbar(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .padding(16.dp)
                                 .widthIn(max = 640.dp),
                             action = {
-                                TextButton(onClick = controller::dismissError) { Text("Dismiss") }
+                                TextButton(
+                                    onClick = if (state.error != null) {
+                                        controller::dismissError
+                                    } else {
+                                        controller::dismissNotice
+                                    },
+                                ) { Text("Dismiss") }
                             },
                         ) {
-                            Text(error)
+                            Text(message)
                         }
                     }
                 }
@@ -354,6 +360,11 @@ private fun ChatPanel(
                         Column(Modifier.padding(12.dp)) {
                             SelectionContainer {
                                 Text(message.text, style = MaterialTheme.typography.bodyLarge)
+                            }
+                            message.attachment?.let { attachment ->
+                                OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
+                                    Text("Download ${attachment.fileName}")
+                                }
                             }
                             if (message.role == ChatRole.User) {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {

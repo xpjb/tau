@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -13,6 +13,7 @@ use serde_json::json;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
 use crate::config::Config;
@@ -42,6 +43,10 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
             "protocolVersion": PROTOCOL_VERSION
         })) }))
         .route("/v1/ws", get(websocket))
+        .route(
+            "/v1/sessions/{session_id}/attachments/{entry_id}",
+            get(download_attachment),
+        )
         .route(
             "/v1/telemetry/crash",
             post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)),
@@ -274,6 +279,77 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
     event_forwarder.abort();
     drop(outbound_tx);
     let _ = writer.await;
+}
+
+async fn download_attachment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((session_id, entry_id)): AxumPath<(String, String)>,
+) -> Response {
+    if !authorized(&headers, &state.config.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if ![&session_id, &entry_id].into_iter().all(|value| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    }) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let attachment = match state
+        .manager
+        .resolve_attachment(&session_id, &entry_id)
+        .await
+    {
+        Ok(attachment) => attachment,
+        Err(error) => {
+            warn!(session = %session_id, entry = %entry_id, %error, "Tau attachment was not available");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    let file = match fs::File::open(&attachment.path).await {
+        Ok(file) => file,
+        Err(error) => {
+            warn!(path = %attachment.path.display(), %error, "failed to open Tau attachment");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    let safe_name = attachment
+        .file_name
+        .chars()
+        .take(160)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let disposition = match HeaderValue::from_str(&format!(
+        "attachment; filename=\"{}\"",
+        if safe_name.is_empty() { "attachment" } else { &safe_name }
+    )) {
+        Ok(value) => value,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(attachment.mime_type),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&attachment.size.to_string())
+            .expect("attachment length is a valid header"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, disposition);
+    response
 }
 
 async fn crash_report(

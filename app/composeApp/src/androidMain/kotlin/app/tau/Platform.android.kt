@@ -1,8 +1,11 @@
 package app.tau
 
+import android.content.ContentValues
 import android.content.Context
 import android.os.Build
+import android.os.Environment
 import android.os.Process
+import android.provider.MediaStore
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
 import java.io.File
@@ -105,6 +108,50 @@ actual object PlatformServices {
         synchronized(fileLock) {
             File(TauAndroidContext.require().filesDir, "client-crash.pending.json").delete()
         }
+    }
+
+    actual fun saveDownload(fileName: String, bytes: ByteArray): String {
+        val safeName = fileName
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+            .map { character -> if (character.code < 32) '_' else character }
+            .joinToString("")
+            .take(160)
+            .ifBlank { "tau-attachment" }
+        val context = TauAndroidContext.require()
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                put(
+                    MediaStore.Downloads.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS + "/Tau",
+                )
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = checkNotNull(
+                resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values),
+            ) { "Android could not create the download" }
+            try {
+                checkNotNull(resolver.openOutputStream(uri)).use { it.write(bytes) }
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            } catch (error: Throwable) {
+                resolver.delete(uri, null, null)
+                throw error
+            }
+            return "Downloads/Tau/$safeName"
+        }
+        val directory = File(
+            checkNotNull(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)),
+            "Tau",
+        )
+        directory.mkdirs()
+        val target = File(directory, safeName)
+        target.writeBytes(bytes)
+        return target.absolutePath
     }
 }
 
