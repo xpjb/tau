@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -19,6 +20,7 @@ use crate::protocol::{
 use crate::state::StateStore;
 
 const EVENT_BUFFER: usize = 2048;
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const IMAGE_LIMIT: u64 = 10_000_000;
 const FILE_LIMIT: u64 = 50_000_000;
 
@@ -58,6 +60,7 @@ struct SessionRuntime {
 struct RuntimeState {
     status: SessionStatus,
     detail: Option<String>,
+    idle_since: Option<Instant>,
 }
 
 enum BranchOperation<'a> {
@@ -235,6 +238,75 @@ impl AgentManager {
         }
         self.broadcast_sessions().await;
         Ok(())
+    }
+
+    async fn sleep_if_idle(&self, id: &str, expected_idle_since: Instant) {
+        let runtime = self.inner.runtimes.lock().await.get(id).cloned();
+        let Some(runtime) = runtime else {
+            return;
+        };
+        let _guard = runtime.operation.lock().await;
+        let state = runtime.snapshot();
+        if state.status != SessionStatus::Idle
+            || state.idle_since != Some(expected_idle_since)
+        {
+            return;
+        }
+        let process = runtime.process.lock().await.take();
+        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
+        if let Some(process) = process {
+            process.shutdown().await;
+        }
+        debug!(session = id, "put idle Pi process to sleep");
+        self.broadcast_sessions().await;
+    }
+
+    pub async fn delete_session(&self, id: &str) -> Result<()> {
+        let runtime = self.runtime(id).await?;
+        let _guard = runtime.operation.lock().await;
+        if let Some(process) = runtime.process.lock().await.take() {
+            self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
+            process.shutdown().await;
+        }
+
+        let stored = self
+            .inner
+            .state
+            .get(id)
+            .context("session disappeared while deleting")?;
+        let session_file = if let Some(path) = stored.session_file.as_deref() {
+            let root = fs::canonicalize(&self.inner.config.session_dir)
+                .await
+                .context("Tau session directory is unavailable")?;
+            match fs::canonicalize(path).await {
+                Ok(path) if path.starts_with(&root) && path != root => Some(path),
+                Ok(_) => bail!("Pi session file is outside Tau's session directory"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error).context("could not inspect the Pi session file"),
+            }
+        } else {
+            None
+        };
+
+        self.inner.state.remove(id).await?;
+        let mut runtimes = self.inner.runtimes.lock().await;
+        if runtimes
+            .get(id)
+            .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+        {
+            runtimes.remove(id);
+        }
+        drop(runtimes);
+
+        let removal = if let Some(path) = session_file {
+            fs::remove_file(&path)
+                .await
+                .with_context(|| format!("failed to delete {}", path.display()))
+        } else {
+            Ok(())
+        };
+        self.broadcast_sessions().await;
+        removal
     }
 
     pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
@@ -738,14 +810,24 @@ impl AgentManager {
         status: SessionStatus,
         detail: Option<String>,
     ) {
-        let next = RuntimeState { status, detail };
         let mut current = runtime
             .state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if current.status == next.status && current.detail == next.detail {
+        if current.status == status && current.detail == detail {
             return;
         }
+        let schedule_sleep = status == SessionStatus::Idle && current.status != SessionStatus::Idle;
+        let idle_since = if status == SessionStatus::Idle {
+            current.idle_since.or_else(|| Some(Instant::now()))
+        } else {
+            None
+        };
+        let next = RuntimeState {
+            status,
+            detail,
+            idle_since,
+        };
         *current = next.clone();
         drop(current);
         let _ = self.inner.events.send(ServerMessage::SessionState {
@@ -753,6 +835,18 @@ impl AgentManager {
             status: next.status,
             detail: next.detail,
         });
+
+        if schedule_sleep {
+            let manager = self.clone();
+            let session_id = id.to_owned();
+            let expected_idle_since = next.idle_since.expect("idle sessions have an idle time");
+            tokio::spawn(async move {
+                tokio::time::sleep(IDLE_TIMEOUT).await;
+                manager
+                    .sleep_if_idle(&session_id, expected_idle_since)
+                    .await;
+            });
+        }
     }
 
     async fn broadcast_sessions(&self) {
@@ -1038,7 +1132,46 @@ for line in sys.stdin:
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].text, "Say hello");
         assert_eq!(history[1].text, "Hello from Tau");
-        assert!(manager.inner.state.get(&session_id).unwrap().session_file.is_some());
+        let session_file = manager
+            .inner
+            .state
+            .get(&session_id)
+            .unwrap()
+            .session_file
+            .unwrap();
+
+        let runtime = manager
+            .inner
+            .runtimes
+            .lock()
+            .await
+            .get(&session_id)
+            .unwrap()
+            .clone();
+        for _ in 0..100 {
+            if runtime.snapshot().status == SessionStatus::Idle {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runtime.snapshot().status, SessionStatus::Idle);
+        let idle_since = runtime.snapshot().idle_since.unwrap();
+        manager
+            .sleep_if_idle(
+                &session_id,
+                idle_since.checked_sub(Duration::from_secs(1)).unwrap(),
+            )
+            .await;
+        assert_eq!(runtime.snapshot().status, SessionStatus::Idle);
+        manager.sleep_if_idle(&session_id, idle_since).await;
+        assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
+        assert!(runtime.process.lock().await.is_none());
+
+        manager.open_session(&session_id).await.unwrap();
+        assert_eq!(runtime.snapshot().status, SessionStatus::Idle);
+        manager.delete_session(&session_id).await.unwrap();
+        assert!(manager.inner.state.get(&session_id).is_none());
+        assert!(!fs::try_exists(session_file).await.unwrap());
 
         manager.shutdown().await;
         fs::remove_dir_all(root).await.unwrap();

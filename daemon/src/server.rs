@@ -237,6 +237,16 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Err(error) => ServerMessage::failure(request_id, error.to_string()),
                             }
                         }
+                        ClientCommand::DeleteSession { session_id } => {
+                            match manager.delete_session(&session_id).await {
+                                Ok(()) => ServerMessage::success(
+                                    request_id,
+                                    Some(session_id),
+                                    None,
+                                ),
+                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                            }
+                        }
                         ClientCommand::RenameSession { session_id, title } => {
                             match manager.rename_session(&session_id, &title).await {
                                 Ok(()) => ServerMessage::success(

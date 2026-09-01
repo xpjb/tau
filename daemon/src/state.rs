@@ -151,6 +151,22 @@ impl StateStore {
         self.commit(state).await
     }
 
+    pub async fn remove(&self, id: &str) -> Result<StoredSession> {
+        let _guard = self.inner.write_gate.lock().await;
+        let mut state = self.read_state().clone();
+        let removed = state
+            .sessions
+            .remove(id)
+            .with_context(|| format!("unknown session {id}"))?;
+        for session in state.sessions.values_mut() {
+            if session.parent_id.as_deref() == Some(id) {
+                session.parent_id = None;
+            }
+        }
+        self.commit(state).await?;
+        Ok(removed)
+    }
+
     fn read_state(&self) -> std::sync::RwLockReadGuard<'_, PersistedState> {
         self.inner
             .state
@@ -242,6 +258,12 @@ mod tests {
             child_state.session_file.as_deref(),
             Some("/tmp/child.jsonl")
         );
+
+        let removed = reloaded.remove(&parent).await.unwrap();
+        assert_eq!(removed.title, "First");
+        let reloaded = StateStore::load(reloaded.inner.path.clone()).await.unwrap();
+        assert!(reloaded.get(&parent).is_none());
+        assert!(reloaded.get(&child).unwrap().parent_id.is_none());
         fs::remove_dir_all(root).await.unwrap();
     }
 }

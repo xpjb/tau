@@ -22,6 +22,7 @@ pub enum ClientCommand {
     Prompt { session_id: String, text: String },
     Abort { session_id: String },
     CloseSession { session_id: String },
+    DeleteSession { session_id: String },
     RenameSession { session_id: String, title: String },
     ForkSession { session_id: String, entry_id: String },
     CloneSession { session_id: String },
