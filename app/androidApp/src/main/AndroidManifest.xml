@@ -4,6 +4,8 @@
 
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
         android:icon="@drawable/ic_tau"
         android:label="Tau"
         android:supportsRtl="true"
