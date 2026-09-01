@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.activity.result.ActivityResultLauncher
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
 import java.io.ByteArrayOutputStream
@@ -235,6 +236,6 @@ actual object PlatformServices {
     }
 }
 
-actual fun Modifier.onSecondaryClick(onClick: () -> Unit): Modifier = this
+actual fun Modifier.onSecondaryClick(onClick: (Offset) -> Unit): Modifier = this
 
 actual fun platformHttpEngine(): HttpClientEngine = OkHttp.create()

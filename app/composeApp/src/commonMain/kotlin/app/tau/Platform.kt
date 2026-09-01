@@ -1,6 +1,7 @@
 package app.tau
 
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import io.ktor.client.engine.HttpClientEngine
 import kotlinx.serialization.Serializable
 
@@ -29,6 +30,6 @@ expect object PlatformServices {
     fun saveDownload(fileName: String, bytes: ByteArray): String
 }
 
-expect fun Modifier.onSecondaryClick(onClick: () -> Unit): Modifier
+expect fun Modifier.onSecondaryClick(onClick: (Offset) -> Unit): Modifier
 
 expect fun platformHttpEngine(): HttpClientEngine

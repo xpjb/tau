@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -25,6 +27,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -52,12 +56,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
+import kotlin.math.roundToInt
 
 private val TauDarkColors = darkColorScheme(
     primary = Color(0xFF67D4FF),
@@ -203,6 +217,39 @@ private fun ConnectionScreen(state: TauUiState, controller: TauController) {
 }
 
 @Composable
+private fun PositionedDropdownMenu(
+    expanded: Boolean,
+    pointerPosition: Offset?,
+    onDismissRequest: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (pointerPosition == null) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismissRequest,
+            content = content,
+        )
+        return
+    }
+    Box(
+        Modifier
+            .offset {
+                IntOffset(
+                    pointerPosition.x.roundToInt(),
+                    pointerPosition.y.roundToInt(),
+                )
+            }
+            .size(1.dp),
+    ) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismissRequest,
+            content = content,
+        )
+    }
+}
+
+@Composable
 private fun SessionList(
     state: TauUiState,
     controller: TauController,
@@ -265,6 +312,7 @@ private fun SessionList(
                 items(state.sessions, key = SessionSummary::id) { session ->
                     val selected = session.id == state.selectedSessionId
                     var menuExpanded by remember(session.id) { mutableStateOf(false) }
+                    var menuPointer by remember(session.id) { mutableStateOf<Offset?>(null) }
                     Box(Modifier.fillMaxWidth()) {
                         Card(
                             colors = CardDefaults.cardColors(
@@ -276,10 +324,16 @@ private fun SessionList(
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .onSecondaryClick { menuExpanded = true }
+                                .onSecondaryClick { position ->
+                                    menuPointer = position
+                                    menuExpanded = true
+                                }
                                 .combinedClickable(
                                     onClick = { controller.selectSession(session.id) },
-                                    onLongClick = { menuExpanded = true },
+                                    onLongClick = {
+                                        menuPointer = null
+                                        menuExpanded = true
+                                    },
                                 ),
                         ) {
                             Column(Modifier.padding(12.dp)) {
@@ -303,15 +357,20 @@ private fun SessionList(
                                 )
                             }
                         }
-                        DropdownMenu(
+                        PositionedDropdownMenu(
                             expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false },
+                            pointerPosition = menuPointer,
+                            onDismissRequest = {
+                                menuExpanded = false
+                                menuPointer = null
+                            },
                         ) {
                             DropdownMenuItem(
                                 text = { Text("Rename") },
                                 enabled = actionsEnabled,
                                 onClick = {
                                     menuExpanded = false
+                                    menuPointer = null
                                     renameText = session.title
                                     renaming = session
                                 },
@@ -321,6 +380,7 @@ private fun SessionList(
                                 enabled = actionsEnabled,
                                 onClick = {
                                     menuExpanded = false
+                                    menuPointer = null
                                     deleting = session
                                 },
                             )
@@ -400,6 +460,9 @@ private fun ChatPanel(
     val partial = state.partials[sessionId].orEmpty()
     val attachments = state.attachments[sessionId].orEmpty()
     val uploading = sessionId in state.uploadingSessions
+    val canSend = state.connectionStatus == ConnectionStatus.Connected &&
+        !uploading &&
+        (state.drafts[sessionId].orEmpty().isNotBlank() || attachments.isNotEmpty())
     val listState = rememberLazyListState()
     LaunchedEffect(messages.size, partial.length) {
         val count = messages.size + if (partial.isNotEmpty()) 1 else 0
@@ -448,6 +511,7 @@ private fun ChatPanel(
             }
             items(messages, key = ChatMessage::entryId) { message ->
                 var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
+                var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = if (message.role == ChatRole.User) {
@@ -459,10 +523,16 @@ private fun ChatPanel(
                     Box(Modifier.fillMaxWidth(0.9f)) {
                         val menuModifier = if (message.role == ChatRole.User) {
                             Modifier
-                                .onSecondaryClick { menuExpanded = true }
+                                .onSecondaryClick { position ->
+                                    menuPointer = position
+                                    menuExpanded = true
+                                }
                                 .combinedClickable(
                                     onClick = {},
-                                    onLongClick = { menuExpanded = true },
+                                    onLongClick = {
+                                        menuPointer = null
+                                        menuExpanded = true
+                                    },
                                 )
                         } else {
                             Modifier
@@ -489,14 +559,19 @@ private fun ChatPanel(
                             }
                         }
                         if (message.role == ChatRole.User) {
-                            DropdownMenu(
+                            PositionedDropdownMenu(
                                 expanded = menuExpanded,
-                                onDismissRequest = { menuExpanded = false },
+                                pointerPosition = menuPointer,
+                                onDismissRequest = {
+                                    menuExpanded = false
+                                    menuPointer = null
+                                },
                             ) {
                                 DropdownMenuItem(
                                     text = { Text("Fork here") },
                                     onClick = {
                                         menuExpanded = false
+                                        menuPointer = null
                                         controller.fork(message.entryId)
                                     },
                                 )
@@ -559,16 +634,26 @@ private fun ChatPanel(
                     },
                     minLines = 1,
                     maxLines = 8,
-                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = { if (canSend) controller.sendPrompt() },
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .onPreviewKeyEvent { event ->
+                            val sends = event.key == Key.Enter && !event.isShiftPressed
+                            if (sends && event.type == KeyEventType.KeyDown && canSend) {
+                                controller.sendPrompt()
+                            }
+                            sends
+                        },
                 )
                 if (session.status == SessionStatus.Running) {
                     OutlinedButton(onClick = controller::abort) { Text("Abort") }
                 }
                 Button(
                     onClick = controller::sendPrompt,
-                    enabled = state.connectionStatus == ConnectionStatus.Connected &&
-                        !uploading &&
-                        (state.drafts[sessionId].orEmpty().isNotBlank() || attachments.isNotEmpty()),
+                    enabled = canSend,
                 ) {
                     Text(
                         when {
