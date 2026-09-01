@@ -1,5 +1,6 @@
 package app.tau
 
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -48,6 +49,12 @@ expect fun Modifier.onClipboardImagePaste(
 ): Modifier
 
 expect fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier
+
+@Composable
+expect fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier
+
+@Composable
+expect fun TranscriptScrollbar(state: LazyListState, modifier: Modifier = Modifier)
 
 @Composable
 expect fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit)

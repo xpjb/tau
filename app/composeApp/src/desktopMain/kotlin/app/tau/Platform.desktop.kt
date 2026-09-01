@@ -1,26 +1,42 @@
 package app.tau
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalScrollbarStyle
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.cio.CIO
 import java.awt.FileDialog
@@ -38,6 +54,8 @@ import java.nio.file.attribute.PosixFilePermission
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.imageio.ImageIO
+import kotlin.math.abs
+import kotlin.math.sign
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
@@ -371,6 +389,99 @@ actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Uni
             false
         }
     }
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier {
+    var anchor by remember(state) { mutableStateOf<Offset?>(null) }
+    var pointer by remember(state) { mutableStateOf(Offset.Zero) }
+    val density = LocalDensity.current
+    val deadZone = with(density) { 20.dp.toPx() }
+    val markerRadius = with(density) { 12.dp.toPx() }
+    val markerColor = MaterialTheme.colorScheme.primary
+    val markerBackground = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
+
+    LaunchedEffect(state, anchor) {
+        var previousFrame = withFrameNanos { it }
+        while (anchor != null) {
+            val frame = withFrameNanos { it }
+            val elapsedSeconds = (frame - previousFrame) / 1_000_000_000f
+            previousFrame = frame
+            val distance = pointer.y - checkNotNull(anchor).y
+            val excess = abs(distance) - deadZone
+            if (excess > 0f) {
+                val speed = distance.sign * minOf(2_600f, excess * 8f)
+                state.scrollBy(-speed * elapsedSeconds)
+            }
+        }
+    }
+
+    return onPointerEvent(PointerEventType.Move) { event ->
+        if (anchor != null) event.changes.firstOrNull()?.let { pointer = it.position }
+    }.onPointerEvent(PointerEventType.Scroll) {
+        anchor = null
+    }.onPointerEvent(PointerEventType.Press) { event ->
+        val position = event.changes.firstOrNull()?.position ?: return@onPointerEvent
+        when (event.button) {
+            PointerButton.Tertiary -> {
+                if (anchor == null) {
+                    anchor = position
+                    pointer = position
+                } else {
+                    anchor = null
+                }
+                event.changes.forEach { it.consume() }
+            }
+            PointerButton.Primary, PointerButton.Secondary -> if (anchor != null) {
+                anchor = null
+                event.changes.forEach { it.consume() }
+            }
+        }
+    }.drawWithContent {
+        drawContent()
+        anchor?.let { position ->
+            drawCircle(markerBackground, markerRadius, position)
+            drawCircle(markerColor, markerRadius, position, style = Stroke(width = 2f))
+            val tip = markerRadius * 0.58f
+            val wing = markerRadius * 0.28f
+            drawLine(markerColor, Offset(position.x, position.y - tip), Offset(position.x, position.y + tip))
+            drawLine(
+                markerColor,
+                Offset(position.x, position.y - tip),
+                Offset(position.x - wing, position.y - tip + wing),
+            )
+            drawLine(
+                markerColor,
+                Offset(position.x, position.y - tip),
+                Offset(position.x + wing, position.y - tip + wing),
+            )
+            drawLine(
+                markerColor,
+                Offset(position.x, position.y + tip),
+                Offset(position.x - wing, position.y + tip - wing),
+            )
+            drawLine(
+                markerColor,
+                Offset(position.x, position.y + tip),
+                Offset(position.x + wing, position.y + tip - wing),
+            )
+        }
+    }
+}
+
+@Composable
+actual fun TranscriptScrollbar(state: LazyListState, modifier: Modifier) {
+    VerticalScrollbar(
+        adapter = rememberScrollbarAdapter(state),
+        modifier = modifier,
+        reverseLayout = true,
+        style = LocalScrollbarStyle.current.copy(
+            thickness = 8.dp,
+            unhoverColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f),
+            hoverColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.72f),
+        ),
+    )
+}
 
 @Composable
 actual fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit) = Unit

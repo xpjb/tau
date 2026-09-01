@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.ActivityResultLauncher
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -256,6 +257,12 @@ actual fun Modifier.onClipboardImagePaste(
 ): Modifier = this
 
 actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier = this
+
+@Composable
+actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier = this
+
+@Composable
+actual fun TranscriptScrollbar(state: LazyListState, modifier: Modifier) = Unit
 
 @Composable
 actual fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit) {

@@ -717,7 +717,12 @@ private fun ChatPanel(
                 }
             }
             HorizontalDivider()
-            Box(Modifier.weight(1f).fillMaxWidth()) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .onTranscriptAutoscroll(listState),
+            ) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
@@ -854,6 +859,13 @@ private fun ChatPanel(
                         }
                     }
                 }
+                TranscriptScrollbar(
+                    state = listState,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .padding(horizontal = 2.dp, vertical = 4.dp),
+                )
                 if (showScrollToBottom) {
                     FilledTonalIconButton(
                         onClick = {
