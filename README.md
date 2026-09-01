@@ -14,7 +14,9 @@ Tau starts a Pi RPC process when a chat receives a prompt and stops it after one
 
 - List, create, rename, and permanently delete chats.
 - Stream assistant text and tool activity.
+- Render completed assistant and system messages as selectable Markdown with clickable links.
 - Send prompts, steer an active run, and abort.
+- Show accepted prompts immediately while they wait in Pi's steering queue.
 - Fork from any visible user message.
 - Attach local files for Pi to inspect and download files produced through Pi's `send_image` and `send_file` tools.
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
