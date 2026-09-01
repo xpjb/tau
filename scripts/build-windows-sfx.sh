@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-version=${TAU_VERSION:-0.3.0}
+version=${TAU_VERSION:-0.3.1}
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/tau
 work="$root/target/windows-sfx-$version"
 bundle="$work/bundle"
