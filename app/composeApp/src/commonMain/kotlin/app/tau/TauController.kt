@@ -23,6 +23,14 @@ enum class ConnectionStatus {
     Offline,
 }
 
+data class OutgoingMessage(
+    val requestId: String,
+    val text: String,
+    val sentText: String,
+    val afterEntryId: String?,
+    val occurrence: Int,
+)
+
 data class TauUiState(
     val settings: ConnectionSettings = ConnectionSettings(),
     val editingSettings: Boolean = false,
@@ -31,6 +39,7 @@ data class TauUiState(
     val sessions: List<SessionSummary> = emptyList(),
     val selectedSessionId: String? = null,
     val histories: Map<String, List<ChatMessage>> = emptyMap(),
+    val outgoingMessages: Map<String, List<OutgoingMessage>> = emptyMap(),
     val partials: Map<String, String> = emptyMap(),
     val drafts: Map<String, String> = emptyMap(),
     val attachments: Map<String, List<PickedFile>> = emptyMap(),
@@ -227,7 +236,29 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 }
                 val id = nextRequestId()
                 requestId = id
-                pending[id] = PendingAction.Prompt(sessionId, text, files)
+                val afterEntryId = mutableState.value.histories[sessionId]
+                    .orEmpty()
+                    .lastOrNull()
+                    ?.entryId
+                val occurrence = mutableState.value.outgoingMessages[sessionId]
+                    .orEmpty()
+                    .count { outgoing ->
+                        outgoing.sentText == message && outgoing.afterEntryId == afterEntryId
+                    } + pending.values.count { action ->
+                        action is PendingAction.Prompt &&
+                            action.sessionId == sessionId &&
+                            action.sentText == message &&
+                            action.afterEntryId == afterEntryId
+                    }
+                pending[id] = PendingAction.Prompt(
+                    sessionId = sessionId,
+                    text = text,
+                    files = files,
+                    displayText = introduction,
+                    sentText = message,
+                    afterEntryId = afterEntryId,
+                    occurrence = occurrence,
+                )
                 client.send(Prompt(id, sessionId, message))
                 mutableState.update { current ->
                     val remaining = current.attachments[sessionId].orEmpty()
@@ -414,6 +445,26 @@ class TauController(dispatcher: CoroutineDispatcher) {
                             error = message.error ?: "Tau rejected the request.",
                         )
                     }
+                } else if (action is PendingAction.Prompt) {
+                    mutableState.update { current ->
+                        val outgoing = reconcileOutgoingMessages(
+                            current.outgoingMessages[action.sessionId].orEmpty() + OutgoingMessage(
+                                requestId = message.requestId,
+                                text = action.displayText,
+                                sentText = action.sentText,
+                                afterEntryId = action.afterEntryId,
+                                occurrence = action.occurrence,
+                            ),
+                            current.histories[action.sessionId].orEmpty(),
+                        )
+                        current.copy(
+                            outgoingMessages = if (outgoing.isEmpty()) {
+                                current.outgoingMessages - action.sessionId
+                            } else {
+                                current.outgoingMessages + (action.sessionId to outgoing)
+                            },
+                        )
+                    }
                 } else if (action == PendingAction.SelectSession && message.sessionId != null) {
                     val sessionId = message.sessionId
                     mutableState.update {
@@ -443,6 +494,9 @@ class TauController(dispatcher: CoroutineDispatcher) {
                         sessions = message.sessions,
                         selectedSessionId = selected,
                         histories = it.histories.filterKeys { sessionId -> sessionId in activeIds },
+                        outgoingMessages = it.outgoingMessages.filterKeys { sessionId ->
+                            sessionId in activeIds
+                        },
                         partials = it.partials.filterKeys { sessionId -> sessionId in activeIds },
                         drafts = it.drafts.filterKeys { sessionId -> sessionId in activeIds },
                         attachments = it.attachments.filterKeys { sessionId -> sessionId in activeIds },
@@ -455,10 +509,19 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 if (selected != null && selected !in openedSessions) openSession(selected, false)
             }
             is History -> {
-                mutableState.update {
-                    it.copy(
-                        histories = it.histories + (message.sessionId to message.messages),
-                        partials = it.partials - message.sessionId,
+                mutableState.update { current ->
+                    val outgoing = reconcileOutgoingMessages(
+                        current.outgoingMessages[message.sessionId].orEmpty(),
+                        message.messages,
+                    )
+                    current.copy(
+                        histories = current.histories + (message.sessionId to message.messages),
+                        outgoingMessages = if (outgoing.isEmpty()) {
+                            current.outgoingMessages - message.sessionId
+                        } else {
+                            current.outgoingMessages + (message.sessionId to outgoing)
+                        },
+                        partials = current.partials - message.sessionId,
                     )
                 }
             }
@@ -533,6 +596,29 @@ class TauController(dispatcher: CoroutineDispatcher) {
             val sessionId: String,
             val text: String,
             val files: List<PickedFile>,
+            val displayText: String,
+            val sentText: String,
+            val afterEntryId: String?,
+            val occurrence: Int,
         ) : PendingAction
     }
+}
+
+internal fun reconcileOutgoingMessages(
+    outgoing: List<OutgoingMessage>,
+    history: List<ChatMessage>,
+): List<OutgoingMessage> = outgoing.filter { pending ->
+    val start = if (pending.afterEntryId == null) {
+        0
+    } else {
+        val baseline = history.indexOfFirst { message -> message.entryId == pending.afterEntryId }
+        if (baseline < 0) return@filter true
+        baseline + 1
+    }
+    history
+        .asSequence()
+        .drop(start)
+        .filter { message -> message.role == ChatRole.User && message.text == pending.sentText }
+        .drop(pending.occurrence)
+        .none()
 }

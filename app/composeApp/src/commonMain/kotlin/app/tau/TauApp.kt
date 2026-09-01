@@ -98,6 +98,7 @@ private data class ChatListStructure(
     val messageCount: Int,
     val firstEntryId: String?,
     val lastEntryId: String?,
+    val outgoingIds: List<String>,
     val hasPartial: Boolean,
 )
 
@@ -534,6 +535,7 @@ private fun ChatPanel(
     }
 
     val messages = state.histories[sessionId].orEmpty()
+    val outgoingMessages = state.outgoingMessages[sessionId].orEmpty()
     val partial = state.partials[sessionId].orEmpty()
     val attachments = state.attachments[sessionId].orEmpty()
     val draft = state.drafts[sessionId].orEmpty()
@@ -557,6 +559,7 @@ private fun ChatPanel(
         messageCount = messages.size,
         firstEntryId = messages.firstOrNull()?.entryId,
         lastEntryId = messages.lastOrNull()?.entryId,
+        outgoingIds = outgoingMessages.map(OutgoingMessage::requestId),
         hasPartial = partial.isNotEmpty(),
     )
     var appliedListStructure by remember { mutableStateOf<ChatListStructure?>(null) }
@@ -573,8 +576,8 @@ private fun ChatPanel(
             } else {
                 val chronologicalIndex = messages.indexOfFirst { it.entryId == originEntryId }
                 if (chronologicalIndex >= 0) {
-                    val partialOffset = if (partial.isNotEmpty()) 1 else 0
-                    val index = messages.lastIndex - chronologicalIndex + partialOffset
+                    val transientOffset = outgoingMessages.size + if (partial.isNotEmpty()) 1 else 0
+                    val index = messages.lastIndex - chronologicalIndex + transientOffset
                     listState.requestScrollToItem(index, originOffset)
                 }
             }
@@ -601,8 +604,8 @@ private fun ChatPanel(
                 }
                 return@collect
             }
-            val partialOffset = if (partial.isNotEmpty()) 1 else 0
-            val reverseIndex = index - partialOffset
+            val transientOffset = outgoingMessages.size + if (partial.isNotEmpty()) 1 else 0
+            val reverseIndex = index - transientOffset
             val chronologicalIndex = messages.lastIndex - reverseIndex
             messages.getOrNull(chronologicalIndex)?.let { message ->
                 originEntryId = message.entryId
@@ -684,12 +687,46 @@ private fun ChatPanel(
                     reverseLayout = true,
                     verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
                 ) {
-                    if (messages.isEmpty() && partial.isEmpty()) {
+                    if (messages.isEmpty() && outgoingMessages.isEmpty() && partial.isEmpty()) {
                         item {
                             Text(
                                 "Start a conversation with Pi.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                        }
+                    }
+                    items(
+                        outgoingMessages.asReversed(),
+                        key = { outgoing -> "outgoing-${outgoing.requestId}" },
+                    ) { outgoing ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
+                                        alpha = 0.72f,
+                                    ),
+                                ),
+                                modifier = Modifier.fillMaxWidth(0.9f),
+                            ) {
+                                Column(
+                                    Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    SelectionContainer {
+                                        Text(outgoing.text, style = MaterialTheme.typography.bodyLarge)
+                                    }
+                                    Text(
+                                        "Waiting for Pi",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(
+                                            alpha = 0.72f,
+                                        ),
+                                    )
+                                }
+                            }
                         }
                     }
                     if (partial.isNotEmpty()) {
