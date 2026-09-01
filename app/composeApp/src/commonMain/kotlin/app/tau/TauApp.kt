@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -123,7 +124,13 @@ fun TauApp(controller: TauController) {
             if (state.editingSettings) {
                 ConnectionScreen(state, controller)
             } else {
-                Box(Modifier.fillMaxSize().systemBarsPadding().displayCutoutPadding()) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .systemBarsPadding()
+                        .displayCutoutPadding()
+                        .imePadding(),
+                ) {
                     BoxWithConstraints(Modifier.fillMaxSize()) {
                         if (maxWidth >= 760.dp) {
                             Row(Modifier.fillMaxSize()) {
@@ -189,7 +196,11 @@ private fun ConnectionScreen(state: TauUiState, controller: TauController) {
         mutableStateOf(state.settings.token)
     }
     Box(
-        Modifier.fillMaxSize().systemBarsPadding().displayCutoutPadding(),
+        Modifier
+            .fillMaxSize()
+            .systemBarsPadding()
+            .displayCutoutPadding()
+            .imePadding(),
         contentAlignment = Alignment.Center,
     ) {
         Card(Modifier.padding(24.dp).widthIn(max = 520.dp).fillMaxWidth()) {
