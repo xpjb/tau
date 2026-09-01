@@ -101,7 +101,7 @@ actual object PlatformServices {
     } else {
         "desktop"
     }
-    actual val appVersion: String = "0.3.2"
+    actual val appVersion: String = TauClientVersion
     actual val osVersion: String = (
         System.getProperty("os.name").orEmpty() + " " + System.getProperty("os.version").orEmpty()
     ).trim()

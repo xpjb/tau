@@ -77,7 +77,7 @@ actual object PlatformServices {
     private val fileLock = Any()
 
     actual val platformName: String = "android"
-    actual val appVersion: String = "0.3.2"
+    actual val appVersion: String = TauClientVersion
     actual val osVersion: String = "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})"
 
     actual fun loadConnection(): ConnectionSettings {
