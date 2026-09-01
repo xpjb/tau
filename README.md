@@ -8,7 +8,7 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 - `app/`: one Compose Multiplatform client for Android and desktop JVM targets.
 - `windows/`: the portable launcher and version-aware self-extracting Windows setup.
 
-Tau creates one Pi RPC process per open chat and stops it after one idle hour. Chats resume from Pi's own JSONL session files after client, process, or daemon restarts. The active chat branch is rebuilt from Pi entry IDs rather than from a second transcript database. New chats currently use `/root` as their working directory.
+Tau starts a Pi RPC process when a chat receives a prompt and stops it after one idle hour. Tau reads Pi's JSONL session files directly when browsing or opening chats, without starting Pi. Chats resume from those files after client, process, or daemon restarts. The active chat branch is rebuilt from Pi entry IDs rather than from a second transcript database. New chats currently use `/root` as their working directory.
 
 ## Current client operations
 

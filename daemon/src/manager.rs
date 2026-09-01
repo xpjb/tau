@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, warn};
 
@@ -143,8 +143,12 @@ impl AgentManager {
     pub async fn open_session(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
         let _guard = runtime.operation.lock().await;
-        let process = self.ensure_process(id, &runtime).await?;
-        self.sync_history(id, &process).await?;
+        let (entries, leaf_id) = self.entries_for_read(id, &runtime).await?;
+        let messages = active_chat_messages(&entries, leaf_id.as_deref())?;
+        let _ = self.inner.events.send(ServerMessage::History {
+            session_id: id.to_owned(),
+            messages,
+        });
         let state = runtime.snapshot();
         let _ = self.inner.events.send(ServerMessage::SessionState {
             session_id: id.to_owned(),
@@ -425,13 +429,7 @@ impl AgentManager {
     ) -> Result<ResolvedAttachment> {
         let runtime = self.runtime(id).await?;
         let _guard = runtime.operation.lock().await;
-        let process = self.ensure_process(id, &runtime).await?;
-        let response = process.request(json!({ "type": "get_entries" })).await?;
-        let entries = response
-            .get("data")
-            .and_then(|data| data.get("entries"))
-            .and_then(Value::as_array)
-            .context("Pi entries response had no entries")?;
+        let (entries, _) = self.entries_for_read(id, &runtime).await?;
         let entry = entries
             .iter()
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
@@ -618,6 +616,76 @@ impl AgentManager {
             bail!("Tau is shutting down");
         }
         Ok(())
+    }
+
+    async fn entries_for_read(
+        &self,
+        id: &str,
+        runtime: &SessionRuntime,
+    ) -> Result<(Vec<Value>, Option<String>)> {
+        if let Some(process) = runtime
+            .process
+            .lock()
+            .await
+            .as_ref()
+            .filter(|process| process.is_alive())
+            .cloned()
+        {
+            let response = process.request(json!({ "type": "get_entries" })).await?;
+            let data = response
+                .get("data")
+                .context("Pi entries response had no data")?;
+            let entries = data
+                .get("entries")
+                .and_then(Value::as_array)
+                .context("Pi entries response had no entries")?
+                .clone();
+            let leaf_id = data
+                .get("leafId")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            return Ok((entries, leaf_id));
+        }
+
+        let stored = self.inner.state.get(id).context("session disappeared")?;
+        let Some(session_file) = stored.session_file else {
+            return Ok((Vec::new(), None));
+        };
+        let root = fs::canonicalize(&self.inner.config.session_dir)
+            .await
+            .context("Tau session directory is unavailable")?;
+        let path = fs::canonicalize(&session_file)
+            .await
+            .with_context(|| format!("Pi session history is unavailable: {session_file}"))?;
+        if !path.starts_with(&root) || path == root {
+            bail!("Pi session file is outside Tau's session directory");
+        }
+        let file = fs::File::open(&path).await?;
+        if !file.metadata().await?.is_file() {
+            bail!("Pi session history is not a regular file");
+        }
+
+        let mut lines = BufReader::new(file).lines();
+        let mut entries = Vec::new();
+        let mut leaf_id = None;
+        let mut line_number = 0_usize;
+        while let Some(line) = lines.next_line().await? {
+            line_number += 1;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry = serde_json::from_str::<Value>(&line).with_context(|| {
+                format!("failed to parse {} at line {line_number}", path.display())
+            })?;
+            if entry.get("type").and_then(Value::as_str) == Some("session") {
+                continue;
+            }
+            if let Some(entry_id) = entry.get("id").and_then(Value::as_str) {
+                leaf_id = Some(entry_id.to_owned());
+            }
+            entries.push(entry);
+        }
+        Ok((entries, leaf_id))
     }
 
     async fn ensure_process(
@@ -1131,8 +1199,19 @@ import json, os, sys
 session_dir = sys.argv[sys.argv.index("--session-dir") + 1]
 os.makedirs(session_dir, exist_ok=True)
 session_file = os.path.join(session_dir, "mock.jsonl")
-open(session_file, "a").close()
+if not os.path.exists(session_file) or os.path.getsize(session_file) == 0:
+    with open(session_file, "w") as session:
+        session.write(json.dumps({"type":"session","version":3,"id":"mock","timestamp":"2025-01-01T00:00:00Z","cwd":os.getcwd()}) + "\n")
 entries = []
+with open(session_file) as session:
+    for record in session:
+        entry = json.loads(record)
+        if entry.get("type") != "session":
+            entries.append(entry)
+def append(entry):
+    entries.append(entry)
+    with open(session_file, "a") as session:
+        session.write(json.dumps(entry) + "\n")
 for line in sys.stdin:
     command = json.loads(line)
     ident = command.get("id")
@@ -1145,14 +1224,14 @@ for line in sys.stdin:
         response["data"] = {"entries": entries, "leafId": entries[-1]["id"] if entries else None}
         print(json.dumps(response), flush=True)
     elif kind == "prompt":
-        entries.append({"type":"message","id":"u1","parentId":None,"message":{"role":"user","content":command["message"],"timestamp":1}})
+        append({"type":"message","id":"u1","parentId":None,"message":{"role":"user","content":command["message"],"timestamp":1}})
         print(json.dumps(response), flush=True)
         print(json.dumps({"type":"agent_start"}), flush=True)
         print(json.dumps({"type":"message_start","message":{"role":"assistant","content":[]}}), flush=True)
         print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}), flush=True)
         print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"from Tau"}}), flush=True)
         assistant = {"role":"assistant","content":[{"type":"text","text":"Hello from Tau"}],"timestamp":2}
-        entries.append({"type":"message","id":"a1","parentId":"u1","message":assistant})
+        append({"type":"message","id":"a1","parentId":"u1","message":assistant})
         print(json.dumps({"type":"message_end","message":assistant}), flush=True)
         print(json.dumps({"type":"agent_settled"}), flush=True)
     else:
@@ -1188,6 +1267,16 @@ for line in sys.stdin:
         assert_eq!(uploaded.name, "source_file.rs");
         assert!(fs::try_exists(&uploaded.path).await.unwrap());
         manager.open_session(&session_id).await.unwrap();
+        let runtime = manager
+            .inner
+            .runtimes
+            .lock()
+            .await
+            .get(&session_id)
+            .unwrap()
+            .clone();
+        assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
+        assert!(runtime.process.lock().await.is_none());
         manager.prompt(&session_id, "Say hello").await.unwrap();
 
         let mut streamed = String::new();
@@ -1217,14 +1306,6 @@ for line in sys.stdin:
             .session_file
             .unwrap();
 
-        let runtime = manager
-            .inner
-            .runtimes
-            .lock()
-            .await
-            .get(&session_id)
-            .unwrap()
-            .clone();
         for _ in 0..100 {
             if runtime.snapshot().status == SessionStatus::Idle {
                 break;
@@ -1244,8 +1325,26 @@ for line in sys.stdin:
         assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
         assert!(runtime.process.lock().await.is_none());
 
+        let mut reopened_events = manager.subscribe();
         manager.open_session(&session_id).await.unwrap();
-        assert_eq!(runtime.snapshot().status, SessionStatus::Idle);
+        assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
+        assert!(runtime.process.lock().await.is_none());
+        let reopened_history = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let ServerMessage::History { session_id: event_session, messages } =
+                    reopened_events.recv().await.unwrap()
+                    && event_session == session_id
+                {
+                    break messages;
+                }
+            }
+        })
+        .await
+        .expect("cold chat history was not loaded");
+        assert_eq!(reopened_history.len(), 2);
+        assert_eq!(reopened_history[0].text, "Say hello");
+        assert_eq!(reopened_history[1].text, "Hello from Tau");
+
         manager.delete_session(&session_id).await.unwrap();
         assert!(manager.inner.state.get(&session_id).is_none());
         assert!(!fs::try_exists(session_file).await.unwrap());
