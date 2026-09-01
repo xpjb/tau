@@ -30,8 +30,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -87,7 +85,6 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
@@ -955,15 +952,11 @@ private fun ChatPanel(
                             }
                         }
                     },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(
-                        onSend = { if (canSend) controller.sendPrompt() },
-                    ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .onClipboardImagePaste(canAttach, controller::attachClipboardImage)
                         .onPreviewKeyEvent { event ->
-                            if (event.key != Key.Enter) {
+                            if (PlatformServices.platformName == "android" || event.key != Key.Enter) {
                                 false
                             } else if (event.isShiftPressed) {
                                 if (event.type == KeyEventType.KeyDown) {
