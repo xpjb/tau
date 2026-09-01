@@ -45,6 +45,7 @@ import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -91,6 +92,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
@@ -334,6 +338,39 @@ private fun ConnectionDot(status: ConnectionStatus) {
                 contentDescription = if (connected) "Connected" else "Reconnecting"
             },
     )
+}
+
+@Composable
+private fun ChatText(
+    text: String,
+    markdown: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    SelectionContainer(modifier) {
+        if (markdown) {
+            Markdown(
+                content = text,
+                colors = markdownColor(
+                    text = LocalContentColor.current,
+                    codeText = LocalContentColor.current,
+                    inlineCodeText = LocalContentColor.current,
+                    linkText = MaterialTheme.colorScheme.primary,
+                    tableText = LocalContentColor.current,
+                ),
+                typography = markdownTypography(
+                    h1 = MaterialTheme.typography.headlineMedium,
+                    h2 = MaterialTheme.typography.headlineSmall,
+                    h3 = MaterialTheme.typography.titleLarge,
+                    h4 = MaterialTheme.typography.titleMedium,
+                    h5 = MaterialTheme.typography.titleSmall,
+                    h6 = MaterialTheme.typography.labelLarge,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else {
+            Text(text, style = MaterialTheme.typography.bodyLarge)
+        }
+    }
 }
 
 @Composable
@@ -715,9 +752,7 @@ private fun ChatPanel(
                                     Modifier.padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(4.dp),
                                 ) {
-                                    SelectionContainer {
-                                        Text(outgoing.text, style = MaterialTheme.typography.bodyLarge)
-                                    }
+                                    ChatText(outgoing.text, markdown = false)
                                     Text(
                                         "Waiting for Pi",
                                         style = MaterialTheme.typography.labelSmall,
@@ -737,9 +772,11 @@ private fun ChatPanel(
                                 ),
                                 modifier = Modifier.fillMaxWidth(0.9f),
                             ) {
-                                SelectionContainer {
-                                    Text(partial, Modifier.padding(12.dp))
-                                }
+                                ChatText(
+                                    text = partial,
+                                    markdown = false,
+                                    modifier = Modifier.padding(12.dp),
+                                )
                             }
                         }
                     }
@@ -782,9 +819,10 @@ private fun ChatPanel(
                                     modifier = Modifier.fillMaxWidth().then(menuModifier),
                                 ) {
                                     Column(Modifier.padding(12.dp)) {
-                                        SelectionContainer {
-                                            Text(message.text, style = MaterialTheme.typography.bodyLarge)
-                                        }
+                                        ChatText(
+                                            text = message.text,
+                                            markdown = message.role != ChatRole.User,
+                                        )
                                         message.attachment?.let { attachment ->
                                             OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
                                                 Text("Download ${attachment.fileName}")

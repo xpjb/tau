@@ -26,6 +26,8 @@ kotlin {
             implementation(compose.material3)
             implementation(compose.ui)
             implementation(compose.components.resources)
+            implementation("com.mikepenz:multiplatform-markdown-renderer:0.28.0")
+            implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.28.0")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
             implementation("io.ktor:ktor-client-core:3.0.3")
