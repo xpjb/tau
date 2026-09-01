@@ -43,4 +43,7 @@ expect fun Modifier.onFilesDropped(
 
 expect fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier
 
+@Composable
+expect fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit)
+
 expect fun platformHttpEngine(): HttpClientEngine

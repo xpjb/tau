@@ -58,7 +58,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -115,6 +118,13 @@ fun TauApp(controller: TauController) {
     val selectedRunning = !state.editingSettings && state.sessions.any { session ->
         session.id == state.selectedSessionId && session.status == SessionStatus.Running
     }
+    val chatStateHolder = rememberSaveableStateHolder()
+    val chatIds = state.sessions.mapTo(mutableSetOf(), SessionSummary::id)
+    var retainedChatIds by remember { mutableStateOf(emptySet<String>()) }
+    LaunchedEffect(chatIds) {
+        (retainedChatIds - chatIds).forEach(chatStateHolder::removeState)
+        retainedChatIds = chatIds
+    }
     MaterialTheme(colorScheme = TauDarkColors) {
         Surface(
             Modifier
@@ -132,6 +142,7 @@ fun TauApp(controller: TauController) {
                         .imePadding(),
                 ) {
                     BoxWithConstraints(Modifier.fillMaxSize()) {
+                        val selectedSessionId = state.selectedSessionId
                         if (maxWidth >= 760.dp) {
                             Row(Modifier.fillMaxSize()) {
                                 SessionList(
@@ -140,20 +151,34 @@ fun TauApp(controller: TauController) {
                                     modifier = Modifier.width(300.dp).fillMaxHeight(),
                                 )
                                 VerticalDivider()
+                                if (selectedSessionId == null) {
+                                    ChatPanel(
+                                        state = state,
+                                        controller = controller,
+                                        showBack = false,
+                                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                                    )
+                                } else {
+                                    chatStateHolder.SaveableStateProvider(selectedSessionId) {
+                                        ChatPanel(
+                                            state = state,
+                                            controller = controller,
+                                            showBack = false,
+                                            modifier = Modifier.weight(1f).fillMaxHeight(),
+                                        )
+                                    }
+                                }
+                            }
+                        } else if (state.mobileChatVisible && selectedSessionId != null) {
+                            PlatformBackHandler(true, controller::showSessionList)
+                            chatStateHolder.SaveableStateProvider(selectedSessionId) {
                                 ChatPanel(
                                     state = state,
                                     controller = controller,
-                                    showBack = false,
-                                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                                    showBack = true,
+                                    modifier = Modifier.fillMaxSize(),
                                 )
                             }
-                        } else if (state.mobileChatVisible && state.selectedSessionId != null) {
-                            ChatPanel(
-                                state = state,
-                                controller = controller,
-                                showBack = true,
-                                modifier = Modifier.fillMaxSize(),
-                            )
                         } else {
                             SessionList(
                                 state = state,
@@ -497,15 +522,25 @@ private fun ChatPanel(
     var editorValue by remember(sessionId) {
         mutableStateOf(TextFieldValue(draft, TextRange(draft.length)))
     }
+    var followBottom by rememberSaveable(sessionId) { mutableStateOf(true) }
     val listState = rememberLazyListState()
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            listState.isScrollInProgress to
+                (listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0)
+        }.collect { (scrolling, atBottom) ->
+            if (scrolling) followBottom = atBottom
+        }
+    }
     LaunchedEffect(draft) {
         if (editorValue.text != draft) {
             editorValue = TextFieldValue(draft, TextRange(draft.length))
         }
     }
     LaunchedEffect(messages.size, partial.length) {
-        val count = messages.size + if (partial.isNotEmpty()) 1 else 0
-        if (count > 0) listState.animateScrollToItem(count - 1)
+        if (followBottom && (messages.isNotEmpty() || partial.isNotEmpty())) {
+            listState.scrollToItem(0)
+        }
     }
 
     Box(
@@ -521,7 +556,13 @@ private fun ChatPanel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (showBack) {
-                    TextButton(onClick = controller::showSessionList) { Text("Chats") }
+                    IconButton(onClick = controller::showSessionList) {
+                        Icon(
+                            imageVector = BackIcon,
+                            contentDescription = "Back to chats",
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
                 }
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -558,7 +599,8 @@ private fun ChatPanel(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            reverseLayout = true,
+            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
         ) {
             if (messages.isEmpty() && partial.isEmpty()) {
                 item {
@@ -568,7 +610,21 @@ private fun ChatPanel(
                     )
                 }
             }
-            items(messages, key = ChatMessage::entryId) { message ->
+            if (partial.isNotEmpty()) {
+                item("streaming") {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        ),
+                        modifier = Modifier.fillMaxWidth(0.9f),
+                    ) {
+                        SelectionContainer {
+                            Text(partial, Modifier.padding(12.dp))
+                        }
+                    }
+                }
+            }
+            items(messages.asReversed(), key = ChatMessage::entryId) { message ->
                 var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
                 var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
                 Row(
@@ -635,20 +691,6 @@ private fun ChatPanel(
                                     },
                                 )
                             }
-                        }
-                    }
-                }
-            }
-            if (partial.isNotEmpty()) {
-                item("streaming") {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        ),
-                        modifier = Modifier.fillMaxWidth(0.9f),
-                    ) {
-                        SelectionContainer {
-                            Text(partial, Modifier.padding(12.dp))
                         }
                     }
                 }
@@ -779,6 +821,27 @@ private fun ChatPanel(
         }
     }
 }
+
+private val BackIcon = ImageVector.Builder(
+    name = "Back",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(20f, 11f)
+        horizontalLineTo(7.83f)
+        lineTo(13.42f, 5.41f)
+        lineTo(12f, 4f)
+        lineTo(4f, 12f)
+        lineTo(12f, 20f)
+        lineTo(13.42f, 18.59f)
+        lineTo(7.83f, 13f)
+        horizontalLineTo(20f)
+        close()
+    }
+}.build()
 
 private val AttachFileIcon = ImageVector.Builder(
     name = "AttachFile",

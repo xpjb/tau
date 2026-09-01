@@ -300,4 +300,7 @@ actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Uni
         }
     }
 
+@Composable
+actual fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit) = Unit
+
 actual fun platformHttpEngine(): HttpClientEngine = CIO.create()

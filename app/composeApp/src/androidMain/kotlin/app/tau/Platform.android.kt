@@ -8,6 +8,7 @@ import android.os.Environment
 import android.os.Process
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.ActivityResultLauncher
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -249,5 +250,10 @@ actual fun Modifier.onFilesDropped(
 ): Modifier = this
 
 actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier = this
+
+@Composable
+actual fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit) {
+    BackHandler(enabled, onBack)
+}
 
 actual fun platformHttpEngine(): HttpClientEngine = OkHttp.create()
