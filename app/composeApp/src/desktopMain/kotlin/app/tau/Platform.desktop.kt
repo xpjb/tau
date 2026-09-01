@@ -1,13 +1,22 @@
 package app.tau
 
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.onPointerEvent
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.cio.CIO
+import java.awt.FileDialog
+import java.awt.Frame
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 
@@ -151,6 +160,29 @@ actual object PlatformServices {
         }
     }
 
+    actual suspend fun pickFiles(): List<PickedFile> {
+        val files = FileDialog(null as Frame?, "Attach files", FileDialog.LOAD).apply {
+            isMultipleMode = true
+            isVisible = true
+        }.files.toList()
+        if (files.size > MaxUploadFiles) {
+            error("Attach at most $MaxUploadFiles files at once")
+        }
+        return withContext(Dispatchers.IO) {
+            var total = 0L
+            files.map { file ->
+                if (!file.isFile) error("${file.name} is not a regular file")
+                val size = file.length()
+                if (size == 0L) error("${file.name} is empty")
+                total += size
+                if (total > MaxUploadBytes) {
+                    error("Attached files exceed Tau's $MaxUploadBytes byte limit")
+                }
+                PickedFile(file.name, Files.readAllBytes(file.toPath()))
+            }
+        }
+    }
+
     actual fun saveDownload(fileName: String, bytes: ByteArray): String {
         val safeName = fileName
             .substringAfterLast('/')
@@ -182,5 +214,14 @@ actual object PlatformServices {
         return target.toString()
     }
 }
+
+@OptIn(ExperimentalComposeUiApi::class)
+actual fun Modifier.onSecondaryClick(onClick: () -> Unit): Modifier =
+    onPointerEvent(PointerEventType.Press) { event ->
+        if (event.buttons.isSecondaryPressed) {
+            onClick()
+            event.changes.forEach { it.consume() }
+        }
+    }
 
 actual fun platformHttpEngine(): HttpClientEngine = CIO.create()

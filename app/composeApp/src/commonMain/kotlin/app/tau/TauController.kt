@@ -33,6 +33,9 @@ data class TauUiState(
     val histories: Map<String, List<ChatMessage>> = emptyMap(),
     val partials: Map<String, String> = emptyMap(),
     val drafts: Map<String, String> = emptyMap(),
+    val attachments: Map<String, List<PickedFile>> = emptyMap(),
+    val pickingFiles: Boolean = false,
+    val uploadingSessions: Set<String> = emptySet(),
     val mobileChatVisible: Boolean = false,
     val notice: String? = null,
     val error: String? = null,
@@ -117,35 +120,120 @@ class TauController(dispatcher: CoroutineDispatcher) {
         mutableState.update { it.copy(drafts = it.drafts + (sessionId to draft)) }
     }
 
-    fun sendPrompt() {
+    fun pickFiles() {
         val sessionId = mutableState.value.selectedSessionId ?: return
-        val text = mutableState.value.drafts[sessionId].orEmpty()
-        if (text.isBlank()) return
-        val id = nextRequestId()
-        pending[id] = PendingAction.Prompt(sessionId, text)
+        if (mutableState.value.pickingFiles) return
+        mutableState.update { it.copy(pickingFiles = true, error = null) }
         scope.launch {
             try {
-                client.send(Prompt(id, sessionId, text))
+                val selected = PlatformServices.pickFiles()
+                if (selected.isEmpty()) return@launch
                 mutableState.update { current ->
-                    if (current.drafts[sessionId] == text) {
-                        current.copy(drafts = current.drafts + (sessionId to ""), error = null)
-                    } else {
-                        current.copy(error = null)
+                    val files = current.attachments[sessionId].orEmpty() + selected
+                    check(files.size <= MaxUploadFiles) {
+                        "Attach at most $MaxUploadFiles files to one message"
                     }
+                    check(files.sumOf { it.bytes.size.toLong() } <= MaxUploadBytes) {
+                        "Attached files exceed Tau's $MaxUploadBytes byte limit"
+                    }
+                    current.copy(
+                        attachments = current.attachments + (sessionId to files),
+                        error = null,
+                    )
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                pending.remove(id)
                 mutableState.update {
-                    it.copy(
-                        drafts = if (it.drafts[sessionId].isNullOrEmpty()) {
-                            it.drafts + (sessionId to text)
+                    it.copy(error = error.message ?: "Files could not be attached.")
+                }
+            } finally {
+                mutableState.update { it.copy(pickingFiles = false) }
+            }
+        }
+    }
+
+    fun removeAttachment(sessionId: String, index: Int) {
+        mutableState.update { current ->
+            val files = current.attachments[sessionId].orEmpty()
+                .filterIndexed { fileIndex, _ -> fileIndex != index }
+            current.copy(
+                attachments = if (files.isEmpty()) {
+                    current.attachments - sessionId
+                } else {
+                    current.attachments + (sessionId to files)
+                },
+            )
+        }
+    }
+
+    fun sendPrompt() {
+        val sessionId = mutableState.value.selectedSessionId ?: return
+        val text = mutableState.value.drafts[sessionId].orEmpty()
+        val files = mutableState.value.attachments[sessionId].orEmpty()
+        if ((text.isBlank() && files.isEmpty()) || sessionId in mutableState.value.uploadingSessions) {
+            return
+        }
+        mutableState.update {
+            it.copy(
+                uploadingSessions = it.uploadingSessions + sessionId,
+                error = null,
+            )
+        }
+        scope.launch {
+            var requestId: String? = null
+            try {
+                val uploaded = files.map { file ->
+                    client.uploadFile(mutableState.value.settings, sessionId, file)
+                }
+                val introduction = if (text.isBlank()) {
+                    if (uploaded.size == 1) {
+                        "Please inspect the attached file."
+                    } else {
+                        "Please inspect the attached files."
+                    }
+                } else {
+                    text
+                }
+                val message = if (uploaded.isEmpty()) {
+                    introduction
+                } else {
+                    uploaded.joinToString(
+                        separator = "\n",
+                        prefix = "$introduction\n\nAttached files are available at:\n",
+                    ) { file -> "- ${file.name}: ${file.path}" }
+                }
+                val id = nextRequestId()
+                requestId = id
+                pending[id] = PendingAction.Prompt(sessionId, text, files)
+                client.send(Prompt(id, sessionId, message))
+                mutableState.update { current ->
+                    val remaining = current.attachments[sessionId].orEmpty()
+                        .filterNot { candidate -> files.any { it === candidate } }
+                    current.copy(
+                        drafts = if (current.drafts[sessionId] == text) {
+                            current.drafts + (sessionId to "")
                         } else {
-                            it.drafts
+                            current.drafts
                         },
-                        error = error.message ?: "Message was not sent.",
+                        attachments = if (remaining.isEmpty()) {
+                            current.attachments - sessionId
+                        } else {
+                            current.attachments + (sessionId to remaining)
+                        },
+                        error = null,
                     )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                requestId?.let(pending::remove)
+                mutableState.update {
+                    it.copy(error = error.message ?: "Message was not sent.")
+                }
+            } finally {
+                mutableState.update {
+                    it.copy(uploadingSessions = it.uploadingSessions - sessionId)
                 }
             }
         }
@@ -158,15 +246,13 @@ class TauController(dispatcher: CoroutineDispatcher) {
         send(Abort(id, sessionId))
     }
 
-    fun closeSession() {
-        val sessionId = mutableState.value.selectedSessionId ?: return
+    fun deleteSession(sessionId: String) {
         val id = nextRequestId()
         pending[id] = PendingAction.Normal
-        send(CloseSession(id, sessionId))
+        send(DeleteSession(id, sessionId))
     }
 
-    fun renameSession(title: String) {
-        val sessionId = mutableState.value.selectedSessionId ?: return
+    fun renameSession(sessionId: String, title: String) {
         val id = nextRequestId()
         pending[id] = PendingAction.Normal
         send(RenameSession(id, sessionId, title))
@@ -177,13 +263,6 @@ class TauController(dispatcher: CoroutineDispatcher) {
         val id = nextRequestId()
         pending[id] = PendingAction.SelectSession
         send(ForkSession(id, sessionId, entryId))
-    }
-
-    fun cloneSession() {
-        val sessionId = mutableState.value.selectedSessionId ?: return
-        val id = nextRequestId()
-        pending[id] = PendingAction.SelectSession
-        send(CloneSession(id, sessionId))
     }
 
     fun downloadAttachment(message: ChatMessage) {
@@ -290,6 +369,19 @@ class TauController(dispatcher: CoroutineDispatcher) {
                             } else {
                                 it.drafts
                             },
+                            attachments = if (action is PendingAction.Prompt) {
+                                val existing = it.attachments[action.sessionId].orEmpty()
+                                val restored = action.files.filter { file ->
+                                    existing.none { it === file }
+                                } + existing
+                                if (restored.isEmpty()) {
+                                    it.attachments
+                                } else {
+                                    it.attachments + (action.sessionId to restored)
+                                }
+                            } else {
+                                it.attachments
+                            },
                             error = message.error ?: "Tau rejected the request.",
                         )
                     }
@@ -311,12 +403,25 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 }
             }
             is Sessions -> {
+                val activeIds = message.sessions.mapTo(mutableSetOf(), SessionSummary::id)
                 val currentSelection = mutableState.value.selectedSessionId
                 val selected = currentSelection
-                    ?.takeIf { selectedId -> message.sessions.any { it.id == selectedId } }
+                    ?.takeIf { it in activeIds }
                     ?: message.sessions.firstOrNull()?.id
+                openedSessions.retainAll(activeIds)
                 mutableState.update {
-                    it.copy(sessions = message.sessions, selectedSessionId = selected)
+                    it.copy(
+                        sessions = message.sessions,
+                        selectedSessionId = selected,
+                        histories = it.histories.filterKeys { sessionId -> sessionId in activeIds },
+                        partials = it.partials.filterKeys { sessionId -> sessionId in activeIds },
+                        drafts = it.drafts.filterKeys { sessionId -> sessionId in activeIds },
+                        attachments = it.attachments.filterKeys { sessionId -> sessionId in activeIds },
+                        uploadingSessions = it.uploadingSessions.filterTo(mutableSetOf()) { sessionId ->
+                            sessionId in activeIds
+                        },
+                        mobileChatVisible = it.mobileChatVisible && selected != null,
+                    )
                 }
                 if (selected != null && selected !in openedSessions) openSession(selected, false)
             }
@@ -395,6 +500,10 @@ class TauController(dispatcher: CoroutineDispatcher) {
         data object Normal : PendingAction
         data object SelectSession : PendingAction
         data class Open(val sessionId: String) : PendingAction
-        data class Prompt(val sessionId: String, val text: String) : PendingAction
+        data class Prompt(
+            val sessionId: String,
+            val text: String,
+            val files: List<PickedFile>,
+        ) : PendingAction
     }
 }

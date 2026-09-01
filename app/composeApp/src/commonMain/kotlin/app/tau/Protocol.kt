@@ -42,8 +42,8 @@ data class Prompt(override val id: String, val sessionId: String, val text: Stri
 data class Abort(override val id: String, val sessionId: String) : ClientRequest
 
 @Serializable
-@SerialName("close_session")
-data class CloseSession(override val id: String, val sessionId: String) : ClientRequest
+@SerialName("delete_session")
+data class DeleteSession(override val id: String, val sessionId: String) : ClientRequest
 
 @Serializable
 @SerialName("rename_session")
@@ -60,10 +60,6 @@ data class ForkSession(
     val sessionId: String,
     val entryId: String,
 ) : ClientRequest
-
-@Serializable
-@SerialName("clone_session")
-data class CloneSession(override val id: String, val sessionId: String) : ClientRequest
 
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
@@ -143,6 +139,13 @@ data class ChatMessage(
     val text: String,
     val timestampMs: Long? = null,
     val attachment: ChatAttachment? = null,
+)
+
+@Serializable
+data class UploadedFile(
+    val name: String,
+    val path: String,
+    val size: Long,
 )
 
 @Serializable

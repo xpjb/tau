@@ -1,6 +1,8 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package app.tau
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +31,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -204,6 +208,11 @@ private fun SessionList(
     controller: TauController,
     modifier: Modifier,
 ) {
+    var renaming by remember { mutableStateOf<SessionSummary?>(null) }
+    var deleting by remember { mutableStateOf<SessionSummary?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    val actionsEnabled = state.connectionStatus == ConnectionStatus.Connected
+
     Column(modifier) {
         Row(
             Modifier.fillMaxWidth().padding(16.dp),
@@ -230,7 +239,7 @@ private fun SessionList(
         }
         Button(
             onClick = controller::createSession,
-            enabled = state.connectionStatus == ConnectionStatus.Connected,
+            enabled = actionsEnabled,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         ) {
             Text("New chat")
@@ -240,7 +249,7 @@ private fun SessionList(
         if (state.sessions.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    if (state.connectionStatus == ConnectionStatus.Connected) {
+                    if (actionsEnabled) {
                         "Create your first Tau chat."
                     } else {
                         "Waiting for the daemon."
@@ -255,38 +264,119 @@ private fun SessionList(
             ) {
                 items(state.sessions, key = SessionSummary::id) { session ->
                     val selected = session.id == state.selectedSessionId
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (selected) {
-                                MaterialTheme.colorScheme.secondaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.surface
-                            },
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { controller.selectSession(session.id) },
-                    ) {
-                        Column(Modifier.padding(12.dp)) {
-                            Text(
-                                session.title,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    var menuExpanded by remember(session.id) { mutableStateOf(false) }
+                    Box(Modifier.fillMaxWidth()) {
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (selected) {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surface
+                                },
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onSecondaryClick { menuExpanded = true }
+                                .combinedClickable(
+                                    onClick = { controller.selectSession(session.id) },
+                                    onLongClick = { menuExpanded = true },
+                                ),
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                Text(
+                                    session.title,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = if (selected) {
+                                        FontWeight.SemiBold
+                                    } else {
+                                        FontWeight.Normal
+                                    },
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    session.detail ?: session.status.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = session.status.color,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Rename") },
+                                enabled = actionsEnabled,
+                                onClick = {
+                                    menuExpanded = false
+                                    renameText = session.title
+                                    renaming = session
+                                },
                             )
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                session.detail ?: session.status.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = session.status.color,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                            DropdownMenuItem(
+                                text = { Text("Delete") },
+                                enabled = actionsEnabled,
+                                onClick = {
+                                    menuExpanded = false
+                                    deleting = session
+                                },
                             )
                         }
                     }
                 }
             }
         }
+    }
+
+    renaming?.let { session ->
+        AlertDialog(
+            onDismissRequest = { renaming = null },
+            title = { Text("Rename chat") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        controller.renameSession(session.id, renameText)
+                        renaming = null
+                    },
+                    enabled = actionsEnabled && renameText.isNotBlank(),
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renaming = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    deleting?.let { session ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("Delete chat?") },
+            text = {
+                Text("Permanently delete “${session.title}” and its Pi session history? This cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        controller.deleteSession(session.id)
+                        deleting = null
+                    },
+                    enabled = actionsEnabled,
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleting = null }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -306,10 +396,10 @@ private fun ChatPanel(
         return
     }
 
-    var renaming by remember(sessionId) { mutableStateOf(false) }
-    var renameText by remember(session.title, renaming) { mutableStateOf(session.title) }
     val messages = state.histories[sessionId].orEmpty()
     val partial = state.partials[sessionId].orEmpty()
+    val attachments = state.attachments[sessionId].orEmpty()
+    val uploading = sessionId in state.uploadingSessions
     val listState = rememberLazyListState()
     LaunchedEffect(messages.size, partial.length) {
         val count = messages.size + if (partial.isNotEmpty()) 1 else 0
@@ -341,14 +431,6 @@ private fun ChatPanel(
                 CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }
         }
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            TextButton(onClick = { renaming = true }) { Text("Rename") }
-            TextButton(onClick = controller::cloneSession) { Text("Clone") }
-            TextButton(onClick = controller::closeSession) { Text("Sleep") }
-        }
         HorizontalDivider()
         LazyColumn(
             state = listState,
@@ -365,6 +447,7 @@ private fun ChatPanel(
                 }
             }
             items(messages, key = ChatMessage::entryId) { message ->
+                var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = if (message.role == ChatRole.User) {
@@ -373,31 +456,50 @@ private fun ChatPanel(
                         Arrangement.Start
                     },
                 ) {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = when (message.role) {
-                                ChatRole.User -> MaterialTheme.colorScheme.primaryContainer
-                                ChatRole.Assistant -> MaterialTheme.colorScheme.surfaceVariant
-                                ChatRole.System -> MaterialTheme.colorScheme.tertiaryContainer
-                            },
-                        ),
-                        modifier = Modifier.fillMaxWidth(0.9f),
-                    ) {
-                        Column(Modifier.padding(12.dp)) {
-                            SelectionContainer {
-                                Text(message.text, style = MaterialTheme.typography.bodyLarge)
-                            }
-                            message.attachment?.let { attachment ->
-                                OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
-                                    Text("Download ${attachment.fileName}")
+                    Box(Modifier.fillMaxWidth(0.9f)) {
+                        val menuModifier = if (message.role == ChatRole.User) {
+                            Modifier
+                                .onSecondaryClick { menuExpanded = true }
+                                .combinedClickable(
+                                    onClick = {},
+                                    onLongClick = { menuExpanded = true },
+                                )
+                        } else {
+                            Modifier
+                        }
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = when (message.role) {
+                                    ChatRole.User -> MaterialTheme.colorScheme.primaryContainer
+                                    ChatRole.Assistant -> MaterialTheme.colorScheme.surfaceVariant
+                                    ChatRole.System -> MaterialTheme.colorScheme.tertiaryContainer
+                                },
+                            ),
+                            modifier = Modifier.fillMaxWidth().then(menuModifier),
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                SelectionContainer {
+                                    Text(message.text, style = MaterialTheme.typography.bodyLarge)
                                 }
-                            }
-                            if (message.role == ChatRole.User) {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                    TextButton(onClick = { controller.fork(message.entryId) }) {
-                                        Text("Fork here")
+                                message.attachment?.let { attachment ->
+                                    OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
+                                        Text("Download ${attachment.fileName}")
                                     }
                                 }
+                            }
+                        }
+                        if (message.role == ChatRole.User) {
+                            DropdownMenu(
+                                expanded = menuExpanded,
+                                onDismissRequest = { menuExpanded = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Fork here") },
+                                    onClick = {
+                                        menuExpanded = false
+                                        controller.fork(message.entryId)
+                                    },
+                                )
                             }
                         }
                     }
@@ -419,66 +521,73 @@ private fun ChatPanel(
             }
         }
         HorizontalDivider()
-        Row(
+        Column(
             Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            OutlinedTextField(
-                value = state.drafts[sessionId].orEmpty(),
-                onValueChange = { controller.setDraft(sessionId, it) },
-                placeholder = {
-                    Text(if (session.status == SessionStatus.Running) "Steer Pi" else "Message Pi")
-                },
-                minLines = 1,
-                maxLines = 8,
-                modifier = Modifier.weight(1f),
-            )
-            if (session.status == SessionStatus.Running) {
-                OutlinedButton(onClick = controller::abort) { Text("Abort") }
-            }
-            Button(
-                onClick = controller::sendPrompt,
-                enabled = state.connectionStatus == ConnectionStatus.Connected &&
-                    state.drafts[sessionId].orEmpty().isNotBlank(),
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(if (session.status == SessionStatus.Running) "Steer" else "Send")
+                OutlinedButton(
+                    onClick = controller::pickFiles,
+                    enabled = state.connectionStatus == ConnectionStatus.Connected &&
+                        !state.pickingFiles && !uploading,
+                ) {
+                    Text(if (state.pickingFiles) "Opening…" else "Attach")
+                }
+                attachments.forEachIndexed { index, file ->
+                    OutlinedButton(
+                        onClick = { controller.removeAttachment(sessionId, index) },
+                        enabled = !uploading,
+                    ) {
+                        Text("${file.name}  ×", maxLines = 1)
+                    }
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = state.drafts[sessionId].orEmpty(),
+                    onValueChange = { controller.setDraft(sessionId, it) },
+                    placeholder = {
+                        Text(if (session.status == SessionStatus.Running) "Steer Pi" else "Message Pi")
+                    },
+                    minLines = 1,
+                    maxLines = 8,
+                    modifier = Modifier.weight(1f),
+                )
+                if (session.status == SessionStatus.Running) {
+                    OutlinedButton(onClick = controller::abort) { Text("Abort") }
+                }
+                Button(
+                    onClick = controller::sendPrompt,
+                    enabled = state.connectionStatus == ConnectionStatus.Connected &&
+                        !uploading &&
+                        (state.drafts[sessionId].orEmpty().isNotBlank() || attachments.isNotEmpty()),
+                ) {
+                    Text(
+                        when {
+                            uploading -> "Uploading…"
+                            session.status == SessionStatus.Running -> "Steer"
+                            else -> "Send"
+                        },
+                    )
+                }
             }
         }
-    }
-
-    if (renaming) {
-        AlertDialog(
-            onDismissRequest = { renaming = false },
-            title = { Text("Rename chat") },
-            text = {
-                OutlinedTextField(
-                    value = renameText,
-                    onValueChange = { renameText = it },
-                    singleLine = true,
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        controller.renameSession(renameText)
-                        renaming = false
-                    },
-                    enabled = renameText.isNotBlank(),
-                ) { Text("Save") }
-            },
-            dismissButton = {
-                TextButton(onClick = { renaming = false }) { Text("Cancel") }
-            },
-        )
     }
 }
 
 private val SessionStatus.label: String
     get() = when (this) {
-        SessionStatus.Sleeping -> "Sleeping"
+        SessionStatus.Sleeping -> "Ready"
         SessionStatus.Starting -> "Starting"
-        SessionStatus.Idle -> "Idle"
+        SessionStatus.Idle -> "Ready"
         SessionStatus.Running -> "Running"
         SessionStatus.Error -> "Error"
     }

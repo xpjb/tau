@@ -12,6 +12,10 @@ class ProtocolTest {
             "{\"type\":\"fork_session\",\"id\":\"7\",\"sessionId\":\"chat\",\"entryId\":\"entry\"}",
             TauJson.encodeToString<ClientRequest>(ForkSession("7", "chat", "entry")),
         )
+        assertEquals(
+            "{\"type\":\"delete_session\",\"id\":\"8\",\"sessionId\":\"chat\"}",
+            TauJson.encodeToString<ClientRequest>(DeleteSession("8", "chat")),
+        )
 
         val event = TauJson.decodeFromString<ServerMessage>(
             """{"type":"session_state","sessionId":"chat","status":"running","detail":"Running bash"}""",

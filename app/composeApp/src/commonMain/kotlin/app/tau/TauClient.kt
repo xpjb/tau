@@ -19,6 +19,7 @@ import io.ktor.websocket.readText
 import io.ktor.websocket.send
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 
 class TauClient {
@@ -80,6 +81,27 @@ class TauClient {
         val bytes = response.body<ByteArray>()
         if (bytes.size > 50_000_000) error("Attachment exceeds Tau's download limit")
         return PlatformServices.saveDownload(fileName, bytes)
+    }
+
+    suspend fun uploadFile(
+        settings: ConnectionSettings,
+        sessionId: String,
+        file: PickedFile,
+    ): UploadedFile {
+        if (file.bytes.isEmpty() || file.bytes.size > MaxUploadBytes) {
+            error("${file.name} exceeds Tau's upload limit")
+        }
+        val baseUrl = settings.serverUrl.trim().trimEnd('/')
+        val response = client.post("$baseUrl/v1/sessions/$sessionId/uploads") {
+            url { parameters.append("fileName", file.name) }
+            header(HttpHeaders.Authorization, "Bearer ${settings.token}")
+            contentType(ContentType.Application.OctetStream)
+            setBody(file.bytes)
+        }
+        if (!response.status.isSuccess()) {
+            error("File upload failed with HTTP ${response.status.value}")
+        }
+        return TauJson.decodeFromString(response.body<String>())
     }
 
     suspend fun uploadPendingCrash(settings: ConnectionSettings) {

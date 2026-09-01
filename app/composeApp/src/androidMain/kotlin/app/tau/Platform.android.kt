@@ -2,27 +2,70 @@ package app.tau
 
 import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.Process
 import android.provider.MediaStore
+import android.provider.OpenableColumns
+import androidx.activity.result.ActivityResultLauncher
+import androidx.compose.ui.Modifier
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 
 internal object TauAndroidContext {
     private var applicationContext: Context? = null
+    private var filePicker: ActivityResultLauncher<Array<String>>? = null
+    private var fileSelection: CancellableContinuation<List<Uri>>? = null
 
-    fun initialize(context: Context) {
+    fun initialize(context: Context, picker: ActivityResultLauncher<Array<String>>) {
         applicationContext = context.applicationContext
+        filePicker = picker
     }
 
     fun require(): Context = checkNotNull(applicationContext) { "Tau Android context is not ready" }
+
+    suspend fun selectFiles(): List<Uri> = suspendCancellableCoroutine { continuation ->
+        val picker = synchronized(this) {
+            check(fileSelection == null) { "A file picker is already open" }
+            val picker = checkNotNull(filePicker) { "Tau's file picker is not ready" }
+            fileSelection = continuation
+            picker
+        }
+        continuation.invokeOnCancellation {
+            synchronized(this) {
+                if (fileSelection === continuation) fileSelection = null
+            }
+        }
+        try {
+            picker.launch(arrayOf("*/*"))
+        } catch (error: Throwable) {
+            synchronized(this) {
+                if (fileSelection === continuation) fileSelection = null
+            }
+            continuation.resumeWith(Result.failure(error))
+        }
+    }
+
+    fun completeFileSelection(uris: List<Uri>) {
+        val continuation = synchronized(this) {
+            fileSelection.also { fileSelection = null }
+        }
+        if (continuation?.isActive == true) {
+            continuation.resumeWith(Result.success(uris))
+        }
+    }
 }
 
 actual object PlatformServices {
@@ -110,6 +153,43 @@ actual object PlatformServices {
         }
     }
 
+    actual suspend fun pickFiles(): List<PickedFile> {
+        val uris = TauAndroidContext.selectFiles()
+        if (uris.size > MaxUploadFiles) {
+            error("Attach at most $MaxUploadFiles files at once")
+        }
+        return withContext(Dispatchers.IO) {
+            val resolver = TauAndroidContext.require().contentResolver
+            var total = 0
+            uris.map { uri ->
+                val name = resolver.query(
+                    uri,
+                    arrayOf(OpenableColumns.DISPLAY_NAME),
+                    null,
+                    null,
+                    null,
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else null
+                } ?: uri.lastPathSegment ?: "attachment"
+                val output = ByteArrayOutputStream()
+                checkNotNull(resolver.openInputStream(uri)) { "Android could not open $name" }.use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        if (total > MaxUploadBytes) {
+                            error("Attached files exceed Tau's $MaxUploadBytes byte limit")
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                }
+                if (output.size() == 0) error("$name is empty")
+                PickedFile(name, output.toByteArray())
+            }
+        }
+    }
+
     actual fun saveDownload(fileName: String, bytes: ByteArray): String {
         val safeName = fileName
             .substringAfterLast('/')
@@ -154,5 +234,7 @@ actual object PlatformServices {
         return target.absolutePath
     }
 }
+
+actual fun Modifier.onSecondaryClick(onClick: () -> Unit): Modifier = this
 
 actual fun platformHttpEngine(): HttpClientEngine = OkHttp.create()
