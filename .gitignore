@@ -2,6 +2,7 @@
 /windows/target/
 /dist/
 /app/.gradle/
+/app/.kotlin/
 /app/build/
 /app/composeApp/build/
 /app/local.properties

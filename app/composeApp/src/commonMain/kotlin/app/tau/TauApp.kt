@@ -37,7 +37,11 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -58,6 +62,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -102,8 +109,15 @@ fun TauApp(controller: TauController) {
         onDispose(controller::dispose)
     }
 
+    val selectedRunning = !state.editingSettings && state.sessions.any { session ->
+        session.id == state.selectedSessionId && session.status == SessionStatus.Running
+    }
     MaterialTheme(colorScheme = TauDarkColors) {
-        Surface(Modifier.fillMaxSize()) {
+        Surface(
+            Modifier
+                .fillMaxSize()
+                .onInterruptShortcut(selectedRunning, controller::abort),
+        ) {
             if (state.editingSettings) {
                 ConnectionScreen(state, controller)
             } else {
@@ -460,40 +474,63 @@ private fun ChatPanel(
     val partial = state.partials[sessionId].orEmpty()
     val attachments = state.attachments[sessionId].orEmpty()
     val uploading = sessionId in state.uploadingSessions
+    val canAttach = state.connectionStatus == ConnectionStatus.Connected &&
+        !state.pickingFiles && !uploading
     val canSend = state.connectionStatus == ConnectionStatus.Connected &&
         !uploading &&
         (state.drafts[sessionId].orEmpty().isNotBlank() || attachments.isNotEmpty())
+    var draggingFiles by remember(sessionId) { mutableStateOf(false) }
     val listState = rememberLazyListState()
     LaunchedEffect(messages.size, partial.length) {
         val count = messages.size + if (partial.isNotEmpty()) 1 else 0
         if (count > 0) listState.animateScrollToItem(count - 1)
     }
 
-    Column(modifier) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (showBack) {
-                TextButton(onClick = controller::showSessionList) { Text("Chats") }
+    Box(
+        modifier.onFilesDropped(
+            enabled = canAttach,
+            onDraggingChanged = { draggingFiles = it },
+            onDrop = controller::attachDroppedFiles,
+        ),
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (showBack) {
+                    TextButton(onClick = controller::showSessionList) { Text("Chats") }
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        session.title,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        session.detail ?: session.status.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = session.status.color,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (session.status == SessionStatus.Starting) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                } else if (session.status == SessionStatus.Running) {
+                    FilledTonalIconButton(
+                        onClick = controller::abort,
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Icon(
+                            imageVector = StopIcon,
+                            contentDescription = "Interrupt Pi",
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
             }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    session.title,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    session.detail ?: session.status.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = session.status.color,
-                )
-            }
-            if (session.status == SessionStatus.Starting) {
-                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            }
-        }
         HorizontalDivider()
         LazyColumn(
             state = listState,
@@ -595,51 +632,78 @@ private fun ChatPanel(
                 }
             }
         }
-        HorizontalDivider()
-        Column(
-            Modifier.fillMaxWidth().padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            HorizontalDivider()
+            Column(
+                Modifier.fillMaxWidth().padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedButton(
-                    onClick = controller::pickFiles,
-                    enabled = state.connectionStatus == ConnectionStatus.Connected &&
-                        !state.pickingFiles && !uploading,
-                ) {
-                    Text(if (state.pickingFiles) "Opening…" else "Attach")
-                }
-                attachments.forEachIndexed { index, file ->
-                    OutlinedButton(
-                        onClick = { controller.removeAttachment(sessionId, index) },
-                        enabled = !uploading,
+                if (attachments.isNotEmpty()) {
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("${file.name}  ×", maxLines = 1)
+                        attachments.forEachIndexed { index, file ->
+                            OutlinedButton(
+                                onClick = { controller.removeAttachment(sessionId, index) },
+                                enabled = !uploading,
+                            ) {
+                                Text("${file.name}  ×", maxLines = 1)
+                            }
+                        }
                     }
                 }
-            }
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
                 OutlinedTextField(
                     value = state.drafts[sessionId].orEmpty(),
                     onValueChange = { controller.setDraft(sessionId, it) },
-                    placeholder = {
-                        Text(if (session.status == SessionStatus.Running) "Steer Pi" else "Message Pi")
-                    },
+                    placeholder = { Text("Message Pi") },
                     minLines = 1,
                     maxLines = 8,
+                    leadingIcon = {
+                        IconButton(
+                            onClick = controller::pickFiles,
+                            enabled = canAttach,
+                        ) {
+                            if (state.pickingFiles) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(
+                                    imageVector = AttachFileIcon,
+                                    contentDescription = "Attach files",
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                        }
+                    },
+                    trailingIcon = {
+                        if (uploading) {
+                            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            }
+                        } else {
+                            FilledIconButton(
+                                onClick = controller::sendPrompt,
+                                enabled = canSend,
+                                modifier = Modifier.size(40.dp),
+                            ) {
+                                Icon(
+                                    imageVector = SendIcon,
+                                    contentDescription = if (session.status == SessionStatus.Running) {
+                                        "Steer Pi"
+                                    } else {
+                                        "Send message"
+                                    },
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        }
+                    },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(
                         onSend = { if (canSend) controller.sendPrompt() },
                     ),
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
                         .onPreviewKeyEvent { event ->
                             val sends = event.key == Key.Enter && !event.isShiftPressed
                             if (sends && event.type == KeyEventType.KeyDown && canSend) {
@@ -648,25 +712,104 @@ private fun ChatPanel(
                             sends
                         },
                 )
-                if (session.status == SessionStatus.Running) {
-                    OutlinedButton(onClick = controller::abort) { Text("Abort") }
-                }
-                Button(
-                    onClick = controller::sendPrompt,
-                    enabled = canSend,
+            }
+        }
+        if (draggingFiles) {
+            Surface(
+                modifier = Modifier.fillMaxSize().padding(12.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.96f),
+                shape = MaterialTheme.shapes.large,
+                tonalElevation = 8.dp,
+            ) {
+                Column(
+                    Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
                 ) {
+                    Icon(
+                        imageVector = AttachFileIcon,
+                        contentDescription = null,
+                        modifier = Modifier.size(40.dp),
+                    )
+                    Spacer(Modifier.height(12.dp))
                     Text(
-                        when {
-                            uploading -> "Uploading…"
-                            session.status == SessionStatus.Running -> "Steer"
-                            else -> "Send"
-                        },
+                        "Drop files to attach",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
             }
         }
     }
 }
+
+private val AttachFileIcon = ImageVector.Builder(
+    name = "AttachFile",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(16.5f, 6f)
+        verticalLineTo(17.5f)
+        curveTo(16.5f, 19.71f, 14.71f, 21.5f, 12.5f, 21.5f)
+        curveTo(10.29f, 21.5f, 8.5f, 19.71f, 8.5f, 17.5f)
+        verticalLineTo(5f)
+        curveTo(8.5f, 3.62f, 9.62f, 2.5f, 11f, 2.5f)
+        curveTo(12.38f, 2.5f, 13.5f, 3.62f, 13.5f, 5f)
+        verticalLineTo(15.5f)
+        curveTo(13.5f, 16.05f, 13.05f, 16.5f, 12.5f, 16.5f)
+        curveTo(11.95f, 16.5f, 11.5f, 16.05f, 11.5f, 15.5f)
+        verticalLineTo(6f)
+        horizontalLineTo(10f)
+        verticalLineTo(15.5f)
+        curveTo(10f, 16.88f, 11.12f, 18f, 12.5f, 18f)
+        curveTo(13.88f, 18f, 15f, 16.88f, 15f, 15.5f)
+        verticalLineTo(5f)
+        curveTo(15f, 2.79f, 13.21f, 1f, 11f, 1f)
+        curveTo(8.79f, 1f, 7f, 2.79f, 7f, 5f)
+        verticalLineTo(17.5f)
+        curveTo(7f, 20.54f, 9.46f, 23f, 12.5f, 23f)
+        curveTo(15.54f, 23f, 18f, 20.54f, 18f, 17.5f)
+        verticalLineTo(6f)
+        close()
+    }
+}.build()
+
+private val SendIcon = ImageVector.Builder(
+    name = "Send",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(2.01f, 21f)
+        lineTo(23f, 12f)
+        lineTo(2.01f, 3f)
+        lineTo(2f, 10f)
+        lineTo(17f, 12f)
+        lineTo(2f, 14f)
+        close()
+    }
+}.build()
+
+private val StopIcon = ImageVector.Builder(
+    name = "Stop",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(6f, 6f)
+        horizontalLineTo(18f)
+        verticalLineTo(18f)
+        horizontalLineTo(6f)
+        close()
+    }
+}.build()
 
 private val SessionStatus.label: String
     get() = when (this) {

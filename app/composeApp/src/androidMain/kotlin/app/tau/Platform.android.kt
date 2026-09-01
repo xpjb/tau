@@ -9,6 +9,7 @@ import android.os.Process
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.activity.result.ActivityResultLauncher
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import io.ktor.client.engine.HttpClientEngine
@@ -191,6 +192,8 @@ actual object PlatformServices {
         }
     }
 
+    actual suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile> = emptyList()
+
     actual fun saveDownload(fileName: String, bytes: ByteArray): String {
         val safeName = fileName
             .substringAfterLast('/')
@@ -237,5 +240,14 @@ actual object PlatformServices {
 }
 
 actual fun Modifier.onSecondaryClick(onClick: (Offset) -> Unit): Modifier = this
+
+@Composable
+actual fun Modifier.onFilesDropped(
+    enabled: Boolean,
+    onDraggingChanged: (Boolean) -> Unit,
+    onDrop: (List<String>) -> Unit,
+): Modifier = this
+
+actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier = this
 
 actual fun platformHttpEngine(): HttpClientEngine = OkHttp.create()

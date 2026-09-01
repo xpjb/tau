@@ -1,8 +1,22 @@
 package app.tau
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.DragData
+import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
@@ -10,6 +24,7 @@ import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.cio.CIO
 import java.awt.FileDialog
 import java.awt.Frame
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -162,25 +177,33 @@ actual object PlatformServices {
     }
 
     actual suspend fun pickFiles(): List<PickedFile> {
-        val files = FileDialog(null as Frame?, "Attach files", FileDialog.LOAD).apply {
+        val paths = FileDialog(null as Frame?, "Attach files", FileDialog.LOAD).apply {
             isMultipleMode = true
             isVisible = true
-        }.files.toList()
-        if (files.size > MaxUploadFiles) {
+        }.files.map { it.toPath() }
+        return withContext(Dispatchers.IO) { readFiles(paths) }
+    }
+
+    actual suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile> =
+        withContext(Dispatchers.IO) {
+            readFiles(fileUris.map { Path.of(URI(it)) })
+        }
+
+    private fun readFiles(paths: List<Path>): List<PickedFile> {
+        if (paths.size > MaxUploadFiles) {
             error("Attach at most $MaxUploadFiles files at once")
         }
-        return withContext(Dispatchers.IO) {
-            var total = 0L
-            files.map { file ->
-                if (!file.isFile) error("${file.name} is not a regular file")
-                val size = file.length()
-                if (size == 0L) error("${file.name} is empty")
-                total += size
-                if (total > MaxUploadBytes) {
-                    error("Attached files exceed Tau's $MaxUploadBytes byte limit")
-                }
-                PickedFile(file.name, Files.readAllBytes(file.toPath()))
+        var total = 0L
+        return paths.map { path ->
+            val name = path.fileName?.toString().orEmpty().ifBlank { "attachment" }
+            if (!Files.isRegularFile(path)) error("$name is not a regular file")
+            val size = Files.size(path)
+            if (size == 0L) error("$name is empty")
+            total += size
+            if (total > MaxUploadBytes) {
+                error("Attached files exceed Tau's $MaxUploadBytes byte limit")
             }
+            PickedFile(name, Files.readAllBytes(path))
         }
     }
 
@@ -222,6 +245,58 @@ actual fun Modifier.onSecondaryClick(onClick: (Offset) -> Unit): Modifier =
         if (event.buttons.isSecondaryPressed) {
             event.changes.firstOrNull()?.let { onClick(it.position) }
             event.changes.forEach { it.consume() }
+        }
+    }
+
+@Composable
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
+actual fun Modifier.onFilesDropped(
+    enabled: Boolean,
+    onDraggingChanged: (Boolean) -> Unit,
+    onDrop: (List<String>) -> Unit,
+): Modifier {
+    val currentEnabled = rememberUpdatedState(enabled)
+    val currentDraggingChanged = rememberUpdatedState(onDraggingChanged)
+    val currentDrop = rememberUpdatedState(onDrop)
+    val target = remember {
+        object : DragAndDropTarget {
+            override fun onEntered(event: DragAndDropEvent) {
+                currentDraggingChanged.value(true)
+            }
+
+            override fun onExited(event: DragAndDropEvent) {
+                currentDraggingChanged.value(false)
+            }
+
+            override fun onEnded(event: DragAndDropEvent) {
+                currentDraggingChanged.value(false)
+            }
+
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                currentDraggingChanged.value(false)
+                val data = event.dragData() as? DragData.FilesList ?: return false
+                val files = runCatching { data.readFiles() }.getOrElse { return false }
+                if (files.isEmpty()) return false
+                currentDrop.value(files)
+                return true
+            }
+        }
+    }
+    return dragAndDropTarget(
+        shouldStartDragAndDrop = { event ->
+            currentEnabled.value && event.dragData() is DragData.FilesList
+        },
+        target = target,
+    )
+}
+
+actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier =
+    onPreviewKeyEvent { event ->
+        if (enabled && event.key == Key.Escape && event.type == KeyEventType.KeyDown) {
+            onInterrupt()
+            true
+        } else {
+            false
         }
     }
 

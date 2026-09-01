@@ -122,22 +122,37 @@ class TauController(dispatcher: CoroutineDispatcher) {
 
     fun pickFiles() {
         val sessionId = mutableState.value.selectedSessionId ?: return
-        if (mutableState.value.pickingFiles) return
+        loadAttachments(sessionId, PlatformServices::pickFiles)
+    }
+
+    fun attachDroppedFiles(fileUris: List<String>) {
+        if (fileUris.isEmpty()) return
+        val sessionId = mutableState.value.selectedSessionId ?: return
+        loadAttachments(sessionId) { PlatformServices.readDroppedFiles(fileUris) }
+    }
+
+    private fun loadAttachments(sessionId: String, load: suspend () -> List<PickedFile>) {
+        val current = mutableState.value
+        if (current.connectionStatus != ConnectionStatus.Connected ||
+            current.pickingFiles || sessionId in current.uploadingSessions
+        ) {
+            return
+        }
         mutableState.update { it.copy(pickingFiles = true, error = null) }
         scope.launch {
             try {
-                val selected = PlatformServices.pickFiles()
+                val selected = load()
                 if (selected.isEmpty()) return@launch
-                mutableState.update { current ->
-                    val files = current.attachments[sessionId].orEmpty() + selected
+                mutableState.update { state ->
+                    val files = state.attachments[sessionId].orEmpty() + selected
                     check(files.size <= MaxUploadFiles) {
                         "Attach at most $MaxUploadFiles files to one message"
                     }
                     check(files.sumOf { it.bytes.size.toLong() } <= MaxUploadBytes) {
                         "Attached files exceed Tau's $MaxUploadBytes byte limit"
                     }
-                    current.copy(
-                        attachments = current.attachments + (sessionId to files),
+                    state.copy(
+                        attachments = state.attachments + (sessionId to files),
                         error = null,
                     )
                 }

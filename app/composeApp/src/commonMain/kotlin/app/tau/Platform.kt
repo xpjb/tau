@@ -1,5 +1,6 @@
 package app.tau
 
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import io.ktor.client.engine.HttpClientEngine
@@ -27,9 +28,19 @@ expect object PlatformServices {
     fun pendingCrashReport(): String?
     fun clearPendingCrashReport()
     suspend fun pickFiles(): List<PickedFile>
+    suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile>
     fun saveDownload(fileName: String, bytes: ByteArray): String
 }
 
 expect fun Modifier.onSecondaryClick(onClick: (Offset) -> Unit): Modifier
+
+@Composable
+expect fun Modifier.onFilesDropped(
+    enabled: Boolean,
+    onDraggingChanged: (Boolean) -> Unit,
+    onDrop: (List<String>) -> Unit,
+): Modifier
+
+expect fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier
 
 expect fun platformHttpEngine(): HttpClientEngine
