@@ -55,9 +55,12 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
@@ -85,6 +88,14 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
+
+private data class ChatListStructure(
+    val messageCount: Int,
+    val firstEntryId: String?,
+    val lastEntryId: String?,
+    val hasPartial: Boolean,
+)
 
 private val TauDarkColors = darkColorScheme(
     primary = Color(0xFF67D4FF),
@@ -523,23 +534,71 @@ private fun ChatPanel(
         mutableStateOf(TextFieldValue(draft, TextRange(draft.length)))
     }
     var followBottom by rememberSaveable(sessionId) { mutableStateOf(true) }
+    var originEntryId by rememberSaveable(sessionId) { mutableStateOf<String?>(null) }
+    var originOffset by rememberSaveable(sessionId) { mutableStateOf(0) }
+    var scrollingToBottom by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
-    LaunchedEffect(listState) {
+    val scrollScope = rememberCoroutineScope()
+    val listStructure = ChatListStructure(
+        messageCount = messages.size,
+        firstEntryId = messages.firstOrNull()?.entryId,
+        lastEntryId = messages.lastOrNull()?.entryId,
+        hasPartial = partial.isNotEmpty(),
+    )
+    var appliedListStructure by remember { mutableStateOf<ChatListStructure?>(null) }
+    val showScrollToBottom by remember(listState) {
+        derivedStateOf {
+            listState.layoutInfo.totalItemsCount > 0 &&
+                listState.layoutInfo.visibleItemsInfo.none { it.index == 0 }
+        }
+    }
+    if (appliedListStructure != listStructure) {
+        SideEffect {
+            if (followBottom) {
+                listState.requestScrollToItem(0)
+            } else {
+                val chronologicalIndex = messages.indexOfFirst { it.entryId == originEntryId }
+                if (chronologicalIndex >= 0) {
+                    val partialOffset = if (partial.isNotEmpty()) 1 else 0
+                    val index = messages.lastIndex - chronologicalIndex + partialOffset
+                    listState.requestScrollToItem(index, originOffset)
+                }
+            }
+            appliedListStructure = listStructure
+        }
+    }
+    LaunchedEffect(listState, listStructure) {
         snapshotFlow {
-            listState.isScrollInProgress to
-                (listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0)
-        }.collect { (scrolling, atBottom) ->
-            if (scrolling) followBottom = atBottom
+            Triple(
+                listState.isScrollInProgress,
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+            )
+        }.collect { (scrolling, index, offset) ->
+            if (appliedListStructure != listStructure || scrollingToBottom) return@collect
+            val atBottom = index == 0 && offset == 0
+            val follows = if (scrolling) atBottom else followBottom
+            if (scrolling) followBottom = follows
+            if (follows || atBottom) {
+                if (atBottom) {
+                    followBottom = true
+                    originEntryId = null
+                    originOffset = 0
+                }
+                return@collect
+            }
+            val partialOffset = if (partial.isNotEmpty()) 1 else 0
+            val reverseIndex = index - partialOffset
+            val chronologicalIndex = messages.lastIndex - reverseIndex
+            messages.getOrNull(chronologicalIndex)?.let { message ->
+                originEntryId = message.entryId
+                originOffset = offset
+            }
         }
     }
     LaunchedEffect(draft) {
         if (editorValue.text != draft) {
             editorValue = TextFieldValue(draft, TextRange(draft.length))
-        }
-    }
-    LaunchedEffect(messages.size, partial.length) {
-        if (followBottom && (messages.isNotEmpty() || partial.isNotEmpty())) {
-            listState.scrollToItem(0)
         }
     }
 
@@ -594,108 +653,138 @@ private fun ChatPanel(
                     }
                 }
             }
-        HorizontalDivider()
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(16.dp),
-            reverseLayout = true,
-            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
-        ) {
-            if (messages.isEmpty() && partial.isEmpty()) {
-                item {
-                    Text(
-                        "Start a conversation with Pi.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            if (partial.isNotEmpty()) {
-                item("streaming") {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        ),
-                        modifier = Modifier.fillMaxWidth(0.9f),
-                    ) {
-                        SelectionContainer {
-                            Text(partial, Modifier.padding(12.dp))
+            HorizontalDivider()
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    reverseLayout = true,
+                    verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
+                ) {
+                    if (messages.isEmpty() && partial.isEmpty()) {
+                        item {
+                            Text(
+                                "Start a conversation with Pi.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
-                }
-            }
-            items(messages.asReversed(), key = ChatMessage::entryId) { message ->
-                var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
-                var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (message.role == ChatRole.User) {
-                        Arrangement.End
-                    } else {
-                        Arrangement.Start
-                    },
-                ) {
-                    Box(Modifier.fillMaxWidth(0.9f)) {
-                        val menuModifier = if (message.role == ChatRole.User) {
-                            Modifier
-                                .onSecondaryClick { position ->
-                                    menuPointer = position
-                                    menuExpanded = true
-                                }
-                                .combinedClickable(
-                                    onClick = {},
-                                    onLongClick = {
-                                        menuPointer = null
-                                        menuExpanded = true
-                                    },
-                                )
-                        } else {
-                            Modifier
-                        }
-                        Card(
-                            colors = CardDefaults.cardColors(
-                                containerColor = when (message.role) {
-                                    ChatRole.User -> MaterialTheme.colorScheme.primaryContainer
-                                    ChatRole.Assistant -> MaterialTheme.colorScheme.surfaceVariant
-                                    ChatRole.System -> MaterialTheme.colorScheme.tertiaryContainer
-                                },
-                            ),
-                            modifier = Modifier.fillMaxWidth().then(menuModifier),
-                        ) {
-                            Column(Modifier.padding(12.dp)) {
+                    if (partial.isNotEmpty()) {
+                        item("streaming") {
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                ),
+                                modifier = Modifier.fillMaxWidth(0.9f),
+                            ) {
                                 SelectionContainer {
-                                    Text(message.text, style = MaterialTheme.typography.bodyLarge)
+                                    Text(partial, Modifier.padding(12.dp))
                                 }
-                                message.attachment?.let { attachment ->
-                                    OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
-                                        Text("Download ${attachment.fileName}")
+                            }
+                        }
+                    }
+                    items(messages.asReversed(), key = ChatMessage::entryId) { message ->
+                        var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
+                        var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (message.role == ChatRole.User) {
+                                Arrangement.End
+                            } else {
+                                Arrangement.Start
+                            },
+                        ) {
+                            Box(Modifier.fillMaxWidth(0.9f)) {
+                                val menuModifier = if (message.role == ChatRole.User) {
+                                    Modifier
+                                        .onSecondaryClick { position ->
+                                            menuPointer = position
+                                            menuExpanded = true
+                                        }
+                                        .combinedClickable(
+                                            onClick = {},
+                                            onLongClick = {
+                                                menuPointer = null
+                                                menuExpanded = true
+                                            },
+                                        )
+                                } else {
+                                    Modifier
+                                }
+                                Card(
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = when (message.role) {
+                                            ChatRole.User -> MaterialTheme.colorScheme.primaryContainer
+                                            ChatRole.Assistant -> MaterialTheme.colorScheme.surfaceVariant
+                                            ChatRole.System -> MaterialTheme.colorScheme.tertiaryContainer
+                                        },
+                                    ),
+                                    modifier = Modifier.fillMaxWidth().then(menuModifier),
+                                ) {
+                                    Column(Modifier.padding(12.dp)) {
+                                        SelectionContainer {
+                                            Text(message.text, style = MaterialTheme.typography.bodyLarge)
+                                        }
+                                        message.attachment?.let { attachment ->
+                                            OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
+                                                Text("Download ${attachment.fileName}")
+                                            }
+                                        }
+                                    }
+                                }
+                                if (message.role == ChatRole.User) {
+                                    PositionedDropdownMenu(
+                                        expanded = menuExpanded,
+                                        pointerPosition = menuPointer,
+                                        onDismissRequest = {
+                                            menuExpanded = false
+                                            menuPointer = null
+                                        },
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Fork here") },
+                                            onClick = {
+                                                menuExpanded = false
+                                                menuPointer = null
+                                                controller.fork(message.entryId)
+                                            },
+                                        )
                                     }
                                 }
                             }
                         }
-                        if (message.role == ChatRole.User) {
-                            PositionedDropdownMenu(
-                                expanded = menuExpanded,
-                                pointerPosition = menuPointer,
-                                onDismissRequest = {
-                                    menuExpanded = false
-                                    menuPointer = null
-                                },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("Fork here") },
-                                    onClick = {
-                                        menuExpanded = false
-                                        menuPointer = null
-                                        controller.fork(message.entryId)
-                                    },
-                                )
+                    }
+                }
+                if (showScrollToBottom) {
+                    FilledTonalIconButton(
+                        onClick = {
+                            scrollScope.launch {
+                                scrollingToBottom = true
+                                try {
+                                    listState.animateScrollToItem(0)
+                                } finally {
+                                    followBottom = true
+                                    originEntryId = null
+                                    originOffset = 0
+                                    scrollingToBottom = false
+                                }
                             }
-                        }
+                        },
+                        enabled = !scrollingToBottom,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp)
+                            .size(44.dp),
+                    ) {
+                        Icon(
+                            imageVector = ScrollToBottomIcon,
+                            contentDescription = "Scroll to newest message",
+                            modifier = Modifier.size(22.dp),
+                        )
                     }
                 }
             }
-        }
             HorizontalDivider()
             Column(
                 Modifier.fillMaxWidth().padding(12.dp),
@@ -839,6 +928,24 @@ private val BackIcon = ImageVector.Builder(
         lineTo(13.42f, 18.59f)
         lineTo(7.83f, 13f)
         horizontalLineTo(20f)
+        close()
+    }
+}.build()
+
+private val ScrollToBottomIcon = ImageVector.Builder(
+    name = "ScrollToBottom",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(7.41f, 8.59f)
+        lineTo(12f, 13.17f)
+        lineTo(16.59f, 8.59f)
+        lineTo(18f, 10f)
+        lineTo(12f, 16f)
+        lineTo(6f, 10f)
         close()
     }
 }.build()
