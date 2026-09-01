@@ -72,8 +72,10 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -473,14 +475,23 @@ private fun ChatPanel(
     val messages = state.histories[sessionId].orEmpty()
     val partial = state.partials[sessionId].orEmpty()
     val attachments = state.attachments[sessionId].orEmpty()
+    val draft = state.drafts[sessionId].orEmpty()
     val uploading = sessionId in state.uploadingSessions
     val canAttach = state.connectionStatus == ConnectionStatus.Connected &&
         !state.pickingFiles && !uploading
     val canSend = state.connectionStatus == ConnectionStatus.Connected &&
         !uploading &&
-        (state.drafts[sessionId].orEmpty().isNotBlank() || attachments.isNotEmpty())
+        (draft.isNotBlank() || attachments.isNotEmpty())
     var draggingFiles by remember(sessionId) { mutableStateOf(false) }
+    var editorValue by remember(sessionId) {
+        mutableStateOf(TextFieldValue(draft, TextRange(draft.length)))
+    }
     val listState = rememberLazyListState()
+    LaunchedEffect(draft) {
+        if (editorValue.text != draft) {
+            editorValue = TextFieldValue(draft, TextRange(draft.length))
+        }
+    }
     LaunchedEffect(messages.size, partial.length) {
         val count = messages.size + if (partial.isNotEmpty()) 1 else 0
         if (count > 0) listState.animateScrollToItem(count - 1)
@@ -654,8 +665,11 @@ private fun ChatPanel(
                     }
                 }
                 OutlinedTextField(
-                    value = state.drafts[sessionId].orEmpty(),
-                    onValueChange = { controller.setDraft(sessionId, it) },
+                    value = editorValue,
+                    onValueChange = {
+                        editorValue = it
+                        controller.setDraft(sessionId, it.text)
+                    },
                     placeholder = { Text("Message Pi") },
                     minLines = 1,
                     maxLines = 8,
@@ -705,11 +719,23 @@ private fun ChatPanel(
                     modifier = Modifier
                         .fillMaxWidth()
                         .onPreviewKeyEvent { event ->
-                            val sends = event.key == Key.Enter && !event.isShiftPressed
-                            if (sends && event.type == KeyEventType.KeyDown && canSend) {
-                                controller.sendPrompt()
+                            if (event.key != Key.Enter) {
+                                false
+                            } else if (event.isShiftPressed) {
+                                if (event.type == KeyEventType.KeyDown) {
+                                    val start = minOf(editorValue.selection.start, editorValue.selection.end)
+                                    val end = maxOf(editorValue.selection.start, editorValue.selection.end)
+                                    val updated = editorValue.text.replaceRange(start, end, "\n")
+                                    editorValue = TextFieldValue(updated, TextRange(start + 1))
+                                    controller.setDraft(sessionId, updated)
+                                }
+                                true
+                            } else {
+                                if (event.type == KeyEventType.KeyDown && canSend) {
+                                    controller.sendPrompt()
+                                }
+                                true
                             }
-                            sends
                         },
                 )
             }
