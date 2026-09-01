@@ -83,11 +83,14 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -350,13 +353,7 @@ private fun ChatText(
         if (markdown) {
             Markdown(
                 content = text,
-                colors = markdownColor(
-                    text = LocalContentColor.current,
-                    codeText = LocalContentColor.current,
-                    inlineCodeText = LocalContentColor.current,
-                    linkText = MaterialTheme.colorScheme.primary,
-                    tableText = LocalContentColor.current,
-                ),
+                colors = markdownColor(text = LocalContentColor.current),
                 typography = markdownTypography(
                     h1 = MaterialTheme.typography.headlineMedium,
                     h2 = MaterialTheme.typography.headlineSmall,
@@ -364,6 +361,13 @@ private fun ChatText(
                     h4 = MaterialTheme.typography.titleMedium,
                     h5 = MaterialTheme.typography.titleSmall,
                     h6 = MaterialTheme.typography.labelLarge,
+                    textLink = TextLinkStyles(
+                        style = SpanStyle(
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold,
+                            textDecoration = TextDecoration.Underline,
+                        ),
+                    ),
                 ),
                 modifier = Modifier.fillMaxWidth(),
             )

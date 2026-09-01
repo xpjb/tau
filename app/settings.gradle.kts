@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Tau"
-include(":composeApp")
+include(":androidApp", ":composeApp")

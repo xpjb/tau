@@ -39,10 +39,10 @@ Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat un
 
 ```bash
 cd app
-./gradlew :composeApp:assembleDebug
+./gradlew :androidApp:assembleDebug
 ```
 
-The APK is written below `app/composeApp/build/outputs/apk/debug`. Release builds use a private signing key configured through ignored `app/local.properties`.
+The APK is written below `app/androidApp/build/outputs/apk/debug`. Release builds use a private signing key configured through ignored `app/local.properties`.
 
 ## Windows self-extractor
 
@@ -60,5 +60,5 @@ On Windows it installs without UAC under `%LOCALAPPDATA%\Tau\versions`, writes a
 cargo nextest run --workspace
 cargo build --workspace --release
 cd app
-./gradlew :composeApp:desktopTest :composeApp:assembleDebug
+./gradlew :composeApp:desktopTest :androidApp:assembleDebug
 ```
