@@ -165,23 +165,13 @@ impl AgentManager {
         let runtime = self.runtime(id).await?;
         let _guard = runtime.operation.lock().await;
         let process = self.ensure_process(id, &runtime).await?;
-        let state = process.request(json!({ "type": "get_state" })).await?;
-        let streaming = state
-            .get("data")
-            .and_then(|data| data.get("isStreaming"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
 
         self.set_runtime_state(id, &runtime, SessionStatus::Running, None);
-        let command = if streaming {
-            json!({
-                "type": "prompt",
-                "message": text,
-                "streamingBehavior": "steer"
-            })
-        } else {
-            json!({ "type": "prompt", "message": text })
-        };
+        let command = json!({
+            "type": "prompt",
+            "message": text,
+            "streamingBehavior": "steer"
+        });
         if let Err(error) = process.request_unbounded(command).await {
             let status = if process.is_alive() {
                 SessionStatus::Idle
@@ -1224,6 +1214,11 @@ for line in sys.stdin:
         response["data"] = {"entries": entries, "leafId": entries[-1]["id"] if entries else None}
         print(json.dumps(response), flush=True)
     elif kind == "prompt":
+        if command.get("streamingBehavior") != "steer":
+            response["success"] = False
+            response["error"] = "prompt was not race-safe"
+            print(json.dumps(response), flush=True)
+            continue
         append({"type":"message","id":"u1","parentId":None,"message":{"role":"user","content":command["message"],"timestamp":1}})
         print(json.dumps(response), flush=True)
         print(json.dumps({"type":"agent_start"}), flush=True)
