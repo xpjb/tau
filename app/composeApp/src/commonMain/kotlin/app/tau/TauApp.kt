@@ -524,6 +524,11 @@ private fun ChatPanel(
     val attachments = state.attachments[sessionId].orEmpty()
     val draft = state.drafts[sessionId].orEmpty()
     val uploading = sessionId in state.uploadingSessions
+    val connectionDetail = when (state.connectionStatus) {
+        ConnectionStatus.Connected -> null
+        ConnectionStatus.NotConfigured -> "Not connected"
+        ConnectionStatus.Connecting, ConnectionStatus.Offline -> "Reconnecting…"
+    }
     val canAttach = state.connectionStatus == ConnectionStatus.Connected &&
         !state.pickingFiles && !uploading
     val canSend = state.connectionStatus == ConnectionStatus.Connected &&
@@ -631,9 +636,13 @@ private fun ChatPanel(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        session.detail ?: session.status.label,
+                        connectionDetail ?: session.detail ?: session.status.label,
                         style = MaterialTheme.typography.labelSmall,
-                        color = session.status.color,
+                        color = if (connectionDetail == null) {
+                            session.status.color
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -860,6 +869,7 @@ private fun ChatPanel(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .onClipboardImagePaste(canAttach, controller::attachClipboardImage)
                         .onPreviewKeyEvent { event ->
                             if (event.key != Key.Enter) {
                                 false

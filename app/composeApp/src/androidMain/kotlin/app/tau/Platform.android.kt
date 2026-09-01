@@ -249,6 +249,12 @@ actual fun Modifier.onFilesDropped(
     onDrop: (List<String>) -> Unit,
 ): Modifier = this
 
+@Composable
+actual fun Modifier.onClipboardImagePaste(
+    enabled: Boolean,
+    onPaste: (suspend () -> PickedFile) -> Unit,
+): Modifier = this
+
 actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier = this
 
 @Composable

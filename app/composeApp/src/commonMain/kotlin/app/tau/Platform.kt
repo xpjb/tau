@@ -41,6 +41,12 @@ expect fun Modifier.onFilesDropped(
     onDrop: (List<String>) -> Unit,
 ): Modifier
 
+@Composable
+expect fun Modifier.onClipboardImagePaste(
+    enabled: Boolean,
+    onPaste: (suspend () -> PickedFile) -> Unit,
+): Modifier
+
 expect fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier
 
 @Composable

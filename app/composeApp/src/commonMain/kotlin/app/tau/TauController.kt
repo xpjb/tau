@@ -50,6 +50,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
     private var connectionJob: Job? = null
     private var requestSequence = 1L
     private var crashUploadAttempted = false
+    private var reportNextConnectionError = false
 
     val state: StateFlow<TauUiState> = mutableState.asStateFlow()
 
@@ -78,6 +79,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
             return
         }
         PlatformServices.saveConnection(normalized)
+        reportNextConnectionError = true
         mutableState.update {
             it.copy(
                 settings = normalized,
@@ -129,6 +131,11 @@ class TauController(dispatcher: CoroutineDispatcher) {
         if (fileUris.isEmpty()) return
         val sessionId = mutableState.value.selectedSessionId ?: return
         loadAttachments(sessionId) { PlatformServices.readDroppedFiles(fileUris) }
+    }
+
+    fun attachClipboardImage(load: suspend () -> PickedFile) {
+        val sessionId = mutableState.value.selectedSessionId ?: return
+        loadAttachments(sessionId) { listOf(load()) }
     }
 
     private fun loadAttachments(sessionId: String, load: suspend () -> List<PickedFile>) {
@@ -331,10 +338,16 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Throwable) {
+                    val connectionError = if (reportNextConnectionError) {
+                        error.message?.take(240) ?: "Tau connection failed."
+                    } else {
+                        null
+                    }
+                    reportNextConnectionError = false
                     mutableState.update {
                         it.copy(
                             connectionStatus = ConnectionStatus.Offline,
-                            error = error.message?.take(240) ?: "Tau connection failed.",
+                            error = connectionError ?: it.error,
                         )
                     }
                 }
@@ -354,6 +367,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 check(message.protocolVersion == TauProtocolVersion) {
                     "Tau protocol ${message.protocolVersion} is not supported"
                 }
+                reportNextConnectionError = false
                 mutableState.update {
                     it.copy(
                         connectionStatus = ConnectionStatus.Connected,

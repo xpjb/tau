@@ -14,6 +14,7 @@ import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -24,6 +25,11 @@ import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.cio.CIO
 import java.awt.FileDialog
 import java.awt.Frame
+import java.awt.Image
+import java.awt.Toolkit
+import java.awt.datatransfer.DataFlavor
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
@@ -31,6 +37,7 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.imageio.ImageIO
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
@@ -288,6 +295,71 @@ actual fun Modifier.onFilesDropped(
         },
         target = target,
     )
+}
+
+@Composable
+actual fun Modifier.onClipboardImagePaste(
+    enabled: Boolean,
+    onPaste: (suspend () -> PickedFile) -> Unit,
+): Modifier {
+    val currentEnabled = rememberUpdatedState(enabled)
+    val currentPaste = rememberUpdatedState(onPaste)
+    return onPreviewKeyEvent { event ->
+        if (!currentEnabled.value || event.key != Key.V || !event.isCtrlPressed) {
+            false
+        } else {
+            val contents = runCatching {
+                Toolkit.getDefaultToolkit().systemClipboard.getContents(null)
+            }.getOrNull()
+            if (
+                contents == null ||
+                !runCatching {
+                    contents.isDataFlavorSupported(DataFlavor.imageFlavor)
+                }.getOrDefault(false)
+            ) {
+                false
+            } else {
+                if (event.type == KeyEventType.KeyDown) {
+                    currentPaste.value {
+                        withContext(Dispatchers.IO) {
+                            val image = contents.getTransferData(DataFlavor.imageFlavor) as? Image
+                                ?: error("The clipboard image could not be read")
+                            val width = image.getWidth(null)
+                            val height = image.getHeight(null)
+                            check(width > 0 && height > 0) {
+                                "The clipboard image has invalid dimensions"
+                            }
+                            val buffered = if (image is BufferedImage) {
+                                image
+                            } else {
+                                BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB).also { target ->
+                                    target.createGraphics().let { graphics ->
+                                        try {
+                                            graphics.drawImage(image, 0, 0, null)
+                                        } finally {
+                                            graphics.dispose()
+                                        }
+                                    }
+                                }
+                            }
+                            val output = ByteArrayOutputStream()
+                            check(ImageIO.write(buffered, "png", output)) {
+                                "The clipboard image could not be encoded"
+                            }
+                            check(output.size().toLong() <= MaxUploadBytes) {
+                                "The clipboard image exceeds Tau's $MaxUploadBytes byte limit"
+                            }
+                            PickedFile(
+                                name = "clipboard-image-${System.currentTimeMillis()}.png",
+                                bytes = output.toByteArray(),
+                            )
+                        }
+                    }
+                }
+                true
+            }
+        }
+    }
 }
 
 actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier =
