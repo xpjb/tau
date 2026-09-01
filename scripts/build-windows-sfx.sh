@@ -9,9 +9,9 @@ bundle="$work/bundle"
 payload="$work/tau-windows-payload.tar.lzma"
 launcher="$root/windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe"
 output="$root/dist/Tau-$version-windows-x64.exe"
-jdk_archive="$cache/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip"
-jdk_sha256=e53a79c3c3d86865bd7e787903884331068e71321714ffd44f145785affc7cb0
-jdk_url='https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip'
+jdk_archive="$cache/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip"
+jdk_sha256=f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e
+jdk_url='https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip'
 
 mkdir -p "$cache" "$root/dist"
 rm -rf "$work"
@@ -37,7 +37,12 @@ if [[ -z "$jmods" ]]; then
     echo "Windows JDK archive has no jmods directory" >&2
     exit 1
 fi
-jlink=$(dirname "$(readlink -f "$(command -v java)")")/jlink
+java_home=${TAU_JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}
+jlink="$java_home/bin/jlink"
+if [[ ! -x "$jlink" ]]; then
+    echo "Tau's Windows build requires a JDK 21 jlink; set TAU_JAVA_HOME" >&2
+    exit 1
+fi
 "$jlink" \
     --module-path "$jmods" \
     --add-modules java.desktop,java.instrument,java.management,jdk.unsupported \

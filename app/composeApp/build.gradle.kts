@@ -1,5 +1,9 @@
 import org.gradle.api.file.DuplicatesStrategy
+import org.gradle.api.tasks.JavaExec
 import org.gradle.api.tasks.Sync
+import org.gradle.api.tasks.testing.Test
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import org.gradle.jvm.toolchain.JavaToolchainService
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -11,6 +15,8 @@ plugins {
 }
 
 kotlin {
+    jvmToolchain(21)
+
     android {
         namespace = "app.tau.shared"
         compileSdk = 37
@@ -18,7 +24,7 @@ kotlin {
         compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
     }
     jvm("desktop") {
-        compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
+        compilerOptions.jvmTarget.set(JvmTarget.JVM_21)
     }
 
     sourceSets {
@@ -63,6 +69,17 @@ dependencies {
     windowsSkiko("org.jetbrains.skiko:skiko-awt-runtime-windows-x64:0.150.1")
 }
 
+val java21 = extensions.getByType<JavaToolchainService>().launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+
+tasks.withType<JavaExec>().configureEach {
+    javaLauncher.set(java21)
+}
+tasks.withType<Test>().configureEach {
+    javaLauncher.set(java21)
+}
+
 tasks.register<Sync>("prepareWindowsApp") {
     dependsOn(tasks.named("proguardReleaseJars"))
     into(layout.buildDirectory.dir("windows/app/lib"))
@@ -76,6 +93,7 @@ tasks.register<Sync>("prepareWindowsApp") {
 compose.desktop {
     application {
         mainClass = "app.tau.MainKt"
+        javaHome = java21.get().metadata.installationPath.asFile.absolutePath
         buildTypes.release.proguard {
             configurationFiles.from(project.file("proguard-desktop.pro"))
         }
