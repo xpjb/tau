@@ -2,6 +2,7 @@
 
 package app.tau
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +29,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -78,6 +80,8 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
@@ -96,6 +100,9 @@ private data class ChatListStructure(
     val lastEntryId: String?,
     val hasPartial: Boolean,
 )
+
+private val ConnectedColor = Color(0xFF4ADE80)
+private val ReconnectingColor = Color(0xFFFBBF24)
 
 private val TauDarkColors = darkColorScheme(
     primary = Color(0xFF67D4FF),
@@ -313,6 +320,22 @@ private fun PositionedDropdownMenu(
 }
 
 @Composable
+private fun ConnectionDot(status: ConnectionStatus) {
+    val connected = status == ConnectionStatus.Connected
+    Box(
+        Modifier
+            .size(9.dp)
+            .background(
+                color = if (connected) ConnectedColor else ReconnectingColor,
+                shape = CircleShape,
+            )
+            .semantics {
+                contentDescription = if (connected) "Connected" else "Reconnecting"
+            },
+    )
+}
+
+@Composable
 private fun SessionList(
     state: TauUiState,
     controller: TauController,
@@ -328,22 +351,13 @@ private fun SessionList(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
+            Row(
+                Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text("Tau", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Text(
-                    when (state.connectionStatus) {
-                        ConnectionStatus.NotConfigured -> "Not configured"
-                        ConnectionStatus.Connecting -> "Connecting"
-                        ConnectionStatus.Connected -> "Connected"
-                        ConnectionStatus.Offline -> "Offline"
-                    },
-                    color = when (state.connectionStatus) {
-                        ConnectionStatus.Connected -> MaterialTheme.colorScheme.primary
-                        ConnectionStatus.Offline -> MaterialTheme.colorScheme.error
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                )
+                ConnectionDot(state.connectionStatus)
             }
             TextButton(onClick = controller::showSettings) { Text("Settings") }
         }
@@ -524,11 +538,6 @@ private fun ChatPanel(
     val attachments = state.attachments[sessionId].orEmpty()
     val draft = state.drafts[sessionId].orEmpty()
     val uploading = sessionId in state.uploadingSessions
-    val connectionDetail = when (state.connectionStatus) {
-        ConnectionStatus.Connected -> null
-        ConnectionStatus.NotConfigured -> "Not connected"
-        ConnectionStatus.Connecting, ConnectionStatus.Offline -> "Reconnecting…"
-    }
     val canAttach = state.connectionStatus == ConnectionStatus.Connected &&
         !state.pickingFiles && !uploading
     val canSend = state.connectionStatus == ConnectionStatus.Connected &&
@@ -629,20 +638,24 @@ private fun ChatPanel(
                     }
                 }
                 Column(Modifier.weight(1f)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            session.title,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        ConnectionDot(state.connectionStatus)
+                    }
                     Text(
-                        session.title,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        connectionDetail ?: session.detail ?: session.status.label,
+                        session.detail ?: session.status.label,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (connectionDetail == null) {
-                            session.status.color
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
+                        color = session.status.color,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
