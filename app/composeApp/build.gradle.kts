@@ -134,5 +134,8 @@ tasks.register<Sync>("prepareWindowsApp") {
 compose.desktop {
     application {
         mainClass = "app.tau.MainKt"
+        buildTypes.release.proguard {
+            configurationFiles.from(project.file("proguard-desktop.pro"))
+        }
     }
 }
