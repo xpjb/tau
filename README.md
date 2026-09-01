@@ -50,7 +50,9 @@ The APK is written below `app/androidApp/build/outputs/apk/debug`. Release build
 ./scripts/build-windows-sfx.sh
 ```
 
-The build runs on Linux and produces `dist/Tau-<version>-windows-x64.exe`. The EXE contains the app, the Windows Compose native runtime, and a small Windows runtime image built from a checksum-pinned JDK.
+The build runs on Linux and produces `dist/Tau-<version>-windows-x64.exe`. The EXE contains the app and its Windows Compose native runtime.
+
+On first launch, Tau downloads a checksum-pinned private Temurin Java 21 runtime into `%LOCALAPPDATA%\Tau\runtimes` and reuses it across later client updates. The launcher verifies the exact archive size and SHA-256 before atomically installing it. Tau requires no system JVM, but its first launch requires internet access.
 
 On Windows it installs without UAC under `%LOCALAPPDATA%\Tau\versions`, writes a stable `%LOCALAPPDATA%\Tau\Tau.exe` launcher, and adds Tau directly to the user's Start Menu. Running the same setup again performs no extraction and reports that the version is already installed. A newer setup installs beside the old version and switches `current.txt` only after extraction completes.
 

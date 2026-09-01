@@ -147,9 +147,6 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
             }
             drop(archive);
             fs::remove_file(tar_path)?;
-            if !staging.join("runtime").join("bin").join("javaw.exe").is_file() {
-                return Err("Tau payload has no Windows Java runtime".into());
-            }
             let library_directory = staging.join("app").join("lib");
             if !fs::read_dir(&library_directory)?.any(|entry| {
                 entry

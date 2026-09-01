@@ -8,4 +8,9 @@ build = "build.rs"
 winresource = "0.1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
+sha2 = "0.10"
+zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Com_Urlmon",
+    "Win32_UI_WindowsAndMessaging",
+] }
