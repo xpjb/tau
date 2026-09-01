@@ -15,6 +15,7 @@ pub struct Config {
     pub telemetry_path: PathBuf,
     pub pi_extension_path: PathBuf,
     pub attachment_root: PathBuf,
+    pub upload_root: PathBuf,
 }
 
 impl Config {
@@ -52,6 +53,9 @@ impl Config {
         let attachment_root = std::env::var_os("TAU_ATTACHMENT_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root/.local/share/tau/outbox".into());
+        let upload_root = std::env::var_os("TAU_UPLOAD_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "/root/.local/share/tau/uploads".into());
 
         if !cwd.is_absolute()
             || !state_path.is_absolute()
@@ -59,6 +63,7 @@ impl Config {
             || !telemetry_path.is_absolute()
             || !pi_extension_path.is_absolute()
             || !attachment_root.is_absolute()
+            || !upload_root.is_absolute()
         {
             bail!("Tau paths must be absolute");
         }
@@ -73,6 +78,7 @@ impl Config {
             telemetry_path,
             pi_extension_path,
             attachment_root,
+            upload_root,
         })
     }
 }

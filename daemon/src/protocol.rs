@@ -5,6 +5,7 @@ pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
 pub const MAX_CRASH_BYTES: usize = 24 * 1024;
+pub const MAX_UPLOAD_BYTES: usize = 50_000_000;
 
 #[derive(Debug, Deserialize)]
 pub struct ClientRequest {
@@ -125,6 +126,14 @@ pub struct ChatMessage {
     pub timestamp_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment: Option<ChatAttachment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadedFile {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

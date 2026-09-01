@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, warn};
 
@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::pi::RpcProcess;
 use crate::protocol::{
     AttachmentKind, ChatAttachment, ChatMessage, ChatRole, ServerMessage, SessionStatus,
-    SessionSummary, MAX_TITLE_CHARS,
+    SessionSummary, UploadedFile, MAX_TITLE_CHARS, MAX_UPLOAD_BYTES,
 };
 use crate::state::StateStore;
 
@@ -298,15 +298,85 @@ impl AgentManager {
         }
         drop(runtimes);
 
-        let removal = if let Some(path) = session_file {
+        let session_removal = if let Some(path) = session_file {
             fs::remove_file(&path)
                 .await
                 .with_context(|| format!("failed to delete {}", path.display()))
         } else {
             Ok(())
         };
+        let upload_removal = match fs::remove_dir_all(self.inner.config.upload_root.join(id)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("failed to delete chat attachments"),
+        };
         self.broadcast_sessions().await;
-        removal
+        session_removal.and(upload_removal)
+    }
+
+    pub async fn store_upload(
+        &self,
+        id: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<UploadedFile> {
+        if bytes.is_empty() {
+            bail!("attached file is empty");
+        }
+        if bytes.len() > MAX_UPLOAD_BYTES {
+            bail!("attached file exceeds Tau's upload limit");
+        }
+        let runtime = self.runtime(id).await?;
+        let _guard = runtime.operation.lock().await;
+        if self.inner.state.get(id).is_none() {
+            bail!("unknown session {id}");
+        }
+
+        let base_name = file_name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default();
+        let safe_name = base_name
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .take(160)
+            .collect::<String>()
+            .trim_matches('.')
+            .to_owned();
+        let safe_name = if safe_name.is_empty() {
+            "attachment".to_owned()
+        } else {
+            safe_name
+        };
+
+        fs::create_dir_all(&self.inner.config.upload_root).await?;
+        let root = fs::canonicalize(&self.inner.config.upload_root).await?;
+        let directory = root.join(id);
+        fs::create_dir_all(&directory).await?;
+        let directory = fs::canonicalize(directory).await?;
+        if !directory.starts_with(&root) || directory == root {
+            bail!("unsafe Tau upload directory");
+        }
+        let path = directory.join(format!("{}-{safe_name}", uuid::Uuid::new_v4()));
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .await?;
+        file.write_all(bytes).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        Ok(UploadedFile {
+            name: safe_name,
+            path: path.to_string_lossy().into_owned(),
+            size: bytes.len().try_into().unwrap_or(u64::MAX),
+        })
     }
 
     pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
@@ -1105,11 +1175,18 @@ for line in sys.stdin:
             telemetry_path: root.join("crashes.jsonl"),
             pi_extension_path: root.join("unused-extension.ts"),
             attachment_root: root.join("outbox"),
+            upload_root: root.join("uploads"),
         };
         let state = StateStore::load(config.state_path.clone()).await.unwrap();
         let manager = AgentManager::new(config, state);
         let mut events = manager.subscribe();
         let session_id = manager.create_session().await.unwrap();
+        let uploaded = manager
+            .store_upload(&session_id, "../source file.rs", b"fn main() {}\n")
+            .await
+            .unwrap();
+        assert_eq!(uploaded.name, "source_file.rs");
+        assert!(fs::try_exists(&uploaded.path).await.unwrap());
         manager.open_session(&session_id).await.unwrap();
         manager.prompt(&session_id, "Say hello").await.unwrap();
 
@@ -1172,6 +1249,7 @@ for line in sys.stdin:
         manager.delete_session(&session_id).await.unwrap();
         assert!(manager.inner.state.get(&session_id).is_none());
         assert!(!fs::try_exists(session_file).await.unwrap());
+        assert!(!fs::try_exists(uploaded.path).await.unwrap());
 
         manager.shutdown().await;
         fs::remove_dir_all(root).await.unwrap();

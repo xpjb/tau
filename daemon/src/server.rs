@@ -3,12 +3,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, State, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::json;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
@@ -20,7 +21,7 @@ use crate::config::Config;
 use crate::manager::AgentManager;
 use crate::protocol::{
     ClientCommand, ClientRequest, CrashReport, MAX_CRASH_BYTES, MAX_PROMPT_CHARS,
-    MAX_REQUEST_BYTES, PROTOCOL_VERSION, ServerMessage,
+    MAX_REQUEST_BYTES, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, ServerMessage,
 };
 
 #[derive(Clone)]
@@ -46,6 +47,10 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
         .route(
             "/v1/sessions/{session_id}/attachments/{entry_id}",
             get(download_attachment),
+        )
+        .route(
+            "/v1/sessions/{session_id}/uploads",
+            post(upload_file).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route(
             "/v1/telemetry/crash",
@@ -295,6 +300,46 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
     event_forwarder.abort();
     drop(outbound_tx);
     let _ = writer.await;
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadQuery {
+    file_name: String,
+}
+
+async fn upload_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<UploadQuery>,
+    body: Bytes,
+) -> Response {
+    if !authorized(&headers, &state.config.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || session_id
+            .chars()
+            .any(|character| !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_'))
+        || query.file_name.trim().is_empty()
+        || query.file_name.chars().count() > 256
+        || body.is_empty()
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match state
+        .manager
+        .store_upload(&session_id, &query.file_name, &body)
+        .await
+    {
+        Ok(file) => (StatusCode::CREATED, Json(file)).into_response(),
+        Err(error) => {
+            warn!(session = %session_id, %error, "Tau file upload failed");
+            StatusCode::BAD_REQUEST.into_response()
+        }
+    }
 }
 
 async fn download_attachment(
