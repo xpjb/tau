@@ -1,5 +1,7 @@
 package app.tau
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
@@ -18,6 +20,10 @@ import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
@@ -156,6 +162,18 @@ actual object PlatformServices {
             File(TauAndroidContext.require().filesDir, "client-crash.pending.json").delete()
         }
     }
+
+    actual fun copyText(text: String) {
+        val clipboard = TauAndroidContext.require()
+            .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Tau message", text))
+    }
+
+    actual fun formatMessageTime(timestampMs: Long): String = runCatching {
+        DateTimeFormatter
+            .ofLocalizedTime(FormatStyle.SHORT)
+            .format(Instant.ofEpochMilli(timestampMs).atZone(ZoneId.systemDefault()))
+    }.getOrDefault("")
 
     actual suspend fun pickFiles(): List<PickedFile> {
         val uris = TauAndroidContext.selectFiles()

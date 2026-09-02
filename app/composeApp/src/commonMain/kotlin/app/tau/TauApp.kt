@@ -33,6 +33,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.SelectionState
+import androidx.compose.foundation.text.selection.rememberSelectionState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -100,6 +102,7 @@ import androidx.compose.runtime.collectAsState
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
+import com.mikepenz.markdown.model.markdownAnimations
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
@@ -117,6 +120,9 @@ private data class ChatListStructure(
     val hasPartial: Boolean,
 )
 
+private val MarkdownSyntax = Regex(
+    """(?m)(https?://|[*_`\[\]#>|~<]|^\s*(?:[-+] |\d+[.)] ))""",
+)
 private val ConnectedColor = Color(0xFF4ADE80)
 private val ReconnectingColor = Color(0xFFFBBF24)
 
@@ -356,9 +362,11 @@ private fun ChatText(
     text: String,
     markdown: Boolean,
     modifier: Modifier = Modifier,
+    selectionState: SelectionState? = null,
 ) {
-    SelectionContainer(modifier) {
-        if (markdown) {
+    val renderMarkdown = markdown && remember(text) { MarkdownSyntax.containsMatchIn(text) }
+    val content: @Composable () -> Unit = {
+        if (renderMarkdown) {
             Markdown(
                 content = text,
                 colors = markdownColor(text = LocalContentColor.current),
@@ -377,11 +385,23 @@ private fun ChatText(
                         ),
                     ),
                 ),
+                animations = markdownAnimations { this },
+                loading = { loadingModifier ->
+                    Text(text, modifier = loadingModifier, style = MaterialTheme.typography.bodyLarge)
+                },
+                error = { errorModifier ->
+                    Text(text, modifier = errorModifier, style = MaterialTheme.typography.bodyLarge)
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
         } else {
             Text(text, style = MaterialTheme.typography.bodyLarge)
         }
+    }
+    if (selectionState == null) {
+        SelectionContainer(modifier, content)
+    } else {
+        SelectionContainer(selectionState, modifier, content)
     }
 }
 
@@ -847,6 +867,7 @@ private fun ChatPanel(
                     ) { _, message ->
                         var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
                         var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
+                        val selectionState = rememberSelectionState()
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = if (message.role == ChatRole.User) {
@@ -856,22 +877,18 @@ private fun ChatPanel(
                             },
                         ) {
                             Box(Modifier.fillMaxWidth(0.9f)) {
-                                val menuModifier = if (message.role == ChatRole.User) {
-                                    Modifier
-                                        .onSecondaryClick { position ->
-                                            menuPointer = position
+                                val menuModifier = Modifier
+                                    .onSecondaryClick { position ->
+                                        menuPointer = position
+                                        menuExpanded = true
+                                    }
+                                    .combinedClickable(
+                                        onClick = {},
+                                        onLongClick = {
+                                            menuPointer = null
                                             menuExpanded = true
-                                        }
-                                        .combinedClickable(
-                                            onClick = {},
-                                            onLongClick = {
-                                                menuPointer = null
-                                                menuExpanded = true
-                                            },
-                                        )
-                                } else {
-                                    Modifier
-                                }
+                                        },
+                                    )
                                 Card(
                                     colors = CardDefaults.cardColors(
                                         containerColor = when (message.role) {
@@ -882,36 +899,61 @@ private fun ChatPanel(
                                     ),
                                     modifier = Modifier.fillMaxWidth().then(menuModifier),
                                 ) {
-                                    Column(Modifier.padding(12.dp)) {
+                                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
                                         ChatText(
                                             text = message.text,
                                             markdown = message.role != ChatRole.User,
+                                            selectionState = selectionState,
                                         )
                                         message.attachment?.let { attachment ->
                                             OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
                                                 Text("Download ${attachment.fileName}")
                                             }
                                         }
+                                        message.timestampMs
+                                            ?.let(PlatformServices::formatMessageTime)
+                                            ?.takeIf(String::isNotEmpty)
+                                            ?.let { timestamp ->
+                                                Text(
+                                                    timestamp,
+                                                    modifier = Modifier.align(Alignment.End),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = LocalContentColor.current.copy(alpha = 0.62f),
+                                                )
+                                            }
                                     }
                                 }
-                                if (message.role == ChatRole.User) {
-                                    PositionedDropdownMenu(
-                                        expanded = menuExpanded,
-                                        pointerPosition = menuPointer,
-                                        onDismissRequest = {
+                                PositionedDropdownMenu(
+                                    expanded = menuExpanded,
+                                    pointerPosition = menuPointer,
+                                    onDismissRequest = {
+                                        menuExpanded = false
+                                        menuPointer = null
+                                    },
+                                ) {
+                                    val hasSelection = selectionState.selectedTexts.any { it.text.isNotEmpty() }
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(if (hasSelection) "Copy selection" else "Copy message")
+                                        },
+                                        onClick = {
+                                            val selectedText = selectionState.selectedTexts
+                                                .joinToString(separator = "\n") { it.text }
+                                            PlatformServices.copyText(
+                                                selectedText.ifEmpty { message.text },
+                                            )
                                             menuExpanded = false
                                             menuPointer = null
                                         },
-                                    ) {
-                                        DropdownMenuItem(
-                                            text = { Text("Fork here") },
-                                            onClick = {
-                                                menuExpanded = false
-                                                menuPointer = null
-                                                controller.fork(message.entryId)
-                                            },
-                                        )
-                                    }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Fork here") },
+                                        onClick = {
+                                            menuExpanded = false
+                                            menuPointer = null
+                                            controller.fork(message.entryId)
+                                        },
+                                    )
                                 }
                             }
                         }

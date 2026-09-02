@@ -26,7 +26,6 @@ enum class ConnectionStatus {
 data class OutgoingMessage(
     val requestId: String,
     val text: String,
-    val sentText: String,
     val afterEntryId: String?,
     val occurrence: Int,
 )
@@ -242,12 +241,10 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     ?.entryId
                 val occurrence = mutableState.value.outgoingMessages[sessionId]
                     .orEmpty()
-                    .count { outgoing ->
-                        outgoing.sentText == message && outgoing.afterEntryId == afterEntryId
-                    } + pending.values.count { action ->
+                    .count { outgoing -> outgoing.afterEntryId == afterEntryId } +
+                    pending.values.count { action ->
                         action is PendingAction.Prompt &&
                             action.sessionId == sessionId &&
-                            action.sentText == message &&
                             action.afterEntryId == afterEntryId
                     }
                 pending[id] = PendingAction.Prompt(
@@ -255,7 +252,6 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     text = text,
                     files = files,
                     displayText = introduction,
-                    sentText = message,
                     afterEntryId = afterEntryId,
                     occurrence = occurrence,
                 )
@@ -282,7 +278,11 @@ class TauController(dispatcher: CoroutineDispatcher) {
             } catch (error: Throwable) {
                 requestId?.let(pending::remove)
                 mutableState.update {
-                    it.copy(error = error.message ?: "Message was not sent.")
+                    if (error is TauConnectionException) {
+                        it.copy(connectionStatus = ConnectionStatus.Offline)
+                    } else {
+                        it.copy(error = error.message ?: "Message was not sent.")
+                    }
                 }
             } finally {
                 mutableState.update {
@@ -451,7 +451,6 @@ class TauController(dispatcher: CoroutineDispatcher) {
                             current.outgoingMessages[action.sessionId].orEmpty() + OutgoingMessage(
                                 requestId = message.requestId,
                                 text = action.displayText,
-                                sentText = action.sentText,
                                 afterEntryId = action.afterEntryId,
                                 occurrence = action.occurrence,
                             ),
@@ -580,7 +579,11 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 val action = pending.remove(request.id)
                 if (action is PendingAction.Open) openedSessions.remove(action.sessionId)
                 mutableState.update {
-                    it.copy(error = error.message ?: "Tau request was not sent.")
+                    if (error is TauConnectionException) {
+                        it.copy(connectionStatus = ConnectionStatus.Offline)
+                    } else {
+                        it.copy(error = error.message ?: "Tau request was not sent.")
+                    }
                 }
             }
         }
@@ -597,7 +600,6 @@ class TauController(dispatcher: CoroutineDispatcher) {
             val text: String,
             val files: List<PickedFile>,
             val displayText: String,
-            val sentText: String,
             val afterEntryId: String?,
             val occurrence: Int,
         ) : PendingAction
@@ -618,7 +620,7 @@ internal fun reconcileOutgoingMessages(
     history
         .asSequence()
         .drop(start)
-        .filter { message -> message.role == ChatRole.User && message.text == pending.sentText }
+        .filter { message -> message.role == ChatRole.User }
         .drop(pending.occurrence)
         .none()
 }

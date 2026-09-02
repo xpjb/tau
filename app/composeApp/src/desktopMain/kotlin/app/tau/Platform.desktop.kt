@@ -44,10 +44,15 @@ import java.awt.Frame
 import java.awt.Image
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.StringSelection
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.nio.file.Files
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
@@ -200,6 +205,16 @@ actual object PlatformServices {
             Files.deleteIfExists(dataDirectory.resolve("client-crash.pending.json"))
         }
     }
+
+    actual fun copyText(text: String) {
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
+    }
+
+    actual fun formatMessageTime(timestampMs: Long): String = runCatching {
+        DateTimeFormatter
+            .ofLocalizedTime(FormatStyle.SHORT)
+            .format(Instant.ofEpochMilli(timestampMs).atZone(ZoneId.systemDefault()))
+    }.getOrDefault("")
 
     actual suspend fun pickFiles(): List<PickedFile> {
         val paths = FileDialog(null as Frame?, "Attach files", FileDialog.LOAD).apply {

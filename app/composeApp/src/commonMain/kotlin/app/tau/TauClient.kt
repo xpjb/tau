@@ -17,10 +17,13 @@ import io.ktor.http.isSuccess
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+
+class TauConnectionException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 class TauClient {
     private val client = HttpClient(platformHttpEngine()) {
@@ -61,8 +64,14 @@ class TauClient {
 
     suspend fun send(request: ClientRequest) {
         val active = socketGate.withLock { socket }
-            ?: error("Tau is not connected")
-        active.send(Frame.Text(TauJson.encodeToString<ClientRequest>(request)))
+            ?: throw TauConnectionException("Tau is not connected")
+        try {
+            active.send(Frame.Text(TauJson.encodeToString<ClientRequest>(request)))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            throw TauConnectionException("Tau connection was lost", error)
+        }
     }
 
     suspend fun downloadAttachment(

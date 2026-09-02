@@ -29,6 +29,8 @@ expect object PlatformServices {
     fun installCrashHandler()
     fun pendingCrashReport(): String?
     fun clearPendingCrashReport()
+    fun copyText(text: String)
+    fun formatMessageTime(timestampMs: Long): String
     suspend fun pickFiles(): List<PickedFile>
     suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile>
     fun saveDownload(fileName: String, bytes: ByteArray): String
