@@ -10,6 +10,7 @@ import android.os.Environment
 import android.os.Process
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.ActivityResultLauncher
 import androidx.compose.foundation.lazy.LazyListState
@@ -20,10 +21,7 @@ import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.time.format.FormatStyle
+import java.util.Date
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
@@ -170,9 +168,7 @@ actual object PlatformServices {
     }
 
     actual fun formatMessageTime(timestampMs: Long): String = runCatching {
-        DateTimeFormatter
-            .ofLocalizedTime(FormatStyle.SHORT)
-            .format(Instant.ofEpochMilli(timestampMs).atZone(ZoneId.systemDefault()))
+        DateFormat.getTimeFormat(TauAndroidContext.require()).format(Date(timestampMs))
     }.getOrDefault("")
 
     actual suspend fun pickFiles(): List<PickedFile> {
