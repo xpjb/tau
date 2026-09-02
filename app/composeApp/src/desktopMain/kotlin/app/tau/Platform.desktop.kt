@@ -392,12 +392,18 @@ actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Uni
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier {
+actual fun Modifier.onTranscriptAutoscroll(
+    state: LazyListState,
+    onUserScroll: () -> Unit,
+): Modifier {
+    val currentOnUserScroll = rememberUpdatedState(onUserScroll)
     var anchor by remember(state) { mutableStateOf<Offset?>(null) }
     var pointer by remember(state) { mutableStateOf(Offset.Zero) }
+    var middlePressedAt by remember(state) { mutableStateOf<Long?>(null) }
     val density = LocalDensity.current
-    val deadZone = with(density) { 20.dp.toPx() }
-    val markerRadius = with(density) { 12.dp.toPx() }
+    val deadZone = with(density) { 6.dp.toPx() }
+    val maxSpeed = with(density) { 7_200.dp.toPx() }
+    val markerRadius = with(density) { 13.5.dp.toPx() }
     val markerColor = MaterialTheme.colorScheme.primary
     val markerBackground = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
 
@@ -410,8 +416,8 @@ actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier {
             val distance = pointer.y - checkNotNull(anchor).y
             val excess = abs(distance) - deadZone
             if (excess > 0f) {
-                val speed = distance.sign * minOf(2_600f, excess * 8f)
-                state.scrollBy(-speed * elapsedSeconds)
+                val speed = distance.sign * minOf(maxSpeed, excess * 30f)
+                state.scrollBy(speed * elapsedSeconds)
             }
         }
     }
@@ -419,23 +425,38 @@ actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier {
     return onPointerEvent(PointerEventType.Move) { event ->
         if (anchor != null) event.changes.firstOrNull()?.let { pointer = it.position }
     }.onPointerEvent(PointerEventType.Scroll) {
+        currentOnUserScroll.value()
         anchor = null
+        middlePressedAt = null
     }.onPointerEvent(PointerEventType.Press) { event ->
         val position = event.changes.firstOrNull()?.position ?: return@onPointerEvent
         when (event.button) {
             PointerButton.Tertiary -> {
                 if (anchor == null) {
+                    currentOnUserScroll.value()
                     anchor = position
                     pointer = position
+                    middlePressedAt = System.nanoTime()
                 } else {
                     anchor = null
+                    middlePressedAt = null
                 }
                 event.changes.forEach { it.consume() }
             }
             PointerButton.Primary, PointerButton.Secondary -> if (anchor != null) {
                 anchor = null
+                middlePressedAt = null
                 event.changes.forEach { it.consume() }
             }
+        }
+    }.onPointerEvent(PointerEventType.Release) { event ->
+        if (event.button == PointerButton.Tertiary) {
+            val pressedAt = middlePressedAt
+            middlePressedAt = null
+            if (pressedAt != null && System.nanoTime() - pressedAt >= 220_000_000L) {
+                anchor = null
+            }
+            event.changes.forEach { it.consume() }
         }
     }.drawWithContent {
         drawContent()
@@ -470,11 +491,19 @@ actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier {
 }
 
 @Composable
-actual fun TranscriptScrollbar(state: LazyListState, modifier: Modifier) {
+@OptIn(ExperimentalComposeUiApi::class)
+actual fun TranscriptScrollbar(
+    state: LazyListState,
+    onUserScroll: () -> Unit,
+    modifier: Modifier,
+) {
+    val currentOnUserScroll = rememberUpdatedState(onUserScroll)
     VerticalScrollbar(
         adapter = rememberScrollbarAdapter(state),
-        modifier = modifier,
-        reverseLayout = true,
+        modifier = modifier.onPointerEvent(PointerEventType.Press) {
+            currentOnUserScroll.value()
+        },
+        reverseLayout = false,
         style = LocalScrollbarStyle.current.copy(
             thickness = 8.dp,
             unhoverColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f),

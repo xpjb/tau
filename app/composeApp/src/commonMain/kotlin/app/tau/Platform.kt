@@ -52,10 +52,17 @@ expect fun Modifier.onClipboardImagePaste(
 expect fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier
 
 @Composable
-expect fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier
+expect fun Modifier.onTranscriptAutoscroll(
+    state: LazyListState,
+    onUserScroll: () -> Unit,
+): Modifier
 
 @Composable
-expect fun TranscriptScrollbar(state: LazyListState, modifier: Modifier = Modifier)
+expect fun TranscriptScrollbar(
+    state: LazyListState,
+    onUserScroll: () -> Unit,
+    modifier: Modifier = Modifier,
+)
 
 @Composable
 expect fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit)

@@ -5,6 +5,7 @@ package app.tau
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -62,10 +64,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -79,6 +83,7 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
@@ -97,6 +102,12 @@ import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
+
+private data class ChatListContent(
+    val messages: List<ChatMessage>,
+    val outgoingIds: List<String>,
+    val partial: String,
+)
 
 private data class ChatListStructure(
     val messageCount: Int,
@@ -588,66 +599,151 @@ private fun ChatPanel(
         mutableStateOf(TextFieldValue(draft, TextRange(draft.length)))
     }
     var followBottom by rememberSaveable(sessionId) { mutableStateOf(true) }
-    var originEntryId by rememberSaveable(sessionId) { mutableStateOf<String?>(null) }
+    var originKey by rememberSaveable(sessionId) { mutableStateOf<String?>(null) }
     var originOffset by rememberSaveable(sessionId) { mutableStateOf(0) }
+    var restoringOrigin by remember { mutableStateOf(false) }
     var scrollingToBottom by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scrollScope = rememberCoroutineScope()
+    val outgoingIds = outgoingMessages.map(OutgoingMessage::requestId)
+    val messageKeys = remember(messages) {
+        messages.mapIndexed { index, message ->
+            if (message.role == ChatRole.Assistant) {
+                "assistant-after-${messages.getOrNull(index - 1)?.entryId ?: "start"}"
+            } else {
+                "message-${message.entryId}"
+            }
+        }
+    }
+    val partialKey = "assistant-after-${messages.lastOrNull()?.entryId ?: "start"}"
+    val listKeys = remember(messageKeys, outgoingIds, partial.isNotEmpty(), partialKey) {
+        buildList {
+            if (messages.isEmpty() && outgoingIds.isEmpty() && partial.isEmpty()) add("empty")
+            addAll(messageKeys)
+            if (partial.isNotEmpty()) add(partialKey)
+            outgoingIds.forEach { add("outgoing-$it") }
+            add("bottom-anchor")
+        }
+    }
+    val listContent = ChatListContent(
+        messages = messages,
+        outgoingIds = outgoingIds,
+        partial = partial,
+    )
     val listStructure = ChatListStructure(
         messageCount = messages.size,
         firstEntryId = messages.firstOrNull()?.entryId,
         lastEntryId = messages.lastOrNull()?.entryId,
-        outgoingIds = outgoingMessages.map(OutgoingMessage::requestId),
+        outgoingIds = outgoingIds,
         hasPartial = partial.isNotEmpty(),
     )
+    val listItemCount = listKeys.size
     var appliedListStructure by remember { mutableStateOf<ChatListStructure?>(null) }
-    val showScrollToBottom by remember(listState) {
+    val currentListContent = rememberUpdatedState(listContent)
+    val currentListStructure = rememberUpdatedState(listStructure)
+    val currentListItemCount = rememberUpdatedState(listItemCount)
+    val bottomThreshold = with(LocalDensity.current) { 5.dp.roundToPx() }
+    val atBottom by remember(listState, bottomThreshold) {
         derivedStateOf {
-            listState.layoutInfo.totalItemsCount > 0 &&
-                listState.layoutInfo.visibleItemsInfo.none { it.index == 0 }
+            val layout = listState.layoutInfo
+            if (layout.totalItemsCount == 0) {
+                true
+            } else {
+                val newest = layout.visibleItemsInfo.firstOrNull {
+                    it.index == layout.totalItemsCount - 1
+                }
+                newest != null && newest.offset + newest.size <=
+                    layout.viewportEndOffset - layout.afterContentPadding + bottomThreshold
+            }
         }
+    }
+    val showScrollToBottom by remember(listState, bottomThreshold) {
+        derivedStateOf { listState.layoutInfo.totalItemsCount > 0 && !atBottom }
     }
     if (appliedListStructure != listStructure) {
         SideEffect {
-            if (followBottom) {
-                listState.requestScrollToItem(0)
-            } else {
-                val chronologicalIndex = messages.indexOfFirst { it.entryId == originEntryId }
-                if (chronologicalIndex >= 0) {
-                    val transientOffset = outgoingMessages.size + if (partial.isNotEmpty()) 1 else 0
-                    val index = messages.lastIndex - chronologicalIndex + transientOffset
+            val previousOutgoingIds = appliedListStructure?.outgoingIds.orEmpty()
+            val sentMessage = listStructure.outgoingIds.any { it !in previousOutgoingIds }
+            if (sentMessage) {
+                restoringOrigin = false
+                followBottom = true
+            } else if (!followBottom) {
+                val index = listKeys.indexOf(originKey)
+                if (index >= 0) {
+                    restoringOrigin = true
                     listState.requestScrollToItem(index, originOffset)
                 }
             }
             appliedListStructure = listStructure
         }
     }
-    LaunchedEffect(listState, listStructure) {
-        snapshotFlow {
-            Triple(
-                listState.isScrollInProgress,
-                listState.firstVisibleItemIndex,
-                listState.firstVisibleItemScrollOffset,
-            )
-        }.collect { (scrolling, index, offset) ->
-            if (appliedListStructure != listStructure || scrollingToBottom) return@collect
-            val atBottom = index == 0 && offset == 0
-            val follows = if (scrolling) atBottom else followBottom
-            if (scrolling) followBottom = follows
-            if (follows || atBottom) {
-                if (atBottom) {
-                    followBottom = true
-                    originEntryId = null
-                    originOffset = 0
+    LaunchedEffect(listState, followBottom) {
+        if (followBottom) {
+            var observedStructure: ChatListStructure? = null
+            var observedViewportHeight = -1
+            snapshotFlow {
+                Triple(
+                    currentListContent.value,
+                    currentListStructure.value,
+                    listState.layoutInfo.viewportSize.height,
+                )
+            }.collect { (_, structure, viewportHeight) ->
+                withFrameNanos { }
+                val lastIndex = currentListItemCount.value - 1
+                if (structure != observedStructure || viewportHeight != observedViewportHeight) {
+                    observedStructure = structure
+                    observedViewportHeight = viewportHeight
+                    listState.animateScrollToItem(lastIndex)
+                } else {
+                    listState.scrollToItem(lastIndex)
                 }
-                return@collect
             }
-            val transientOffset = outgoingMessages.size + if (partial.isNotEmpty()) 1 else 0
-            val reverseIndex = index - transientOffset
-            val chronologicalIndex = messages.lastIndex - reverseIndex
-            messages.getOrNull(chronologicalIndex)?.let { message ->
-                originEntryId = message.entryId
-                originOffset = offset
+        }
+    }
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Start) {
+                restoringOrigin = false
+                followBottom = false
+            }
+        }
+    }
+    LaunchedEffect(listState, listStructure, followBottom, restoringOrigin) {
+        if (!followBottom && restoringOrigin) {
+            repeat(3) {
+                withFrameNanos { }
+                if (!restoringOrigin) return@LaunchedEffect
+                val index = listKeys.indexOf(originKey)
+                if (index < 0) return@LaunchedEffect
+                listState.scrollToItem(index, originOffset)
+            }
+            restoringOrigin = false
+        }
+    }
+    LaunchedEffect(listState) {
+        var wasScrolling = false
+        snapshotFlow { listState.isScrollInProgress to atBottom }.collect { (scrolling, bottom) ->
+            if (!scrollingToBottom && wasScrolling && !scrolling && bottom) {
+                followBottom = true
+            }
+            wasScrolling = scrolling
+        }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            Triple(followBottom, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+        }.collect { (following, index, offset) ->
+            if (!following && !scrollingToBottom && !restoringOrigin) {
+                val key = listState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.index == index }
+                    ?.key as? String
+                if (key != null) {
+                    originKey = key
+                    originOffset = offset
+                }
+            } else if (following && atBottom) {
+                originKey = null
+                originOffset = 0
             }
         }
     }
@@ -721,72 +817,34 @@ private fun ChatPanel(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .onTranscriptAutoscroll(listState),
+                    .onTranscriptAutoscroll(listState) {
+                        restoringOrigin = false
+                        followBottom = false
+                    },
             ) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(16.dp),
-                    reverseLayout = true,
+                    contentPadding = PaddingValues(
+                        start = 16.dp,
+                        top = 16.dp,
+                        end = 16.dp,
+                        bottom = 3.dp,
+                    ),
                     verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
                 ) {
                     if (messages.isEmpty() && outgoingMessages.isEmpty() && partial.isEmpty()) {
-                        item {
+                        item("empty") {
                             Text(
                                 "Start a conversation with Pi.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
-                    items(
-                        outgoingMessages.asReversed(),
-                        key = { outgoing -> "outgoing-${outgoing.requestId}" },
-                    ) { outgoing ->
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            Card(
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
-                                        alpha = 0.72f,
-                                    ),
-                                ),
-                                modifier = Modifier.fillMaxWidth(0.9f),
-                            ) {
-                                Column(
-                                    Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                                ) {
-                                    ChatText(outgoing.text, markdown = false)
-                                    Text(
-                                        "Waiting for Pi",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(
-                                            alpha = 0.72f,
-                                        ),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    if (partial.isNotEmpty()) {
-                        item("streaming") {
-                            Card(
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                ),
-                                modifier = Modifier.fillMaxWidth(0.9f),
-                            ) {
-                                ChatText(
-                                    text = partial,
-                                    markdown = false,
-                                    modifier = Modifier.padding(12.dp),
-                                )
-                            }
-                        }
-                    }
-                    items(messages.asReversed(), key = ChatMessage::entryId) { message ->
+                    itemsIndexed(
+                        messages,
+                        key = { index, _ -> messageKeys[index] },
+                    ) { _, message ->
                         var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
                         var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
                         Row(
@@ -858,9 +916,64 @@ private fun ChatPanel(
                             }
                         }
                     }
+                    if (partial.isNotEmpty()) {
+                        item(partialKey) {
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                ),
+                                modifier = Modifier.fillMaxWidth(0.9f),
+                            ) {
+                                ChatText(
+                                    text = partial,
+                                    markdown = false,
+                                    modifier = Modifier.padding(12.dp),
+                                )
+                            }
+                        }
+                    }
+                    items(
+                        outgoingMessages,
+                        key = { outgoing -> "outgoing-${outgoing.requestId}" },
+                    ) { outgoing ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
+                                        alpha = 0.72f,
+                                    ),
+                                ),
+                                modifier = Modifier.fillMaxWidth(0.9f),
+                            ) {
+                                Column(
+                                    Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    ChatText(outgoing.text, markdown = false)
+                                    Text(
+                                        "Waiting for Pi",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(
+                                            alpha = 0.72f,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    item("bottom-anchor") {
+                        Spacer(Modifier.height(1.dp))
+                    }
                 }
                 TranscriptScrollbar(
                     state = listState,
+                    onUserScroll = {
+                        restoringOrigin = false
+                        followBottom = false
+                    },
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
                         .fillMaxHeight()
@@ -869,14 +982,14 @@ private fun ChatPanel(
                 if (showScrollToBottom) {
                     FilledTonalIconButton(
                         onClick = {
+                            restoringOrigin = false
                             scrollScope.launch {
                                 scrollingToBottom = true
                                 try {
-                                    listState.animateScrollToItem(0)
-                                } finally {
+                                    listState.animateScrollToItem(listItemCount - 1)
                                     followBottom = true
-                                    originEntryId = null
-                                    originOffset = 0
+                                    listState.requestScrollToItem(listItemCount - 1)
+                                } finally {
                                     scrollingToBottom = false
                                 }
                             }
