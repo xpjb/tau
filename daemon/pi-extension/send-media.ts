@@ -18,6 +18,17 @@ const parameters = Type.Object({
 export default function (pi: ExtensionAPI) {
   register(pi, "send_image", "image", "Send a PNG, JPEG, or WebP image to the user through Tau");
   register(pi, "send_file", "file", "Send a downloadable file to the user through Tau");
+  pi.registerCommand("tau-fork-at", {
+    description: "Create a Tau fork through the selected session entry",
+    handler: async (args, context) => {
+      const entryId = args.trim();
+      if (!entryId || entryId.length > 256 || /\s/.test(entryId)) {
+        throw new Error("Tau fork entry ID is invalid");
+      }
+      const result = await context.fork(entryId, { position: "at" });
+      if (result.cancelled) throw new Error("Pi cancelled the Tau fork");
+    },
+  });
 }
 
 function register(

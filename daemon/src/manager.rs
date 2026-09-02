@@ -217,7 +217,7 @@ impl AgentManager {
             return Ok(());
         }
         if let Some(process) = process.filter(|process| process.is_alive()) {
-            process.request(json!({ "type": "abort" })).await?;
+            process.notify(json!({ "type": "abort" })).await?;
         }
         Ok(())
     }
@@ -399,11 +399,12 @@ impl AgentManager {
         Ok(())
     }
 
-    pub async fn fork_session(&self, id: &str, entry_id: &str) -> Result<(String, String)> {
-        let (child, draft) = self
-            .branch_session(id, BranchOperation::Fork(entry_id))
-            .await?;
-        Ok((child, draft.context("Pi fork returned no draft")?))
+    pub async fn fork_session(
+        &self,
+        id: &str,
+        entry_id: &str,
+    ) -> Result<(String, Option<String>)> {
+        self.branch_session(id, BranchOperation::Fork(entry_id)).await
     }
 
     pub async fn clone_session(&self, id: &str) -> Result<String> {
@@ -496,6 +497,25 @@ impl AgentManager {
         {
             bail!("wait for Pi to become idle before forking");
         }
+        let fork_at_entry = if let BranchOperation::Fork(entry_id) = &operation {
+            let response = process.request(json!({ "type": "get_entries" })).await?;
+            let entries = response
+                .get("data")
+                .and_then(|data| data.get("entries"))
+                .and_then(Value::as_array)
+                .context("Pi entries response had no entries")?;
+            let entry = entries
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(*entry_id))
+                .with_context(|| format!("fork entry {entry_id} does not exist"))?;
+            entry
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                != Some("user")
+        } else {
+            false
+        };
         self.persist_session_file(id, &process).await?;
         let parent = self
             .inner
@@ -515,6 +535,15 @@ impl AgentManager {
         let temporary = RpcProcess::spawn(&self.inner.config, Some(&parent_file))?;
         let result = async {
             let response = match operation {
+                BranchOperation::Fork(entry_id) if fork_at_entry => {
+                    temporary
+                        .request(json!({
+                            "type": "prompt",
+                            "message": format!("/tau-fork-at {entry_id}"),
+                            "streamingBehavior": "steer"
+                        }))
+                        .await?
+                }
                 BranchOperation::Fork(entry_id) => {
                     temporary
                         .request(json!({ "type": "fork", "entryId": entry_id }))
@@ -1229,6 +1258,9 @@ for line in sys.stdin:
         append({"type":"message","id":"a1","parentId":"u1","message":assistant})
         print(json.dumps({"type":"message_end","message":assistant}), flush=True)
         print(json.dumps({"type":"agent_settled"}), flush=True)
+    elif kind == "abort":
+        with open(os.path.join(session_dir, "abort-notified"), "w") as marker:
+            marker.write("abort")
     else:
         print(json.dumps(response), flush=True)
 "#,
@@ -1308,6 +1340,20 @@ for line in sys.stdin:
             tokio::task::yield_now().await;
         }
         assert_eq!(runtime.snapshot().status, SessionStatus::Idle);
+        manager.set_runtime_state(&session_id, &runtime, SessionStatus::Running, None);
+        tokio::time::timeout(Duration::from_secs(1), manager.abort(&session_id))
+            .await
+            .expect("abort waited for Pi to settle")
+            .unwrap();
+        let abort_marker = root.join("pi-sessions/abort-notified");
+        for _ in 0..100 {
+            if fs::try_exists(&abort_marker).await.unwrap() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(fs::try_exists(abort_marker).await.unwrap());
+        manager.set_runtime_state(&session_id, &runtime, SessionStatus::Idle, None);
         let idle_since = runtime.snapshot().idle_since.unwrap();
         manager
             .sleep_if_idle(

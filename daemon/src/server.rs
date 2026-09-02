@@ -269,7 +269,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             Ok((child, draft)) => ServerMessage::success(
                                 request_id,
                                 Some(child),
-                                Some(draft),
+                                draft,
                             ),
                             Err(error) => ServerMessage::failure(request_id, error.to_string()),
                         },

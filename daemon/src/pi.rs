@@ -165,39 +165,26 @@ impl RpcProcess {
         self.request_with_timeout(command, None).await
     }
 
+    pub async fn notify(&self, command: Value) -> Result<()> {
+        self.write_command(&command).await
+    }
+
     async fn request_with_timeout(
         &self,
         mut command: Value,
         response_timeout: Option<Duration>,
     ) -> Result<Value> {
-        if !self.is_alive() {
-            bail!("Pi RPC channel is closed");
-        }
-
         let id = format!("tau-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         command
             .as_object_mut()
             .context("Pi RPC command must be a JSON object")?
             .insert("id".to_owned(), Value::String(id.clone()));
-        let mut encoded = serde_json::to_vec(&command).context("could not encode Pi command")?;
-        encoded.push(b'\n');
 
         let (sender, receiver) = oneshot::channel();
         lock_unpoisoned(&self.pending).insert(id.clone(), sender);
-        let write_result = {
-            let mut writer = self.writer.lock().await;
-            match writer.as_mut() {
-                Some(writer) => writer.write_all(&encoded).await,
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Pi stdin is closed",
-                )),
-            }
-        };
-        if let Err(error) = write_result {
+        if let Err(error) = self.write_command(&command).await {
             lock_unpoisoned(&self.pending).remove(&id);
-            self.dead.store(true, Ordering::Release);
-            bail!("failed writing Pi command: {error}");
+            return Err(error);
         }
 
         let response = if let Some(limit) = response_timeout {
@@ -229,6 +216,32 @@ impl RpcProcess {
                     .unwrap_or("Pi rejected the RPC command")
             )
         }
+    }
+
+    async fn write_command(&self, command: &Value) -> Result<()> {
+        command
+            .as_object()
+            .context("Pi RPC command must be a JSON object")?;
+        if !self.is_alive() {
+            bail!("Pi RPC channel is closed");
+        }
+        let mut encoded = serde_json::to_vec(command).context("could not encode Pi command")?;
+        encoded.push(b'\n');
+        let result = {
+            let mut writer = self.writer.lock().await;
+            match writer.as_mut() {
+                Some(writer) => writer.write_all(&encoded).await,
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "Pi stdin is closed",
+                )),
+            }
+        };
+        if let Err(error) = result {
+            self.dead.store(true, Ordering::Release);
+            bail!("failed writing Pi command: {error}");
+        }
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
