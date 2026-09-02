@@ -32,8 +32,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.text.selection.SelectionState
 import androidx.compose.foundation.text.selection.rememberSelectionState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -362,46 +362,38 @@ private fun ChatText(
     text: String,
     markdown: Boolean,
     modifier: Modifier = Modifier,
-    selectionState: SelectionState? = null,
 ) {
     val renderMarkdown = markdown && remember(text) { MarkdownSyntax.containsMatchIn(text) }
-    val content: @Composable () -> Unit = {
-        if (renderMarkdown) {
-            Markdown(
-                content = text,
-                colors = markdownColor(text = LocalContentColor.current),
-                typography = markdownTypography(
-                    h1 = MaterialTheme.typography.headlineMedium,
-                    h2 = MaterialTheme.typography.headlineSmall,
-                    h3 = MaterialTheme.typography.titleLarge,
-                    h4 = MaterialTheme.typography.titleMedium,
-                    h5 = MaterialTheme.typography.titleSmall,
-                    h6 = MaterialTheme.typography.labelLarge,
-                    textLink = TextLinkStyles(
-                        style = SpanStyle(
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
-                            textDecoration = TextDecoration.Underline,
-                        ),
+    if (renderMarkdown) {
+        Markdown(
+            content = text,
+            colors = markdownColor(text = LocalContentColor.current),
+            typography = markdownTypography(
+                h1 = MaterialTheme.typography.headlineMedium,
+                h2 = MaterialTheme.typography.headlineSmall,
+                h3 = MaterialTheme.typography.titleLarge,
+                h4 = MaterialTheme.typography.titleMedium,
+                h5 = MaterialTheme.typography.titleSmall,
+                h6 = MaterialTheme.typography.labelLarge,
+                textLink = TextLinkStyles(
+                    style = SpanStyle(
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
+                        textDecoration = TextDecoration.Underline,
                     ),
                 ),
-                animations = markdownAnimations { this },
-                loading = { loadingModifier ->
-                    Text(text, modifier = loadingModifier, style = MaterialTheme.typography.bodyLarge)
-                },
-                error = { errorModifier ->
-                    Text(text, modifier = errorModifier, style = MaterialTheme.typography.bodyLarge)
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-        } else {
-            Text(text, style = MaterialTheme.typography.bodyLarge)
-        }
-    }
-    if (selectionState == null) {
-        SelectionContainer(modifier, content)
+            ),
+            animations = markdownAnimations { this },
+            loading = { loadingModifier ->
+                Text(text, modifier = loadingModifier, style = MaterialTheme.typography.bodyLarge)
+            },
+            error = { errorModifier ->
+                Text(text, modifier = errorModifier, style = MaterialTheme.typography.bodyLarge)
+            },
+            modifier = modifier.fillMaxWidth(),
+        )
     } else {
-        SelectionContainer(selectionState, modifier, content)
+        Text(text, modifier = modifier, style = MaterialTheme.typography.bodyLarge)
     }
 }
 
@@ -624,6 +616,7 @@ private fun ChatPanel(
     var restoringOrigin by remember { mutableStateOf(false) }
     var scrollingToBottom by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val transcriptSelectionState = rememberSelectionState()
     val scrollScope = rememberCoroutineScope()
     val outgoingIds = outgoingMessages.map(OutgoingMessage::requestId)
     val messageKeys = remember(messages) {
@@ -767,6 +760,9 @@ private fun ChatPanel(
             }
         }
     }
+    LaunchedEffect(sessionId) {
+        transcriptSelectionState.clear()
+    }
     LaunchedEffect(draft) {
         if (editorValue.text != draft) {
             editorValue = TextFieldValue(draft, TextRange(draft.length))
@@ -842,7 +838,8 @@ private fun ChatPanel(
                         followBottom = false
                     },
             ) {
-                LazyColumn(
+                SelectionContainer(transcriptSelectionState, Modifier.fillMaxSize()) {
+                    LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
@@ -867,7 +864,6 @@ private fun ChatPanel(
                     ) { _, message ->
                         var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
                         var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
-                        val selectionState = rememberSelectionState()
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = if (message.role == ChatRole.User) {
@@ -903,57 +899,63 @@ private fun ChatPanel(
                                         ChatText(
                                             text = message.text,
                                             markdown = message.role != ChatRole.User,
-                                            selectionState = selectionState,
                                         )
                                         message.attachment?.let { attachment ->
-                                            OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
-                                                Text("Download ${attachment.fileName}")
+                                            DisableSelection {
+                                                OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
+                                                    Text("Download ${attachment.fileName}")
+                                                }
                                             }
                                         }
                                         message.timestampMs
                                             ?.let(PlatformServices::formatMessageTime)
                                             ?.takeIf(String::isNotEmpty)
                                             ?.let { timestamp ->
-                                                Text(
-                                                    timestamp,
-                                                    modifier = Modifier.align(Alignment.End),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = LocalContentColor.current.copy(alpha = 0.62f),
-                                                )
+                                                DisableSelection {
+                                                    Text(
+                                                        timestamp,
+                                                        modifier = Modifier.align(Alignment.End),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = LocalContentColor.current.copy(alpha = 0.62f),
+                                                    )
+                                                }
                                             }
                                     }
                                 }
-                                PositionedDropdownMenu(
-                                    expanded = menuExpanded,
-                                    pointerPosition = menuPointer,
-                                    onDismissRequest = {
-                                        menuExpanded = false
-                                        menuPointer = null
-                                    },
-                                ) {
-                                    val hasSelection = selectionState.selectedTexts.any { it.text.isNotEmpty() }
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(if (hasSelection) "Copy selection" else "Copy message")
-                                        },
-                                        onClick = {
-                                            val selectedText = selectionState.selectedTexts
-                                                .joinToString(separator = "\n") { it.text }
-                                            PlatformServices.copyText(
-                                                selectedText.ifEmpty { message.text },
-                                            )
+                                DisableSelection {
+                                    PositionedDropdownMenu(
+                                        expanded = menuExpanded,
+                                        pointerPosition = menuPointer,
+                                        onDismissRequest = {
                                             menuExpanded = false
                                             menuPointer = null
                                         },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Fork here") },
-                                        onClick = {
-                                            menuExpanded = false
-                                            menuPointer = null
-                                            controller.fork(message.entryId)
-                                        },
-                                    )
+                                    ) {
+                                        val hasSelection = transcriptSelectionState.selectedTexts
+                                            .any { it.text.isNotEmpty() }
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(if (hasSelection) "Copy selection" else "Copy message")
+                                            },
+                                            onClick = {
+                                                val selectedText = transcriptSelectionState.selectedTexts
+                                                    .joinToString(separator = "\n") { it.text }
+                                                PlatformServices.copyText(
+                                                    selectedText.ifEmpty { message.text },
+                                                )
+                                                menuExpanded = false
+                                                menuPointer = null
+                                            },
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Fork here") },
+                                            onClick = {
+                                                menuExpanded = false
+                                                menuPointer = null
+                                                controller.fork(message.entryId)
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -995,19 +997,22 @@ private fun ChatPanel(
                                     verticalArrangement = Arrangement.spacedBy(4.dp),
                                 ) {
                                     ChatText(outgoing.text, markdown = false)
-                                    Text(
-                                        "Waiting for Pi",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(
-                                            alpha = 0.72f,
-                                        ),
-                                    )
+                                    DisableSelection {
+                                        Text(
+                                            "Waiting for Pi",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(
+                                                alpha = 0.72f,
+                                            ),
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                     item("bottom-anchor") {
                         Spacer(Modifier.height(1.dp))
+                    }
                     }
                 }
                 TranscriptScrollbar(
