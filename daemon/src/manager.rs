@@ -830,6 +830,9 @@ impl AgentManager {
                         .and_then(Value::as_str)
                         == Some("assistant")
                     {
+                        if let Err(error) = self.sync_history(&id, &process).await {
+                            debug!(session = %id, %error, "history was not ready at assistant start");
+                        }
                         let _ = self.inner.events.send(ServerMessage::StreamReset {
                             session_id: id.clone(),
                         });
@@ -1214,7 +1217,7 @@ mod tests {
         fs::write(
             &mock,
             r#"#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, threading, time
 session_dir = sys.argv[sys.argv.index("--session-dir") + 1]
 os.makedirs(session_dir, exist_ok=True)
 session_file = os.path.join(session_dir, "mock.jsonl")
@@ -1249,15 +1252,18 @@ for line in sys.stdin:
             print(json.dumps(response), flush=True)
             continue
         append({"type":"message","id":"u1","parentId":None,"message":{"role":"user","content":command["message"],"timestamp":1}})
-        print(json.dumps(response), flush=True)
         print(json.dumps({"type":"agent_start"}), flush=True)
         print(json.dumps({"type":"message_start","message":{"role":"assistant","content":[]}}), flush=True)
-        print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}), flush=True)
-        print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"from Tau"}}), flush=True)
-        assistant = {"role":"assistant","content":[{"type":"text","text":"Hello from Tau"}],"timestamp":2}
-        append({"type":"message","id":"a1","parentId":"u1","message":assistant})
-        print(json.dumps({"type":"message_end","message":assistant}), flush=True)
-        print(json.dumps({"type":"agent_settled"}), flush=True)
+        print(json.dumps(response), flush=True)
+        def answer():
+            time.sleep(0.05)
+            print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}), flush=True)
+            print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"from Tau"}}), flush=True)
+            assistant = {"role":"assistant","content":[{"type":"text","text":"Hello from Tau"}],"timestamp":2}
+            append({"type":"message","id":"a1","parentId":"u1","message":assistant})
+            print(json.dumps({"type":"message_end","message":assistant}), flush=True)
+            print(json.dumps({"type":"agent_settled"}), flush=True)
+        threading.Thread(target=answer, daemon=True).start()
     elif kind == "abort":
         with open(os.path.join(session_dir, "abort-notified"), "w") as marker:
             marker.write("abort")
@@ -1308,13 +1314,25 @@ for line in sys.stdin:
 
         let mut streamed = String::new();
         let history = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut user_history_seen = false;
             loop {
                 match events.recv().await.unwrap() {
+                    ServerMessage::History { session_id: event_session, messages }
+                        if event_session == session_id => {
+                            user_history_seen |= messages.iter().any(|message| {
+                                message.role == ChatRole::User && message.text == "Say hello"
+                            });
+                            if messages.last().is_some_and(|message| message.role == ChatRole::Assistant) {
+                                break messages;
+                            }
+                        }
+                    ServerMessage::StreamReset { session_id: event_session }
+                        if event_session == session_id => assert!(
+                            user_history_seen,
+                            "assistant stream was exposed before its canonical user message",
+                        ),
                     ServerMessage::StreamDelta { session_id: event_session, delta }
                         if event_session == session_id => streamed.push_str(&delta),
-                    ServerMessage::History { session_id: event_session, messages }
-                        if event_session == session_id
-                            && messages.last().is_some_and(|message| message.role == ChatRole::Assistant) => break messages,
                     _ => {}
                 }
             }
