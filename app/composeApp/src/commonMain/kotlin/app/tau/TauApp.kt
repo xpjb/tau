@@ -3,6 +3,7 @@
 package app.tau
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -99,6 +100,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil3.ImageLoader
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
@@ -557,6 +560,9 @@ private fun TranscriptRowContent(
                                             var imageLoaded by remember(imageUrl, settings.token) {
                                                 mutableStateOf<Boolean?>(null)
                                             }
+                                            var imageExpanded by remember(imageUrl, settings.token) {
+                                                mutableStateOf(false)
+                                            }
                                             Box(
                                                 Modifier
                                                     .widthIn(max = 520.dp)
@@ -567,7 +573,8 @@ private fun TranscriptRowContent(
                                                         MaterialTheme.colorScheme.surface.copy(
                                                             alpha = 0.52f,
                                                         ),
-                                                    ),
+                                                    )
+                                                    .clickable { imageExpanded = true },
                                                 contentAlignment = Alignment.Center,
                                             ) {
                                                 when (imageLoaded) {
@@ -593,6 +600,44 @@ private fun TranscriptRowContent(
                                                     onError = { imageLoaded = false },
                                                     contentScale = ContentScale.Fit,
                                                 )
+                                            }
+                                            if (imageExpanded) {
+                                                Dialog(
+                                                    onDismissRequest = { imageExpanded = false },
+                                                    properties = DialogProperties(
+                                                        usePlatformDefaultWidth = false,
+                                                    ),
+                                                ) {
+                                                    Box(
+                                                        Modifier
+                                                            .fillMaxSize()
+                                                            .background(Color.Black.copy(alpha = 0.94f))
+                                                            .clickable { imageExpanded = false }
+                                                            .systemBarsPadding()
+                                                            .displayCutoutPadding(),
+                                                    ) {
+                                                        AsyncImage(
+                                                            model = imageRequest,
+                                                            contentDescription = attachment.caption
+                                                                ?: attachment.fileName,
+                                                            modifier = Modifier
+                                                                .fillMaxSize()
+                                                                .padding(24.dp),
+                                                            contentScale = ContentScale.Fit,
+                                                        )
+                                                        FilledTonalIconButton(
+                                                            onClick = { imageExpanded = false },
+                                                            modifier = Modifier
+                                                                .align(Alignment.TopEnd)
+                                                                .padding(8.dp),
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = CloseIcon,
+                                                                contentDescription = "Close image",
+                                                            )
+                                                        }
+                                                    }
+                                                }
                                             }
                                             Spacer(Modifier.height(ImageDownloadSpacing))
                                         }
@@ -1343,6 +1388,30 @@ private val BackIcon = ImageVector.Builder(
         lineTo(13.42f, 18.59f)
         lineTo(7.83f, 13f)
         horizontalLineTo(20f)
+        close()
+    }
+}.build()
+
+private val CloseIcon = ImageVector.Builder(
+    name = "Close",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(18.3f, 5.71f)
+        lineTo(12f, 12f)
+        lineTo(5.7f, 5.71f)
+        lineTo(4.29f, 7.12f)
+        lineTo(10.59f, 13.41f)
+        lineTo(4.29f, 19.71f)
+        lineTo(5.7f, 21.12f)
+        lineTo(12f, 14.83f)
+        lineTo(18.3f, 21.12f)
+        lineTo(19.71f, 19.71f)
+        lineTo(13.41f, 13.41f)
+        lineTo(19.71f, 7.12f)
         close()
     }
 }.build()
