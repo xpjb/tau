@@ -1,9 +1,15 @@
 package app.tau
 
+import androidx.compose.animation.core.AnimationState
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.animateTo
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalScrollbarStyle
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.gestures.FlingBehavior
+import androidx.compose.foundation.gestures.ScrollScope
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.v2.ScrollbarAdapter
@@ -32,6 +38,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerButton
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
@@ -60,6 +67,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.imageio.ImageIO
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.sign
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -499,59 +507,116 @@ actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier {
     }
 }
 
+private class TranscriptInputSource {
+    var touchpad = false
+}
+
+internal fun transcriptTouchpadFlingProgress(fraction: Float): Float =
+    1f - (1f - fraction) * (1f - fraction)
+
+internal fun transcriptTouchpadFlingDurationMillis(
+    velocity: Float,
+    maximumVelocity: Float,
+    deceleration: Float,
+): Int = (abs(velocity.coerceIn(-maximumVelocity, maximumVelocity)) / deceleration * 1_000f)
+    .roundToInt()
+    .coerceIn(80, 1_600)
+
+internal fun transcriptTouchpadFlingDistance(velocity: Float, durationMillis: Int): Float =
+    velocity * durationMillis / 2_000f
+
+private val TouchpadFlingEasing = Easing(::transcriptTouchpadFlingProgress)
+
+private class TranscriptFlingBehavior(
+    private val inputSource: TranscriptInputSource,
+    private val maximumVelocity: Float,
+    private val deceleration: Float,
+) : FlingBehavior {
+    override suspend fun ScrollScope.performFling(initialVelocity: Float): Float {
+        if (!inputSource.touchpad) return initialVelocity
+        val velocity = initialVelocity.coerceIn(-maximumVelocity, maximumVelocity)
+        if (velocity == 0f) return 0f
+        val durationMillis = transcriptTouchpadFlingDurationMillis(
+            velocity,
+            maximumVelocity,
+            deceleration,
+        )
+        val distance = transcriptTouchpadFlingDistance(velocity, durationMillis)
+        var previous = 0f
+        var remainingVelocity = 0f
+        AnimationState(initialValue = 0f, initialVelocity = velocity).animateTo(
+            targetValue = distance,
+            animationSpec = tween(durationMillis, easing = TouchpadFlingEasing),
+        ) {
+            val delta = value - previous
+            val consumed = scrollBy(delta)
+            previous = value
+            if (abs(delta - consumed) > 0.5f) {
+                remainingVelocity = this.velocity
+                cancelAnimation()
+            }
+        }
+        return remainingVelocity
+    }
+}
+
+@Composable
+@OptIn(ExperimentalComposeUiApi::class)
+actual fun rememberTranscriptScrollMotion(): TranscriptScrollMotion {
+    val density = LocalDensity.current
+    val inputSource = remember { TranscriptInputSource() }
+    val behavior = remember(density, inputSource) {
+        TranscriptFlingBehavior(
+            inputSource = inputSource,
+            maximumVelocity = with(density) { 4_200.dp.toPx() },
+            deceleration = with(density) { 3_000.dp.toPx() },
+        )
+    }
+    val modifier = Modifier
+        .onPointerEvent(PointerEventType.PanStart, PointerEventPass.Initial) {
+            inputSource.touchpad = true
+        }
+        .onPointerEvent(PointerEventType.PanMove, PointerEventPass.Initial) {
+            inputSource.touchpad = true
+        }
+        .onPointerEvent(PointerEventType.PanEnd, PointerEventPass.Initial) {
+            inputSource.touchpad = true
+        }
+        .onPointerEvent(PointerEventType.Scroll, PointerEventPass.Initial) {
+            inputSource.touchpad = false
+        }
+        .onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) {
+            inputSource.touchpad = false
+        }
+    return TranscriptScrollMotion(modifier, behavior)
+}
+
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
 actual fun TranscriptScrollbar(
     state: LazyListState,
+    geometry: TranscriptGeometry,
     modifier: Modifier,
 ) {
-    val virtualItemSize = with(LocalDensity.current) { 84.dp.toPx().toDouble() }
-    val adapter = remember(state, virtualItemSize) {
+    if (geometry.maxScrollOffset == 0.0) return
+    val currentGeometry by rememberUpdatedState(geometry)
+    val adapter = remember(state) {
         object : ScrollbarAdapter {
             override val viewportSize: Double
-                get() = state.layoutInfo.viewportSize.height.toDouble().coerceAtLeast(1.0)
+                get() = currentGeometry.viewportSize.toDouble()
 
             override val contentSize: Double
-                get() {
-                    if (!state.canScrollBackward && !state.canScrollForward) return viewportSize
-                    return maxOf(
-                        state.layoutInfo.totalItemsCount * virtualItemSize,
-                        viewportSize + virtualItemSize,
-                    )
-                }
+                get() = currentGeometry.contentSize
 
             override val scrollOffset: Double
-                get() {
-                    val maximum = (contentSize - viewportSize).coerceAtLeast(0.0)
-                    if (maximum == 0.0 || !state.canScrollBackward) return 0.0
-                    if (!state.canScrollForward) return maximum
-                    val count = state.layoutInfo.totalItemsCount
-                    val visibleItem = state.layoutInfo.visibleItemsInfo.firstOrNull {
-                        it.index == state.firstVisibleItemIndex
-                    }
-                    if (count <= 1) {
-                        val range = ((visibleItem?.size ?: 1) - viewportSize).coerceAtLeast(1.0)
-                        return (state.firstVisibleItemScrollOffset / range * maximum)
-                            .coerceIn(0.0, maximum)
-                    }
-                    val fraction = state.firstVisibleItemScrollOffset.toDouble() /
-                        (visibleItem?.size ?: 1).coerceAtLeast(1)
-                    return ((state.firstVisibleItemIndex + fraction) / (count - 1) * maximum)
-                        .coerceIn(0.0, maximum)
-                }
+                get() = currentGeometry.scrollOffset(
+                    state.firstVisibleItemIndex,
+                    state.firstVisibleItemScrollOffset,
+                )
 
             override suspend fun scrollTo(scrollOffset: Double) {
-                val count = state.layoutInfo.totalItemsCount
-                if (count == 0) return
-                val maximum = (contentSize - viewportSize).coerceAtLeast(0.0)
-                val index = if (maximum == 0.0) {
-                    0
-                } else {
-                    (scrollOffset.coerceIn(0.0, maximum) / maximum * (count - 1))
-                        .toInt()
-                        .coerceIn(0, count - 1)
-                }
-                state.scrollToItem(index)
+                val position = currentGeometry.positionAt(scrollOffset)
+                state.scrollToItem(position.index, position.scrollOffset)
             }
         }
     }

@@ -1,5 +1,6 @@
 package app.tau
 
+import androidx.compose.foundation.gestures.FlingBehavior
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -56,9 +57,18 @@ expect fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Uni
 @Composable
 expect fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier
 
+class TranscriptScrollMotion(
+    val modifier: Modifier,
+    val flingBehavior: FlingBehavior,
+)
+
+@Composable
+expect fun rememberTranscriptScrollMotion(): TranscriptScrollMotion
+
 @Composable
 expect fun TranscriptScrollbar(
     state: LazyListState,
+    geometry: TranscriptGeometry,
     modifier: Modifier = Modifier,
 )
 

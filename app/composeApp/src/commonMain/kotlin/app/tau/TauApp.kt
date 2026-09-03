@@ -27,12 +27,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.SelectionState
 import androidx.compose.foundation.text.selection.rememberSelectionState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -78,29 +78,26 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
-import com.mikepenz.markdown.m3.Markdown
-import com.mikepenz.markdown.m3.markdownColor
-import com.mikepenz.markdown.m3.markdownTypography
-import com.mikepenz.markdown.model.markdownAnimations
-import com.mikepenz.markdown.model.parseMarkdown
 import kotlin.math.roundToInt
 
-private val MarkdownSyntax = Regex(
-    """(?m)(https?://|[*_`\[\]#>|~<]|^\s*(?:[-+] |\d+[.)] ))""",
-)
 private val ConnectedColor = Color(0xFF4ADE80)
 private val ReconnectingColor = Color(0xFFFBBF24)
 
@@ -137,10 +134,14 @@ fun TauApp(controller: TauController) {
         session.id == state.selectedSessionId && session.status == SessionStatus.Running
     }
     val chatStateHolder = rememberSaveableStateHolder()
+    val transcriptMeasureCaches = remember { mutableMapOf<String, TranscriptMeasureCache>() }
     val chatIds = state.sessions.mapTo(mutableSetOf(), SessionSummary::id)
     var retainedChatIds by remember { mutableStateOf(emptySet<String>()) }
     LaunchedEffect(chatIds) {
-        (retainedChatIds - chatIds).forEach(chatStateHolder::removeState)
+        (retainedChatIds - chatIds).forEach { sessionId ->
+            chatStateHolder.removeState(sessionId)
+            transcriptMeasureCaches.remove(sessionId)
+        }
         retainedChatIds = chatIds
     }
     MaterialTheme(colorScheme = TauDarkColors) {
@@ -174,6 +175,7 @@ fun TauApp(controller: TauController) {
                                         state = state,
                                         controller = controller,
                                         showBack = false,
+                                        transcriptMeasureCaches = transcriptMeasureCaches,
                                         modifier = Modifier.weight(1f).fillMaxHeight(),
                                     )
                                 } else {
@@ -182,6 +184,7 @@ fun TauApp(controller: TauController) {
                                             state = state,
                                             controller = controller,
                                             showBack = false,
+                                            transcriptMeasureCaches = transcriptMeasureCaches,
                                             modifier = Modifier.weight(1f).fillMaxHeight(),
                                         )
                                     }
@@ -194,6 +197,7 @@ fun TauApp(controller: TauController) {
                                     state = state,
                                     controller = controller,
                                     showBack = true,
+                                    transcriptMeasureCaches = transcriptMeasureCaches,
                                     modifier = Modifier.fillMaxSize(),
                                 )
                             }
@@ -335,44 +339,206 @@ private fun ConnectionDot(status: ConnectionStatus) {
     )
 }
 
+private sealed interface TranscriptRow {
+    val key: String
+
+    data object BottomAnchor : TranscriptRow {
+        override val key = "bottom-anchor"
+    }
+
+    data object Empty : TranscriptRow {
+        override val key = "empty"
+    }
+
+    data class Outgoing(val message: OutgoingMessage) : TranscriptRow {
+        override val key = "outgoing-${message.requestId}"
+    }
+
+    data class Partial(
+        override val key: String,
+        val text: String,
+    ) : TranscriptRow
+
+    data class Message(
+        override val key: String,
+        val message: ChatMessage,
+        val timestamp: String?,
+    ) : TranscriptRow
+}
+
+private data class TranscriptMeasureContext(
+    val width: Int,
+    val density: Float,
+    val fontScale: Float,
+    val layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+    val textMeasurer: TextMeasurer,
+    val styles: TranscriptTextStyles,
+)
+
+private data class MeasuredTranscriptRow(
+    val text: MeasuredTranscriptText?,
+    val height: Int,
+)
+
+private class TranscriptMeasureCache {
+    var styles: TranscriptTextStyles? = null
+    var context: TranscriptMeasureContext? = null
+    val documents = mutableMapOf<TranscriptRow, TranscriptTextDocument>()
+    val rows = mutableMapOf<TranscriptRow, MeasuredTranscriptRow>()
+}
+
 @Composable
-private fun ChatText(
-    text: String,
-    markdown: Boolean,
-    modifier: Modifier = Modifier,
+private fun TranscriptRowContent(
+    row: TranscriptRow,
+    measured: MeasuredTranscriptRow,
+    styles: TranscriptTextStyles,
+    controller: TauController,
+    selectionState: SelectionState,
 ) {
-    val renderMarkdown = markdown && remember(text) { MarkdownSyntax.containsMatchIn(text) }
-    if (renderMarkdown) {
-        val parsedMarkdown = remember(text) { parseMarkdown(text) }
-        Markdown(
-            state = parsedMarkdown,
-            colors = markdownColor(text = LocalContentColor.current),
-            typography = markdownTypography(
-                h1 = MaterialTheme.typography.headlineMedium,
-                h2 = MaterialTheme.typography.headlineSmall,
-                h3 = MaterialTheme.typography.titleLarge,
-                h4 = MaterialTheme.typography.titleMedium,
-                h5 = MaterialTheme.typography.titleSmall,
-                h6 = MaterialTheme.typography.labelLarge,
-                textLink = TextLinkStyles(
-                    style = SpanStyle(
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold,
-                        textDecoration = TextDecoration.Underline,
-                    ),
-                ),
-            ),
-            animations = markdownAnimations { this },
-            loading = { loadingModifier ->
-                Text(text, modifier = loadingModifier, style = MaterialTheme.typography.bodyLarge)
-            },
-            error = { errorModifier ->
-                Text(text, modifier = errorModifier, style = MaterialTheme.typography.bodyLarge)
-            },
-            modifier = modifier.fillMaxWidth(),
+    when (row) {
+        TranscriptRow.BottomAnchor -> Spacer(Modifier.height(1.dp))
+        TranscriptRow.Empty -> Text(
+            "Start a conversation with Pi.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = styles.body,
         )
-    } else {
-        Text(text, modifier = modifier, style = MaterialTheme.typography.bodyLarge)
+        is TranscriptRow.Outgoing -> Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+                ),
+                modifier = Modifier.fillMaxWidth(0.9f),
+            ) {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    ChatText(checkNotNull(measured.text), styles)
+                    DisableSelection {
+                        Text(
+                            "Waiting for Pi",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
+                        )
+                    }
+                }
+            }
+        }
+        is TranscriptRow.Partial -> Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            ),
+            modifier = Modifier.fillMaxWidth(0.9f),
+        ) {
+            ChatText(
+                text = checkNotNull(measured.text),
+                styles = styles,
+                modifier = Modifier.padding(12.dp),
+            )
+        }
+        is TranscriptRow.Message -> {
+            val message = row.message
+            var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
+            var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = if (message.role == ChatRole.User) {
+                    Arrangement.End
+                } else {
+                    Arrangement.Start
+                },
+            ) {
+                Box(Modifier.fillMaxWidth(0.9f)) {
+                    val menuModifier = Modifier
+                        .onSecondaryClick { position ->
+                            menuPointer = position
+                            menuExpanded = true
+                        }
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = {
+                                menuPointer = null
+                                menuExpanded = true
+                            },
+                        )
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = when (message.role) {
+                                ChatRole.User -> MaterialTheme.colorScheme.primaryContainer
+                                ChatRole.Assistant -> MaterialTheme.colorScheme.surfaceVariant
+                                ChatRole.System -> MaterialTheme.colorScheme.tertiaryContainer
+                            },
+                        ),
+                        modifier = Modifier.fillMaxWidth().then(menuModifier),
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                            ChatText(checkNotNull(measured.text), styles)
+                            message.attachment?.let { attachment ->
+                                DisableSelection {
+                                    OutlinedButton(
+                                        onClick = { controller.downloadAttachment(message) },
+                                        modifier = Modifier.height(40.dp),
+                                    ) {
+                                        Text(
+                                            "Download ${attachment.fileName}",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                            row.timestamp?.let { timestamp ->
+                                DisableSelection {
+                                    Text(
+                                        timestamp,
+                                        modifier = Modifier.align(Alignment.End),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = LocalContentColor.current.copy(alpha = 0.62f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    DisableSelection {
+                        PositionedDropdownMenu(
+                            expanded = menuExpanded,
+                            pointerPosition = menuPointer,
+                            onDismissRequest = {
+                                menuExpanded = false
+                                menuPointer = null
+                            },
+                        ) {
+                            val hasSelection = selectionState.selectedTexts.any { it.text.isNotEmpty() }
+                            DropdownMenuItem(
+                                text = {
+                                    Text(if (hasSelection) "Copy selection" else "Copy message")
+                                },
+                                onClick = {
+                                    val selectedText = selectionState.selectedTexts
+                                        .joinToString(separator = "\n") { it.text }
+                                    PlatformServices.copyText(
+                                        selectedText.ifEmpty { message.text },
+                                    )
+                                    menuExpanded = false
+                                    menuPointer = null
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Fork here") },
+                                onClick = {
+                                    menuExpanded = false
+                                    menuPointer = null
+                                    controller.fork(message.entryId)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -563,6 +729,7 @@ private fun ChatPanel(
     state: TauUiState,
     controller: TauController,
     showBack: Boolean,
+    transcriptMeasureCaches: MutableMap<String, TranscriptMeasureCache>,
     modifier: Modifier,
 ) {
     val sessionId = state.selectedSessionId
@@ -597,16 +764,70 @@ private fun ChatPanel(
     }
     val listState = rememberLazyListState()
     val transcriptSelectionState = rememberSelectionState()
-    val messageKeys = remember(messages) {
-        messages.mapIndexed { index, message ->
-            if (message.role == ChatRole.Assistant) {
-                "assistant-after-${messages.getOrNull(index - 1)?.entryId ?: "start"}"
-            } else {
-                "message-${message.entryId}"
+    val density = LocalDensity.current
+    val layoutDirection = LocalLayoutDirection.current
+    val textMeasurer = rememberTextMeasurer(cacheSize = 0)
+    val transcriptTextStyles = TranscriptTextStyles(
+        body = MaterialTheme.typography.bodyLarge,
+        headings = listOf(
+            MaterialTheme.typography.headlineMedium,
+            MaterialTheme.typography.headlineSmall,
+            MaterialTheme.typography.titleLarge,
+            MaterialTheme.typography.titleMedium,
+            MaterialTheme.typography.titleSmall,
+            MaterialTheme.typography.labelLarge,
+        ),
+        code = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+        link = SpanStyle(
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+            textDecoration = TextDecoration.Underline,
+        ),
+        inlineCode = MaterialTheme.typography.bodyLarge.toSpanStyle().copy(
+            fontFamily = FontFamily.Monospace,
+            background = MaterialTheme.colorScheme.outlineVariant,
+        ),
+        codeBackground = MaterialTheme.colorScheme.background.copy(alpha = 0.72f),
+        quoteBar = MaterialTheme.colorScheme.primary.copy(alpha = 0.72f),
+    )
+    val transcriptRows = remember(messages, outgoingMessages, partial) {
+        buildList {
+            add(TranscriptRow.BottomAnchor)
+            if (messages.isEmpty() && outgoingMessages.isEmpty() && partial.isEmpty()) {
+                add(TranscriptRow.Empty)
+            }
+            outgoingMessages.asReversed().forEach { outgoing ->
+                add(TranscriptRow.Outgoing(outgoing))
+            }
+            if (partial.isNotEmpty()) {
+                add(
+                    TranscriptRow.Partial(
+                        key = "assistant-after-${messages.lastOrNull()?.entryId ?: "start"}",
+                        text = partial,
+                    ),
+                )
+            }
+            messages.indices.reversed().forEach { index ->
+                val message = messages[index]
+                val key = if (message.role == ChatRole.Assistant) {
+                    "assistant-after-${messages.getOrNull(index - 1)?.entryId ?: "start"}"
+                } else {
+                    "message-${message.entryId}"
+                }
+                add(
+                    TranscriptRow.Message(
+                        key = key,
+                        message = message,
+                        timestamp = message.timestampMs
+                            ?.let(PlatformServices::formatMessageTime)
+                            ?.takeIf(String::isNotEmpty),
+                    ),
+                )
             }
         }
     }
-    val partialKey = "assistant-after-${messages.lastOrNull()?.entryId ?: "start"}"
+    val transcriptMeasureCache = transcriptMeasureCaches.getOrPut(sessionId, ::TranscriptMeasureCache)
+    val scrollMotion = rememberTranscriptScrollMotion()
     val showScrollToBottom by remember(listState) {
         derivedStateOf {
             listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0
@@ -681,210 +902,171 @@ private fun ChatPanel(
                 }
             }
             HorizontalDivider()
-            Box(
+            BoxWithConstraints(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .onTranscriptAutoscroll(listState),
             ) {
-                SelectionContainer(transcriptSelectionState, Modifier.fillMaxSize()) {
-                    LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = 16.dp,
-                        top = 16.dp,
-                        end = 16.dp,
-                        bottom = 3.dp,
-                    ),
-                    reverseLayout = true,
-                    verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
-                ) {
-                    item("bottom-anchor") {
-                        Spacer(Modifier.height(1.dp))
-                    }
-                    if (messages.isEmpty() && outgoingMessages.isEmpty() && partial.isEmpty()) {
-                        item("empty") {
-                            Text(
+                val transcriptPadding = with(density) { 16.dp.roundToPx() } * 2
+                val cardPadding = with(density) { 12.dp.roundToPx() } * 2
+                val itemWidth = (constraints.maxWidth - transcriptPadding).coerceAtLeast(0)
+                val bubbleWidth = (itemWidth * 0.9f).roundToInt()
+                val textWidth = (bubbleWidth - cardPadding).coerceAtLeast(0)
+                val measureContext = TranscriptMeasureContext(
+                    width = itemWidth,
+                    density = density.density,
+                    fontScale = density.fontScale,
+                    layoutDirection = layoutDirection,
+                    textMeasurer = textMeasurer,
+                    styles = transcriptTextStyles,
+                )
+                if (transcriptMeasureCache.styles != transcriptTextStyles) {
+                    transcriptMeasureCache.styles = transcriptTextStyles
+                    transcriptMeasureCache.documents.clear()
+                }
+                if (transcriptMeasureCache.context != measureContext) {
+                    transcriptMeasureCache.context = measureContext
+                    transcriptMeasureCache.rows.clear()
+                }
+                val retainedRows = transcriptRows.toSet()
+                transcriptMeasureCache.documents.keys.retainAll(retainedRows)
+                transcriptMeasureCache.rows.keys.retainAll(retainedRows)
+                val waitingSpacing = with(density) { 4.dp.roundToPx() }
+                val attachmentHeight = with(density) { 40.dp.roundToPx() }
+                fun measuredText(
+                    row: TranscriptRow,
+                    content: String,
+                    markdown: Boolean,
+                    width: Int,
+                ) = measureChatText(
+                    document = transcriptMeasureCache.documents.getOrPut(row) {
+                        buildChatText(content, markdown, transcriptTextStyles)
+                    },
+                    maxWidth = width,
+                    textMeasurer = textMeasurer,
+                    styles = transcriptTextStyles,
+                    density = density,
+                )
+                for (row in transcriptRows) {
+                    if (row in transcriptMeasureCache.rows) continue
+                    transcriptMeasureCache.rows[row] = when (row) {
+                        TranscriptRow.BottomAnchor -> MeasuredTranscriptRow(
+                            text = null,
+                            height = with(density) { 1.dp.roundToPx() },
+                        )
+                        TranscriptRow.Empty -> {
+                            val text = measuredText(
+                                row,
                                 "Start a conversation with Pi.",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                false,
+                                itemWidth,
+                            )
+                            MeasuredTranscriptRow(text, text.height)
+                        }
+                        is TranscriptRow.Outgoing -> {
+                            val text = measuredText(row, row.message.text, false, textWidth)
+                            val waitingHeight = textMeasurer.measure(
+                                text = "Waiting for Pi",
+                                style = MaterialTheme.typography.labelSmall,
+                                constraints = Constraints(maxWidth = textWidth),
+                            ).size.height
+                            MeasuredTranscriptRow(
+                                text = text,
+                                height = cardPadding + text.height + waitingSpacing + waitingHeight,
+                            )
+                        }
+                        is TranscriptRow.Partial -> {
+                            val text = measuredText(row, row.text, false, textWidth)
+                            MeasuredTranscriptRow(text, cardPadding + text.height)
+                        }
+                        is TranscriptRow.Message -> {
+                            val text = measuredText(
+                                row,
+                                row.message.text,
+                                row.message.role != ChatRole.User,
+                                textWidth,
+                            )
+                            val timestampHeight = row.timestamp?.let { timestamp ->
+                                textMeasurer.measure(
+                                    text = timestamp,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    constraints = Constraints(maxWidth = textWidth),
+                                ).size.height
+                            } ?: 0
+                            MeasuredTranscriptRow(
+                                text = text,
+                                height = cardPadding + text.height + timestampHeight +
+                                    if (row.message.attachment == null) 0 else attachmentHeight,
                             )
                         }
                     }
-                    items(
-                        outgoingMessages.asReversed(),
-                        key = { outgoing -> "outgoing-${outgoing.requestId}" },
-                    ) { outgoing ->
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            Card(
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
-                                        alpha = 0.72f,
-                                    ),
-                                ),
-                                modifier = Modifier.fillMaxWidth(0.9f),
-                            ) {
-                                Column(
-                                    Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                                ) {
-                                    ChatText(outgoing.text, markdown = false)
-                                    DisableSelection {
-                                        Text(
-                                            "Waiting for Pi",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(
-                                                alpha = 0.72f,
-                                            ),
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if (partial.isNotEmpty()) {
-                        item(partialKey) {
-                            Card(
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                ),
-                                modifier = Modifier.fillMaxWidth(0.9f),
-                            ) {
-                                ChatText(
-                                    text = partial,
-                                    markdown = false,
-                                    modifier = Modifier.padding(12.dp),
-                                )
-                            }
-                        }
-                    }
-                    itemsIndexed(
-                        messages.asReversed(),
-                        key = { index, _ -> messageKeys[messages.lastIndex - index] },
-                    ) { _, message ->
-                        var menuExpanded by remember(message.entryId) { mutableStateOf(false) }
-                        var menuPointer by remember(message.entryId) { mutableStateOf<Offset?>(null) }
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = if (message.role == ChatRole.User) {
-                                Arrangement.End
-                            } else {
-                                Arrangement.Start
-                            },
-                        ) {
-                            Box(Modifier.fillMaxWidth(0.9f)) {
-                                val menuModifier = Modifier
-                                    .onSecondaryClick { position ->
-                                        menuPointer = position
-                                        menuExpanded = true
-                                    }
-                                    .combinedClickable(
-                                        onClick = {},
-                                        onLongClick = {
-                                            menuPointer = null
-                                            menuExpanded = true
-                                        },
-                                    )
-                                Card(
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = when (message.role) {
-                                            ChatRole.User -> MaterialTheme.colorScheme.primaryContainer
-                                            ChatRole.Assistant -> MaterialTheme.colorScheme.surfaceVariant
-                                            ChatRole.System -> MaterialTheme.colorScheme.tertiaryContainer
-                                        },
-                                    ),
-                                    modifier = Modifier.fillMaxWidth().then(menuModifier),
-                                ) {
-                                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                                        ChatText(
-                                            text = message.text,
-                                            markdown = message.role != ChatRole.User,
-                                        )
-                                        message.attachment?.let { attachment ->
-                                            DisableSelection {
-                                                OutlinedButton(onClick = { controller.downloadAttachment(message) }) {
-                                                    Text("Download ${attachment.fileName}")
-                                                }
-                                            }
-                                        }
-                                        message.timestampMs
-                                            ?.let(PlatformServices::formatMessageTime)
-                                            ?.takeIf(String::isNotEmpty)
-                                            ?.let { timestamp ->
-                                                DisableSelection {
-                                                    Text(
-                                                        timestamp,
-                                                        modifier = Modifier.align(Alignment.End),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = LocalContentColor.current.copy(alpha = 0.62f),
-                                                    )
-                                                }
-                                            }
-                                    }
-                                }
-                                DisableSelection {
-                                    PositionedDropdownMenu(
-                                        expanded = menuExpanded,
-                                        pointerPosition = menuPointer,
-                                        onDismissRequest = {
-                                            menuExpanded = false
-                                            menuPointer = null
-                                        },
-                                    ) {
-                                        val hasSelection = transcriptSelectionState.selectedTexts
-                                            .any { it.text.isNotEmpty() }
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(if (hasSelection) "Copy selection" else "Copy message")
-                                            },
-                                            onClick = {
-                                                val selectedText = transcriptSelectionState.selectedTexts
-                                                    .joinToString(separator = "\n") { it.text }
-                                                PlatformServices.copyText(
-                                                    selectedText.ifEmpty { message.text },
-                                                )
-                                                menuExpanded = false
-                                                menuPointer = null
-                                            },
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Fork here") },
-                                            onClick = {
-                                                menuExpanded = false
-                                                menuPointer = null
-                                                controller.fork(message.entryId)
-                                            },
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
-                }
-                TranscriptScrollbar(
-                    state = listState,
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .fillMaxHeight()
-                        .padding(horizontal = 2.dp, vertical = 4.dp),
+                val geometry = TranscriptGeometry(
+                    itemHeights = transcriptRows.map { transcriptMeasureCache.rows.getValue(it).height },
+                    itemSpacing = with(density) { 12.dp.roundToPx() },
+                    beforeContentPadding = with(density) { 16.dp.roundToPx() },
+                    afterContentPadding = with(density) { 3.dp.roundToPx() },
+                    viewportSize = constraints.maxHeight,
                 )
-                if (showScrollToBottom) {
-                    FilledTonalIconButton(
-                        onClick = { listState.requestScrollToItem(0) },
+                Box(Modifier.fillMaxSize()) {
+                    SelectionContainer(transcriptSelectionState, Modifier.fillMaxSize()) {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize().then(scrollMotion.modifier),
+                            contentPadding = PaddingValues(
+                                start = 16.dp,
+                                top = 16.dp,
+                                end = 16.dp,
+                                bottom = 3.dp,
+                            ),
+                            reverseLayout = true,
+                            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
+                            flingBehavior = scrollMotion.flingBehavior,
+                        ) {
+                            items(
+                                transcriptRows,
+                                key = TranscriptRow::key,
+                            ) { row ->
+                                val measured = transcriptMeasureCache.rows.getValue(row)
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .height(with(density) { measured.height.toDp() }),
+                                ) {
+                                    TranscriptRowContent(
+                                        row = row,
+                                        measured = measured,
+                                        styles = transcriptTextStyles,
+                                        controller = controller,
+                                        selectionState = transcriptSelectionState,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    TranscriptScrollbar(
+                        state = listState,
+                        geometry = geometry,
                         modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(12.dp)
-                            .size(44.dp),
-                    ) {
-                        Icon(
-                            imageVector = ScrollToBottomIcon,
-                            contentDescription = "Scroll to newest message",
-                            modifier = Modifier.size(22.dp),
-                        )
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .padding(horizontal = 2.dp, vertical = 4.dp),
+                    )
+                    if (showScrollToBottom) {
+                        FilledTonalIconButton(
+                            onClick = { listState.requestScrollToItem(0) },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(12.dp)
+                                .size(44.dp),
+                        ) {
+                            Icon(
+                                imageVector = ScrollToBottomIcon,
+                                contentDescription = "Scroll to newest message",
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
                     }
                 }
             }

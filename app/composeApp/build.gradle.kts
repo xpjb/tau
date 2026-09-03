@@ -35,7 +35,7 @@ kotlin {
             implementation("org.jetbrains.compose.ui:ui:1.12.0")
             implementation("org.jetbrains.compose.components:components-resources:1.12.0")
             implementation("com.mikepenz:multiplatform-markdown-renderer:0.45.0")
-            implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.45.0")
+            implementation("org.jetbrains:markdown:0.7.9")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
             implementation("io.ktor:ktor-client-core:3.5.2")

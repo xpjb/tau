@@ -13,6 +13,7 @@ import android.provider.OpenableColumns
 import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.ActivityResultLauncher
+import androidx.compose.foundation.gestures.ScrollableDefaults
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -276,8 +277,15 @@ actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Uni
 actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier = this
 
 @Composable
+actual fun rememberTranscriptScrollMotion() = TranscriptScrollMotion(
+    modifier = Modifier,
+    flingBehavior = ScrollableDefaults.flingBehavior(),
+)
+
+@Composable
 actual fun TranscriptScrollbar(
     state: LazyListState,
+    geometry: TranscriptGeometry,
     modifier: Modifier,
 ) = Unit
 
