@@ -43,6 +43,7 @@ kotlin {
         }
         androidMain.dependencies {
             implementation("androidx.activity:activity-compose:1.13.0")
+            implementation("androidx.core:core:1.18.0")
             implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
             implementation("io.ktor:ktor-client-okhttp:3.5.2")
         }

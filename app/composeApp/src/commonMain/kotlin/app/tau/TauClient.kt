@@ -79,7 +79,7 @@ class TauClient {
         sessionId: String,
         entryId: String,
         fileName: String,
-    ): String {
+    ): SavedDownload {
         val baseUrl = settings.serverUrl.trim().trimEnd('/')
         val response = client.get("$baseUrl/v1/sessions/$sessionId/attachments/$entryId") {
             header(HttpHeaders.Authorization, "Bearer ${settings.token}")

@@ -46,6 +46,7 @@ data class TauUiState(
     val uploadingSessions: Set<String> = emptySet(),
     val mobileChatVisible: Boolean = false,
     val notice: String? = null,
+    val downloadedFile: SavedDownload? = null,
     val error: String? = null,
 )
 
@@ -323,13 +324,19 @@ class TauController(dispatcher: CoroutineDispatcher) {
         val attachment = message.attachment ?: return
         scope.launch {
             try {
-                val location = client.downloadAttachment(
+                val download = client.downloadAttachment(
                     mutableState.value.settings,
                     sessionId,
                     message.entryId,
                     attachment.fileName,
                 )
-                mutableState.update { it.copy(notice = "Saved to $location", error = null) }
+                mutableState.update {
+                    it.copy(
+                        notice = "Saved to ${download.location}",
+                        downloadedFile = download,
+                        error = null,
+                    )
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -344,8 +351,24 @@ class TauController(dispatcher: CoroutineDispatcher) {
         mutableState.update { it.copy(error = null) }
     }
 
+    fun openDownloadedFile() {
+        val download = mutableState.value.downloadedFile ?: return
+        try {
+            PlatformServices.openDownload(download)
+            mutableState.update { it.copy(notice = null, downloadedFile = null) }
+        } catch (error: Throwable) {
+            mutableState.update {
+                it.copy(
+                    notice = null,
+                    downloadedFile = null,
+                    error = error.message ?: "The downloaded file could not be opened.",
+                )
+            }
+        }
+    }
+
     fun dismissNotice() {
-        mutableState.update { it.copy(notice = null) }
+        mutableState.update { it.copy(notice = null, downloadedFile = null) }
     }
 
     fun dispose() {

@@ -216,13 +216,20 @@ fun TauApp(controller: TauController) {
                                 .padding(16.dp)
                                 .widthIn(max = 640.dp),
                             action = {
-                                TextButton(
-                                    onClick = if (state.error != null) {
-                                        controller::dismissError
-                                    } else {
-                                        controller::dismissNotice
-                                    },
-                                ) { Text("Dismiss") }
+                                Row {
+                                    if (state.error == null && state.downloadedFile != null) {
+                                        TextButton(onClick = controller::openDownloadedFile) {
+                                            Text("Open")
+                                        }
+                                    }
+                                    TextButton(
+                                        onClick = if (state.error != null) {
+                                            controller::dismissError
+                                        } else {
+                                            controller::dismissNotice
+                                        },
+                                    ) { Text("Dismiss") }
+                                }
                             },
                         ) {
                             Text(message)
@@ -593,7 +600,7 @@ private fun SessionList(
                 contentPadding = PaddingValues(8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                items(state.sessions, key = SessionSummary::id) { session ->
+                items(state.sessions) { session ->
                     val selected = session.id == state.selectedSessionId
                     var menuExpanded by remember(session.id) { mutableStateOf(false) }
                     var menuPointer by remember(session.id) { mutableStateOf<Offset?>(null) }

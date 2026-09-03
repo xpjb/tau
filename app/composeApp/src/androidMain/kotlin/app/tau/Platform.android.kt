@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -11,6 +12,7 @@ import android.os.Process
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.format.DateFormat
+import android.webkit.MimeTypeMap
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.ActivityResultLauncher
 import androidx.compose.foundation.gestures.ScrollableDefaults
@@ -18,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.core.content.FileProvider
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
 import java.io.ByteArrayOutputStream
@@ -211,7 +214,7 @@ actual object PlatformServices {
 
     actual suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile> = emptyList()
 
-    actual fun saveDownload(fileName: String, bytes: ByteArray): String {
+    actual fun saveDownload(fileName: String, bytes: ByteArray): SavedDownload {
         val safeName = fileName
             .substringAfterLast('/')
             .substringAfterLast('\\')
@@ -220,10 +223,13 @@ actual object PlatformServices {
             .take(160)
             .ifBlank { "tau-attachment" }
         val context = TauAndroidContext.require()
+        val extension = safeName.substringAfterLast('.', "").lowercase()
+        val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            ?: "application/octet-stream"
         if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, safeName)
-                put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
                 put(
                     MediaStore.Downloads.RELATIVE_PATH,
                     Environment.DIRECTORY_DOWNLOADS + "/Tau",
@@ -243,7 +249,11 @@ actual object PlatformServices {
                 resolver.delete(uri, null, null)
                 throw error
             }
-            return "Downloads/Tau/$safeName"
+            return SavedDownload(
+                location = "Downloads/Tau/$safeName",
+                reference = uri.toString(),
+                mimeType = mimeType,
+            )
         }
         val directory = File(
             checkNotNull(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)),
@@ -252,7 +262,24 @@ actual object PlatformServices {
         directory.mkdirs()
         val target = File(directory, safeName)
         target.writeBytes(bytes)
-        return target.absolutePath
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.files",
+            target,
+        )
+        return SavedDownload(
+            location = target.absolutePath,
+            reference = uri.toString(),
+            mimeType = mimeType,
+        )
+    }
+
+    actual fun openDownload(download: SavedDownload) {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(Uri.parse(download.reference), download.mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        TauAndroidContext.require().startActivity(intent)
     }
 }
 

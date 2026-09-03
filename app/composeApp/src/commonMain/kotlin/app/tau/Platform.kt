@@ -20,6 +20,12 @@ data class ConnectionSettings(
 
 data class PickedFile(val name: String, val bytes: ByteArray)
 
+data class SavedDownload(
+    val location: String,
+    val reference: String,
+    val mimeType: String,
+)
+
 expect object PlatformServices {
     val platformName: String
     val appVersion: String
@@ -34,7 +40,8 @@ expect object PlatformServices {
     fun formatMessageTime(timestampMs: Long): String
     suspend fun pickFiles(): List<PickedFile>
     suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile>
-    fun saveDownload(fileName: String, bytes: ByteArray): String
+    fun saveDownload(fileName: String, bytes: ByteArray): SavedDownload
+    fun openDownload(download: SavedDownload)
 }
 
 expect fun Modifier.onSecondaryClick(onClick: (Offset) -> Unit): Modifier

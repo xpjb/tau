@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.cio.CIO
+import java.awt.Desktop
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Image
@@ -255,7 +256,7 @@ actual object PlatformServices {
         }
     }
 
-    actual fun saveDownload(fileName: String, bytes: ByteArray): String {
+    actual fun saveDownload(fileName: String, bytes: ByteArray): SavedDownload {
         val safeName = fileName
             .substringAfterLast('/')
             .substringAfterLast('\\')
@@ -283,7 +284,22 @@ actual object PlatformServices {
         } catch (_: Throwable) {
             Files.move(temporary, target)
         }
-        return target.toString()
+        return SavedDownload(
+            location = target.toString(),
+            reference = target.toString(),
+            mimeType = Files.probeContentType(target) ?: "application/octet-stream",
+        )
+    }
+
+    actual fun openDownload(download: SavedDownload) {
+        val path = Path.of(download.reference)
+        check(Files.isRegularFile(path)) { "The downloaded file no longer exists." }
+        check(Desktop.isDesktopSupported()) { "Opening files is not supported on this desktop." }
+        val desktop = Desktop.getDesktop()
+        check(desktop.isSupported(Desktop.Action.OPEN)) {
+            "Opening files is not supported on this desktop."
+        }
+        desktop.open(path.toFile())
     }
 }
 
