@@ -27,8 +27,8 @@ android {
         applicationId = "app.tau"
         minSdk = 26
         targetSdk = 37
-        versionCode = 9
-        versionName = "0.4.1"
+        versionCode = 10
+        versionName = "0.4.2"
     }
 
     signingConfigs {
