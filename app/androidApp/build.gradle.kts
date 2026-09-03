@@ -61,4 +61,5 @@ android {
 
 dependencies {
     implementation(project(":composeApp"))
+    implementation("androidx.core:core:1.18.0")
 }
