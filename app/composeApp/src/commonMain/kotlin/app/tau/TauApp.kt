@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.selection.SelectionState
@@ -59,6 +60,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +69,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -78,6 +81,7 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.contentDescription
@@ -95,11 +99,25 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.collectAsState
+import coil3.ImageLoader
+import coil3.compose.AsyncImage
+import coil3.compose.LocalPlatformContext
+import coil3.compose.setSingletonImageLoaderFactory
+import coil3.network.NetworkHeaders
+import coil3.network.httpHeaders
+import coil3.network.ktor3.KtorNetworkFetcherFactory
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
+import coil3.serviceLoaderEnabled
+import io.ktor.client.HttpClient
+import io.ktor.http.encodeURLPathPart
 import kotlin.math.roundToInt
 
 private val ConnectedColor = Color(0xFF4ADE80)
 private val ReconnectingColor = Color(0xFFFBBF24)
+private val InlineImagePreviewHeight = 260.dp
+private val AttachmentTopSpacing = 8.dp
+private val ImageDownloadSpacing = 4.dp
 
 private val TauDarkColors = darkColorScheme(
     primary = Color(0xFF67D4FF),
@@ -124,6 +142,18 @@ private val TauDarkColors = darkColorScheme(
 
 @Composable
 fun TauApp(controller: TauController) {
+    setSingletonImageLoaderFactory { context ->
+        ImageLoader.Builder(context)
+            .serviceLoaderEnabled(false)
+            .components {
+                add(
+                    KtorNetworkFetcherFactory(
+                        httpClient = { HttpClient(platformHttpEngine()) },
+                    ),
+                )
+            }
+            .build()
+    }
     val state by controller.state.collectAsState()
     DisposableEffect(controller) {
         controller.start()
@@ -400,6 +430,8 @@ private fun TranscriptRowContent(
     measured: MeasuredTranscriptRow,
     styles: TranscriptTextStyles,
     controller: TauController,
+    settings: ConnectionSettings,
+    sessionId: String,
     selectionState: SelectionState,
 ) {
     when (row) {
@@ -485,15 +517,95 @@ private fun TranscriptRowContent(
                             ChatText(checkNotNull(measured.text), styles)
                             message.attachment?.let { attachment ->
                                 DisableSelection {
-                                    OutlinedButton(
-                                        onClick = { controller.downloadAttachment(message) },
-                                        modifier = Modifier.height(40.dp),
-                                    ) {
-                                        Text(
-                                            "Download ${attachment.fileName}",
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
+                                    Column(Modifier.fillMaxWidth()) {
+                                        Spacer(Modifier.height(AttachmentTopSpacing))
+                                        if (attachment.kind == AttachmentKind.Image) {
+                                            val platformContext = LocalPlatformContext.current
+                                            val imageUrl = remember(
+                                                settings.serverUrl,
+                                                sessionId,
+                                                message.entryId,
+                                            ) {
+                                                val baseUrl = settings.serverUrl.trim().trimEnd('/')
+                                                "$baseUrl/v1/sessions/" +
+                                                    sessionId.encodeURLPathPart() +
+                                                    "/attachments/" +
+                                                    message.entryId.encodeURLPathPart()
+                                            }
+                                            val imageRequest = remember(
+                                                platformContext,
+                                                imageUrl,
+                                                settings.token,
+                                            ) {
+                                                ImageRequest.Builder(platformContext)
+                                                    .data(imageUrl)
+                                                    .httpHeaders(
+                                                        NetworkHeaders.Builder()
+                                                            .set(
+                                                                "Authorization",
+                                                                "Bearer ${settings.token}",
+                                                            )
+                                                            .set("Accept", "image/*")
+                                                            .build(),
+                                                    )
+                                                    .memoryCacheKey(
+                                                        "$imageUrl#${settings.token.hashCode()}",
+                                                    )
+                                                    .diskCachePolicy(CachePolicy.DISABLED)
+                                                    .build()
+                                            }
+                                            var imageLoaded by remember(imageUrl, settings.token) {
+                                                mutableStateOf<Boolean?>(null)
+                                            }
+                                            Box(
+                                                Modifier
+                                                    .widthIn(max = 520.dp)
+                                                    .fillMaxWidth()
+                                                    .height(InlineImagePreviewHeight)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(
+                                                        MaterialTheme.colorScheme.surface.copy(
+                                                            alpha = 0.52f,
+                                                        ),
+                                                    ),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                when (imageLoaded) {
+                                                    null -> CircularProgressIndicator(
+                                                        Modifier.size(28.dp),
+                                                        strokeWidth = 2.dp,
+                                                    )
+                                                    false -> Text(
+                                                        "Image preview unavailable",
+                                                        modifier = Modifier.padding(12.dp),
+                                                        style = MaterialTheme.typography.labelMedium,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    )
+                                                    true -> Unit
+                                                }
+                                                AsyncImage(
+                                                    model = imageRequest,
+                                                    contentDescription = attachment.caption
+                                                        ?: attachment.fileName,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    onLoading = { imageLoaded = null },
+                                                    onSuccess = { imageLoaded = true },
+                                                    onError = { imageLoaded = false },
+                                                    contentScale = ContentScale.Fit,
+                                                )
+                                            }
+                                            Spacer(Modifier.height(ImageDownloadSpacing))
+                                        }
+                                        OutlinedButton(
+                                            onClick = { controller.downloadAttachment(message) },
+                                            modifier = Modifier.height(40.dp),
+                                        ) {
+                                            Text(
+                                                "Download ${attachment.fileName}",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -940,7 +1052,10 @@ private fun ChatPanel(
                 transcriptMeasureCache.documents.keys.retainAll(retainedRows)
                 transcriptMeasureCache.rows.keys.retainAll(retainedRows)
                 val waitingSpacing = with(density) { 4.dp.roundToPx() }
-                val attachmentHeight = with(density) { 40.dp.roundToPx() }
+                val attachmentButtonHeight = with(density) { 40.dp.roundToPx() }
+                val attachmentTopSpacing = with(density) { AttachmentTopSpacing.roundToPx() }
+                val imagePreviewHeight = with(density) { InlineImagePreviewHeight.roundToPx() }
+                val imageDownloadSpacing = with(density) { ImageDownloadSpacing.roundToPx() }
                 fun measuredText(
                     row: TranscriptRow,
                     content: String,
@@ -1001,10 +1116,15 @@ private fun ChatPanel(
                                     constraints = Constraints(maxWidth = textWidth),
                                 ).size.height
                             } ?: 0
+                            val attachmentHeight = when (row.message.attachment?.kind) {
+                                null -> 0
+                                AttachmentKind.File -> attachmentTopSpacing + attachmentButtonHeight
+                                AttachmentKind.Image -> attachmentTopSpacing + imagePreviewHeight +
+                                    imageDownloadSpacing + attachmentButtonHeight
+                            }
                             MeasuredTranscriptRow(
                                 text = text,
-                                height = cardPadding + text.height + timestampHeight +
-                                    if (row.message.attachment == null) 0 else attachmentHeight,
+                                height = cardPadding + text.height + timestampHeight + attachmentHeight,
                             )
                         }
                     }
@@ -1046,6 +1166,8 @@ private fun ChatPanel(
                                         measured = measured,
                                         styles = transcriptTextStyles,
                                         controller = controller,
+                                        settings = state.settings,
+                                        sessionId = sessionId,
                                         selectionState = transcriptSelectionState,
                                     )
                                 }

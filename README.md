@@ -18,7 +18,7 @@ Tau starts a Pi RPC process when a chat receives a prompt and stops it after one
 - Send prompts, steer an active run, and abort.
 - Show accepted prompts immediately while they wait in Pi's steering queue.
 - Fork from any visible user message.
-- Attach local files for Pi to inspect and download files produced through Pi's `send_image` and `send_file` tools.
+- Attach local files for Pi to inspect, view images from Pi inline, and download files produced through Pi's `send_image` and `send_file` tools.
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
 - Use the same chats from Android and Windows.
 
