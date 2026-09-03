@@ -273,15 +273,11 @@ actual fun Modifier.onClipboardImagePaste(
 actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Unit): Modifier = this
 
 @Composable
-actual fun Modifier.onTranscriptAutoscroll(
-    state: LazyListState,
-    onUserScroll: () -> Unit,
-): Modifier = this
+actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier = this
 
 @Composable
 actual fun TranscriptScrollbar(
     state: LazyListState,
-    onUserScroll: () -> Unit,
     modifier: Modifier,
 ) = Unit
 

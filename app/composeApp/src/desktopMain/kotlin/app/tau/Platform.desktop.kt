@@ -6,7 +6,7 @@ import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.v2.ScrollbarAdapter
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -407,11 +407,7 @@ actual fun Modifier.onInterruptShortcut(enabled: Boolean, onInterrupt: () -> Uni
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-actual fun Modifier.onTranscriptAutoscroll(
-    state: LazyListState,
-    onUserScroll: () -> Unit,
-): Modifier {
-    val currentOnUserScroll = rememberUpdatedState(onUserScroll)
+actual fun Modifier.onTranscriptAutoscroll(state: LazyListState): Modifier {
     var anchor by remember(state) { mutableStateOf<Offset?>(null) }
     var pointer by remember(state) { mutableStateOf(Offset.Zero) }
     var middlePressedAt by remember(state) { mutableStateOf<Long?>(null) }
@@ -432,7 +428,7 @@ actual fun Modifier.onTranscriptAutoscroll(
             val excess = abs(distance) - deadZone
             if (excess > 0f) {
                 val speed = distance.sign * minOf(maxSpeed, excess * 30f)
-                state.scrollBy(speed * elapsedSeconds)
+                state.scrollBy(-speed * elapsedSeconds)
             }
         }
     }
@@ -440,7 +436,6 @@ actual fun Modifier.onTranscriptAutoscroll(
     return onPointerEvent(PointerEventType.Move) { event ->
         if (anchor != null) event.changes.firstOrNull()?.let { pointer = it.position }
     }.onPointerEvent(PointerEventType.Scroll) {
-        currentOnUserScroll.value()
         anchor = null
         middlePressedAt = null
     }.onPointerEvent(PointerEventType.Press) { event ->
@@ -448,7 +443,6 @@ actual fun Modifier.onTranscriptAutoscroll(
         when (event.button) {
             PointerButton.Tertiary -> {
                 if (anchor == null) {
-                    currentOnUserScroll.value()
                     anchor = position
                     pointer = position
                     middlePressedAt = System.nanoTime()
@@ -509,16 +503,62 @@ actual fun Modifier.onTranscriptAutoscroll(
 @OptIn(ExperimentalComposeUiApi::class)
 actual fun TranscriptScrollbar(
     state: LazyListState,
-    onUserScroll: () -> Unit,
     modifier: Modifier,
 ) {
-    val currentOnUserScroll = rememberUpdatedState(onUserScroll)
+    val virtualItemSize = with(LocalDensity.current) { 84.dp.toPx().toDouble() }
+    val adapter = remember(state, virtualItemSize) {
+        object : ScrollbarAdapter {
+            override val viewportSize: Double
+                get() = state.layoutInfo.viewportSize.height.toDouble().coerceAtLeast(1.0)
+
+            override val contentSize: Double
+                get() {
+                    if (!state.canScrollBackward && !state.canScrollForward) return viewportSize
+                    return maxOf(
+                        state.layoutInfo.totalItemsCount * virtualItemSize,
+                        viewportSize + virtualItemSize,
+                    )
+                }
+
+            override val scrollOffset: Double
+                get() {
+                    val maximum = (contentSize - viewportSize).coerceAtLeast(0.0)
+                    if (maximum == 0.0 || !state.canScrollBackward) return 0.0
+                    if (!state.canScrollForward) return maximum
+                    val count = state.layoutInfo.totalItemsCount
+                    val visibleItem = state.layoutInfo.visibleItemsInfo.firstOrNull {
+                        it.index == state.firstVisibleItemIndex
+                    }
+                    if (count <= 1) {
+                        val range = ((visibleItem?.size ?: 1) - viewportSize).coerceAtLeast(1.0)
+                        return (state.firstVisibleItemScrollOffset / range * maximum)
+                            .coerceIn(0.0, maximum)
+                    }
+                    val fraction = state.firstVisibleItemScrollOffset.toDouble() /
+                        (visibleItem?.size ?: 1).coerceAtLeast(1)
+                    return ((state.firstVisibleItemIndex + fraction) / (count - 1) * maximum)
+                        .coerceIn(0.0, maximum)
+                }
+
+            override suspend fun scrollTo(scrollOffset: Double) {
+                val count = state.layoutInfo.totalItemsCount
+                if (count == 0) return
+                val maximum = (contentSize - viewportSize).coerceAtLeast(0.0)
+                val index = if (maximum == 0.0) {
+                    0
+                } else {
+                    (scrollOffset.coerceIn(0.0, maximum) / maximum * (count - 1))
+                        .toInt()
+                        .coerceIn(0, count - 1)
+                }
+                state.scrollToItem(index)
+            }
+        }
+    }
     VerticalScrollbar(
-        adapter = rememberScrollbarAdapter(state),
-        modifier = modifier.onPointerEvent(PointerEventType.Press) {
-            currentOnUserScroll.value()
-        },
-        reverseLayout = false,
+        adapter = adapter,
+        modifier = modifier,
+        reverseLayout = true,
         style = LocalScrollbarStyle.current.copy(
             thickness = 8.dp,
             unhoverColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f),
