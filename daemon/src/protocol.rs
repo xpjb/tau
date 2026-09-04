@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::state::SessionModel;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
@@ -221,6 +223,8 @@ pub struct SessionSummary {
     pub title: String,
     pub status: SessionStatus,
     pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<SessionModel>,
     pub parent_id: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,

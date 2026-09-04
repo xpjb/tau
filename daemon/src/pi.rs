@@ -54,6 +54,12 @@ impl RpcProcess {
             .kill_on_drop(true);
         if let Some(session) = session {
             command.arg("--session").arg(session);
+        } else {
+            command
+                .arg("--model")
+                .arg(&config.default_model)
+                .arg("--thinking")
+                .arg(&config.default_thinking_level);
         }
 
         let mut child = command.spawn().with_context(|| {

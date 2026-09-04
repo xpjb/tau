@@ -9,6 +9,8 @@ pub struct Config {
     pub bind: SocketAddr,
     pub token: Arc<str>,
     pub pi_command: PathBuf,
+    pub default_model: String,
+    pub default_thinking_level: String,
     pub cwd: PathBuf,
     pub state_path: PathBuf,
     pub session_dir: PathBuf,
@@ -35,6 +37,28 @@ impl Config {
         let pi_command = std::env::var_os("TAU_PI_COMMAND")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/usr/bin/pi".into());
+        let default_model = std::env::var("TAU_DEFAULT_MODEL")
+            .unwrap_or_else(|_| "openai-codex/gpt-5.6-sol".to_owned());
+        let valid_model = default_model
+            .split_once('/')
+            .is_some_and(|(provider, model_id)| {
+                !provider.is_empty()
+                    && !model_id.is_empty()
+                    && !default_model.chars().any(char::is_whitespace)
+            });
+        if !valid_model {
+            bail!("TAU_DEFAULT_MODEL must be provider/model");
+        }
+        let default_thinking_level = std::env::var("TAU_DEFAULT_THINKING_LEVEL")
+            .unwrap_or_else(|_| "max".to_owned());
+        if !matches!(
+            default_thinking_level.as_str(),
+            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        ) {
+            bail!(
+                "TAU_DEFAULT_THINKING_LEVEL must be off, minimal, low, medium, high, xhigh, or max"
+            );
+        }
         let cwd = std::env::var_os("TAU_CWD")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root".into());
@@ -72,6 +96,8 @@ impl Config {
             bind,
             token: Arc::from(token),
             pi_command,
+            default_model,
+            default_thinking_level,
             cwd,
             state_path,
             session_dir,

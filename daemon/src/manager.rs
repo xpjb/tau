@@ -18,7 +18,7 @@ use crate::protocol::{
     SessionStatus, SessionSummary, SlashCommand, SlashCommandArgument, SlashCommandSource,
     UploadedFile, MAX_PROMPT_CHARS, MAX_TITLE_CHARS, MAX_UPLOAD_BYTES,
 };
-use crate::state::StateStore;
+use crate::state::{SessionModel, StateStore};
 
 const EVENT_BUFFER: usize = 2048;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -158,6 +158,7 @@ impl AgentManager {
                     title: stored.title,
                     status: runtime.status,
                     detail: runtime.detail,
+                    model: stored.model,
                     parent_id: stored.parent_id,
                     created_at_ms: stored.created_at_ms,
                     updated_at_ms: stored.updated_at_ms,
@@ -169,10 +170,24 @@ impl AgentManager {
 
     pub async fn create_session(&self) -> Result<String> {
         self.ensure_running()?;
+        let (provider, model_id) = self
+            .inner
+            .config
+            .default_model
+            .split_once('/')
+            .expect("validated Tau default model");
         let id = self
             .inner
             .state
-            .create("New chat".to_owned(), None, None)
+            .create(
+                "New chat".to_owned(),
+                None,
+                None,
+                Some(SessionModel {
+                    provider: provider.to_owned(),
+                    model_id: model_id.to_owned(),
+                }),
+            )
             .await?;
         self.broadcast_sessions().await;
         Ok(id)
@@ -274,11 +289,19 @@ impl AgentManager {
                         let (provider, model_id) = arguments.split_once('/').filter(
                             |(provider, model_id)| !provider.is_empty() && !model_id.is_empty(),
                         ).context("Usage: /model <provider/model>")?;
-                        process.request(json!({
+                        let response = process.request(json!({
                             "type": "set_model",
                             "provider": provider,
                             "modelId": model_id,
                         })).await?;
+                        let model = response
+                            .get("data")
+                            .and_then(session_model_from_pi_model)
+                            .unwrap_or_else(|| SessionModel {
+                                provider: provider.to_owned(),
+                                model_id: model_id.to_owned(),
+                            });
+                        self.inner.state.set_model(id, model).await?;
                         self.inner.state.touch(id).await?;
                         Ok(format!("Model set to {provider}/{model_id}."))
                     }
@@ -894,20 +917,26 @@ impl AgentManager {
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             let state = temporary.request(json!({ "type": "get_state" })).await?;
-            let child_file = state
+            let data = state
                 .get("data")
-                .and_then(|data| data.get("sessionFile"))
+                .context("forked Pi state response had no data")?;
+            let child_file = data
+                .get("sessionFile")
                 .and_then(Value::as_str)
                 .context("forked Pi session has no session file")?
                 .to_owned();
             if child_file == parent_file {
                 bail!("Pi did not create an independent session file");
             }
-            Ok::<_, anyhow::Error>((child_file, draft))
+            let model = data
+                .get("model")
+                .and_then(session_model_from_pi_model)
+                .or_else(|| parent.model.clone());
+            Ok::<_, anyhow::Error>((child_file, draft, model))
         }
         .await;
         temporary.shutdown().await;
-        let (child_file, draft) = result?;
+        let (child_file, draft, model) = result?;
 
         let prefix = match operation {
             BranchOperation::Fork(_) => "Fork of ",
@@ -920,6 +949,7 @@ impl AgentManager {
                 bounded(&format!("{prefix}{}", parent.title), MAX_TITLE_CHARS),
                 Some(id.to_owned()),
                 Some(child_file),
+                model,
             )
             .await?;
         self.broadcast_sessions().await;
@@ -1120,6 +1150,9 @@ impl AgentManager {
             }
         };
         let data = state.get("data").context("Pi state response had no data")?;
+        if let Some(model) = data.get("model").and_then(session_model_from_pi_model) {
+            self.inner.state.set_model(id, model).await?;
+        }
         let session_file = data
             .get("sessionFile")
             .and_then(Value::as_str)
@@ -1650,6 +1683,18 @@ impl AgentManager {
     }
 }
 
+fn session_model_from_pi_model(model: &Value) -> Option<SessionModel> {
+    let provider = model.get("provider")?.as_str()?.trim();
+    let model_id = model.get("id")?.as_str()?.trim();
+    if provider.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    Some(SessionModel {
+        provider: bounded(provider, 120),
+        model_id: bounded(model_id, 240),
+    })
+}
+
 fn active_chat_messages(entries: &[Value], leaf_id: Option<&str>) -> Result<Vec<ChatMessage>> {
     let Some(mut current) = leaf_id else {
         return Ok(Vec::new());
@@ -1865,6 +1910,10 @@ mod tests {
 import json, os, sys, threading, time
 session_dir = sys.argv[sys.argv.index("--session-dir") + 1]
 os.makedirs(session_dir, exist_ok=True)
+with open(os.path.join(session_dir, "spawn-args"), "a") as marker:
+    marker.write(json.dumps(sys.argv[1:]) + "\n")
+selected_model = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else "test/model"
+current_provider, current_model = selected_model.split("/", 1)
 session_file = os.path.join(session_dir, "mock.jsonl")
 if not os.path.exists(session_file) or os.path.getsize(session_file) == 0:
     with open(session_file, "w") as session:
@@ -1886,7 +1935,7 @@ for line in sys.stdin:
     kind = command.get("type")
     response = {"id": ident, "type": "response", "command": kind, "success": True}
     if kind == "get_state":
-        response["data"] = {"sessionFile": session_file, "isStreaming": False, "isCompacting": False}
+        response["data"] = {"sessionFile": session_file, "isStreaming": False, "isCompacting": False, "model":{"provider":current_provider,"id":current_model,"name":"Test Model"}}
         print(json.dumps(response), flush=True)
     elif kind == "get_commands":
         response["data"] = {"commands": [
@@ -1901,6 +1950,11 @@ for line in sys.stdin:
         print(json.dumps(response), flush=True)
     elif kind == "get_available_thinking_levels":
         response["data"] = {"levels": ["low", "high"]}
+        print(json.dumps(response), flush=True)
+    elif kind == "set_model":
+        current_provider = command["provider"]
+        current_model = command["modelId"]
+        response["data"] = {"provider":current_provider,"id":current_model,"name":"Selected Model"}
         print(json.dumps(response), flush=True)
     elif kind == "get_entries":
         response["data"] = {"entries": entries, "leafId": entries[-1]["id"] if entries else None}
@@ -1951,6 +2005,8 @@ for line in sys.stdin:
             bind: "127.0.0.1:0".parse().unwrap(),
             token: Arc::from("test-token-with-at-least-thirty-two-characters"),
             pi_command: mock,
+            default_model: "test/model".to_owned(),
+            default_thinking_level: "high".to_owned(),
             cwd: root.clone(),
             state_path: root.join("state.json"),
             session_dir,
@@ -1989,6 +2045,13 @@ for line in sys.stdin:
 
         let mut events = manager.subscribe();
         let session_id = manager.create_session().await.unwrap();
+        assert_eq!(
+            manager.inner.state.get(&session_id).unwrap().model,
+            Some(SessionModel {
+                provider: "test".to_owned(),
+                model_id: "model".to_owned(),
+            }),
+        );
         let uploaded = manager
             .store_upload(&session_id, "../source file.rs", b"fn main() {}\n")
             .await
@@ -2007,6 +2070,21 @@ for line in sys.stdin:
         assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
         assert!(runtime.process.lock().await.is_none());
         manager.prompt(&session_id, "Say hello").await.unwrap();
+        let spawn_arguments = fs::read_to_string(root.join("pi-sessions/spawn-args"))
+            .await
+            .unwrap();
+        let spawn_arguments =
+            serde_json::from_str::<Vec<String>>(spawn_arguments.lines().next().unwrap()).unwrap();
+        assert!(
+            spawn_arguments
+                .windows(2)
+                .any(|arguments| arguments == ["--model", "test/model"])
+        );
+        assert!(
+            spawn_arguments
+                .windows(2)
+                .any(|arguments| arguments == ["--thinking", "high"])
+        );
 
         let mut streamed = String::new();
         let history = tokio::time::timeout(Duration::from_secs(5), async {
@@ -2096,6 +2174,16 @@ for line in sys.stdin:
         let thinking = manager.prompt(&session_id, "/thinking high").await.unwrap();
         assert!(thinking.command_handled);
         assert_eq!(thinking.notice.as_deref(), Some("Thinking level set to high."));
+        let model = manager.prompt(&session_id, "/model test/other").await.unwrap();
+        assert!(model.command_handled);
+        assert_eq!(model.notice.as_deref(), Some("Model set to test/other."));
+        assert_eq!(
+            manager.inner.state.get(&session_id).unwrap().model,
+            Some(SessionModel {
+                provider: "test".to_owned(),
+                model_id: "other".to_owned(),
+            }),
+        );
         assert!(manager.prompt(&session_id, "/settings").await.is_err());
 
         let session_file = manager

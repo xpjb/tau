@@ -12,6 +12,8 @@ Environment=HOME=/root
 Environment=RUST_LOG=info
 Environment=TAU_CWD=/root
 Environment=TAU_PI_COMMAND=/usr/bin/pi
+Environment=TAU_DEFAULT_MODEL=openai-codex/gpt-5.6-sol
+Environment=TAU_DEFAULT_THINKING_LEVEL=max
 Environment=TAU_STATE_PATH=/var/lib/tau/state.json
 Environment=TAU_SESSION_DIR=/var/lib/tau/pi-sessions
 Environment=TAU_TELEMETRY_PATH=/var/lib/tau/client-crashes.jsonl

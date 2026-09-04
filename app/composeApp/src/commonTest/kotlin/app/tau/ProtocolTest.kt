@@ -3,9 +3,21 @@ package app.tau
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlinx.serialization.encodeToString
 
 class ProtocolTest {
+    @Test
+    fun fuzzy_completion_matches_compact_model_queries() {
+        val direct = fuzzyCompletionScore("openai-codex/gpt-5.6-sol", "cod sol")
+        val scattered = fuzzyCompletionScore("test/c---o---d---s---o---l", "cod sol")
+        assertNotNull(direct)
+        assertNotNull(scattered)
+        kotlin.test.assertTrue(direct < scattered)
+        assertNull(fuzzyCompletionScore("anthropic/claude-sonnet", "gpt sol"))
+    }
+
     @Test
     fun encodes_commands_and_decodes_daemon_events() {
         assertEquals(
@@ -34,6 +46,12 @@ class ProtocolTest {
         assertEquals("chat", state.sessionId)
         assertEquals(SessionStatus.Running, state.status)
         assertEquals("Running bash", state.detail)
+
+        val sessions = assertIs<Sessions>(TauJson.decodeFromString<ServerMessage>(
+            """{"type":"sessions","sessions":[{"id":"chat","title":"Work","status":"idle","model":{"provider":"openai-codex","modelId":"gpt-5.6-sol"},"createdAtMs":1,"updatedAtMs":2}]}""",
+        ))
+        assertEquals("openai-codex", sessions.sessions.single().model?.provider)
+        assertEquals("gpt-5.6-sol", sessions.sessions.single().model?.modelId)
 
         val history = assertIs<History>(TauJson.decodeFromString<ServerMessage>(
             """{"type":"history","sessionId":"chat","messages":[{"entryId":"tool","role":"system","text":"Build","attachment":{"kind":"file","fileName":"tau.zip","caption":"Build","size":12345}}]}""",

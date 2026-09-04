@@ -190,11 +190,18 @@ data class ExtensionUiRequest(
 )
 
 @Serializable
+data class SessionModel(
+    val provider: String,
+    val modelId: String,
+)
+
+@Serializable
 data class SessionSummary(
     val id: String,
     val title: String,
     val status: SessionStatus,
     val detail: String? = null,
+    val model: SessionModel? = null,
     val parentId: String? = null,
     val createdAtMs: Long,
     val updatedAtMs: Long,

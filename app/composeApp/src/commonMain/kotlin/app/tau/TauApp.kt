@@ -140,6 +140,25 @@ private data class ComposerSuggestion(
     val replaceEnd: Int,
 )
 
+internal fun fuzzyCompletionScore(value: String, query: String): Int? {
+    val needle = query.lowercase().filterNot(Char::isWhitespace)
+    if (needle.isEmpty()) return 0
+    val haystack = value.lowercase().filterNot(Char::isWhitespace)
+    val substring = haystack.indexOf(needle)
+    if (substring >= 0) {
+        return substring * 4 + (haystack.length - needle.length).coerceAtMost(200)
+    }
+    var previous = -1
+    var gaps = 0
+    for (character in needle) {
+        val index = haystack.indexOf(character, previous + 1)
+        if (index < 0) return null
+        gaps += index - previous - 1
+        previous = index
+    }
+    return 1_000 + gaps * 4 + (haystack.length - needle.length).coerceAtMost(200)
+}
+
 private fun formatByteCount(bytes: Long): String {
     val amount = bytes.coerceAtLeast(0)
     if (amount < 1_024) return "$amount B"
@@ -1085,6 +1104,16 @@ private fun SessionList(
                                     },
                                 )
                                 Spacer(Modifier.height(4.dp))
+                                session.model?.let { model ->
+                                    Text(
+                                        "${model.provider}/${model.modelId}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Spacer(Modifier.height(2.dp))
+                                }
                                 Text(
                                     session.detail ?: session.status.label,
                                     style = MaterialTheme.typography.labelSmall,
@@ -1230,14 +1259,15 @@ private fun ChatPanel(
             val prefix = rest
             availableCommands
                 .asSequence()
-                .filter { command -> command.name.contains(prefix, ignoreCase = true) }
+                .mapNotNull { command ->
+                    fuzzyCompletionScore(command.name, prefix)?.let { score -> command to score }
+                }
                 .sortedWith(
-                    compareBy<SlashCommand> {
-                        !it.name.startsWith(prefix, ignoreCase = true)
-                    }.thenBy(SlashCommand::name),
+                    compareBy<Pair<SlashCommand, Int>> { it.second }
+                        .thenBy { it.first.name },
                 )
                 .take(6)
-                .map { command ->
+                .map { (command, _) ->
                     ComposerSuggestion(
                         value = "/${command.name}",
                         label = buildString {
@@ -1259,31 +1289,52 @@ private fun ChatPanel(
                     index + 1
                 }
             val argumentPrefix = editorValue.text.substring(argumentStart)
-            availableCommands
+            val arguments = availableCommands
                 .firstOrNull { command -> command.name == commandName }
                 ?.arguments
                 .orEmpty()
-                .asSequence()
-                .filter { argument ->
-                    argumentPrefix.none { character -> character.isWhitespace() } &&
-                        argument.value.contains(argumentPrefix, ignoreCase = true)
+            val selectedArgument = argumentPrefix.lastOrNull()?.isWhitespace() == true &&
+                arguments.any { argument -> argument.value == argumentPrefix.trim() }
+            if (selectedArgument) {
+                emptyList()
+            } else {
+                val currentModel = session.model?.let { model ->
+                    "${model.provider}/${model.modelId}"
                 }
-                .sortedWith(
-                    compareBy<SlashCommandArgument> {
-                        !it.value.startsWith(argumentPrefix, ignoreCase = true)
-                    }.thenBy(SlashCommandArgument::value),
-                )
-                .take(6)
-                .map { argument ->
-                    ComposerSuggestion(
-                        value = argument.value,
-                        label = argument.value,
-                        description = argument.description,
-                        replaceStart = argumentStart,
-                        replaceEnd = editorValue.text.length,
+                arguments
+                    .asSequence()
+                    .mapNotNull { argument ->
+                        val score = listOfNotNull(
+                            fuzzyCompletionScore(argument.value, argumentPrefix),
+                            argument.description?.let { description ->
+                                fuzzyCompletionScore(description, argumentPrefix)
+                            },
+                        ).minOrNull() ?: return@mapNotNull null
+                        Triple(argument, score, argument.value == currentModel)
+                    }
+                    .sortedWith(
+                        compareBy<Triple<SlashCommandArgument, Int, Boolean>> {
+                            if (argumentPrefix.isBlank() && it.third) -1 else it.second
+                        }.thenBy { it.first.value },
                     )
-                }
-                .toList()
+                    .take(6)
+                    .map { (argument, _, current) ->
+                        ComposerSuggestion(
+                            value = argument.value,
+                            label = argument.value,
+                            description = when {
+                                current && argument.description != null -> {
+                                    "Current · ${argument.description}"
+                                }
+                                current -> "Current"
+                                else -> argument.description
+                            },
+                            replaceStart = argumentStart,
+                            replaceEnd = editorValue.text.length,
+                        )
+                    }
+                    .toList()
+            }
         }
     } else {
         emptyList()
@@ -1301,6 +1352,16 @@ private fun ChatPanel(
         )
         editorValue = TextFieldValue(completed, TextRange(completed.length))
         controller.setDraft(sessionId, completed)
+    }
+    val completeBareModelCommand: () -> Boolean = {
+        if (attachments.isEmpty() && editorValue.text == "/model") {
+            val completed = "/model "
+            editorValue = TextFieldValue(completed, TextRange(completed.length))
+            controller.setDraft(sessionId, completed)
+            true
+        } else {
+            false
+        }
     }
     val listState = rememberLazyListState()
     val transcriptSelectionState = rememberSelectionState()
@@ -1779,8 +1840,10 @@ private fun ChatPanel(
                         } else {
                             FilledIconButton(
                                 onClick = {
-                                    listState.requestScrollToItem(0)
-                                    controller.sendPrompt()
+                                    if (!completeBareModelCommand()) {
+                                        listState.requestScrollToItem(0)
+                                        controller.sendPrompt()
+                                    }
                                 },
                                 enabled = canSend,
                                 modifier = Modifier.size(40.dp),
@@ -1803,6 +1866,15 @@ private fun ChatPanel(
                         .onClipboardImagePaste(canAttach, controller::attachClipboardImage)
                         .onPreviewKeyEvent { event ->
                             when {
+                                PlatformServices.platformName != "android" &&
+                                    event.key == Key.Enter &&
+                                    !event.isShiftPressed &&
+                                    editorValue.text == "/model" -> {
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        completeBareModelCommand()
+                                    }
+                                    true
+                                }
                                 suggestions.isNotEmpty() && event.key == Key.DirectionDown -> {
                                     if (event.type == KeyEventType.KeyDown) {
                                         selectedSuggestion = (selectedSuggestion + 1)
