@@ -34,8 +34,23 @@ data class CreateSession(override val id: String) : ClientRequest
 data class OpenSession(override val id: String, val sessionId: String) : ClientRequest
 
 @Serializable
+@SerialName("get_commands")
+data class GetCommands(override val id: String, val sessionId: String) : ClientRequest
+
+@Serializable
 @SerialName("prompt")
 data class Prompt(override val id: String, val sessionId: String, val text: String) : ClientRequest
+
+@Serializable
+@SerialName("extension_ui_response")
+data class RespondExtensionUi(
+    override val id: String,
+    val sessionId: String,
+    val requestId: String,
+    val value: String? = null,
+    val confirmed: Boolean? = null,
+    val cancelled: Boolean = false,
+) : ClientRequest
 
 @Serializable
 @SerialName("abort")
@@ -77,8 +92,28 @@ data class Response(
     val ok: Boolean,
     val sessionId: String? = null,
     val draft: String? = null,
+    val commandHandled: Boolean? = null,
+    val notice: String? = null,
     val error: String? = null,
 ) : ServerMessage
+
+@Serializable
+@SerialName("commands")
+data class Commands(
+    val sessionId: String,
+    val commands: List<SlashCommand>,
+) : ServerMessage
+
+@Serializable
+@SerialName("extension_ui")
+data class ExtensionUi(
+    val sessionId: String,
+    val request: ExtensionUiRequest,
+) : ServerMessage
+
+@Serializable
+@SerialName("extension_error")
+data class ExtensionError(val sessionId: String, val error: String) : ServerMessage
 
 @Serializable
 @SerialName("sessions")
@@ -111,6 +146,48 @@ data class StreamEnd(val sessionId: String) : ServerMessage
 @Serializable
 @SerialName("resync_required")
 data object ResyncRequired : ServerMessage
+
+@Serializable
+data class SlashCommand(
+    val name: String,
+    val description: String? = null,
+    val source: SlashCommandSource,
+    val argumentHint: String? = null,
+    val arguments: List<SlashCommandArgument> = emptyList(),
+)
+
+@Serializable
+enum class SlashCommandSource {
+    @SerialName("extension") Extension,
+    @SerialName("prompt") Prompt,
+    @SerialName("skill") Skill,
+    @SerialName("builtin") Builtin,
+}
+
+@Serializable
+data class SlashCommandArgument(
+    val value: String,
+    val description: String? = null,
+)
+
+@Serializable
+data class ExtensionUiRequest(
+    val id: String,
+    val method: String,
+    val title: String? = null,
+    val message: String? = null,
+    val options: List<String> = emptyList(),
+    val placeholder: String? = null,
+    val prefill: String? = null,
+    val timeout: Long? = null,
+    val notifyType: String? = null,
+    val statusKey: String? = null,
+    val statusText: String? = null,
+    val widgetKey: String? = null,
+    val widgetLines: List<String> = emptyList(),
+    val widgetPlacement: String? = null,
+    val text: String? = null,
+)
 
 @Serializable
 data class SessionSummary(

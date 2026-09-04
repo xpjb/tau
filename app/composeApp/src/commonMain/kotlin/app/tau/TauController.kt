@@ -30,6 +30,16 @@ data class OutgoingMessage(
     val occurrence: Int,
 )
 
+data class SessionExtensionUi(
+    val sessionId: String,
+    val request: ExtensionUiRequest,
+)
+
+data class ExtensionWidget(
+    val lines: List<String>,
+    val placement: String?,
+)
+
 data class TauUiState(
     val settings: ConnectionSettings = ConnectionSettings(),
     val editingSettings: Boolean = false,
@@ -42,6 +52,11 @@ data class TauUiState(
     val partials: Map<String, String> = emptyMap(),
     val drafts: Map<String, String> = emptyMap(),
     val attachments: Map<String, List<PickedFile>> = emptyMap(),
+    val slashCommands: Map<String, List<SlashCommand>> = emptyMap(),
+    val loadingCommands: Set<String> = emptySet(),
+    val extensionDialogs: List<SessionExtensionUi> = emptyList(),
+    val extensionStatuses: Map<String, Map<String, String>> = emptyMap(),
+    val extensionWidgets: Map<String, Map<String, ExtensionWidget>> = emptyMap(),
     val pickingFiles: Boolean = false,
     val uploadingSessions: Set<String> = emptySet(),
     val mobileChatVisible: Boolean = false,
@@ -128,7 +143,26 @@ class TauController(dispatcher: CoroutineDispatcher) {
     }
 
     fun setDraft(sessionId: String, draft: String) {
-        mutableState.update { it.copy(drafts = it.drafts + (sessionId to draft)) }
+        val current = mutableState.value
+        val loadCommands = draft.startsWith('/') &&
+            current.connectionStatus == ConnectionStatus.Connected &&
+            sessionId !in current.slashCommands &&
+            sessionId !in current.loadingCommands
+        mutableState.update {
+            it.copy(
+                drafts = it.drafts + (sessionId to draft),
+                loadingCommands = if (loadCommands) {
+                    it.loadingCommands + sessionId
+                } else {
+                    it.loadingCommands
+                },
+            )
+        }
+        if (loadCommands) {
+            val id = nextRequestId()
+            pending[id] = PendingAction.Commands(sessionId)
+            send(GetCommands(id, sessionId))
+        }
     }
 
     fun pickFiles() {
@@ -293,6 +327,40 @@ class TauController(dispatcher: CoroutineDispatcher) {
         }
     }
 
+    fun dismissExpiredExtensionUi(dialog: SessionExtensionUi) {
+        mutableState.update {
+            it.copy(extensionDialogs = it.extensionDialogs.filterNot { active ->
+                active.sessionId == dialog.sessionId && active.request.id == dialog.request.id
+            })
+        }
+    }
+
+    fun respondExtensionUi(
+        dialog: SessionExtensionUi,
+        value: String? = null,
+        confirmed: Boolean? = null,
+        cancelled: Boolean = false,
+    ) {
+        if (mutableState.value.connectionStatus != ConnectionStatus.Connected) return
+        mutableState.update {
+            it.copy(extensionDialogs = it.extensionDialogs.filterNot { active ->
+                active.sessionId == dialog.sessionId && active.request.id == dialog.request.id
+            })
+        }
+        val id = nextRequestId()
+        pending[id] = PendingAction.ExtensionUi(dialog)
+        send(
+            RespondExtensionUi(
+                id = id,
+                sessionId = dialog.sessionId,
+                requestId = dialog.request.id,
+                value = value,
+                confirmed = confirmed,
+                cancelled = cancelled,
+            ),
+        )
+    }
+
     fun abort() {
         val sessionId = mutableState.value.selectedSessionId ?: return
         val id = nextRequestId()
@@ -408,7 +476,15 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 openedSessions.clear()
                 pending.clear()
                 mutableState.update {
-                    it.copy(connectionStatus = ConnectionStatus.Offline, daemonVersion = null)
+                    it.copy(
+                        connectionStatus = ConnectionStatus.Offline,
+                        daemonVersion = null,
+                        slashCommands = emptyMap(),
+                        loadingCommands = emptySet(),
+                        extensionDialogs = emptyList(),
+                        extensionStatuses = emptyMap(),
+                        extensionWidgets = emptyMap(),
+                    )
                 }
                 delay(ReconnectDelayMillis)
             }
@@ -465,27 +541,48 @@ class TauController(dispatcher: CoroutineDispatcher) {
                             } else {
                                 it.attachments
                             },
+                            loadingCommands = if (action is PendingAction.Commands) {
+                                it.loadingCommands - action.sessionId
+                            } else {
+                                it.loadingCommands
+                            },
                             error = message.error ?: "Tau rejected the request.",
                         )
                     }
                 } else if (action is PendingAction.Prompt) {
                     mutableState.update { current ->
-                        val outgoing = reconcileOutgoingMessages(
-                            current.outgoingMessages[action.sessionId].orEmpty() + OutgoingMessage(
-                                requestId = message.requestId,
-                                text = action.displayText,
-                                afterEntryId = action.afterEntryId,
-                                occurrence = action.occurrence,
-                            ),
-                            current.histories[action.sessionId].orEmpty(),
-                        )
-                        current.copy(
-                            outgoingMessages = if (outgoing.isEmpty()) {
-                                current.outgoingMessages - action.sessionId
-                            } else {
-                                current.outgoingMessages + (action.sessionId to outgoing)
-                            },
-                        )
+                        if (message.commandHandled == true) {
+                            current.copy(
+                                notice = message.notice ?: current.notice,
+                                downloadedFile = if (message.notice != null) {
+                                    null
+                                } else {
+                                    current.downloadedFile
+                                },
+                            )
+                        } else {
+                            val outgoing = reconcileOutgoingMessages(
+                                current.outgoingMessages[action.sessionId].orEmpty() +
+                                    OutgoingMessage(
+                                        requestId = message.requestId,
+                                        text = action.displayText,
+                                        afterEntryId = action.afterEntryId,
+                                        occurrence = action.occurrence,
+                                    ),
+                                current.histories[action.sessionId].orEmpty(),
+                            )
+                            current.copy(
+                                outgoingMessages = if (outgoing.isEmpty()) {
+                                    current.outgoingMessages - action.sessionId
+                                } else {
+                                    current.outgoingMessages + (action.sessionId to outgoing)
+                                },
+                            )
+                        }
+                    }
+                } else if (action is PendingAction.Commands) {
+                    mutableState.update {
+                        it.copy(loadingCommands = it.loadingCommands - action.sessionId)
                     }
                 } else if (action == PendingAction.SelectSession && message.sessionId != null) {
                     val sessionId = message.sessionId
@@ -503,6 +600,88 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     }
                     openSession(sessionId, true)
                 }
+            }
+            is Commands -> {
+                mutableState.update {
+                    it.copy(
+                        slashCommands = it.slashCommands + (message.sessionId to message.commands),
+                        loadingCommands = it.loadingCommands - message.sessionId,
+                    )
+                }
+            }
+            is ExtensionUi -> {
+                val sessionId = message.sessionId
+                val request = message.request
+                mutableState.update { current ->
+                    when (request.method) {
+                        "select", "confirm", "input", "editor" -> {
+                            val dialog = SessionExtensionUi(sessionId, request)
+                            if (current.extensionDialogs.any { active ->
+                                    active.sessionId == sessionId && active.request.id == request.id
+                                }
+                            ) {
+                                current
+                            } else {
+                                current.copy(extensionDialogs = current.extensionDialogs + dialog)
+                            }
+                        }
+                        "notify" -> if (request.notifyType == "error") {
+                            current.copy(error = request.message ?: "Pi extension failed.")
+                        } else {
+                            current.copy(
+                                notice = request.message,
+                                downloadedFile = null,
+                            )
+                        }
+                        "setStatus" -> {
+                            val statuses = current.extensionStatuses[sessionId].orEmpty()
+                            val updated = if (request.statusKey == null) {
+                                statuses
+                            } else if (request.statusText == null) {
+                                statuses - request.statusKey
+                            } else {
+                                statuses + (request.statusKey to request.statusText)
+                            }
+                            current.copy(
+                                extensionStatuses = if (updated.isEmpty()) {
+                                    current.extensionStatuses - sessionId
+                                } else {
+                                    current.extensionStatuses + (sessionId to updated)
+                                },
+                            )
+                        }
+                        "setWidget" -> {
+                            val widgets = current.extensionWidgets[sessionId].orEmpty()
+                            val updated = if (request.widgetKey == null) {
+                                widgets
+                            } else if (request.widgetLines.isEmpty()) {
+                                widgets - request.widgetKey
+                            } else {
+                                widgets + (request.widgetKey to ExtensionWidget(
+                                    lines = request.widgetLines,
+                                    placement = request.widgetPlacement,
+                                ))
+                            }
+                            current.copy(
+                                extensionWidgets = if (updated.isEmpty()) {
+                                    current.extensionWidgets - sessionId
+                                } else {
+                                    current.extensionWidgets + (sessionId to updated)
+                                },
+                            )
+                        }
+                        "set_editor_text" -> current.copy(
+                            drafts = current.drafts + (sessionId to request.text.orEmpty()),
+                        )
+                        "setTitle" -> current
+                        else -> current.copy(
+                            error = "Pi requested unsupported extension UI: ${request.method}",
+                        )
+                    }
+                }
+            }
+            is ExtensionError -> {
+                mutableState.update { it.copy(error = message.error) }
             }
             is Sessions -> {
                 val activeIds = message.sessions.mapTo(mutableSetOf(), SessionSummary::id)
@@ -522,6 +701,19 @@ class TauController(dispatcher: CoroutineDispatcher) {
                         partials = it.partials.filterKeys { sessionId -> sessionId in activeIds },
                         drafts = it.drafts.filterKeys { sessionId -> sessionId in activeIds },
                         attachments = it.attachments.filterKeys { sessionId -> sessionId in activeIds },
+                        slashCommands = it.slashCommands.filterKeys { sessionId -> sessionId in activeIds },
+                        loadingCommands = it.loadingCommands.filterTo(mutableSetOf()) { sessionId ->
+                            sessionId in activeIds
+                        },
+                        extensionDialogs = it.extensionDialogs.filter { dialog ->
+                            dialog.sessionId in activeIds
+                        },
+                        extensionStatuses = it.extensionStatuses.filterKeys { sessionId ->
+                            sessionId in activeIds
+                        },
+                        extensionWidgets = it.extensionWidgets.filterKeys { sessionId ->
+                            sessionId in activeIds
+                        },
                         uploadingSessions = it.uploadingSessions.filterTo(mutableSetOf()) { sessionId ->
                             sessionId in activeIds
                         },
@@ -549,6 +741,8 @@ class TauController(dispatcher: CoroutineDispatcher) {
             }
             is SessionState -> {
                 mutableState.update { current ->
+                    val processStopped = message.status == SessionStatus.Sleeping ||
+                        message.status == SessionStatus.Error
                     current.copy(
                         sessions = current.sessions.map { session ->
                             if (session.id == message.sessionId) {
@@ -556,6 +750,33 @@ class TauController(dispatcher: CoroutineDispatcher) {
                             } else {
                                 session
                             }
+                        },
+                        slashCommands = if (processStopped) {
+                            current.slashCommands - message.sessionId
+                        } else {
+                            current.slashCommands
+                        },
+                        loadingCommands = if (processStopped) {
+                            current.loadingCommands - message.sessionId
+                        } else {
+                            current.loadingCommands
+                        },
+                        extensionDialogs = if (processStopped) {
+                            current.extensionDialogs.filterNot { dialog ->
+                                dialog.sessionId == message.sessionId
+                            }
+                        } else {
+                            current.extensionDialogs
+                        },
+                        extensionStatuses = if (processStopped) {
+                            current.extensionStatuses - message.sessionId
+                        } else {
+                            current.extensionStatuses
+                        },
+                        extensionWidgets = if (processStopped) {
+                            current.extensionWidgets - message.sessionId
+                        } else {
+                            current.extensionWidgets
                         },
                     )
                 }
@@ -602,10 +823,35 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 val action = pending.remove(request.id)
                 if (action is PendingAction.Open) openedSessions.remove(action.sessionId)
                 mutableState.update {
-                    if (error is TauConnectionException) {
-                        it.copy(connectionStatus = ConnectionStatus.Offline)
+                    val loadingCommands = if (action is PendingAction.Commands) {
+                        it.loadingCommands - action.sessionId
                     } else {
-                        it.copy(error = error.message ?: "Tau request was not sent.")
+                        it.loadingCommands
+                    }
+                    val dialogs = if (
+                        action is PendingAction.ExtensionUi &&
+                        error !is TauConnectionException &&
+                        it.extensionDialogs.none { active ->
+                            active.sessionId == action.dialog.sessionId &&
+                                active.request.id == action.dialog.request.id
+                        }
+                    ) {
+                        it.extensionDialogs + action.dialog
+                    } else {
+                        it.extensionDialogs
+                    }
+                    if (error is TauConnectionException) {
+                        it.copy(
+                            connectionStatus = ConnectionStatus.Offline,
+                            loadingCommands = loadingCommands,
+                            extensionDialogs = dialogs,
+                        )
+                    } else {
+                        it.copy(
+                            loadingCommands = loadingCommands,
+                            extensionDialogs = dialogs,
+                            error = error.message ?: "Tau request was not sent.",
+                        )
                     }
                 }
             }
@@ -618,6 +864,8 @@ class TauController(dispatcher: CoroutineDispatcher) {
         data object Normal : PendingAction
         data object SelectSession : PendingAction
         data class Open(val sessionId: String) : PendingAction
+        data class Commands(val sessionId: String) : PendingAction
+        data class ExtensionUi(val dialog: SessionExtensionUi) : PendingAction
         data class Prompt(
             val sessionId: String,
             val text: String,

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -114,6 +115,7 @@ import coil3.request.ImageRequest
 import coil3.serviceLoaderEnabled
 import io.ktor.client.HttpClient
 import io.ktor.http.encodeURLPathPart
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 private val ConnectedColor = Color(0xFF4ADE80)
@@ -121,6 +123,14 @@ private val ReconnectingColor = Color(0xFFFBBF24)
 private val InlineImagePreviewHeight = 260.dp
 private val AttachmentTopSpacing = 8.dp
 private val ImageDownloadSpacing = 4.dp
+
+private data class ComposerSuggestion(
+    val value: String,
+    val label: String,
+    val description: String?,
+    val replaceStart: Int,
+    val replaceEnd: Int,
+)
 
 private val TauDarkColors = darkColorScheme(
     primary = Color(0xFF67D4FF),
@@ -269,6 +279,100 @@ fun TauApp(controller: TauController) {
                         }
                     }
                 }
+            }
+        }
+        state.extensionDialogs.firstOrNull()?.let { dialog ->
+            val request = dialog.request
+            var responseText by remember(dialog.sessionId, request.id) {
+                mutableStateOf(request.prefill.orEmpty())
+            }
+            LaunchedEffect(dialog.sessionId, request.id, request.timeout) {
+                request.timeout?.let { timeout ->
+                    delay(timeout.coerceAtLeast(0))
+                    controller.dismissExpiredExtensionUi(dialog)
+                }
+            }
+            val dismiss = { controller.respondExtensionUi(dialog, cancelled = true) }
+            when (request.method) {
+                "select" -> AlertDialog(
+                    onDismissRequest = dismiss,
+                    title = { Text(request.title ?: "Choose an option") },
+                    text = {
+                        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
+                            items(request.options) { option ->
+                                TextButton(
+                                    onClick = {
+                                        controller.respondExtensionUi(dialog, value = option)
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(option, modifier = Modifier.fillMaxWidth())
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        TextButton(onClick = dismiss) { Text("Cancel") }
+                    },
+                )
+                "confirm" -> AlertDialog(
+                    onDismissRequest = dismiss,
+                    title = { Text(request.title ?: "Confirm") },
+                    text = { Text(request.message.orEmpty()) },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                controller.respondExtensionUi(dialog, confirmed = true)
+                            },
+                        ) { Text("Yes") }
+                    },
+                    dismissButton = {
+                        Row {
+                            TextButton(
+                                onClick = {
+                                    controller.respondExtensionUi(dialog, confirmed = false)
+                                },
+                            ) { Text("No") }
+                            TextButton(onClick = dismiss) { Text("Cancel") }
+                        }
+                    },
+                )
+                "input", "editor" -> AlertDialog(
+                    onDismissRequest = dismiss,
+                    title = {
+                        Text(
+                            request.title ?: if (request.method == "editor") {
+                                "Edit text"
+                            } else {
+                                "Enter a value"
+                            },
+                        )
+                    },
+                    text = {
+                        OutlinedTextField(
+                            value = responseText,
+                            onValueChange = { responseText = it },
+                            placeholder = request.placeholder?.let { placeholder ->
+                                { Text(placeholder) }
+                            },
+                            minLines = if (request.method == "editor") 4 else 1,
+                            maxLines = if (request.method == "editor") 14 else 1,
+                            singleLine = request.method == "input",
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                controller.respondExtensionUi(dialog, value = responseText)
+                            },
+                        ) { Text("Submit") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = dismiss) { Text("Cancel") }
+                    },
+                )
             }
         }
     }
@@ -926,6 +1030,90 @@ private fun ChatPanel(
     var editorValue by remember(sessionId) {
         mutableStateOf(TextFieldValue(draft, TextRange(draft.length)))
     }
+    val availableCommands = state.slashCommands[sessionId].orEmpty()
+    val suggestions = if (
+        editorValue.selection.collapsed &&
+        editorValue.selection.end == editorValue.text.length &&
+        editorValue.text.startsWith('/')
+    ) {
+        val rest = editorValue.text.drop(1)
+        val separator = rest.indexOfFirst { character -> character.isWhitespace() }
+        if (separator < 0) {
+            val prefix = rest
+            availableCommands
+                .asSequence()
+                .filter { command -> command.name.contains(prefix, ignoreCase = true) }
+                .sortedWith(
+                    compareBy<SlashCommand> {
+                        !it.name.startsWith(prefix, ignoreCase = true)
+                    }.thenBy(SlashCommand::name),
+                )
+                .take(6)
+                .map { command ->
+                    ComposerSuggestion(
+                        value = "/${command.name}",
+                        label = buildString {
+                            append('/').append(command.name)
+                            command.argumentHint?.let { append(' ').append(it) }
+                        },
+                        description = command.description,
+                        replaceStart = 0,
+                        replaceEnd = editorValue.text.length,
+                    )
+                }
+                .toList()
+        } else {
+            val commandName = rest.take(separator)
+            val argumentStart = (separator + 1)
+                .let { start ->
+                    var index = start
+                    while (index < rest.length && rest[index].isWhitespace()) index++
+                    index + 1
+                }
+            val argumentPrefix = editorValue.text.substring(argumentStart)
+            availableCommands
+                .firstOrNull { command -> command.name == commandName }
+                ?.arguments
+                .orEmpty()
+                .asSequence()
+                .filter { argument ->
+                    argumentPrefix.none { character -> character.isWhitespace() } &&
+                        argument.value.contains(argumentPrefix, ignoreCase = true)
+                }
+                .sortedWith(
+                    compareBy<SlashCommandArgument> {
+                        !it.value.startsWith(argumentPrefix, ignoreCase = true)
+                    }.thenBy(SlashCommandArgument::value),
+                )
+                .take(6)
+                .map { argument ->
+                    ComposerSuggestion(
+                        value = argument.value,
+                        label = argument.value,
+                        description = argument.description,
+                        replaceStart = argumentStart,
+                        replaceEnd = editorValue.text.length,
+                    )
+                }
+                .toList()
+        }
+    } else {
+        emptyList()
+    }
+    var selectedSuggestion by remember(sessionId) { mutableStateOf(0) }
+    val suggestionIdentity = suggestions.joinToString("\u0000") { suggestion -> suggestion.value }
+    LaunchedEffect(suggestionIdentity) {
+        selectedSuggestion = 0
+    }
+    val applySuggestion: (ComposerSuggestion) -> Unit = { suggestion ->
+        val completed = editorValue.text.replaceRange(
+            suggestion.replaceStart,
+            suggestion.replaceEnd,
+            "${suggestion.value} ",
+        )
+        editorValue = TextFieldValue(completed, TextRange(completed.length))
+        controller.setDraft(sessionId, completed)
+    }
     val listState = rememberLazyListState()
     val transcriptSelectionState = rememberSelectionState()
     val density = LocalDensity.current
@@ -1043,7 +1231,13 @@ private fun ChatPanel(
                         ConnectionDot(state.connectionStatus)
                     }
                     Text(
-                        session.detail ?: session.status.label,
+                        session.detail
+                            ?: state.extensionStatuses[sessionId]
+                                .orEmpty()
+                                .toSortedMap()
+                                .values
+                                .joinToString(" · ")
+                                .ifEmpty { session.status.label },
                         style = MaterialTheme.typography.labelSmall,
                         color = session.status.color,
                         maxLines = 1,
@@ -1265,6 +1459,90 @@ private fun ChatPanel(
                         }
                     }
                 }
+                state.extensionWidgets[sessionId]
+                    .orEmpty()
+                    .toSortedMap()
+                    .values
+                    .filter { widget -> widget.placement != "belowEditor" }
+                    .forEach { widget ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = MaterialTheme.shapes.small,
+                        ) {
+                            Text(
+                                widget.lines.joinToString("\n"),
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                if (suggestions.isNotEmpty()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = MaterialTheme.shapes.medium,
+                        tonalElevation = 6.dp,
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                            suggestions.forEachIndexed { index, suggestion ->
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            if (index == selectedSuggestion.coerceIn(
+                                                    0,
+                                                    suggestions.lastIndex,
+                                                )
+                                            ) {
+                                                MaterialTheme.colorScheme.secondaryContainer
+                                            } else {
+                                                Color.Transparent
+                                            },
+                                        )
+                                        .clickable { applySuggestion(suggestion) }
+                                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        suggestion.label,
+                                        modifier = Modifier.weight(1f),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    suggestion.description?.let { description ->
+                                        Text(
+                                            description,
+                                            modifier = Modifier.weight(1.4f),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (
+                    editorValue.text.startsWith('/') &&
+                    sessionId in state.loadingCommands
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text("Loading Pi commands", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = editorValue,
                     onValueChange = {
@@ -1320,26 +1598,93 @@ private fun ChatPanel(
                         .fillMaxWidth()
                         .onClipboardImagePaste(canAttach, controller::attachClipboardImage)
                         .onPreviewKeyEvent { event ->
-                            if (PlatformServices.platformName == "android" || event.key != Key.Enter) {
-                                false
-                            } else if (event.isShiftPressed) {
-                                if (event.type == KeyEventType.KeyDown) {
-                                    val start = minOf(editorValue.selection.start, editorValue.selection.end)
-                                    val end = maxOf(editorValue.selection.start, editorValue.selection.end)
-                                    val updated = editorValue.text.replaceRange(start, end, "\n")
-                                    editorValue = TextFieldValue(updated, TextRange(start + 1))
-                                    controller.setDraft(sessionId, updated)
+                            when {
+                                suggestions.isNotEmpty() && event.key == Key.DirectionDown -> {
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        selectedSuggestion = (selectedSuggestion + 1)
+                                            .coerceAtMost(suggestions.lastIndex)
+                                    }
+                                    true
                                 }
-                                true
-                            } else {
-                                if (event.type == KeyEventType.KeyDown && canSend) {
-                                    listState.requestScrollToItem(0)
-                                    controller.sendPrompt()
+                                suggestions.isNotEmpty() && event.key == Key.DirectionUp -> {
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        selectedSuggestion = (selectedSuggestion - 1).coerceAtLeast(0)
+                                    }
+                                    true
                                 }
-                                true
+                                suggestions.isNotEmpty() && event.key == Key.Tab -> {
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        applySuggestion(
+                                            suggestions[selectedSuggestion.coerceIn(
+                                                0,
+                                                suggestions.lastIndex,
+                                            )],
+                                        )
+                                    }
+                                    true
+                                }
+                                suggestions.isNotEmpty() &&
+                                    PlatformServices.platformName != "android" &&
+                                    event.key == Key.Enter &&
+                                    !event.isShiftPressed -> {
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        applySuggestion(
+                                            suggestions[selectedSuggestion.coerceIn(
+                                                0,
+                                                suggestions.lastIndex,
+                                            )],
+                                        )
+                                    }
+                                    true
+                                }
+                                PlatformServices.platformName == "android" ||
+                                    event.key != Key.Enter -> false
+                                event.isShiftPressed -> {
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        val start = minOf(
+                                            editorValue.selection.start,
+                                            editorValue.selection.end,
+                                        )
+                                        val end = maxOf(
+                                            editorValue.selection.start,
+                                            editorValue.selection.end,
+                                        )
+                                        val updated = editorValue.text.replaceRange(start, end, "\n")
+                                        editorValue = TextFieldValue(
+                                            updated,
+                                            TextRange(start + 1),
+                                        )
+                                        controller.setDraft(sessionId, updated)
+                                    }
+                                    true
+                                }
+                                else -> {
+                                    if (event.type == KeyEventType.KeyDown && canSend) {
+                                        listState.requestScrollToItem(0)
+                                        controller.sendPrompt()
+                                    }
+                                    true
+                                }
                             }
                         },
                 )
+                state.extensionWidgets[sessionId]
+                    .orEmpty()
+                    .toSortedMap()
+                    .values
+                    .filter { widget -> widget.placement == "belowEditor" }
+                    .forEach { widget ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = MaterialTheme.shapes.small,
+                        ) {
+                            Text(
+                                widget.lines.joinToString("\n"),
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
             }
         }
         if (draggingFiles) {

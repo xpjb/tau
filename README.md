@@ -14,7 +14,9 @@ Tau starts a Pi RPC process when a chat receives a prompt and stops it after one
 
 - List, create, rename, and permanently delete chats.
 - Stream assistant text and tool activity.
-- Render completed assistant and system messages as selectable Markdown with clickable links.
+- Render completed assistant and system messages as selectable Markdown with clickable links and width-wrapped tables.
+- Discover Pi extension, prompt-template, and skill commands when `/` is entered, with command and supported built-in argument completion.
+- Run extension dialogs inside Tau and expose extension notices, status text, widgets, and composer updates.
 - Send prompts, steer an active run, and abort.
 - Show accepted prompts immediately while they wait in Pi's steering queue.
 - Fork from any visible user message.

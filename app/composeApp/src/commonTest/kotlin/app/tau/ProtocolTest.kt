@@ -16,6 +16,16 @@ class ProtocolTest {
             "{\"type\":\"delete_session\",\"id\":\"8\",\"sessionId\":\"chat\"}",
             TauJson.encodeToString<ClientRequest>(DeleteSession("8", "chat")),
         )
+        assertEquals(
+            "{\"type\":\"get_commands\",\"id\":\"9\",\"sessionId\":\"chat\"}",
+            TauJson.encodeToString<ClientRequest>(GetCommands("9", "chat")),
+        )
+        assertEquals(
+            "{\"type\":\"extension_ui_response\",\"id\":\"10\",\"sessionId\":\"chat\",\"requestId\":\"dialog\",\"value\":\"One\"}",
+            TauJson.encodeToString<ClientRequest>(
+                RespondExtensionUi("10", "chat", "dialog", value = "One"),
+            ),
+        )
 
         val event = TauJson.decodeFromString<ServerMessage>(
             """{"type":"session_state","sessionId":"chat","status":"running","detail":"Running bash"}""",
@@ -30,5 +40,22 @@ class ProtocolTest {
         ))
         assertEquals(AttachmentKind.File, history.messages.single().attachment?.kind)
         assertEquals("tau.zip", history.messages.single().attachment?.fileName)
+
+        val commands = assertIs<Commands>(TauJson.decodeFromString<ServerMessage>(
+            """{"type":"commands","sessionId":"chat","commands":[{"name":"model","description":"Select model","source":"builtin","argumentHint":"<provider/model>","arguments":[{"value":"test/model","description":"Test"}]}]}""",
+        ))
+        assertEquals("model", commands.commands.single().name)
+        assertEquals("test/model", commands.commands.single().arguments.single().value)
+
+        val extensionUi = assertIs<ExtensionUi>(TauJson.decodeFromString<ServerMessage>(
+            """{"type":"extension_ui","sessionId":"chat","request":{"id":"dialog","method":"select","title":"Choose","options":["One","Two"]}}""",
+        ))
+        assertEquals(listOf("One", "Two"), extensionUi.request.options)
+
+        val response = assertIs<Response>(TauJson.decodeFromString<ServerMessage>(
+            """{"type":"response","requestId":"11","ok":true,"commandHandled":true,"notice":"Done"}""",
+        ))
+        assertEquals(true, response.commandHandled)
+        assertEquals("Done", response.notice)
     }
 }
