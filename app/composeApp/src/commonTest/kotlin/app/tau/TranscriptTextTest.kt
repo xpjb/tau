@@ -58,6 +58,7 @@ class TranscriptTextTest {
         assertTrue("Name" in visible && "Value" in visible && "alpha" in visible && "10" in visible)
         assertFalse("https://example.com" in visible)
         assertTrue(document.blocks.any { it.kind == TranscriptTextBlockKind.Code })
+        assertTrue(document.blocks.any { it.kind == TranscriptTextBlockKind.Table })
         assertTrue(document.blocks.any { it.kind == TranscriptTextBlockKind.Quote })
         assertTrue(document.blocks.any { it.kind == TranscriptTextBlockKind.Rule })
     }

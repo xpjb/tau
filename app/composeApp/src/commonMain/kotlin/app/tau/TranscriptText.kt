@@ -64,6 +64,7 @@ internal enum class TranscriptTextBlockKind {
     Flow,
     Heading,
     Code,
+    Table,
     Quote,
     Rule,
 }
@@ -311,7 +312,7 @@ internal fun buildChatText(
                     GFMElementTypes.TABLE -> result += TranscriptTextBlock(
                         flattened(node),
                         styles.code,
-                        TranscriptTextBlockKind.Code,
+                        TranscriptTextBlockKind.Table,
                     )
                     MarkdownTokenTypes.HORIZONTAL_RULE -> result += TranscriptTextBlock(
                         AnnotatedString(""),
@@ -369,8 +370,9 @@ internal fun measureChatText(
                 height = with(density) { 1.dp.roundToPx() },
             )
         } else {
-            val flowWidth = when (block.kind) {
+            val contentWidth = when (block.kind) {
                 TranscriptTextBlockKind.Quote -> (maxWidth - quoteInset).coerceAtLeast(0)
+                TranscriptTextBlockKind.Table -> (maxWidth - codePadding * 2).coerceAtLeast(0)
                 else -> maxWidth
             }
             val softWrap = block.kind != TranscriptTextBlockKind.Code
@@ -379,7 +381,7 @@ internal fun measureChatText(
                 style = block.style,
                 softWrap = softWrap,
                 constraints = if (softWrap) {
-                    Constraints(maxWidth = flowWidth)
+                    Constraints(maxWidth = contentWidth)
                 } else {
                     Constraints()
                 },
@@ -387,7 +389,10 @@ internal fun measureChatText(
             )
             MeasuredTranscriptTextBlock(
                 source = block,
-                height = layout.size.height + if (block.kind == TranscriptTextBlockKind.Code) {
+                height = layout.size.height + if (
+                    block.kind == TranscriptTextBlockKind.Code ||
+                    block.kind == TranscriptTextBlockKind.Table
+                ) {
                     codePadding * 2
                 } else {
                     0
@@ -442,6 +447,19 @@ internal fun ChatText(
                         text = block.text,
                         style = block.style,
                         softWrap = false,
+                    )
+                }
+                TranscriptTextBlockKind.Table -> Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(height)
+                        .background(styles.codeBackground, MaterialTheme.shapes.small)
+                        .padding(styles.codePadding),
+                ) {
+                    Text(
+                        text = block.text,
+                        style = block.style,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
                 TranscriptTextBlockKind.Quote -> Row(
