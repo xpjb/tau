@@ -2,12 +2,14 @@ package app.tau
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.plugins.BodyProgress
+import io.ktor.client.plugins.onDownload
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
-import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.setBody
 import io.ktor.client.request.url
 import io.ktor.http.ContentType
@@ -27,6 +29,7 @@ class TauConnectionException(message: String, cause: Throwable? = null) : Except
 
 class TauClient {
     private val client = HttpClient(platformHttpEngine()) {
+        install(BodyProgress)
         install(WebSockets)
     }
     private val socketGate = Mutex()
@@ -79,17 +82,20 @@ class TauClient {
         sessionId: String,
         entryId: String,
         fileName: String,
+        onProgress: suspend (transferred: Long, total: Long?) -> Unit,
     ): SavedDownload {
         val baseUrl = settings.serverUrl.trim().trimEnd('/')
-        val response = client.get("$baseUrl/v1/sessions/$sessionId/attachments/$entryId") {
+        return client.prepareGet("$baseUrl/v1/sessions/$sessionId/attachments/$entryId") {
             header(HttpHeaders.Authorization, "Bearer ${settings.token}")
+            onDownload(onProgress)
+        }.execute { response ->
+            if (!response.status.isSuccess()) {
+                error("Attachment download failed with HTTP ${response.status.value}")
+            }
+            val bytes = response.body<ByteArray>()
+            if (bytes.size > 50_000_000) error("Attachment exceeds Tau's download limit")
+            PlatformServices.saveDownload(fileName, bytes)
         }
-        if (!response.status.isSuccess()) {
-            error("Attachment download failed with HTTP ${response.status.value}")
-        }
-        val bytes = response.body<ByteArray>()
-        if (bytes.size > 50_000_000) error("Attachment exceeds Tau's download limit")
-        return PlatformServices.saveDownload(fileName, bytes)
     }
 
     suspend fun uploadFile(

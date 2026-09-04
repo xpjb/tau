@@ -49,6 +49,7 @@ import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -126,6 +127,7 @@ private val ConnectedColor = Color(0xFF4ADE80)
 private val ReconnectingColor = Color(0xFFFBBF24)
 private val InlineImagePreviewHeight = 260.dp
 private val AttachmentTopSpacing = 8.dp
+private val AttachmentControlHeight = 68.dp
 private val ImageDownloadSpacing = 4.dp
 
 private data class ComposerSuggestion(
@@ -135,6 +137,24 @@ private data class ComposerSuggestion(
     val replaceStart: Int,
     val replaceEnd: Int,
 )
+
+private fun formatByteCount(bytes: Long): String {
+    val amount = bytes.coerceAtLeast(0)
+    if (amount < 1_024) return "$amount B"
+    val units = listOf("KB", "MB", "GB")
+    var unit = 1_024L
+    var index = 0
+    while (index < units.lastIndex && amount >= unit * 1_024) {
+        unit *= 1_024
+        index++
+    }
+    val tenths = (amount * 10 + unit / 2) / unit
+    return if (tenths < 100) {
+        "${tenths / 10}.${tenths % 10} ${units[index]}"
+    } else {
+        "${(tenths + 5) / 10} ${units[index]}"
+    }
+}
 
 private val TauDarkColors = darkColorScheme(
     primary = Color(0xFF67D4FF),
@@ -263,20 +283,13 @@ fun TauApp(controller: TauController) {
                                 .padding(16.dp)
                                 .widthIn(max = 640.dp),
                             action = {
-                                Row {
-                                    if (state.error == null && state.downloadedFile != null) {
-                                        TextButton(onClick = controller::openDownloadedFile) {
-                                            Text("Open")
-                                        }
-                                    }
-                                    TextButton(
-                                        onClick = if (state.error != null) {
-                                            controller::dismissError
-                                        } else {
-                                            controller::dismissNotice
-                                        },
-                                    ) { Text("Dismiss") }
-                                }
+                                TextButton(
+                                    onClick = if (state.error != null) {
+                                        controller::dismissError
+                                    } else {
+                                        controller::dismissNotice
+                                    },
+                                ) { Text("Dismiss") }
                             },
                         ) {
                             Text(message)
@@ -550,6 +563,7 @@ private fun TranscriptRowContent(
     controller: TauController,
     settings: ConnectionSettings,
     sessionId: String,
+    attachmentDownload: AttachmentDownload?,
     selectionState: SelectionState,
 ) {
     when (row) {
@@ -756,15 +770,130 @@ private fun TranscriptRowContent(
                                             }
                                             Spacer(Modifier.height(ImageDownloadSpacing))
                                         }
-                                        OutlinedButton(
-                                            onClick = { controller.downloadAttachment(message) },
-                                            modifier = Modifier.height(40.dp),
+                                        val totalBytes = attachmentDownload?.totalBytes
+                                            ?: attachment.size
+                                        val statusText = when (attachmentDownload?.status) {
+                                            AttachmentDownloadStatus.Downloading -> buildString {
+                                                append(formatByteCount(attachmentDownload.transferredBytes))
+                                                totalBytes?.takeIf { it > 0 }?.let { total ->
+                                                    append(" / ").append(formatByteCount(total))
+                                                    append(" · ")
+                                                    append(
+                                                        (attachmentDownload.transferredBytes * 100 / total)
+                                                            .coerceIn(0, 100),
+                                                    )
+                                                    append('%')
+                                                }
+                                                attachmentDownload.bytesPerSecond
+                                                    ?.takeIf { it > 0 }
+                                                    ?.let { rate ->
+                                                        append(" · ").append(formatByteCount(rate)).append("/s")
+                                                    }
+                                            }
+                                            AttachmentDownloadStatus.Downloaded -> totalBytes
+                                                ?.let { "${formatByteCount(it)} · Downloaded" }
+                                                ?: "Downloaded"
+                                            AttachmentDownloadStatus.Failed -> buildString {
+                                                append(formatByteCount(attachmentDownload.transferredBytes))
+                                                totalBytes?.let {
+                                                    append(" / ").append(formatByteCount(it))
+                                                }
+                                                append(" · ")
+                                                append(attachmentDownload.error ?: "Download failed")
+                                            }
+                                            null -> totalBytes?.let(::formatByteCount) ?: "Ready to download"
+                                        }
+                                        val progress = if (
+                                            attachmentDownload?.status ==
+                                            AttachmentDownloadStatus.Downloading &&
+                                            totalBytes != null && totalBytes > 0
                                         ) {
-                                            Text(
-                                                "Download ${attachment.fileName}",
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
+                                            (attachmentDownload.transferredBytes.toFloat() / totalBytes)
+                                                .coerceIn(0f, 1f)
+                                        } else {
+                                            null
+                                        }
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f),
+                                            shape = MaterialTheme.shapes.medium,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(AttachmentControlHeight),
+                                        ) {
+                                            Column(
+                                                Modifier.fillMaxSize().padding(
+                                                    start = 12.dp,
+                                                    top = 4.dp,
+                                                    end = 4.dp,
+                                                    bottom = 4.dp,
+                                                ),
+                                            ) {
+                                                Row(
+                                                    Modifier.weight(1f),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Column(Modifier.weight(1f)) {
+                                                        Text(
+                                                            attachment.fileName,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            fontWeight = FontWeight.Medium,
+                                                        )
+                                                        Text(
+                                                            statusText,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = if (
+                                                                attachmentDownload?.status ==
+                                                                AttachmentDownloadStatus.Failed
+                                                            ) {
+                                                                MaterialTheme.colorScheme.error
+                                                            } else {
+                                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                                            },
+                                                        )
+                                                    }
+                                                    when (attachmentDownload?.status) {
+                                                        AttachmentDownloadStatus.Downloading -> TextButton(
+                                                            onClick = {
+                                                                controller.cancelAttachmentDownload(message)
+                                                            },
+                                                        ) { Text("Cancel") }
+                                                        AttachmentDownloadStatus.Downloaded -> TextButton(
+                                                            onClick = {
+                                                                controller.openAttachmentDownload(message)
+                                                            },
+                                                        ) { Text("Open") }
+                                                        AttachmentDownloadStatus.Failed -> TextButton(
+                                                            onClick = {
+                                                                controller.downloadAttachment(message)
+                                                            },
+                                                        ) { Text("Retry") }
+                                                        null -> TextButton(
+                                                            onClick = {
+                                                                controller.downloadAttachment(message)
+                                                            },
+                                                        ) { Text("Download") }
+                                                    }
+                                                }
+                                                if (
+                                                    attachmentDownload?.status ==
+                                                    AttachmentDownloadStatus.Downloading
+                                                ) {
+                                                    if (progress == null) {
+                                                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                                                    } else {
+                                                        LinearProgressIndicator(
+                                                            progress = { progress },
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                        )
+                                                    }
+                                                } else {
+                                                    Spacer(Modifier.height(4.dp))
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1316,7 +1445,7 @@ private fun ChatPanel(
                 transcriptMeasureCache.documents.keys.retainAll(retainedRows)
                 transcriptMeasureCache.rows.keys.retainAll(retainedRows)
                 val waitingSpacing = with(density) { 4.dp.roundToPx() }
-                val attachmentButtonHeight = with(density) { 40.dp.roundToPx() }
+                val attachmentControlHeight = with(density) { AttachmentControlHeight.roundToPx() }
                 val attachmentTopSpacing = with(density) { AttachmentTopSpacing.roundToPx() }
                 val imagePreviewHeight = with(density) { InlineImagePreviewHeight.roundToPx() }
                 val imageDownloadSpacing = with(density) { ImageDownloadSpacing.roundToPx() }
@@ -1382,9 +1511,9 @@ private fun ChatPanel(
                             } ?: 0
                             val attachmentHeight = when (row.message.attachment?.kind) {
                                 null -> 0
-                                AttachmentKind.File -> attachmentTopSpacing + attachmentButtonHeight
+                                AttachmentKind.File -> attachmentTopSpacing + attachmentControlHeight
                                 AttachmentKind.Image -> attachmentTopSpacing + imagePreviewHeight +
-                                    imageDownloadSpacing + attachmentButtonHeight
+                                    imageDownloadSpacing + attachmentControlHeight
                             }
                             MeasuredTranscriptRow(
                                 text = text,
@@ -1420,6 +1549,13 @@ private fun ChatPanel(
                                 key = TranscriptRow::key,
                             ) { row ->
                                 val measured = transcriptMeasureCache.rows.getValue(row)
+                                val attachmentDownload = if (row is TranscriptRow.Message) {
+                                    state.attachmentDownloads[
+                                        AttachmentDownloadKey(sessionId, row.message.entryId)
+                                    ]
+                                } else {
+                                    null
+                                }
                                 Box(
                                     Modifier
                                         .fillMaxWidth()
@@ -1432,6 +1568,7 @@ private fun ChatPanel(
                                         controller = controller,
                                         settings = state.settings,
                                         sessionId = sessionId,
+                                        attachmentDownload = attachmentDownload,
                                         selectionState = transcriptSelectionState,
                                     )
                                 }
