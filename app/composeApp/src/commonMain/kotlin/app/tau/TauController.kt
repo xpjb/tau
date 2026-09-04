@@ -547,10 +547,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
             PlatformServices.openDownload(download)
         } catch (error: Throwable) {
             mutableState.update {
-                it.copy(
-                    attachmentDownloads = it.attachmentDownloads - key,
-                    error = error.message ?: "The downloaded file could not be opened.",
-                )
+                it.copy(error = error.message ?: "The downloaded file could not be opened.")
             }
         }
     }

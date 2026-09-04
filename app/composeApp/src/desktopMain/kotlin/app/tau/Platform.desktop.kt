@@ -297,6 +297,14 @@ actual object PlatformServices {
     actual fun openDownload(download: SavedDownload) {
         val path = Path.of(download.reference)
         check(Files.isRegularFile(path)) { "The downloaded file no longer exists." }
+        if (platformName == "windows") {
+            val launcher = System.getenv("LOCALAPPDATA")
+                ?.let { directory -> Path.of(directory, "Tau", "Tau.exe") }
+            if (launcher != null && Files.isRegularFile(launcher)) {
+                ProcessBuilder(launcher.toString(), "--open", path.toString()).start()
+                return
+            }
+        }
         check(Desktop.isDesktopSupported()) { "Opening files is not supported on this desktop." }
         val desktop = Desktop.getDesktop()
         check(desktop.isSupported(Desktop.Action.OPEN)) {

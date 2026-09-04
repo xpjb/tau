@@ -21,6 +21,52 @@ fn main() {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Com::Urlmon::URLDownloadToFileW;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().is_some_and(|argument| argument == "--open") {
+        let file = match (arguments.next(), arguments.next()) {
+            (Some(file), None) => file,
+            _ => {
+                show_message("Tau received an invalid file-open request.", true);
+                return;
+            }
+        };
+        let path = PathBuf::from(&file);
+        if !path.is_file() {
+            show_message("The downloaded file no longer exists.", true);
+            return;
+        }
+        let operation = "open"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let file = file
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let opened = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if opened as usize <= 32 {
+            show_message(
+                &format!(
+                    "Windows could not open the downloaded file (shell error {}).",
+                    opened as usize,
+                ),
+                true,
+            );
+        }
+        return;
+    }
 
     let result = (|| {
         let local = std::env::var_os("LOCALAPPDATA")
