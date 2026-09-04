@@ -403,7 +403,14 @@ private fun ConnectionScreen(state: TauUiState, controller: TauController) {
                 Modifier.padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                Text("Tau", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Tau", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Version ${PlatformServices.appVersion}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Text("Connect directly to the Tau daemon over your Tailnet.")
                 OutlinedTextField(
                     value = serverUrl,
