@@ -72,6 +72,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -85,7 +87,9 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
@@ -819,6 +823,7 @@ private fun SessionList(
     var renaming by remember { mutableStateOf<SessionSummary?>(null) }
     var deleting by remember { mutableStateOf<SessionSummary?>(null) }
     var renameText by remember { mutableStateOf("") }
+    val focusManager = LocalFocusManager.current
     val actionsEnabled = state.connectionStatus == ConnectionStatus.Connected
 
     Column(modifier) {
@@ -837,7 +842,10 @@ private fun SessionList(
             TextButton(onClick = controller::showSettings) { Text("Settings") }
         }
         Button(
-            onClick = controller::createSession,
+            onClick = {
+                focusManager.clearFocus(force = true)
+                controller.createSession()
+            },
             enabled = actionsEnabled,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         ) {
@@ -1020,6 +1028,9 @@ private fun ChatPanel(
     val partial = state.partials[sessionId].orEmpty()
     val attachments = state.attachments[sessionId].orEmpty()
     val draft = state.drafts[sessionId].orEmpty()
+    val editorFocusRequester = remember(sessionId) { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val shouldFocusComposer = state.focusComposerSessionId == sessionId
     val uploading = sessionId in state.uploadingSessions
     val canAttach = state.connectionStatus == ConnectionStatus.Connected &&
         !state.pickingFiles && !uploading
@@ -1191,6 +1202,13 @@ private fun ChatPanel(
     LaunchedEffect(draft) {
         if (editorValue.text != draft) {
             editorValue = TextFieldValue(draft, TextRange(draft.length))
+        }
+    }
+    LaunchedEffect(shouldFocusComposer) {
+        if (shouldFocusComposer) {
+            editorFocusRequester.requestFocus()
+            keyboardController?.show()
+            controller.consumeComposerFocus(sessionId)
         }
     }
 
@@ -1595,6 +1613,7 @@ private fun ChatPanel(
                         }
                     },
                     modifier = Modifier
+                        .focusRequester(editorFocusRequester)
                         .fillMaxWidth()
                         .onClipboardImagePaste(canAttach, controller::attachClipboardImage)
                         .onPreviewKeyEvent { event ->

@@ -47,6 +47,7 @@ data class TauUiState(
     val daemonVersion: String? = null,
     val sessions: List<SessionSummary> = emptyList(),
     val selectedSessionId: String? = null,
+    val focusComposerSessionId: String? = null,
     val histories: Map<String, List<ChatMessage>> = emptyMap(),
     val outgoingMessages: Map<String, List<OutgoingMessage>> = emptyMap(),
     val partials: Map<String, String> = emptyMap(),
@@ -127,7 +128,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
 
     fun createSession() {
         val id = nextRequestId()
-        pending[id] = PendingAction.SelectSession
+        pending[id] = PendingAction.CreateSession
         send(CreateSession(id))
     }
 
@@ -140,6 +141,16 @@ class TauController(dispatcher: CoroutineDispatcher) {
 
     fun showSessionList() {
         mutableState.update { it.copy(mobileChatVisible = false) }
+    }
+
+    fun consumeComposerFocus(sessionId: String) {
+        mutableState.update {
+            if (it.focusComposerSessionId == sessionId) {
+                it.copy(focusComposerSessionId = null)
+            } else {
+                it
+            }
+        }
     }
 
     fun setDraft(sessionId: String, draft: String) {
@@ -584,11 +595,19 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     mutableState.update {
                         it.copy(loadingCommands = it.loadingCommands - action.sessionId)
                     }
-                } else if (action == PendingAction.SelectSession && message.sessionId != null) {
+                } else if (
+                    (action == PendingAction.CreateSession || action == PendingAction.SelectSession) &&
+                    message.sessionId != null
+                ) {
                     val sessionId = message.sessionId
                     mutableState.update {
                         it.copy(
                             selectedSessionId = sessionId,
+                            focusComposerSessionId = if (action == PendingAction.CreateSession) {
+                                sessionId
+                            } else {
+                                it.focusComposerSessionId
+                            },
                             mobileChatVisible = true,
                             drafts = if (message.draft != null) {
                                 it.drafts + (sessionId to message.draft)
@@ -694,6 +713,8 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     it.copy(
                         sessions = message.sessions,
                         selectedSessionId = selected,
+                        focusComposerSessionId = it.focusComposerSessionId
+                            ?.takeIf { sessionId -> sessionId in activeIds },
                         histories = it.histories.filterKeys { sessionId -> sessionId in activeIds },
                         outgoingMessages = it.outgoingMessages.filterKeys { sessionId ->
                             sessionId in activeIds
@@ -862,6 +883,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
 
     private sealed interface PendingAction {
         data object Normal : PendingAction
+        data object CreateSession : PendingAction
         data object SelectSession : PendingAction
         data class Open(val sessionId: String) : PendingAction
         data class Commands(val sessionId: String) : PendingAction
