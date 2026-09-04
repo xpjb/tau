@@ -206,20 +206,64 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Err(error) => ServerMessage::failure(request_id, error.to_string()),
                             }
                         }
+                        ClientCommand::GetCommands { session_id } => {
+                            match manager.commands(&session_id).await {
+                                Ok(commands) => {
+                                    if !queue_server(
+                                        &response_outbound,
+                                        &ServerMessage::Commands {
+                                            session_id: session_id.clone(),
+                                            commands,
+                                        },
+                                    ).await {
+                                        return;
+                                    }
+                                    ServerMessage::success(
+                                        request_id,
+                                        Some(session_id),
+                                        None,
+                                    )
+                                }
+                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                            }
+                        }
                         ClientCommand::Prompt { session_id, text } => {
                             if text.chars().count() > MAX_PROMPT_CHARS {
                                 ServerMessage::failure(request_id, "message is too large")
                             } else {
                                 match manager.prompt(&session_id, &text).await {
-                                    Ok(()) => ServerMessage::success(
+                                    Ok(outcome) => ServerMessage::prompt_success(
                                         request_id,
-                                        Some(session_id),
-                                        None,
+                                        session_id,
+                                        outcome.command_handled,
+                                        outcome.notice,
                                     ),
                                     Err(error) => {
                                         ServerMessage::failure(request_id, error.to_string())
                                     }
                                 }
+                            }
+                        }
+                        ClientCommand::ExtensionUiResponse {
+                            session_id,
+                            request_id: extension_request_id,
+                            value,
+                            confirmed,
+                            cancelled,
+                        } => {
+                            match manager.extension_ui_response(
+                                &session_id,
+                                &extension_request_id,
+                                value,
+                                confirmed,
+                                cancelled,
+                            ).await {
+                                Ok(()) => ServerMessage::success(
+                                    request_id,
+                                    Some(session_id),
+                                    None,
+                                ),
+                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
                             }
                         }
                         ClientCommand::Abort { session_id } => {

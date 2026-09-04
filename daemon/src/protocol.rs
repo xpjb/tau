@@ -20,7 +20,18 @@ pub enum ClientCommand {
     ListSessions,
     CreateSession,
     OpenSession { session_id: String },
+    GetCommands { session_id: String },
     Prompt { session_id: String, text: String },
+    ExtensionUiResponse {
+        session_id: String,
+        request_id: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        confirmed: Option<bool>,
+        #[serde(default)]
+        cancelled: bool,
+    },
     Abort { session_id: String },
     CloseSession { session_id: String },
     DeleteSession { session_id: String },
@@ -44,7 +55,23 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         draft: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        command_handled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notice: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    Commands {
+        session_id: String,
+        commands: Vec<SlashCommand>,
+    },
+    ExtensionUi {
+        session_id: String,
+        request: Box<ExtensionUiRequest>,
+    },
+    ExtensionError {
+        session_id: String,
+        error: String,
     },
     Sessions {
         sessions: Vec<SessionSummary>,
@@ -79,6 +106,25 @@ impl ServerMessage {
             ok: true,
             session_id,
             draft,
+            command_handled: None,
+            notice: None,
+            error: None,
+        }
+    }
+
+    pub fn prompt_success(
+        request_id: String,
+        session_id: String,
+        command_handled: bool,
+        notice: Option<String>,
+    ) -> Self {
+        Self::Response {
+            request_id,
+            ok: true,
+            session_id: Some(session_id),
+            draft: None,
+            command_handled: Some(command_handled),
+            notice,
             error: None,
         }
     }
@@ -89,9 +135,72 @@ impl ServerMessage {
             ok: false,
             session_id: None,
             draft: None,
+            command_handled: None,
+            notice: None,
             error: Some(error.into()),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlashCommandSource {
+    Extension,
+    Prompt,
+    Skill,
+    Builtin,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommandArgument {
+    pub value: String,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: Option<String>,
+    pub source: SlashCommandSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<SlashCommandArgument>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionUiRequest {
+    pub id: String,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widget_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_placement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]

@@ -14,8 +14,9 @@ use tracing::{debug, error, warn};
 use crate::config::Config;
 use crate::pi::RpcProcess;
 use crate::protocol::{
-    AttachmentKind, ChatAttachment, ChatMessage, ChatRole, ServerMessage, SessionStatus,
-    SessionSummary, UploadedFile, MAX_TITLE_CHARS, MAX_UPLOAD_BYTES,
+    AttachmentKind, ChatAttachment, ChatMessage, ChatRole, ExtensionUiRequest, ServerMessage,
+    SessionStatus, SessionSummary, SlashCommand, SlashCommandArgument, SlashCommandSource,
+    UploadedFile, MAX_PROMPT_CHARS, MAX_TITLE_CHARS, MAX_UPLOAD_BYTES,
 };
 use crate::state::StateStore;
 
@@ -23,6 +24,28 @@ const EVENT_BUFFER: usize = 2048;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const IMAGE_LIMIT: u64 = 10_000_000;
 const FILE_LIMIT: u64 = 50_000_000;
+const INTERNAL_FORK_COMMAND: &str = "tau-fork-at";
+const TUI_ONLY_COMMANDS: &[&str] = &[
+    "settings",
+    "tree",
+    "scoped-models",
+    "export",
+    "import",
+    "share",
+    "copy",
+    "session",
+    "changelog",
+    "hotkeys",
+    "fork",
+    "clone",
+    "trust",
+    "login",
+    "logout",
+    "new",
+    "resume",
+    "reload",
+    "quit",
+];
 
 pub struct ResolvedAttachment {
     pub file: fs::File,
@@ -37,6 +60,16 @@ struct AttachmentRequest {
     caption: Option<String>,
 }
 
+pub struct PromptOutcome {
+    pub command_handled: bool,
+    pub notice: Option<String>,
+}
+
+struct PendingExtensionUi {
+    process: Arc<RpcProcess>,
+    request: ExtensionUiRequest,
+}
+
 #[derive(Clone)]
 pub struct AgentManager {
     inner: Arc<ManagerInner>,
@@ -46,6 +79,7 @@ struct ManagerInner {
     config: Config,
     state: StateStore,
     runtimes: Mutex<HashMap<String, Arc<SessionRuntime>>>,
+    pending_extension_ui: Mutex<HashMap<(String, String), PendingExtensionUi>>,
     events: broadcast::Sender<ServerMessage>,
     shutting_down: AtomicBool,
 }
@@ -53,6 +87,7 @@ struct ManagerInner {
 struct SessionRuntime {
     operation: Mutex<()>,
     process: Mutex<Option<Arc<RpcProcess>>>,
+    commands: StdRwLock<Option<Vec<SlashCommand>>>,
     state: StdRwLock<RuntimeState>,
 }
 
@@ -73,6 +108,7 @@ impl SessionRuntime {
         Self {
             operation: Mutex::new(()),
             process: Mutex::new(None),
+            commands: StdRwLock::new(None),
             state: StdRwLock::new(RuntimeState::default()),
         }
     }
@@ -93,6 +129,7 @@ impl AgentManager {
                 config,
                 state,
                 runtimes: Mutex::new(HashMap::new()),
+                pending_extension_ui: Mutex::new(HashMap::new()),
                 events,
                 shutting_down: AtomicBool::new(false),
             }),
@@ -142,6 +179,21 @@ impl AgentManager {
 
     pub async fn open_session(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
+        let pending = self
+            .inner
+            .pending_extension_ui
+            .lock()
+            .await
+            .iter()
+            .filter(|((session_id, _), _)| session_id == id)
+            .map(|(_, pending)| pending.request.clone())
+            .collect::<Vec<_>>();
+        for request in pending {
+            let _ = self.inner.events.send(ServerMessage::ExtensionUi {
+                session_id: id.to_owned(),
+                request: Box::new(request),
+            });
+        }
         let _guard = runtime.operation.lock().await;
         let (entries, leaf_id) = self.entries_for_read(id, &runtime).await?;
         let messages = active_chat_messages(&entries, leaf_id.as_deref())?;
@@ -158,7 +210,14 @@ impl AgentManager {
         Ok(())
     }
 
-    pub async fn prompt(&self, id: &str, text: &str) -> Result<()> {
+    pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
+        let runtime = self.runtime(id).await?;
+        let _guard = runtime.operation.lock().await;
+        let process = self.ensure_process(id, &runtime).await?;
+        self.load_slash_commands(&runtime, &process, true).await
+    }
+
+    pub async fn prompt(&self, id: &str, text: &str) -> Result<PromptOutcome> {
         if text.trim().is_empty() {
             bail!("message cannot be empty");
         }
@@ -166,6 +225,144 @@ impl AgentManager {
         let _guard = runtime.operation.lock().await;
         let process = self.ensure_process(id, &runtime).await?;
 
+        let slash = if let Some(rest) = text.strip_prefix('/') {
+            let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let name = &rest[..name_end];
+            (!name.is_empty()).then(|| (name, rest[name_end..].trim()))
+        } else {
+            None
+        };
+        if slash.is_some_and(|(name, _)| name == INTERNAL_FORK_COMMAND) {
+            bail!("that command is reserved for Tau's fork operation");
+        }
+
+        let slash_command = if let Some((name, _)) = slash {
+            let mut commands = self.load_slash_commands(&runtime, &process, false).await?;
+            let found = commands.iter().find(|command| command.name == name).cloned();
+            if found.is_none() {
+                commands = self.load_slash_commands(&runtime, &process, true).await?;
+            }
+            commands.into_iter().find(|command| command.name == name)
+        } else {
+            None
+        };
+
+        if let Some((name, arguments)) = slash
+            && slash_command.as_ref().is_some_and(|command| {
+                command.source == SlashCommandSource::Builtin
+            })
+        {
+            let previous_status = runtime.snapshot().status;
+            self.set_runtime_state(id, &runtime, SessionStatus::Running, None);
+            let result: Result<String> = async {
+                match name {
+                    "compact" => {
+                        let mut command = json!({ "type": "compact" });
+                        if !arguments.is_empty() {
+                            command.as_object_mut().expect("command is an object").insert(
+                                "customInstructions".to_owned(),
+                                Value::String(arguments.to_owned()),
+                            );
+                        }
+                        process.request_unbounded(command).await?;
+                        self.inner.state.touch(id).await?;
+                        Ok("Context compacted.".to_owned())
+                    }
+                    "model" => {
+                        let (provider, model_id) = arguments.split_once('/').filter(
+                            |(provider, model_id)| !provider.is_empty() && !model_id.is_empty(),
+                        ).context("Usage: /model <provider/model>")?;
+                        process.request(json!({
+                            "type": "set_model",
+                            "provider": provider,
+                            "modelId": model_id,
+                        })).await?;
+                        self.inner.state.touch(id).await?;
+                        Ok(format!("Model set to {provider}/{model_id}."))
+                    }
+                    "thinking" => {
+                        if arguments.is_empty() || arguments.chars().any(char::is_whitespace) {
+                            bail!("Usage: /thinking <level>");
+                        }
+                        process.request(json!({
+                            "type": "set_thinking_level",
+                            "level": arguments,
+                        })).await?;
+                        self.inner.state.touch(id).await?;
+                        Ok(format!("Thinking level set to {arguments}."))
+                    }
+                    "name" => {
+                        let title = arguments.trim();
+                        if title.is_empty() {
+                            bail!("Usage: /name <title>");
+                        }
+                        if title.contains('\n') || title.contains('\r') {
+                            bail!("session title must be one line");
+                        }
+                        if title.chars().count() > MAX_TITLE_CHARS {
+                            bail!("session title is too long");
+                        }
+                        process.request(json!({
+                            "type": "set_session_name",
+                            "name": title,
+                        })).await?;
+                        self.inner.state.rename(id, title.to_owned()).await?;
+                        Ok(format!("Chat renamed to {title}."))
+                    }
+                    _ => bail!("unsupported Tau command /{name}"),
+                }
+            }
+            .await;
+            let notice = match result {
+                Ok(notice) => notice,
+                Err(error) => {
+                    let status = if process.is_alive() {
+                        if previous_status == SessionStatus::Running {
+                            SessionStatus::Running
+                        } else {
+                            SessionStatus::Idle
+                        }
+                    } else {
+                        SessionStatus::Error
+                    };
+                    self.set_runtime_state(
+                        id,
+                        &runtime,
+                        status,
+                        (status == SessionStatus::Error)
+                            .then(|| bounded(&error.to_string(), 240)),
+                    );
+                    return Err(error);
+                }
+            };
+            self.persist_session_file(id, &process).await?;
+            if let Err(error) = self.sync_history(id, &process).await {
+                debug!(session = id, %error, "history refresh after command was delayed");
+            }
+            self.refresh_runtime_status(id, &runtime, &process).await?;
+            self.broadcast_sessions().await;
+            return Ok(PromptOutcome {
+                command_handled: true,
+                notice: Some(notice),
+            });
+        }
+
+        if let Some((name, _)) = slash
+            && slash_command.is_none()
+            && TUI_ONLY_COMMANDS.contains(&name)
+        {
+            bail!("Pi /{name} is available only in the interactive terminal");
+        }
+
+        let command_handled = slash_command.as_ref().is_some_and(|command| {
+            if command.source != SlashCommandSource::Extension {
+                return false;
+            }
+            let rest = text.strip_prefix('/').expect("slash command starts with slash");
+            let end = rest.find(' ').unwrap_or(rest.len());
+            rest[..end] == command.name
+        });
+        let previous_status = runtime.snapshot().status;
         self.set_runtime_state(id, &runtime, SessionStatus::Running, None);
         let command = json!({
             "type": "prompt",
@@ -174,7 +371,11 @@ impl AgentManager {
         });
         if let Err(error) = process.request_unbounded(command).await {
             let status = if process.is_alive() {
-                SessionStatus::Idle
+                if previous_status == SessionStatus::Running {
+                    SessionStatus::Running
+                } else {
+                    SessionStatus::Idle
+                }
             } else {
                 SessionStatus::Error
             };
@@ -187,7 +388,9 @@ impl AgentManager {
             return Err(error);
         }
 
-        if let Some(stored) = self.inner.state.get(id)
+        if command_handled {
+            self.inner.state.touch(id).await?;
+        } else if let Some(stored) = self.inner.state.get(id)
             && stored.title == "New chat"
         {
             let title = title_from_prompt(text);
@@ -205,18 +408,85 @@ impl AgentManager {
         if let Err(error) = self.sync_history(id, &process).await {
             debug!(session = id, %error, "history refresh after prompt acceptance was delayed");
         }
+        if command_handled {
+            self.refresh_runtime_status(id, &runtime, &process).await?;
+        }
         self.broadcast_sessions().await;
-        Ok(())
+        Ok(PromptOutcome {
+            command_handled,
+            notice: None,
+        })
+    }
+
+    pub async fn extension_ui_response(
+        &self,
+        id: &str,
+        request_id: &str,
+        value: Option<String>,
+        confirmed: Option<bool>,
+        cancelled: bool,
+    ) -> Result<()> {
+        if request_id.is_empty() || request_id.len() > 128 {
+            bail!("invalid extension dialog ID");
+        }
+        if value.as_deref().is_some_and(|value| value.chars().count() > MAX_PROMPT_CHARS) {
+            bail!("extension dialog response is too large");
+        }
+        let key = (id.to_owned(), request_id.to_owned());
+        let pending = self
+            .inner
+            .pending_extension_ui
+            .lock()
+            .await
+            .remove(&key)
+            .context("that extension dialog is no longer active")?;
+        let runtime = self.runtime(id).await?;
+        if !self.runtime_owns(&runtime, &pending.process).await || !pending.process.is_alive() {
+            bail!("the Pi process for that extension dialog is no longer active");
+        }
+        let invalid = if cancelled {
+            None
+        } else if pending.request.method == "confirm" && confirmed.is_none() {
+            Some("confirmation response is missing")
+        } else if pending.request.method != "confirm" && value.is_none() {
+            Some("extension dialog response is missing")
+        } else if pending.request.method == "select"
+            && value.as_ref().is_some_and(|value| !pending.request.options.contains(value))
+        {
+            Some("extension selection is invalid")
+        } else {
+            None
+        };
+        if let Some(error) = invalid {
+            self.inner.pending_extension_ui.lock().await.insert(key, pending);
+            bail!(error);
+        }
+        let response = if cancelled {
+            json!({ "type": "extension_ui_response", "id": request_id, "cancelled": true })
+        } else if pending.request.method == "confirm" {
+            json!({
+                "type": "extension_ui_response",
+                "id": request_id,
+                "confirmed": confirmed.expect("confirmation was validated"),
+            })
+        } else {
+            json!({
+                "type": "extension_ui_response",
+                "id": request_id,
+                "value": value.expect("dialog value was validated"),
+            })
+        };
+        pending.process.notify(response).await
     }
 
     pub async fn abort(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
-        let _guard = runtime.operation.lock().await;
         let process = runtime.process.lock().await.clone();
         if runtime.snapshot().status != SessionStatus::Running {
             return Ok(());
         }
         if let Some(process) = process.filter(|process| process.is_alive()) {
+            self.cancel_extension_ui(&process).await;
             process.notify(json!({ "type": "abort" })).await?;
         }
         Ok(())
@@ -224,8 +494,15 @@ impl AgentManager {
 
     pub async fn close_session(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
+        if let Some(process) = runtime.process.lock().await.clone() {
+            self.cancel_extension_ui(&process).await;
+        }
         let _guard = runtime.operation.lock().await;
         let process = runtime.process.lock().await.take();
+        *runtime
+            .commands
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
         if let Some(process) = process {
             process.shutdown().await;
@@ -247,6 +524,10 @@ impl AgentManager {
             return;
         }
         let process = runtime.process.lock().await.take();
+        *runtime
+            .commands
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
         if let Some(process) = process {
             process.shutdown().await;
@@ -257,8 +538,15 @@ impl AgentManager {
 
     pub async fn delete_session(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
+        if let Some(process) = runtime.process.lock().await.clone() {
+            self.cancel_extension_ui(&process).await;
+        }
         let _guard = runtime.operation.lock().await;
         if let Some(process) = runtime.process.lock().await.take() {
+            *runtime
+                .commands
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
             self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
             process.shutdown().await;
         }
@@ -610,9 +898,39 @@ impl AgentManager {
             .map(|(_, runtime)| runtime)
             .collect::<Vec<_>>();
         for runtime in runtimes {
+            if let Some(process) = runtime.process.lock().await.clone() {
+                self.cancel_extension_ui(&process).await;
+            }
             let _guard = runtime.operation.lock().await;
             if let Some(process) = runtime.process.lock().await.take() {
                 process.shutdown().await;
+            }
+        }
+    }
+
+    async fn cancel_extension_ui(&self, process: &Arc<RpcProcess>) {
+        let pending_ids = {
+            let mut pending = self.inner.pending_extension_ui.lock().await;
+            let keys = pending
+                .iter()
+                .filter(|(_, request)| Arc::ptr_eq(&request.process, process))
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in &keys {
+                pending.remove(key);
+            }
+            keys.into_iter().map(|(_, request_id)| request_id).collect::<Vec<_>>()
+        };
+        for request_id in pending_ids {
+            if let Err(error) = process
+                .notify(json!({
+                    "type": "extension_ui_response",
+                    "id": request_id,
+                    "cancelled": true,
+                }))
+                .await
+            {
+                debug!(%error, "could not cancel a Pi extension dialog");
             }
         }
     }
@@ -720,6 +1038,10 @@ impl AgentManager {
         if let Some(process) = slot.take() {
             process.shutdown().await;
         }
+        *runtime
+            .commands
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 
         self.set_runtime_state(id, runtime, SessionStatus::Starting, None);
         let stored = self.inner.state.get(id).context("session disappeared")?;
@@ -742,6 +1064,7 @@ impl AgentManager {
                 return Err(error);
             }
         };
+        let events = process.subscribe();
         let state = match process.request(json!({ "type": "get_state" })).await {
             Ok(state) => state,
             Err(error) => {
@@ -784,13 +1107,188 @@ impl AgentManager {
         let session_id = id.to_owned();
         let monitored = process.clone();
         tokio::spawn(async move {
-            manager.monitor_process(session_id, monitored).await;
+            manager.monitor_process(session_id, monitored, events).await;
         });
         Ok(process)
     }
 
-    async fn monitor_process(&self, id: String, process: Arc<RpcProcess>) {
-        let mut events = process.subscribe();
+    async fn load_slash_commands(
+        &self,
+        runtime: &SessionRuntime,
+        process: &RpcProcess,
+        refresh: bool,
+    ) -> Result<Vec<SlashCommand>> {
+        if !refresh
+            && let Some(commands) = runtime
+                .commands
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        {
+            return Ok(commands);
+        }
+
+        let response = process
+            .request(json!({ "type": "get_commands" }))
+            .await
+            .context("Pi could not list slash commands")?;
+        let records = response
+            .get("data")
+            .and_then(|data| data.get("commands"))
+            .and_then(Value::as_array)
+            .context("Pi command response had no commands")?;
+        let mut commands = records
+            .iter()
+            .filter_map(|record| {
+                let name = record.get("name")?.as_str()?.trim();
+                if name.is_empty()
+                    || name == INTERNAL_FORK_COMMAND
+                    || name.chars().count() > 128
+                    || name.chars().any(char::is_whitespace)
+                {
+                    return None;
+                }
+                let source = match record.get("source")?.as_str()? {
+                    "extension" => SlashCommandSource::Extension,
+                    "prompt" => SlashCommandSource::Prompt,
+                    "skill" => SlashCommandSource::Skill,
+                    _ => return None,
+                };
+                Some(SlashCommand {
+                    name: name.to_owned(),
+                    description: record
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|description| !description.is_empty())
+                        .map(|description| bounded(description, 240)),
+                    source,
+                    argument_hint: None,
+                    arguments: Vec::new(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let names = commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect::<HashSet<_>>();
+
+        let model_arguments = if names.contains("model") {
+            Vec::new()
+        } else {
+            match process
+                .request(json!({ "type": "get_available_models" }))
+                .await
+            {
+                Ok(response) => {
+                    let mut arguments = response
+                        .get("data")
+                        .and_then(|data| data.get("models"))
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|model| {
+                            let provider = model.get("provider")?.as_str()?;
+                            let model_id = model.get("id")?.as_str()?;
+                            if provider.is_empty() || model_id.is_empty() {
+                                return None;
+                            }
+                            Some(SlashCommandArgument {
+                                value: bounded(&format!("{provider}/{model_id}"), 240),
+                                description: model
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .filter(|name| !name.is_empty())
+                                    .map(|name| bounded(name, 160)),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    arguments.sort_by(|left, right| left.value.cmp(&right.value));
+                    arguments.dedup_by(|left, right| left.value == right.value);
+                    arguments
+                }
+                Err(error) => {
+                    debug!(%error, "Pi model completion is unavailable");
+                    Vec::new()
+                }
+            }
+        };
+        let thinking_arguments = if names.contains("thinking") {
+            Vec::new()
+        } else {
+            match process
+                .request(json!({ "type": "get_available_thinking_levels" }))
+                .await
+            {
+                Ok(response) => response
+                    .get("data")
+                    .and_then(|data| data.get("levels"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter(|level| !level.is_empty() && !level.chars().any(char::is_whitespace))
+                    .map(|level| SlashCommandArgument {
+                        value: level.to_owned(),
+                        description: None,
+                    })
+                    .collect(),
+                Err(error) => {
+                    debug!(%error, "Pi thinking-level completion is unavailable");
+                    Vec::new()
+                }
+            }
+        };
+        drop(names);
+
+        for command in [
+            SlashCommand {
+                name: "compact".to_owned(),
+                description: Some("Manually compact the session context".to_owned()),
+                source: SlashCommandSource::Builtin,
+                argument_hint: Some("[instructions]".to_owned()),
+                arguments: Vec::new(),
+            },
+            SlashCommand {
+                name: "model".to_owned(),
+                description: Some("Select the Pi model".to_owned()),
+                source: SlashCommandSource::Builtin,
+                argument_hint: Some("<provider/model>".to_owned()),
+                arguments: model_arguments,
+            },
+            SlashCommand {
+                name: "thinking".to_owned(),
+                description: Some("Set the Pi thinking level".to_owned()),
+                source: SlashCommandSource::Builtin,
+                argument_hint: Some("<level>".to_owned()),
+                arguments: thinking_arguments,
+            },
+            SlashCommand {
+                name: "name".to_owned(),
+                description: Some("Set the Tau and Pi session name".to_owned()),
+                source: SlashCommandSource::Builtin,
+                argument_hint: Some("<title>".to_owned()),
+                arguments: Vec::new(),
+            },
+        ] {
+            if commands.iter().all(|existing| existing.name != command.name) {
+                commands.push(command);
+            }
+        }
+        commands.sort_by(|left, right| left.name.cmp(&right.name));
+        *runtime
+            .commands
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(commands.clone());
+        Ok(commands)
+    }
+
+    async fn monitor_process(
+        &self,
+        id: String,
+        process: Arc<RpcProcess>,
+        mut events: broadcast::Receiver<Value>,
+    ) {
         loop {
             let event = match events.recv().await {
                 Ok(event) => event,
@@ -800,12 +1298,17 @@ impl AgentManager {
                         && self.runtime_owns(&runtime, &process).await
                     {
                         runtime.process.lock().await.take();
+                        *runtime
+                            .commands
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                         self.set_runtime_state(
                             &id,
                             &runtime,
                             SessionStatus::Error,
                             Some(format!("Pi event stream skipped {skipped} events")),
                         );
+                        self.cancel_extension_ui(&process).await;
                         process.shutdown().await;
                     }
                     break;
@@ -820,6 +1323,58 @@ impl AgentManager {
             }
 
             match event.get("type").and_then(Value::as_str) {
+                Some("extension_ui_request") => {
+                    match serde_json::from_value::<ExtensionUiRequest>(event.clone()) {
+                        Ok(request) if !request.id.is_empty() && request.id.len() <= 128 => {
+                            if matches!(
+                                request.method.as_str(),
+                                "select" | "confirm" | "input" | "editor"
+                            ) {
+                                let key = (id.clone(), request.id.clone());
+                                self.inner.pending_extension_ui.lock().await.insert(
+                                    key.clone(),
+                                    PendingExtensionUi {
+                                        process: process.clone(),
+                                        request: request.clone(),
+                                    },
+                                );
+                                if let Some(timeout_ms) = request.timeout {
+                                    let inner = self.inner.clone();
+                                    let timed_process = process.clone();
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(Duration::from_millis(
+                                            timeout_ms.saturating_add(1_000),
+                                        )).await;
+                                        let mut pending = inner.pending_extension_ui.lock().await;
+                                        if pending.get(&key).is_some_and(|pending| {
+                                            Arc::ptr_eq(&pending.process, &timed_process)
+                                        }) {
+                                            pending.remove(&key);
+                                        }
+                                    });
+                                }
+                            }
+                            let _ = self.inner.events.send(ServerMessage::ExtensionUi {
+                                session_id: id.clone(),
+                                request: Box::new(request),
+                            });
+                        }
+                        Ok(_) => warn!(session = %id, "Pi sent an invalid extension UI request ID"),
+                        Err(error) => {
+                            warn!(session = %id, %error, "Pi sent an invalid extension UI request")
+                        }
+                    }
+                }
+                Some("extension_error") => {
+                    let message = event
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Pi extension failed");
+                    let _ = self.inner.events.send(ServerMessage::ExtensionError {
+                        session_id: id.clone(),
+                        error: bounded(message, 480),
+                    });
+                }
                 Some("agent_start") => {
                     self.set_runtime_state(&id, &runtime, SessionStatus::Running, None);
                 }
@@ -910,6 +1465,15 @@ impl AgentManager {
                 }
                 Some("rpc_closed") => {
                     runtime.process.lock().await.take();
+                    *runtime
+                        .commands
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                    self.inner
+                        .pending_extension_ui
+                        .lock()
+                        .await
+                        .retain(|_, pending| !Arc::ptr_eq(&pending.process, &process));
                     let detail = event
                         .get("error")
                         .and_then(Value::as_str)
@@ -930,6 +1494,35 @@ impl AgentManager {
             .await
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, process))
+    }
+
+    async fn refresh_runtime_status(
+        &self,
+        id: &str,
+        runtime: &SessionRuntime,
+        process: &RpcProcess,
+    ) -> Result<()> {
+        let state = process.request(json!({ "type": "get_state" })).await?;
+        let data = state.get("data").context("Pi state response had no data")?;
+        let running = data
+            .get("isStreaming")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || data
+                .get("isCompacting")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        self.set_runtime_state(
+            id,
+            runtime,
+            if running {
+                SessionStatus::Running
+            } else {
+                SessionStatus::Idle
+            },
+            None,
+        );
+        Ok(())
     }
 
     async fn persist_session_file(&self, id: &str, process: &RpcProcess) -> Result<()> {
@@ -1230,6 +1823,7 @@ with open(session_file) as session:
         entry = json.loads(record)
         if entry.get("type") != "session":
             entries.append(entry)
+pending_prompt = None
 def append(entry):
     entries.append(entry)
     with open(session_file, "a") as session:
@@ -1240,7 +1834,21 @@ for line in sys.stdin:
     kind = command.get("type")
     response = {"id": ident, "type": "response", "command": kind, "success": True}
     if kind == "get_state":
-        response["data"] = {"sessionFile": session_file, "isStreaming": False}
+        response["data"] = {"sessionFile": session_file, "isStreaming": False, "isCompacting": False}
+        print(json.dumps(response), flush=True)
+    elif kind == "get_commands":
+        response["data"] = {"commands": [
+            {"name":"tau-fork-at","description":"private","source":"extension"},
+            {"name":"choose","description":"Choose a value","source":"extension"},
+            {"name":"review","description":"Review this change","source":"prompt"},
+            {"name":"skill:search","description":"Search","source":"skill"}
+        ]}
+        print(json.dumps(response), flush=True)
+    elif kind == "get_available_models":
+        response["data"] = {"models": [{"provider":"test","id":"model","name":"Test Model"}]}
+        print(json.dumps(response), flush=True)
+    elif kind == "get_available_thinking_levels":
+        response["data"] = {"levels": ["low", "high"]}
         print(json.dumps(response), flush=True)
     elif kind == "get_entries":
         response["data"] = {"entries": entries, "leafId": entries[-1]["id"] if entries else None}
@@ -1250,6 +1858,10 @@ for line in sys.stdin:
             response["success"] = False
             response["error"] = "prompt was not race-safe"
             print(json.dumps(response), flush=True)
+            continue
+        if command["message"].split(" ", 1)[0] == "/choose":
+            pending_prompt = ident
+            print(json.dumps({"type":"extension_ui_request","id":"dialog-1","method":"select","title":"Choose","options":["One","Two"]}), flush=True)
             continue
         append({"type":"message","id":"u1","parentId":None,"message":{"role":"user","content":command["message"],"timestamp":1}})
         print(json.dumps({"type":"agent_start"}), flush=True)
@@ -1264,6 +1876,12 @@ for line in sys.stdin:
             print(json.dumps({"type":"message_end","message":assistant}), flush=True)
             print(json.dumps({"type":"agent_settled"}), flush=True)
         threading.Thread(target=answer, daemon=True).start()
+    elif kind == "extension_ui_response":
+        with open(os.path.join(session_dir, "extension-response"), "w") as marker:
+            marker.write(command.get("value", "cancelled"))
+        if pending_prompt:
+            print(json.dumps({"id":pending_prompt,"type":"response","command":"prompt","success":True}), flush=True)
+            pending_prompt = None
     elif kind == "abort":
         with open(os.path.join(session_dir, "abort-notified"), "w") as marker:
             marker.write("abort")
@@ -1343,6 +1961,65 @@ for line in sys.stdin:
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].text, "Say hello");
         assert_eq!(history[1].text, "Hello from Tau");
+
+        let commands = manager.commands(&session_id).await.unwrap();
+        assert!(commands.iter().any(|command| {
+            command.name == "choose" && command.source == SlashCommandSource::Extension
+        }));
+        assert!(commands.iter().any(|command| {
+            command.name == "review" && command.source == SlashCommandSource::Prompt
+        }));
+        assert!(commands.iter().any(|command| {
+            command.name == "model"
+                && command.source == SlashCommandSource::Builtin
+                && command.arguments.iter().any(|argument| argument.value == "test/model")
+        }));
+        assert!(commands.iter().all(|command| command.name != INTERNAL_FORK_COMMAND));
+
+        let command_manager = manager.clone();
+        let command_session = session_id.clone();
+        let command_task = tokio::spawn(async move {
+            command_manager.prompt(&command_session, "/choose").await
+        });
+        let dialog = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let ServerMessage::ExtensionUi { session_id: event_session, request } =
+                    events.recv().await.unwrap()
+                    && event_session == session_id
+                    && request.method == "select"
+                {
+                    break request;
+                }
+            }
+        })
+        .await
+        .expect("extension dialog was not forwarded");
+        assert_eq!(dialog.options, ["One", "Two"]);
+        manager
+            .extension_ui_response(
+                &session_id,
+                &dialog.id,
+                Some("Two".to_owned()),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let outcome = command_task.await.unwrap().unwrap();
+        assert!(outcome.command_handled);
+        assert_eq!(runtime.snapshot().status, SessionStatus::Idle);
+        assert_eq!(
+            fs::read_to_string(root.join("pi-sessions/extension-response"))
+                .await
+                .unwrap(),
+            "Two",
+        );
+
+        let thinking = manager.prompt(&session_id, "/thinking high").await.unwrap();
+        assert!(thinking.command_handled);
+        assert_eq!(thinking.notice.as_deref(), Some("Thinking level set to high."));
+        assert!(manager.prompt(&session_id, "/settings").await.is_err());
+
         let session_file = manager
             .inner
             .state
