@@ -3,7 +3,10 @@ package app.tau
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.BodyProgress
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.HttpTimeoutConfig
 import io.ktor.client.plugins.onDownload
+import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
@@ -30,6 +33,7 @@ class TauConnectionException(message: String, cause: Throwable? = null) : Except
 class TauClient {
     private val client = HttpClient(platformHttpEngine()) {
         install(BodyProgress)
+        install(HttpTimeout)
         install(WebSockets)
     }
     private val socketGate = Mutex()
@@ -87,6 +91,11 @@ class TauClient {
         val baseUrl = settings.serverUrl.trim().trimEnd('/')
         return client.prepareGet("$baseUrl/v1/sessions/$sessionId/attachments/$entryId") {
             header(HttpHeaders.Authorization, "Bearer ${settings.token}")
+            timeout {
+                requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+                connectTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+                socketTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+            }
             onDownload(onProgress)
         }.execute { response ->
             if (!response.status.isSuccess()) {
