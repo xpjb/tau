@@ -87,6 +87,8 @@ actual object PlatformServices {
     actual val platformName: String = "android"
     actual val appVersion: String = TauClientVersion
     actual val osVersion: String = "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})"
+    actual val thumbnailCacheDirectory: String
+        get() = File(TauAndroidContext.require().cacheDir, "image-thumbnails").absolutePath
 
     actual fun loadConnection(): ConnectionSettings {
         val preferences = TauAndroidContext.require()

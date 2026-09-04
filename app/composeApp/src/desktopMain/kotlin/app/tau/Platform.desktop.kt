@@ -119,6 +119,9 @@ actual object PlatformServices {
     actual val osVersion: String = (
         System.getProperty("os.name").orEmpty() + " " + System.getProperty("os.version").orEmpty()
     ).trim()
+    actual val thumbnailCacheDirectory: String by lazy {
+        dataDirectory.resolve("image-thumbnails").toString()
+    }
 
     actual fun loadConnection(): ConnectionSettings {
         val path = dataDirectory.resolve("connection.json")

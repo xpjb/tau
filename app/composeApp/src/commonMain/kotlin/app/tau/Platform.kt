@@ -30,6 +30,7 @@ expect object PlatformServices {
     val platformName: String
     val appVersion: String
     val osVersion: String
+    val thumbnailCacheDirectory: String
 
     fun loadConnection(): ConnectionSettings
     fun saveConnection(settings: ConnectionSettings)

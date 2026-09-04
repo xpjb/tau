@@ -112,6 +112,7 @@ import coil3.ImageLoader
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import coil3.compose.setSingletonImageLoaderFactory
+import coil3.disk.DiskCache
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.network.ktor3.KtorNetworkFetcherFactory
@@ -121,6 +122,7 @@ import coil3.serviceLoaderEnabled
 import io.ktor.client.HttpClient
 import io.ktor.http.encodeURLPathPart
 import kotlinx.coroutines.delay
+import okio.Path.Companion.toPath
 import kotlin.math.roundToInt
 
 private val ConnectedColor = Color(0xFF4ADE80)
@@ -182,6 +184,12 @@ fun TauApp(controller: TauController) {
     setSingletonImageLoaderFactory { context ->
         ImageLoader.Builder(context)
             .serviceLoaderEnabled(false)
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(PlatformServices.thumbnailCacheDirectory.toPath())
+                    .maxSizeBytes(100L * 1_024 * 1_024)
+                    .build()
+            }
             .components {
                 add(
                     KtorNetworkFetcherFactory(
@@ -664,33 +672,60 @@ private fun TranscriptRowContent(
                                                     "/attachments/" +
                                                     message.entryId.encodeURLPathPart()
                                             }
-                                            val imageRequest = remember(
+                                            val thumbnailUrl = "$imageUrl/thumbnail"
+                                            val authenticationHeaders = remember(settings.token) {
+                                                NetworkHeaders.Builder()
+                                                    .set(
+                                                        "Authorization",
+                                                        "Bearer ${settings.token}",
+                                                    )
+                                                    .set("Accept", "image/*")
+                                                    .build()
+                                            }
+                                            val cacheScope = settings.token.hashCode()
+                                            val thumbnailCacheKey = "$thumbnailUrl#$cacheScope"
+                                            val thumbnailRequest = remember(
+                                                platformContext,
+                                                thumbnailUrl,
+                                                authenticationHeaders,
+                                                thumbnailCacheKey,
+                                            ) {
+                                                ImageRequest.Builder(platformContext)
+                                                    .data(thumbnailUrl)
+                                                    .httpHeaders(authenticationHeaders)
+                                                    .memoryCacheKey(thumbnailCacheKey)
+                                                    .diskCacheKey(thumbnailCacheKey)
+                                                    .diskCachePolicy(CachePolicy.ENABLED)
+                                                    .build()
+                                            }
+                                            val originalImageRequest = remember(
                                                 platformContext,
                                                 imageUrl,
-                                                settings.token,
+                                                authenticationHeaders,
+                                                cacheScope,
+                                                thumbnailCacheKey,
                                             ) {
                                                 ImageRequest.Builder(platformContext)
                                                     .data(imageUrl)
-                                                    .httpHeaders(
-                                                        NetworkHeaders.Builder()
-                                                            .set(
-                                                                "Authorization",
-                                                                "Bearer ${settings.token}",
-                                                            )
-                                                            .set("Accept", "image/*")
-                                                            .build(),
-                                                    )
-                                                    .memoryCacheKey(
-                                                        "$imageUrl#${settings.token.hashCode()}",
-                                                    )
+                                                    .httpHeaders(authenticationHeaders)
+                                                    .memoryCacheKey("$imageUrl#$cacheScope")
+                                                    .placeholderMemoryCacheKey(thumbnailCacheKey)
                                                     .diskCachePolicy(CachePolicy.DISABLED)
                                                     .build()
+                                            }
+                                            var useOriginalPreview by remember(imageUrl, settings.token) {
+                                                mutableStateOf(false)
                                             }
                                             var imageLoaded by remember(imageUrl, settings.token) {
                                                 mutableStateOf<Boolean?>(null)
                                             }
                                             var imageExpanded by remember(imageUrl, settings.token) {
                                                 mutableStateOf(false)
+                                            }
+                                            val previewRequest = if (useOriginalPreview) {
+                                                originalImageRequest
+                                            } else {
+                                                thumbnailRequest
                                             }
                                             Box(
                                                 Modifier
@@ -720,13 +755,19 @@ private fun TranscriptRowContent(
                                                     true -> Unit
                                                 }
                                                 AsyncImage(
-                                                    model = imageRequest,
+                                                    model = previewRequest,
                                                     contentDescription = attachment.caption
                                                         ?: attachment.fileName,
                                                     modifier = Modifier.fillMaxSize(),
                                                     onLoading = { imageLoaded = null },
                                                     onSuccess = { imageLoaded = true },
-                                                    onError = { imageLoaded = false },
+                                                    onError = {
+                                                        if (useOriginalPreview) {
+                                                            imageLoaded = false
+                                                        } else {
+                                                            useOriginalPreview = true
+                                                        }
+                                                    },
                                                     contentScale = ContentScale.Fit,
                                                 )
                                             }
@@ -746,7 +787,7 @@ private fun TranscriptRowContent(
                                                             .displayCutoutPadding(),
                                                     ) {
                                                         AsyncImage(
-                                                            model = imageRequest,
+                                                            model = originalImageRequest,
                                                             contentDescription = attachment.caption
                                                                 ?: attachment.fileName,
                                                             modifier = Modifier
