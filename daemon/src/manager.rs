@@ -58,6 +58,7 @@ struct AttachmentRequest {
     kind: AttachmentKind,
     path: PathBuf,
     caption: Option<String>,
+    size: Option<u64>,
 }
 
 pub struct PromptOutcome {
@@ -196,7 +197,8 @@ impl AgentManager {
         }
         let _guard = runtime.operation.lock().await;
         let (entries, leaf_id) = self.entries_for_read(id, &runtime).await?;
-        let messages = active_chat_messages(&entries, leaf_id.as_deref())?;
+        let mut messages = active_chat_messages(&entries, leaf_id.as_deref())?;
+        self.populate_attachment_sizes(&entries, &mut messages).await;
         let _ = self.inner.events.send(ServerMessage::History {
             session_id: id.to_owned(),
             messages,
@@ -699,6 +701,45 @@ impl AgentManager {
         self.branch_session(id, BranchOperation::Clone)
             .await
             .map(|(child, _)| child)
+    }
+
+    async fn populate_attachment_sizes(&self, entries: &[Value], messages: &mut [ChatMessage]) {
+        let Ok(root) = fs::canonicalize(&self.inner.config.attachment_root).await else {
+            return;
+        };
+        let by_id = entries
+            .iter()
+            .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
+            .collect::<HashMap<_, _>>();
+        for message in messages {
+            let Some(attachment) = message.attachment.as_mut() else {
+                continue;
+            };
+            if attachment.size.is_some() {
+                continue;
+            }
+            let Some(request) = by_id.get(message.entry_id.as_str()).and_then(|entry| {
+                attachment_request(entry)
+            }) else {
+                continue;
+            };
+            let Ok(path) = fs::canonicalize(&request.path).await else {
+                continue;
+            };
+            if !path.starts_with(&root) {
+                continue;
+            }
+            let Ok(metadata) = fs::metadata(path).await else {
+                continue;
+            };
+            let limit = match request.kind {
+                AttachmentKind::Image => IMAGE_LIMIT,
+                AttachmentKind::File => FILE_LIMIT,
+            };
+            if metadata.is_file() && metadata.len() <= limit {
+                attachment.size = Some(metadata.len());
+            }
+        }
     }
 
     pub async fn resolve_attachment(
@@ -1548,7 +1589,8 @@ impl AgentManager {
             .and_then(Value::as_array)
             .context("Pi entries response had no entries")?;
         let leaf_id = data.get("leafId").and_then(Value::as_str);
-        let messages = active_chat_messages(entries, leaf_id)?;
+        let mut messages = active_chat_messages(entries, leaf_id)?;
+        self.populate_attachment_sizes(entries, &mut messages).await;
         let _ = self.inner.events.send(ServerMessage::History {
             session_id: id.to_owned(),
             messages,
@@ -1675,6 +1717,7 @@ fn active_chat_messages(entries: &[Value], leaf_id: Option<&str>) -> Result<Vec<
                         kind: request.kind,
                         file_name,
                         caption: request.caption,
+                        size: request.size,
                     }),
                 });
             }
@@ -1725,10 +1768,19 @@ fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
         .map(str::trim)
         .filter(|caption| !caption.is_empty())
         .map(|caption| bounded(caption, 1024));
+    let limit = match kind {
+        AttachmentKind::Image => IMAGE_LIMIT,
+        AttachmentKind::File => FILE_LIMIT,
+    };
+    let size = attachment
+        .get("size")
+        .and_then(Value::as_u64)
+        .filter(|size| *size <= limit);
     Some(AttachmentRequest {
         kind,
         path: PathBuf::from(attachment.get("path")?.as_str()?),
         caption,
+        size,
     })
 }
 
@@ -1768,7 +1820,7 @@ mod tests {
             json!({"type":"message","id":"old","parentId":"a1","message":{"role":"user","content":"Old branch","timestamp":3}}),
             json!({"type":"message","id":"u2","parentId":"a1","message":{"role":"user","content":[{"type":"text","text":"New branch"}],"timestamp":4}}),
             json!({"type":"message","id":"a2","parentId":"u2","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Result"},{"type":"toolCall","name":"send_file"}],"timestamp":5}}),
-            json!({"type":"message","id":"t1","parentId":"a2","message":{"role":"toolResult","content":[{"type":"text","text":"queued"}],"details":{"tauAttachment":{"version":1,"kind":"file","path":"/tmp/outbox/result.zip","caption":"Build"}},"timestamp":6}}),
+            json!({"type":"message","id":"t1","parentId":"a2","message":{"role":"toolResult","content":[{"type":"text","text":"queued"}],"details":{"tauAttachment":{"version":1,"kind":"file","path":"/tmp/outbox/result.zip","caption":"Build","size":123}},"timestamp":6}}),
         ];
         let messages = active_chat_messages(&entries, Some("t1")).unwrap();
         assert_eq!(
@@ -1778,7 +1830,7 @@ mod tests {
                 ChatMessage { entry_id: "a1".to_owned(), role: ChatRole::Assistant, text: "First".to_owned(), timestamp_ms: Some(2), attachment: None },
                 ChatMessage { entry_id: "u2".to_owned(), role: ChatRole::User, text: "New branch".to_owned(), timestamp_ms: Some(4), attachment: None },
                 ChatMessage { entry_id: "a2".to_owned(), role: ChatRole::Assistant, text: "Result".to_owned(), timestamp_ms: Some(5), attachment: None },
-                ChatMessage { entry_id: "t1".to_owned(), role: ChatRole::System, text: "Build".to_owned(), timestamp_ms: Some(6), attachment: Some(ChatAttachment { kind: AttachmentKind::File, file_name: "result.zip".to_owned(), caption: Some("Build".to_owned()) }) },
+                ChatMessage { entry_id: "t1".to_owned(), role: ChatRole::System, text: "Build".to_owned(), timestamp_ms: Some(6), attachment: Some(ChatAttachment { kind: AttachmentKind::File, file_name: "result.zip".to_owned(), caption: Some("Build".to_owned()), size: Some(123) }) },
             ]
         );
     }
@@ -1909,6 +1961,32 @@ for line in sys.stdin:
         };
         let state = StateStore::load(config.state_path.clone()).await.unwrap();
         let manager = AgentManager::new(config, state);
+        fs::create_dir_all(root.join("outbox")).await.unwrap();
+        let artifact = root.join("outbox/result.zip");
+        fs::write(&artifact, b"artifact").await.unwrap();
+        let attachment_entries = vec![json!({
+            "type": "message",
+            "id": "attachment",
+            "parentId": null,
+            "message": {
+                "role": "toolResult",
+                "content": [{"type": "text", "text": "queued"}],
+                "details": {"tauAttachment": {
+                    "version": 1,
+                    "kind": "file",
+                    "path": artifact,
+                    "caption": "Build",
+                }},
+                "timestamp": 1,
+            },
+        })];
+        let mut attachment_messages =
+            active_chat_messages(&attachment_entries, Some("attachment")).unwrap();
+        manager
+            .populate_attachment_sizes(&attachment_entries, &mut attachment_messages)
+            .await;
+        assert_eq!(attachment_messages[0].attachment.as_ref().unwrap().size, Some(8));
+
         let mut events = manager.subscribe();
         let session_id = manager.create_session().await.unwrap();
         let uploaded = manager

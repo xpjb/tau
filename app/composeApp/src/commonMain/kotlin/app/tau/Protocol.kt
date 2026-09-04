@@ -230,6 +230,7 @@ data class ChatAttachment(
     val kind: AttachmentKind,
     val fileName: String,
     val caption: String? = null,
+    val size: Long? = null,
 )
 
 @Serializable

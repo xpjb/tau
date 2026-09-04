@@ -36,10 +36,11 @@ class ProtocolTest {
         assertEquals("Running bash", state.detail)
 
         val history = assertIs<History>(TauJson.decodeFromString<ServerMessage>(
-            """{"type":"history","sessionId":"chat","messages":[{"entryId":"tool","role":"system","text":"Build","attachment":{"kind":"file","fileName":"tau.zip","caption":"Build"}}]}""",
+            """{"type":"history","sessionId":"chat","messages":[{"entryId":"tool","role":"system","text":"Build","attachment":{"kind":"file","fileName":"tau.zip","caption":"Build","size":12345}}]}""",
         ))
         assertEquals(AttachmentKind.File, history.messages.single().attachment?.kind)
         assertEquals("tau.zip", history.messages.single().attachment?.fileName)
+        assertEquals(12345L, history.messages.single().attachment?.size)
 
         val commands = assertIs<Commands>(TauJson.decodeFromString<ServerMessage>(
             """{"type":"commands","sessionId":"chat","commands":[{"name":"model","description":"Select model","source":"builtin","argumentHint":"<provider/model>","arguments":[{"value":"test/model","description":"Test"}]}]}""",

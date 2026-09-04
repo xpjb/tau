@@ -63,6 +63,7 @@ function register(
             kind,
             path: attachment.path,
             caption: attachment.caption,
+            size: attachment.size,
           },
         },
       };
@@ -105,7 +106,7 @@ async function validate(
   if (normalizedCaption && Array.from(normalizedCaption).length > CAPTION_LIMIT) {
     throw new Error(`Caption exceeds ${CAPTION_LIMIT} characters`);
   }
-  return { path, caption: normalizedCaption };
+  return { path, caption: normalizedCaption, size: metadata.size };
 }
 
 async function imageMime(path: string): Promise<string | undefined> {

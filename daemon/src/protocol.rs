@@ -251,6 +251,8 @@ pub struct ChatAttachment {
     pub kind: AttachmentKind,
     pub file_name: String,
     pub caption: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
