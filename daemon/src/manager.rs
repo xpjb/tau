@@ -971,6 +971,7 @@ impl AgentManager {
                 .and_then(|data| data.get("text"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
+            temporary.request(json!({ "type": "get_transcript" })).await?;
             let state = temporary.request(json!({ "type": "get_state" })).await?;
             let data = state
                 .get("data")
