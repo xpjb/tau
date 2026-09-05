@@ -63,6 +63,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -721,6 +722,14 @@ private data class MeasuredTranscriptRow(
     val height: Int,
 )
 
+private data class TranscriptResizeAnchor(
+    val row: TranscriptRow,
+    val itemEnd: Double,
+    val scrollOffset: Double,
+    val firstVisibleItemIndex: Int,
+    val firstVisibleItemScrollOffset: Int,
+)
+
 private class TranscriptMeasureCache {
     var styles: TranscriptTextStyles? = null
     var detailStyles: List<TranscriptTextStyles>? = null
@@ -800,6 +809,7 @@ private fun TranscriptRowContent(
     sessionId: String,
     attachmentDownload: AttachmentDownload?,
     selectionState: SelectionState,
+    beforeDetailsResize: () -> Unit,
 ) {
     when (row) {
         TranscriptRow.BottomAnchor -> Spacer(Modifier.height(1.dp))
@@ -849,6 +859,7 @@ private fun TranscriptRowContent(
                         codeStyles = detailCodeStyles,
                         errorStyles = detailErrorStyles,
                         onToggle = {
+                            beforeDetailsResize()
                             controller.setDetailsExpanded(
                                 sessionId,
                                 null,
@@ -909,6 +920,7 @@ private fun TranscriptRowContent(
                                     codeStyles = detailCodeStyles,
                                     errorStyles = detailErrorStyles,
                                     onToggle = {
+                                        beforeDetailsResize()
                                         controller.setDetailsExpanded(
                                             sessionId,
                                             message.entryId,
@@ -916,6 +928,7 @@ private fun TranscriptRowContent(
                                         )
                                     },
                                     onContentToggle = { block ->
+                                        beforeDetailsResize()
                                         controller.toggleDetailContent(
                                             DetailContentExpansionKey(
                                                 sessionId = sessionId,
@@ -1623,6 +1636,9 @@ private fun ChatPanel(
         }
     }
     val listState = rememberLazyListState()
+    var transcriptResizeAnchor by remember(sessionId) {
+        mutableStateOf<TranscriptResizeAnchor?>(null)
+    }
     val transcriptSelectionState = rememberSelectionState()
     val density = LocalDensity.current
     val layoutDirection = LocalLayoutDirection.current
@@ -2135,6 +2151,34 @@ private fun ChatPanel(
                     afterContentPadding = with(density) { 3.dp.roundToPx() },
                     viewportSize = constraints.maxHeight,
                 )
+                transcriptResizeAnchor?.let { anchor ->
+                    val resizedIndex = transcriptRows.indexOfFirst { row -> row.key == anchor.row.key }
+                    val resizedRow = transcriptRows.getOrNull(resizedIndex)
+                    if (resizedRow == null) {
+                        SideEffect {
+                            if (transcriptResizeAnchor === anchor) transcriptResizeAnchor = null
+                        }
+                    } else if (resizedRow != anchor.row) {
+                        val viewportUnchanged = !listState.isScrollInProgress &&
+                            listState.firstVisibleItemIndex == anchor.firstVisibleItemIndex &&
+                            listState.firstVisibleItemScrollOffset ==
+                            anchor.firstVisibleItemScrollOffset
+                        val position = geometry.positionAt(
+                            anchor.scrollOffset + geometry.itemEnd(resizedIndex) - anchor.itemEnd,
+                        )
+                        SideEffect {
+                            if (transcriptResizeAnchor === anchor) {
+                                if (viewportUnchanged) {
+                                    listState.requestScrollToItem(
+                                        position.index,
+                                        position.scrollOffset,
+                                    )
+                                }
+                                transcriptResizeAnchor = null
+                            }
+                        }
+                    }
+                }
                 Box(Modifier.fillMaxSize()) {
                     SelectionContainer(transcriptSelectionState, Modifier.fillMaxSize()) {
                         LazyColumn(
@@ -2180,6 +2224,23 @@ private fun ChatPanel(
                                         sessionId = sessionId,
                                         attachmentDownload = attachmentDownload,
                                         selectionState = transcriptSelectionState,
+                                        beforeDetailsResize = {
+                                            val rowIndex = transcriptRows.indexOf(row)
+                                            if (rowIndex >= 0) {
+                                                transcriptResizeAnchor = TranscriptResizeAnchor(
+                                                    row = row,
+                                                    itemEnd = geometry.itemEnd(rowIndex),
+                                                    scrollOffset = geometry.scrollOffset(
+                                                        listState.firstVisibleItemIndex,
+                                                        listState.firstVisibleItemScrollOffset,
+                                                    ),
+                                                    firstVisibleItemIndex =
+                                                        listState.firstVisibleItemIndex,
+                                                    firstVisibleItemScrollOffset =
+                                                        listState.firstVisibleItemScrollOffset,
+                                                )
+                                            }
+                                        },
                                     )
                                 }
                             }

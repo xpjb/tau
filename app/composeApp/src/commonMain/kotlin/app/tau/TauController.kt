@@ -29,8 +29,10 @@ enum class ConnectionStatus {
 data class OutgoingMessage(
     val requestId: String,
     val text: String,
+    val canonicalText: String,
     val afterEntryId: String?,
     val occurrence: Int,
+    val canonicalOccurrence: Int,
 )
 
 data class SessionExtensionUi(
@@ -237,9 +239,6 @@ class TauController(dispatcher: CoroutineDispatcher) {
                         previousDefault,
                     )
                 }
-            if (key != null) {
-                expansions[key] = expanded
-            }
             val message = entryId?.let { id ->
                 current.histories[sessionId]
                     .orEmpty()
@@ -249,6 +248,11 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 key !in current.messageDetails &&
                 key !in current.loadingMessageDetails &&
                 key !in current.messageDetailErrors
+            val waitingForDetails = expanded && key != null &&
+                (loadDetails || key in current.loadingMessageDetails)
+            if (key != null) {
+                expansions[key] = expanded && !waitingForDetails
+            }
             current.copy(
                 detailsExpandedBySession = current.detailsExpandedBySession +
                     (sessionId to expanded),
@@ -287,11 +291,13 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     key.entryId,
                 )
                 mutableState.update { current ->
-                    if (current.detailExpansions[key] != true) {
+                    if (key !in current.loadingMessageDetails || detailJobs[key] !== job) {
                         current
                     } else {
                         current.copy(
+                            detailExpansions = current.detailExpansions + (key to true),
                             messageDetails = current.messageDetails + (key to details),
+                            loadingMessageDetails = current.loadingMessageDetails - key,
                             messageDetailErrors = current.messageDetailErrors - key,
                         )
                     }
@@ -300,18 +306,26 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 throw cancelled
             } catch (error: Throwable) {
                 mutableState.update { current ->
-                    current.copy(
-                        messageDetailErrors = current.messageDetailErrors +
-                            (key to (error.message ?: "Details could not be loaded.").take(240)),
-                    )
+                    if (key !in current.loadingMessageDetails || detailJobs[key] !== job) {
+                        current
+                    } else {
+                        current.copy(
+                            detailExpansions = current.detailExpansions + (key to true),
+                            loadingMessageDetails = current.loadingMessageDetails - key,
+                            messageDetailErrors = current.messageDetailErrors +
+                                (key to (error.message ?: "Details could not be loaded.").take(240)),
+                        )
+                    }
                 }
             } finally {
-                mutableState.update { current ->
-                    current.copy(
-                        loadingMessageDetails = current.loadingMessageDetails - key,
-                    )
+                if (detailJobs[key] === job) {
+                    detailJobs.remove(key)
+                    mutableState.update { current ->
+                        current.copy(
+                            loadingMessageDetails = current.loadingMessageDetails - key,
+                        )
+                    }
                 }
-                if (detailJobs[key] === job) detailJobs.remove(key)
             }
         }
         detailJobs[key] = job
@@ -435,11 +449,10 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 }
                 val id = nextRequestId()
                 requestId = id
-                val afterEntryId = mutableState.value.histories[sessionId]
-                    .orEmpty()
-                    .lastOrNull()
-                    ?.entryId
-                val occurrence = mutableState.value.outgoingMessages[sessionId]
+                val current = mutableState.value
+                val history = current.histories[sessionId].orEmpty()
+                val afterEntryId = history.lastOrNull()?.entryId
+                val occurrence = current.outgoingMessages[sessionId]
                     .orEmpty()
                     .count { outgoing -> outgoing.afterEntryId == afterEntryId } +
                     pending.values.count { action ->
@@ -447,13 +460,25 @@ class TauController(dispatcher: CoroutineDispatcher) {
                             action.sessionId == sessionId &&
                             action.afterEntryId == afterEntryId
                     }
+                val canonicalOccurrence = history.count { canonical ->
+                    canonical.role == ChatRole.User && canonical.text == message
+                } + current.outgoingMessages[sessionId]
+                    .orEmpty()
+                    .count { outgoing -> outgoing.canonicalText == message } +
+                    pending.values.count { action ->
+                        action is PendingAction.Prompt &&
+                            action.sessionId == sessionId &&
+                            action.canonicalText == message
+                    }
                 pending[id] = PendingAction.Prompt(
                     sessionId = sessionId,
                     text = text,
                     files = files,
                     displayText = introduction,
+                    canonicalText = message,
                     afterEntryId = afterEntryId,
                     occurrence = occurrence,
+                    canonicalOccurrence = canonicalOccurrence,
                 )
                 client.send(Prompt(id, sessionId, message))
                 mutableState.update { current ->
@@ -825,8 +850,10 @@ class TauController(dispatcher: CoroutineDispatcher) {
                                     OutgoingMessage(
                                         requestId = message.requestId,
                                         text = action.displayText,
+                                        canonicalText = action.canonicalText,
                                         afterEntryId = action.afterEntryId,
                                         occurrence = action.occurrence,
+                                        canonicalOccurrence = action.canonicalOccurrence,
                                     ),
                                 current.histories[action.sessionId].orEmpty(),
                             )
@@ -1206,8 +1233,10 @@ class TauController(dispatcher: CoroutineDispatcher) {
             val text: String,
             val files: List<PickedFile>,
             val displayText: String,
+            val canonicalText: String,
             val afterEntryId: String?,
             val occurrence: Int,
+            val canonicalOccurrence: Int,
         ) : PendingAction
     }
 }
@@ -1216,6 +1245,15 @@ internal fun reconcileOutgoingMessages(
     outgoing: List<OutgoingMessage>,
     history: List<ChatMessage>,
 ): List<OutgoingMessage> = outgoing.filter { pending ->
+    val acceptedByContent = history
+        .asSequence()
+        .filter { message ->
+            message.role == ChatRole.User && message.text == pending.canonicalText
+        }
+        .drop(pending.canonicalOccurrence)
+        .any()
+    if (acceptedByContent) return@filter false
+
     val start = if (pending.afterEntryId == null) {
         0
     } else {

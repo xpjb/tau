@@ -40,6 +40,12 @@ class TranscriptGeometry(
             .coerceIn(0.0, maxScrollOffset)
     }
 
+    fun itemEnd(index: Int): Double {
+        if (starts.isEmpty()) return 0.0
+        val safeIndex = index.coerceIn(starts.indices)
+        return (starts[safeIndex] + heights[safeIndex]).toDouble()
+    }
+
     fun positionAt(scrollOffset: Double): TranscriptPosition {
         if (starts.isEmpty()) return TranscriptPosition(0, 0)
         val target = scrollOffset.coerceIn(0.0, maxScrollOffset).toLong()
