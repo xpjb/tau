@@ -1653,6 +1653,91 @@ impl AgentManager {
                             }
                         }
                     }
+                    if let (Some(kind), Some(attempt_id), Some(content_index), Some(final_text)) = (
+                        match update_type {
+                            Some("text_end") => Some(ChatContentKind::Text),
+                            Some("thinking_end") => Some(ChatContentKind::Thinking),
+                            _ => None,
+                        },
+                        attempt_id.as_deref(),
+                        content_index,
+                        update
+                            .and_then(|update| update.get("content"))
+                            .and_then(Value::as_str),
+                    ) {
+                        let final_text = if kind == ChatContentKind::Thinking {
+                            bounded(final_text, MAX_DETAIL_CHARS)
+                        } else {
+                            final_text.to_owned()
+                        };
+                        let mut completion_delta = None;
+                        let mut completion_snapshot = None;
+                        let mut attempts = runtime
+                            .live_attempts
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if let Some(attempt) = attempts
+                            .iter_mut()
+                            .find(|attempt| attempt.entry_id == attempt_id)
+                        {
+                            let existing = attempt.content.iter().find(|content| {
+                                content.content_index == content_index && content.kind == kind
+                            });
+                            let previous = existing
+                                .and_then(|content| content.text.as_deref())
+                                .unwrap_or_default();
+                            let extends_previous = final_text.starts_with(previous);
+                            if extends_previous && final_text.len() > previous.len() {
+                                completion_delta = Some(final_text[previous.len()..].to_owned());
+                            }
+                            attempt.content.retain(|content| {
+                                content.content_index != content_index
+                            });
+                            if !final_text.is_empty() {
+                                attempt.content.push(ChatContent {
+                                    kind,
+                                    content_index,
+                                    detail_index: None,
+                                    text: Some(final_text),
+                                    tool_name: None,
+                                    arguments: None,
+                                    result: None,
+                                    has_content: true,
+                                    has_arguments: false,
+                                    has_result: false,
+                                    is_error: false,
+                                });
+                                attempt.content.sort_by_key(|content| content.content_index);
+                            }
+                            if !extends_previous {
+                                completion_snapshot = Some(attempts.clone());
+                            }
+                        }
+                        drop(attempts);
+                        if let Some(attempts) = completion_snapshot {
+                            let _ = self.inner.events.send(ServerMessage::StreamSnapshot {
+                                session_id: id.clone(),
+                                attempts,
+                            });
+                        } else if let Some(delta) = completion_delta {
+                            let message = match kind {
+                                ChatContentKind::Text => ServerMessage::StreamDelta {
+                                    session_id: id.clone(),
+                                    attempt_id: attempt_id.to_owned(),
+                                    content_index,
+                                    delta,
+                                },
+                                ChatContentKind::Thinking => ServerMessage::StreamDetailsDelta {
+                                    session_id: id.clone(),
+                                    attempt_id: attempt_id.to_owned(),
+                                    content_index,
+                                    delta,
+                                },
+                                ChatContentKind::Tool => unreachable!(),
+                            };
+                            let _ = self.inner.events.send(message);
+                        }
+                    }
                     match (update_type, attempt_id, content_index, delta) {
                         (Some("text_delta"), Some(attempt_id), Some(content_index), Some(delta)) => {
                             let _ = self.inner.events.send(ServerMessage::StreamDelta {
@@ -2793,7 +2878,7 @@ for line in sys.stdin:
         print(json.dumps(response), flush=True)
         def answer():
             time.sleep(0.05)
-            print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Checking"}}), flush=True)
+            print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Checking"}}), flush=True)
             print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Hello "}}), flush=True)
             print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"from Tau"}}), flush=True)
             assistant = {"role":"assistant","content":[{"type":"thinking","thinking":"Checking"},{"type":"text","text":"Hello from Tau"}],"timestamp":2}
