@@ -43,6 +43,7 @@ kotlin {
             implementation("io.ktor:ktor-client-core:3.5.2")
             implementation("io.ktor:ktor-client-websockets:3.5.2")
             implementation("com.squareup.okio:okio:3.18.1")
+            implementation("androidx.sqlite:sqlite-bundled:2.7.0")
         }
         androidMain.dependencies {
             implementation("androidx.activity:activity-compose:1.13.0")

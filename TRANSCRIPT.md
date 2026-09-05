@@ -12,8 +12,15 @@ Eight daemon tests pass, including RPC recovery, retired-process rejection,
 interrupted thinking, stale snapshots, and attachment security. Clippy passes.
 Held queues prevent automatic idle shutdown; forking requires a resumed or empty
 queue so process replacement cannot silently discard queued work.
-The shared durable store and UI migration remain unfinished; the client still
-uses protocol 2. Do not deploy this daemon with that client.
+The shared SQLite store core now passes three desktop tests for durable content,
+atomic rollback, pending identities, controls, attachments, connection isolation,
+and a 10,000-entry history. It is not yet connected to the controller or UI;
+the client still uses protocol 2. Do not deploy this daemon with that client.
+
+Pi follow-up `3c543e3` persists identified sessions before publishing, including
+new sessions and forks without an assistant reply. Legacy RPC keeps lazy initial
+persistence. Its isolated package passes consumer and no-provider persistence
+checks; 169 persistence/control regression tests and read-only checks pass.
 
 ## Authority and identity
 
