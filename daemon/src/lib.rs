@@ -4,6 +4,7 @@ mod pi;
 mod protocol;
 mod server;
 mod state;
+mod transcript;
 
 use anyhow::{Context, Result, bail};
 use tokio::fs;

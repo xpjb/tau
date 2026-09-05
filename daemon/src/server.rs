@@ -86,14 +86,6 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
         })) }))
         .route("/v1/ws", get(websocket))
         .route(
-            "/v1/sessions/{session_id}/messages/{entry_id}/details",
-            get(message_details),
-        )
-        .route(
-            "/v1/sessions/{session_id}/messages/{entry_id}/details/{detail_index}",
-            get(message_detail),
-        )
-        .route(
             "/v1/sessions/{session_id}/attachments/{entry_id}/thumbnail",
             get(download_attachment_thumbnail),
         )
@@ -247,7 +239,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Some(session_id),
                                 None,
                             ),
-                            Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                            Err(error) => ServerMessage::command_failure(request_id, error),
                         },
                         ClientCommand::OpenSession { session_id } => {
                             match manager.open_session(&session_id).await {
@@ -256,7 +248,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                     Some(session_id),
                                     None,
                                 ),
-                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                                Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
                         ClientCommand::GetCommands { session_id } => {
@@ -277,22 +269,22 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                         None,
                                     )
                                 }
-                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                                Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
                         ClientCommand::Prompt { session_id, text } => {
                             if text.chars().count() > MAX_PROMPT_CHARS {
                                 ServerMessage::failure(request_id, "message is too large")
                             } else {
-                                match manager.prompt(&session_id, &text).await {
+                                match manager.prompt(&session_id, &text, &request_id).await {
                                     Ok(outcome) => ServerMessage::prompt_success(
                                         request_id,
                                         session_id,
-                                        outcome.command_handled,
+                                        outcome.disposition,
                                         outcome.notice,
                                     ),
                                     Err(error) => {
-                                        ServerMessage::failure(request_id, error.to_string())
+                                        ServerMessage::command_failure(request_id, error)
                                     }
                                 }
                             }
@@ -316,7 +308,17 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                     Some(session_id),
                                     None,
                                 ),
-                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                                Err(error) => ServerMessage::command_failure(request_id, error),
+                            }
+                        }
+                        ClientCommand::QueueControl { session_id, generation, operation } => {
+                            match manager.queue_control(&session_id, &generation, &request_id, operation).await {
+                                Ok(outcome) => {
+                                    let mut response = ServerMessage::success(request_id, Some(session_id), None);
+                                    if let ServerMessage::Response { outcome: field, .. } = &mut response { *field = Some(outcome); }
+                                    response
+                                }
+                                Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
                         ClientCommand::Abort { session_id } => {
@@ -326,7 +328,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                     Some(session_id),
                                     None,
                                 ),
-                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                                Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
                         ClientCommand::CloseSession { session_id } => {
@@ -336,7 +338,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                     Some(session_id),
                                     None,
                                 ),
-                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                                Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
                         ClientCommand::DeleteSession { session_id } => {
@@ -346,7 +348,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                     Some(session_id),
                                     None,
                                 ),
-                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                                Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
                         ClientCommand::RenameSession { session_id, title } => {
@@ -356,7 +358,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                     Some(session_id),
                                     None,
                                 ),
-                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                                Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
                         ClientCommand::ForkSession {
@@ -368,7 +370,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Some(child),
                                 draft,
                             ),
-                            Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                            Err(error) => ServerMessage::command_failure(request_id, error),
                         },
                         ClientCommand::CloneSession { session_id } => {
                             match manager.clone_session(&session_id).await {
@@ -377,7 +379,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                     Some(child),
                                     None,
                                 ),
-                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                                Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
                     };
@@ -445,68 +447,6 @@ fn valid_resource_key(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-}
-
-async fn message_details(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath((session_id, entry_id)): AxumPath<(String, String)>,
-) -> Response {
-    if !authorized(&headers, &state.config.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    if !valid_resource_key(&session_id) || !valid_resource_key(&entry_id) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    match state
-        .manager
-        .message_details(&session_id, &entry_id)
-        .await
-    {
-        Ok(details) => (
-            [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
-            Json(details),
-        )
-            .into_response(),
-        Err(error) => {
-            warn!(session = %session_id, entry = %entry_id, %error, "Tau message details were not available");
-            StatusCode::NOT_FOUND.into_response()
-        }
-    }
-}
-
-async fn message_detail(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath((session_id, entry_id, detail_index)): AxumPath<(String, String, usize)>,
-) -> Response {
-    if !authorized(&headers, &state.config.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    if !valid_resource_key(&session_id) || !valid_resource_key(&entry_id) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    match state
-        .manager
-        .message_detail(&session_id, &entry_id, detail_index)
-        .await
-    {
-        Ok(detail) => (
-            [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
-            Json(detail),
-        )
-            .into_response(),
-        Err(error) => {
-            warn!(
-                session = %session_id,
-                entry = %entry_id,
-                detail_index,
-                %error,
-                "Tau message detail was not available",
-            );
-            StatusCode::NOT_FOUND.into_response()
-        }
-    }
 }
 
 async fn download_attachment_thumbnail(

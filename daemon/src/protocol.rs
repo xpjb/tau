@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::state::SessionModel;
+use crate::transcript::{QueueRef, TranscriptChange, TranscriptSnapshot};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -34,12 +35,24 @@ pub enum ClientCommand {
         #[serde(default)]
         cancelled: bool,
     },
+    QueueControl { session_id: String, generation: String, operation: QueueOperation },
     Abort { session_id: String },
     CloseSession { session_id: String },
     DeleteSession { session_id: String },
     RenameSession { session_id: String, title: String },
     ForkSession { session_id: String, entry_id: String },
     CloneSession { session_id: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum QueueOperation {
+    Edit { request_id: String, revision: u64, text: String },
+    Delete { request_id: String, revision: u64 },
+    Prefix { run_id: Option<String>, requests: Vec<QueueRef>, boundary: String },
+    Pause { run_id: Option<String>, boundary: String },
+    Resume { run_id: Option<String> },
+    Cancel { control_id: String },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,7 +70,10 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         draft: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        command_handled: Option<bool>,
+        disposition: Option<PromptDisposition>,
+        uncertain: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         notice: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,50 +94,21 @@ pub enum ServerMessage {
     Sessions {
         sessions: Vec<SessionSummary>,
     },
-    History {
+    TranscriptSnapshot {
         session_id: String,
-        messages: Vec<ChatMessage>,
+        snapshot: TranscriptSnapshot,
+    },
+    TranscriptUpdate {
+        session_id: String,
+        generation: String,
+        sequence: u64,
+        change: TranscriptChange,
     },
     SessionState {
         session_id: String,
         status: SessionStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-    },
-    StreamReset {
-        session_id: String,
-        attempt_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        timestamp_ms: Option<u64>,
-    },
-    StreamDelta {
-        session_id: String,
-        attempt_id: String,
-        content_index: usize,
-        delta: String,
-    },
-    StreamDetailsDelta {
-        session_id: String,
-        attempt_id: String,
-        content_index: usize,
-        delta: String,
-    },
-    StreamTool {
-        session_id: String,
-        attempt_id: String,
-        content_index: usize,
-        tool_name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        arguments: Option<String>,
-    },
-    StreamSnapshot {
-        session_id: String,
-        attempts: Vec<ChatAttempt>,
-    },
-    StreamEnd {
-        session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        attempt: Option<ChatAttempt>,
     },
     ResyncRequired,
 }
@@ -133,7 +120,9 @@ impl ServerMessage {
             ok: true,
             session_id,
             draft,
-            command_handled: None,
+            disposition: None,
+            uncertain: false,
+            outcome: None,
             notice: None,
             error: None,
         }
@@ -142,7 +131,7 @@ impl ServerMessage {
     pub fn prompt_success(
         request_id: String,
         session_id: String,
-        command_handled: bool,
+        disposition: PromptDisposition,
         notice: Option<String>,
     ) -> Self {
         Self::Response {
@@ -150,10 +139,20 @@ impl ServerMessage {
             ok: true,
             session_id: Some(session_id),
             draft: None,
-            command_handled: Some(command_handled),
+            disposition: Some(disposition),
+            uncertain: false,
+            outcome: None,
             notice,
             error: None,
         }
+    }
+
+    pub fn command_failure(request_id: String, error: anyhow::Error) -> Self {
+        let mut response = Self::failure(request_id, error.to_string());
+        if let Self::Response { uncertain, .. } = &mut response {
+            *uncertain = error.is::<crate::pi::UnconfirmedCommand>();
+        }
+        response
     }
 
     pub fn failure(request_id: String, error: impl Into<String>) -> Self {
@@ -162,7 +161,9 @@ impl ServerMessage {
             ok: false,
             session_id: None,
             draft: None,
-            command_handled: None,
+            disposition: None,
+            uncertain: false,
+            outcome: None,
             notice: None,
             error: Some(error.into()),
         }
@@ -255,89 +256,12 @@ pub struct SessionSummary {
     pub updated_at_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChatDetailKind {
-    Thinking,
-    Tool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatDetail {
-    pub kind: ChatDetailKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
-    pub has_arguments: bool,
-    pub has_result: bool,
-    pub is_error: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChatContentKind {
-    Text,
-    Thinking,
-    Tool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatContent {
-    pub kind: ChatContentKind,
-    pub content_index: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail_index: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
-    pub has_content: bool,
-    pub has_arguments: bool,
-    pub has_result: bool,
-    pub is_error: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatAttempt {
-    pub entry_id: String,
-    pub timestamp_ms: Option<u64>,
-    pub stop_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
-    pub content: Vec<ChatContent>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatMessage {
-    pub entry_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<String>,
-    pub role: ChatRole,
-    pub text: String,
-    pub timestamp_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub attempts: Vec<ChatAttempt>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachment: Option<ChatAttachment>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatDetails {
-    pub attempts: Vec<ChatAttempt>,
+pub enum PromptDisposition {
+    Submitted,
+    Queued,
+    Handled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -348,7 +272,7 @@ pub struct UploadedFile {
     pub size: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatAttachment {
     pub kind: AttachmentKind,
@@ -358,19 +282,11 @@ pub struct ChatAttachment {
     pub size: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentKind {
     Image,
     File,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChatRole {
-    User,
-    Assistant,
-    System,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

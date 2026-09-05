@@ -21,6 +21,17 @@ const EVENT_BUFFER: usize = 2048;
 
 type ResponseSender = oneshot::Sender<std::result::Result<Value, String>>;
 
+#[derive(Debug)]
+pub struct UnconfirmedCommand(pub String);
+
+impl std::fmt::Display for UnconfirmedCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UnconfirmedCommand {}
+
 pub struct RpcProcess {
     shutdown_gate: Mutex<()>,
     writer: Mutex<Option<ChildStdin>>,
@@ -104,7 +115,11 @@ impl RpcProcess {
                         }
                         match serde_json::from_slice::<Value>(&record) {
                             Ok(message) => {
-                                if route_response(&stdout_pending, &message) {
+                                if message.get("type").and_then(Value::as_str) == Some("response")
+                                    && let Some(id) = message.get("id").and_then(Value::as_str)
+                                    && let Some(sender) = lock_unpoisoned(&stdout_pending).remove(id)
+                                {
+                                    let _ = sender.send(Ok(message));
                                     continue;
                                 }
                                 let _ = stdout_events.send(message);
@@ -115,7 +130,10 @@ impl RpcProcess {
                     Err(error) => break format!("failed reading Pi stdout: {error}"),
                 }
             };
-            mark_dead(&stdout_pending, &stdout_events, &stdout_dead, end_reason);
+            if !stdout_dead.swap(true, Ordering::AcqRel) {
+                fail_pending(&stdout_pending, &end_reason);
+                let _ = stdout_events.send(serde_json::json!({ "type": "rpc_closed", "error": end_reason }));
+            }
         });
 
         let stderr_task = tokio::spawn(async move {
@@ -190,24 +208,24 @@ impl RpcProcess {
         lock_unpoisoned(&self.pending).insert(id.clone(), sender);
         if let Err(error) = self.write_command(&command).await {
             lock_unpoisoned(&self.pending).remove(&id);
-            return Err(error);
+            return Err(UnconfirmedCommand(error.to_string()).into());
         }
 
         let response = if let Some(limit) = response_timeout {
             match timeout(limit, receiver).await {
                 Ok(Ok(Ok(response))) => response,
-                Ok(Ok(Err(error))) => bail!("Pi RPC channel closed: {error}"),
-                Ok(Err(_)) => bail!("Pi response router stopped"),
+                Ok(Ok(Err(error))) => return Err(UnconfirmedCommand(format!("Pi RPC channel closed: {error}")).into()),
+                Ok(Err(_)) => return Err(UnconfirmedCommand("Pi response router stopped".to_owned()).into()),
                 Err(_) => {
                     lock_unpoisoned(&self.pending).remove(&id);
-                    bail!("timed out waiting for Pi response");
+                    return Err(UnconfirmedCommand("timed out waiting for Pi response".to_owned()).into());
                 }
             }
         } else {
             match receiver.await {
                 Ok(Ok(response)) => response,
-                Ok(Err(error)) => bail!("Pi RPC channel closed: {error}"),
-                Err(_) => bail!("Pi response router stopped"),
+                Ok(Err(error)) => return Err(UnconfirmedCommand(format!("Pi RPC channel closed: {error}")).into()),
+                Err(_) => return Err(UnconfirmedCommand("Pi response router stopped".to_owned()).into()),
             }
         };
 
@@ -244,7 +262,10 @@ impl RpcProcess {
             }
         };
         if let Err(error) = result {
-            self.dead.store(true, Ordering::Release);
+            if !self.dead.swap(true, Ordering::AcqRel) {
+                fail_pending(&self.pending, "Pi input pipe failed");
+                let _ = self.events.send(serde_json::json!({ "type": "rpc_closed", "error": "Pi input pipe failed" }));
+            }
             bail!("failed writing Pi command: {error}");
         }
         Ok(())
@@ -281,33 +302,6 @@ impl RpcProcess {
             }
         }
     }
-}
-
-fn route_response(pending: &StdMutex<HashMap<String, ResponseSender>>, message: &Value) -> bool {
-    if message.get("type").and_then(Value::as_str) != Some("response") {
-        return false;
-    }
-    let Some(id) = message.get("id").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(sender) = lock_unpoisoned(pending).remove(id) else {
-        return false;
-    };
-    let _ = sender.send(Ok(message.clone()));
-    true
-}
-
-fn mark_dead(
-    pending: &StdMutex<HashMap<String, ResponseSender>>,
-    events: &broadcast::Sender<Value>,
-    dead: &AtomicBool,
-    reason: String,
-) {
-    if dead.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    fail_pending(pending, &reason);
-    let _ = events.send(serde_json::json!({ "type": "rpc_closed", "error": reason }));
 }
 
 fn fail_pending(pending: &StdMutex<HashMap<String, ResponseSender>>, reason: &str) {

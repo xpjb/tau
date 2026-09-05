@@ -7,10 +7,13 @@ Development checkpoint: Pi transcript and queue controls are committed through
 package passes SDK/CLI and no-provider RPC checks. Focused checks pass 270 tests;
 13 legacy tests are skipped. No production installation changed.
 
-Tau's daemon draft passes `cargo check --workspace`; its tests still need migration.
-Queue content/revisions and control state still need Tau protocol projection.
+Tau's daemon now projects queue content, revisions, run identity and controls.
+Eight daemon tests pass, including RPC recovery, retired-process rejection,
+interrupted thinking, stale snapshots, and attachment security. Clippy passes.
+Held queues prevent automatic idle shutdown; forking requires a resumed or empty
+queue so process replacement cannot silently discard queued work.
 The shared durable store and UI migration remain unfinished; the client still
-uses protocol 2. Do not deploy this daemon draft with that client.
+uses protocol 2. Do not deploy this daemon with that client.
 
 ## Authority and identity
 
