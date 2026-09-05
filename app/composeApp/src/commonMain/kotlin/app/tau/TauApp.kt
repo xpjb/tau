@@ -131,6 +131,11 @@ private val InlineImagePreviewHeight = 260.dp
 private val AttachmentTopSpacing = 8.dp
 private val AttachmentControlHeight = 68.dp
 private val ImageDownloadSpacing = 4.dp
+private val DetailsAnswerSpacing = 8.dp
+private val DetailsBlockSpacing = 6.dp
+private val DetailsHeaderVerticalPadding = 4.dp
+private const val LargeDetailContentChars = 1_200
+private const val LargeDetailContentLines = 16
 
 private data class ComposerSuggestion(
     val value: String,
@@ -157,6 +162,124 @@ internal fun fuzzyCompletionScore(value: String, query: String): Int? {
         previous = index
     }
     return 1_000 + gaps * 4 + (haystack.length - needle.length).coerceAtMost(200)
+}
+
+private enum class DetailTextKind {
+    Thinking,
+    StreamingThinking,
+    Heading,
+    Code,
+    ErrorCode,
+}
+
+private sealed interface DetailBlock {
+    val key: String
+
+    data class Text(
+        override val key: String,
+        val text: String,
+        val kind: DetailTextKind,
+    ) : DetailBlock
+
+    data class Toggle(
+        override val key: String,
+        val detailIndex: Int,
+        val content: DetailContentKind,
+        val label: String,
+        val error: Boolean,
+    ) : DetailBlock
+}
+
+private fun buildDetailBlocks(
+    details: List<ChatDetail>,
+    expandedContent: Set<Pair<Int, DetailContentKind>>,
+    streaming: Boolean,
+): List<DetailBlock> = buildList {
+    fun addToolContent(
+        detailIndex: Int,
+        content: DetailContentKind,
+        label: String,
+        value: String?,
+        error: Boolean,
+    ) {
+        val text = value?.takeIf(String::isNotBlank) ?: return
+        val lines = text.count { character -> character == '\n' } + 1
+        val large = text.length > LargeDetailContentChars || lines > LargeDetailContentLines
+        if (!large) {
+            add(DetailBlock.Text("$detailIndex-${content.name}-label", label, DetailTextKind.Heading))
+            add(
+                DetailBlock.Text(
+                    "$detailIndex-${content.name}-text",
+                    text,
+                    if (error) DetailTextKind.ErrorCode else DetailTextKind.Code,
+                ),
+            )
+            return
+        }
+        val expanded = (detailIndex to content) in expandedContent
+        val amount = if (lines > 1) "$lines lines" else "${text.length} characters"
+        add(
+            DetailBlock.Toggle(
+                key = "$detailIndex-${content.name}-toggle",
+                detailIndex = detailIndex,
+                content = content,
+                label = "${if (expanded) "Hide" else "Show"} ${label.lowercase()} · $amount",
+                error = error,
+            ),
+        )
+        if (expanded) {
+            add(
+                DetailBlock.Text(
+                    "$detailIndex-${content.name}-text",
+                    text,
+                    if (error) DetailTextKind.ErrorCode else DetailTextKind.Code,
+                ),
+            )
+        }
+    }
+
+    details.forEachIndexed { index, detail ->
+        when (detail.kind) {
+            ChatDetailKind.Thinking -> detail.text
+                ?.takeIf(String::isNotBlank)
+                ?.let { thinking ->
+                    add(
+                        DetailBlock.Text(
+                            "$index-thinking",
+                            thinking,
+                            if (streaming) {
+                                DetailTextKind.StreamingThinking
+                            } else {
+                                DetailTextKind.Thinking
+                            },
+                        ),
+                    )
+                }
+            ChatDetailKind.Tool -> {
+                add(
+                    DetailBlock.Text(
+                        "$index-tool",
+                        "Tool · ${detail.toolName ?: "unknown"}",
+                        DetailTextKind.Heading,
+                    ),
+                )
+                addToolContent(
+                    index,
+                    DetailContentKind.Arguments,
+                    "Input",
+                    detail.arguments,
+                    false,
+                )
+                addToolContent(
+                    index,
+                    DetailContentKind.Result,
+                    if (detail.isError) "Error" else "Output",
+                    detail.result,
+                    detail.isError,
+                )
+            }
+        }
+    }
 }
 
 private fun formatByteCount(bytes: Long): String {
@@ -552,12 +675,18 @@ private sealed interface TranscriptRow {
     data class Partial(
         override val key: String,
         val text: String,
+        val hasDetails: Boolean,
+        val detailBlocks: List<DetailBlock>,
+        val detailsExpanded: Boolean,
     ) : TranscriptRow
 
     data class Message(
         override val key: String,
         val message: ChatMessage,
         val timestamp: String?,
+        val hasDetails: Boolean,
+        val detailBlocks: List<DetailBlock>,
+        val detailsExpanded: Boolean,
     ) : TranscriptRow
 }
 
@@ -570,16 +699,91 @@ private data class TranscriptMeasureContext(
     val styles: TranscriptTextStyles,
 )
 
+private data class DetailDocumentKey(
+    val rowKey: String,
+    val block: DetailBlock.Text,
+)
+
+private data class MeasuredDetailBlock(
+    val block: DetailBlock,
+    val text: MeasuredTranscriptText?,
+    val height: Int,
+)
+
+private data class MeasuredTranscriptDetails(
+    val blocks: List<MeasuredDetailBlock>,
+    val height: Int,
+)
+
 private data class MeasuredTranscriptRow(
     val text: MeasuredTranscriptText?,
+    val details: MeasuredTranscriptDetails?,
     val height: Int,
 )
 
 private class TranscriptMeasureCache {
     var styles: TranscriptTextStyles? = null
+    var detailStyles: List<TranscriptTextStyles>? = null
     var context: TranscriptMeasureContext? = null
     val documents = mutableMapOf<TranscriptRow, TranscriptTextDocument>()
+    val detailDocuments = mutableMapOf<DetailDocumentKey, TranscriptTextDocument>()
     val rows = mutableMapOf<TranscriptRow, MeasuredTranscriptRow>()
+}
+
+@Composable
+private fun ColumnScope.TranscriptDetails(
+    details: MeasuredTranscriptDetails,
+    expanded: Boolean,
+    thinkingStyles: TranscriptTextStyles,
+    headingStyles: TranscriptTextStyles,
+    codeStyles: TranscriptTextStyles,
+    errorStyles: TranscriptTextStyles,
+    onToggle: () -> Unit,
+    onContentToggle: (DetailBlock.Toggle) -> Unit,
+) {
+    DisableSelection {
+        Text(
+            if (expanded) "▾ Details" else "▸ Details",
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(vertical = DetailsHeaderVerticalPadding),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    if (!expanded || details.blocks.isEmpty()) return
+    Spacer(Modifier.height(DetailsBlockSpacing))
+    details.blocks.forEachIndexed { index, measured ->
+        if (index > 0) Spacer(Modifier.height(DetailsBlockSpacing))
+        when (val block = measured.block) {
+            is DetailBlock.Text -> ChatText(
+                text = checkNotNull(measured.text),
+                styles = when (block.kind) {
+                    DetailTextKind.Thinking,
+                    DetailTextKind.StreamingThinking -> thinkingStyles
+                    DetailTextKind.Heading -> headingStyles
+                    DetailTextKind.Code -> codeStyles
+                    DetailTextKind.ErrorCode -> errorStyles
+                },
+            )
+            is DetailBlock.Toggle -> DisableSelection {
+                Text(
+                    block.label,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onContentToggle(block) }
+                        .padding(vertical = DetailsHeaderVerticalPadding),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (block.error) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -587,6 +791,10 @@ private fun TranscriptRowContent(
     row: TranscriptRow,
     measured: MeasuredTranscriptRow,
     styles: TranscriptTextStyles,
+    detailStyles: TranscriptTextStyles,
+    detailHeadingStyles: TranscriptTextStyles,
+    detailCodeStyles: TranscriptTextStyles,
+    detailErrorStyles: TranscriptTextStyles,
     controller: TauController,
     settings: ConnectionSettings,
     sessionId: String,
@@ -631,11 +839,30 @@ private fun TranscriptRowContent(
             ),
             modifier = Modifier.fillMaxWidth(0.9f),
         ) {
-            ChatText(
-                text = checkNotNull(measured.text),
-                styles = styles,
-                modifier = Modifier.padding(12.dp),
-            )
+            Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                measured.details?.let { details ->
+                    TranscriptDetails(
+                        details = details,
+                        expanded = row.detailsExpanded,
+                        thinkingStyles = detailStyles,
+                        headingStyles = detailHeadingStyles,
+                        codeStyles = detailCodeStyles,
+                        errorStyles = detailErrorStyles,
+                        onToggle = {
+                            controller.setDetailsExpanded(
+                                sessionId,
+                                null,
+                                !row.detailsExpanded,
+                            )
+                        },
+                        onContentToggle = {},
+                    )
+                }
+                measured.text?.let { text ->
+                    if (measured.details != null) Spacer(Modifier.height(DetailsAnswerSpacing))
+                    ChatText(text = text, styles = styles)
+                }
+            }
         }
         is TranscriptRow.Message -> {
             val message = row.message
@@ -673,7 +900,39 @@ private fun TranscriptRowContent(
                         modifier = Modifier.fillMaxWidth().then(menuModifier),
                     ) {
                         Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                            ChatText(checkNotNull(measured.text), styles)
+                            measured.details?.let { details ->
+                                TranscriptDetails(
+                                    details = details,
+                                    expanded = row.detailsExpanded,
+                                    thinkingStyles = detailStyles,
+                                    headingStyles = detailHeadingStyles,
+                                    codeStyles = detailCodeStyles,
+                                    errorStyles = detailErrorStyles,
+                                    onToggle = {
+                                        controller.setDetailsExpanded(
+                                            sessionId,
+                                            message.entryId,
+                                            !row.detailsExpanded,
+                                        )
+                                    },
+                                    onContentToggle = { block ->
+                                        controller.toggleDetailContent(
+                                            DetailContentExpansionKey(
+                                                sessionId = sessionId,
+                                                entryId = message.entryId,
+                                                detailIndex = block.detailIndex,
+                                                content = block.content,
+                                            ),
+                                        )
+                                    },
+                                )
+                            }
+                            measured.text?.let { text ->
+                                if (measured.details != null) {
+                                    Spacer(Modifier.height(DetailsAnswerSpacing))
+                                }
+                                ChatText(text, styles)
+                            }
                             message.attachment?.let { attachment ->
                                 DisableSelection {
                                     Column(Modifier.fillMaxWidth()) {
@@ -1391,20 +1650,80 @@ private fun ChatPanel(
         codeBackground = MaterialTheme.colorScheme.background.copy(alpha = 0.72f),
         quoteBar = MaterialTheme.colorScheme.primary.copy(alpha = 0.72f),
     )
-    val transcriptRows = remember(messages, outgoingMessages, partial) {
+    val detailStyles = transcriptTextStyles.copy(
+        body = MaterialTheme.typography.bodySmall,
+        headings = listOf(
+            MaterialTheme.typography.titleSmall,
+            MaterialTheme.typography.labelLarge,
+            MaterialTheme.typography.labelLarge,
+            MaterialTheme.typography.labelMedium,
+            MaterialTheme.typography.labelMedium,
+            MaterialTheme.typography.labelMedium,
+        ),
+        code = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        inlineCode = MaterialTheme.typography.bodySmall.toSpanStyle().copy(
+            fontFamily = FontFamily.Monospace,
+            background = MaterialTheme.colorScheme.outlineVariant,
+        ),
+        blockSpacing = 6.dp,
+        codePadding = 8.dp,
+    )
+    val detailHeadingStyles = detailStyles.copy(
+        body = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+    )
+    val detailCodeStyles = detailStyles.copy(
+        body = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+    )
+    val detailErrorStyles = detailCodeStyles.copy(
+        body = detailCodeStyles.body.copy(color = MaterialTheme.colorScheme.error),
+    )
+    val partialDetails = state.partialDetails[sessionId].orEmpty()
+    val transcriptRows = remember(
+        messages,
+        outgoingMessages,
+        partial,
+        partialDetails,
+        state.detailsExpandedBySession,
+        state.detailExpansions,
+        state.expandedDetailContent,
+        state.messageDetails,
+        state.loadingMessageDetails,
+        state.messageDetailErrors,
+    ) {
         buildList {
+            val defaultDetailsExpanded = state.detailsExpandedBySession[sessionId] ?: false
             add(TranscriptRow.BottomAnchor)
-            if (messages.isEmpty() && outgoingMessages.isEmpty() && partial.isEmpty()) {
+            if (
+                messages.isEmpty() && outgoingMessages.isEmpty() &&
+                partial.isEmpty() && partialDetails.isEmpty()
+            ) {
                 add(TranscriptRow.Empty)
             }
             outgoingMessages.asReversed().forEach { outgoing ->
                 add(TranscriptRow.Outgoing(outgoing))
             }
-            if (partial.isNotEmpty()) {
+            if (partial.isNotEmpty() || partialDetails.isNotEmpty()) {
+                val details = if (partialDetails.isEmpty()) {
+                    emptyList()
+                } else {
+                    listOf(
+                        ChatDetail(
+                            kind = ChatDetailKind.Thinking,
+                            text = partialDetails,
+                        ),
+                    )
+                }
                 add(
                     TranscriptRow.Partial(
                         key = "assistant-after-${messages.lastOrNull()?.entryId ?: "start"}",
                         text = partial,
+                        hasDetails = details.isNotEmpty(),
+                        detailBlocks = buildDetailBlocks(
+                            details,
+                            emptySet(),
+                            streaming = true,
+                        ),
+                        detailsExpanded = defaultDetailsExpanded,
                     ),
                 )
             }
@@ -1415,6 +1734,40 @@ private fun ChatPanel(
                 } else {
                     "message-${message.entryId}"
                 }
+                val detailKey = DetailExpansionKey(sessionId, message.entryId)
+                val detailsExpanded = state.detailExpansions[detailKey]
+                    ?: defaultDetailsExpanded
+                val hasDetails = message.hasDetails || message.details.isNotEmpty()
+                val expandedContent = state.expandedDetailContent
+                    .asSequence()
+                    .filter { expanded ->
+                        expanded.sessionId == sessionId && expanded.entryId == message.entryId
+                    }
+                    .map { expanded -> expanded.detailIndex to expanded.content }
+                    .toSet()
+                val loadedDetails = state.messageDetails[detailKey] ?: message.details
+                val detailBlocks = when {
+                    !detailsExpanded || !hasDetails -> emptyList()
+                    loadedDetails.isNotEmpty() -> buildDetailBlocks(
+                        loadedDetails,
+                        expandedContent,
+                        streaming = false,
+                    )
+                    detailKey in state.messageDetailErrors -> listOf(
+                        DetailBlock.Text(
+                            key = "details-error",
+                            text = state.messageDetailErrors.getValue(detailKey),
+                            kind = DetailTextKind.ErrorCode,
+                        ),
+                    )
+                    else -> listOf(
+                        DetailBlock.Text(
+                            key = "details-loading",
+                            text = "Loading details…",
+                            kind = DetailTextKind.StreamingThinking,
+                        ),
+                    )
+                }
                 add(
                     TranscriptRow.Message(
                         key = key,
@@ -1422,8 +1775,33 @@ private fun ChatPanel(
                         timestamp = message.timestampMs
                             ?.let(PlatformServices::formatMessageTime)
                             ?.takeIf(String::isNotEmpty),
+                        hasDetails = hasDetails,
+                        detailBlocks = detailBlocks,
+                        detailsExpanded = detailsExpanded,
                     ),
                 )
+            }
+        }
+    }
+    LaunchedEffect(
+        messages,
+        state.detailsExpandedBySession,
+        state.detailExpansions,
+        state.messageDetails,
+        state.loadingMessageDetails,
+        state.messageDetailErrors,
+    ) {
+        val defaultExpanded = state.detailsExpandedBySession[sessionId] ?: false
+        messages.forEach { message ->
+            val key = DetailExpansionKey(sessionId, message.entryId)
+            val expanded = state.detailExpansions[key] ?: defaultExpanded
+            if (
+                expanded && message.hasDetails && message.details.isEmpty() &&
+                key !in state.messageDetails &&
+                key !in state.loadingMessageDetails &&
+                key !in state.messageDetailErrors
+            ) {
+                controller.setDetailsExpanded(sessionId, message.entryId, true)
             }
         }
     }
@@ -1539,6 +1917,17 @@ private fun ChatPanel(
                     transcriptMeasureCache.styles = transcriptTextStyles
                     transcriptMeasureCache.documents.clear()
                 }
+                val currentDetailStyles = listOf(
+                    detailStyles,
+                    detailHeadingStyles,
+                    detailCodeStyles,
+                    detailErrorStyles,
+                )
+                if (transcriptMeasureCache.detailStyles != currentDetailStyles) {
+                    transcriptMeasureCache.detailStyles = currentDetailStyles
+                    transcriptMeasureCache.detailDocuments.clear()
+                    transcriptMeasureCache.rows.clear()
+                }
                 if (transcriptMeasureCache.context != measureContext) {
                     transcriptMeasureCache.context = measureContext
                     transcriptMeasureCache.rows.clear()
@@ -1546,11 +1935,29 @@ private fun ChatPanel(
                 val retainedRows = transcriptRows.toSet()
                 transcriptMeasureCache.documents.keys.retainAll(retainedRows)
                 transcriptMeasureCache.rows.keys.retainAll(retainedRows)
+                val retainedDetailDocuments = transcriptRows
+                    .flatMap { row ->
+                        when (row) {
+                            is TranscriptRow.Partial -> row.detailBlocks
+                            is TranscriptRow.Message -> row.detailBlocks
+                            else -> emptyList()
+                        }.filterIsInstance<DetailBlock.Text>()
+                            .map { block -> DetailDocumentKey(row.key, block) }
+                    }
+                    .toSet()
+                transcriptMeasureCache.detailDocuments.keys.retainAll(retainedDetailDocuments)
                 val waitingSpacing = with(density) { 4.dp.roundToPx() }
                 val attachmentControlHeight = with(density) { AttachmentControlHeight.roundToPx() }
                 val attachmentTopSpacing = with(density) { AttachmentTopSpacing.roundToPx() }
                 val imagePreviewHeight = with(density) { InlineImagePreviewHeight.roundToPx() }
                 val imageDownloadSpacing = with(density) { ImageDownloadSpacing.roundToPx() }
+                val detailsAnswerSpacing = with(density) { DetailsAnswerSpacing.roundToPx() }
+                val detailsBlockSpacing = with(density) { DetailsBlockSpacing.roundToPx() }
+                val detailsHeaderPadding = with(density) {
+                    DetailsHeaderVerticalPadding.roundToPx() * 2
+                }
+                val detailsHeaderTextStyle = MaterialTheme.typography.labelMedium
+                val detailsToggleTextStyle = MaterialTheme.typography.labelSmall
                 fun measuredText(
                     row: TranscriptRow,
                     content: String,
@@ -1565,11 +1972,72 @@ private fun ChatPanel(
                     styles = transcriptTextStyles,
                     density = density,
                 )
+                fun measuredDetails(
+                    row: TranscriptRow,
+                    hasDetails: Boolean,
+                    blocks: List<DetailBlock>,
+                    expanded: Boolean,
+                ): MeasuredTranscriptDetails? {
+                    if (!hasDetails) return null
+                    val headerHeight = textMeasurer.measure(
+                        text = if (expanded) "▾ Details" else "▸ Details",
+                        style = detailsHeaderTextStyle,
+                        constraints = Constraints(maxWidth = textWidth),
+                    ).size.height + detailsHeaderPadding
+                    if (!expanded) {
+                        return MeasuredTranscriptDetails(emptyList(), headerHeight)
+                    }
+                    val measuredBlocks = blocks.map { block ->
+                        when (block) {
+                            is DetailBlock.Text -> {
+                                val blockStyles = when (block.kind) {
+                                    DetailTextKind.Thinking,
+                                    DetailTextKind.StreamingThinking -> detailStyles
+                                    DetailTextKind.Heading -> detailHeadingStyles
+                                    DetailTextKind.Code -> detailCodeStyles
+                                    DetailTextKind.ErrorCode -> detailErrorStyles
+                                }
+                                val documentKey = DetailDocumentKey(row.key, block)
+                                val text = measureChatText(
+                                    document = transcriptMeasureCache.detailDocuments.getOrPut(
+                                        documentKey,
+                                    ) {
+                                        buildChatText(
+                                            block.text,
+                                            block.kind == DetailTextKind.Thinking,
+                                            blockStyles,
+                                        )
+                                    },
+                                    maxWidth = textWidth,
+                                    textMeasurer = textMeasurer,
+                                    styles = blockStyles,
+                                    density = density,
+                                )
+                                MeasuredDetailBlock(block, text, text.height)
+                            }
+                            is DetailBlock.Toggle -> {
+                                val height = textMeasurer.measure(
+                                    text = block.label,
+                                    style = detailsToggleTextStyle,
+                                    constraints = Constraints(maxWidth = textWidth),
+                                ).size.height + detailsHeaderPadding
+                                MeasuredDetailBlock(block, null, height)
+                            }
+                        }
+                    }
+                    val contentHeight = measuredBlocks.sumOf(MeasuredDetailBlock::height) +
+                        detailsBlockSpacing * measuredBlocks.size
+                    return MeasuredTranscriptDetails(
+                        measuredBlocks,
+                        headerHeight + contentHeight,
+                    )
+                }
                 for (row in transcriptRows) {
                     if (row in transcriptMeasureCache.rows) continue
                     transcriptMeasureCache.rows[row] = when (row) {
                         TranscriptRow.BottomAnchor -> MeasuredTranscriptRow(
                             text = null,
+                            details = null,
                             height = with(density) { 1.dp.roundToPx() },
                         )
                         TranscriptRow.Empty -> {
@@ -1579,7 +2047,7 @@ private fun ChatPanel(
                                 false,
                                 itemWidth,
                             )
-                            MeasuredTranscriptRow(text, text.height)
+                            MeasuredTranscriptRow(text, null, text.height)
                         }
                         is TranscriptRow.Outgoing -> {
                             val text = measuredText(row, row.message.text, false, textWidth)
@@ -1590,19 +2058,47 @@ private fun ChatPanel(
                             ).size.height
                             MeasuredTranscriptRow(
                                 text = text,
+                                details = null,
                                 height = cardPadding + text.height + waitingSpacing + waitingHeight,
                             )
                         }
                         is TranscriptRow.Partial -> {
-                            val text = measuredText(row, row.text, false, textWidth)
-                            MeasuredTranscriptRow(text, cardPadding + text.height)
+                            val text = row.text.takeIf(String::isNotEmpty)?.let { content ->
+                                measuredText(row, content, false, textWidth)
+                            }
+                            val details = measuredDetails(
+                                row,
+                                row.hasDetails,
+                                row.detailBlocks,
+                                row.detailsExpanded,
+                            )
+                            MeasuredTranscriptRow(
+                                text = text,
+                                details = details,
+                                height = cardPadding +
+                                    (text?.height ?: 0) +
+                                    (details?.height ?: 0) +
+                                    if (text != null && details != null) {
+                                        detailsAnswerSpacing
+                                    } else {
+                                        0
+                                    },
+                            )
                         }
                         is TranscriptRow.Message -> {
-                            val text = measuredText(
+                            val text = row.message.text.takeIf(String::isNotEmpty)?.let { content ->
+                                measuredText(
+                                    row,
+                                    content,
+                                    row.message.role != ChatRole.User,
+                                    textWidth,
+                                )
+                            }
+                            val details = measuredDetails(
                                 row,
-                                row.message.text,
-                                row.message.role != ChatRole.User,
-                                textWidth,
+                                row.hasDetails,
+                                row.detailBlocks,
+                                row.detailsExpanded,
                             )
                             val timestampHeight = row.timestamp?.let { timestamp ->
                                 textMeasurer.measure(
@@ -1619,7 +2115,15 @@ private fun ChatPanel(
                             }
                             MeasuredTranscriptRow(
                                 text = text,
-                                height = cardPadding + text.height + timestampHeight + attachmentHeight,
+                                details = details,
+                                height = cardPadding +
+                                    (text?.height ?: 0) +
+                                    (details?.height ?: 0) +
+                                    (if (text != null && details != null) {
+                                        detailsAnswerSpacing
+                                    } else {
+                                        0
+                                    }) + timestampHeight + attachmentHeight,
                             )
                         }
                     }
@@ -1667,6 +2171,10 @@ private fun ChatPanel(
                                         row = row,
                                         measured = measured,
                                         styles = transcriptTextStyles,
+                                        detailStyles = detailStyles,
+                                        detailHeadingStyles = detailHeadingStyles,
+                                        detailCodeStyles = detailCodeStyles,
+                                        detailErrorStyles = detailErrorStyles,
                                         controller = controller,
                                         settings = state.settings,
                                         sessionId = sessionId,

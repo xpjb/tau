@@ -95,6 +95,10 @@ pub enum ServerMessage {
         session_id: String,
         delta: String,
     },
+    StreamDetailsDelta {
+        session_id: String,
+        delta: String,
+    },
     StreamEnd {
         session_id: String,
     },
@@ -231,14 +235,45 @@ pub struct SessionSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatDetailKind {
+    Thinking,
+    Tool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDetail {
+    pub kind: ChatDetailKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    pub is_error: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub entry_id: String,
     pub role: ChatRole,
     pub text: String,
     pub timestamp_ms: Option<u64>,
+    pub has_details: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ChatDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment: Option<ChatAttachment>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDetails {
+    pub details: Vec<ChatDetail>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

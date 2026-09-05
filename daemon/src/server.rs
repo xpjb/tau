@@ -24,7 +24,7 @@ use tracing::{info, warn};
 use crate::config::Config;
 use crate::manager::AgentManager;
 use crate::protocol::{
-    ClientCommand, ClientRequest, CrashReport, MAX_CRASH_BYTES, MAX_PROMPT_CHARS,
+    ChatDetails, ClientCommand, ClientRequest, CrashReport, MAX_CRASH_BYTES, MAX_PROMPT_CHARS,
     MAX_REQUEST_BYTES, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, ServerMessage,
 };
 
@@ -38,6 +38,11 @@ struct AppState {
     manager: AgentManager,
     telemetry_gate: Arc<Mutex<()>>,
     thumbnail_gate: Arc<Semaphore>,
+}
+
+#[derive(Default, Deserialize)]
+struct WebSocketQuery {
+    features: Option<String>,
 }
 
 fn thumbnail_bytes(source: &[u8]) -> Result<Vec<u8>> {
@@ -85,6 +90,10 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
             "protocolVersion": PROTOCOL_VERSION
         })) }))
         .route("/v1/ws", get(websocket))
+        .route(
+            "/v1/sessions/{session_id}/messages/{entry_id}/details",
+            get(message_details),
+        )
         .route(
             "/v1/sessions/{session_id}/attachments/{entry_id}/thumbnail",
             get(download_attachment_thumbnail),
@@ -140,19 +149,23 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
 
 async fn websocket(
     State(state): State<AppState>,
+    Query(query): Query<WebSocketQuery>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     if !authorized(&headers, &state.config.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let details = query.features.as_deref().is_some_and(|features| {
+        features.split(',').any(|feature| feature == "details")
+    });
     upgrade
         .max_message_size(MAX_REQUEST_BYTES)
-        .on_upgrade(move |socket| serve_socket(socket, state))
+        .on_upgrade(move |socket| serve_socket(socket, state, details))
         .into_response()
 }
 
-async fn serve_socket(socket: WebSocket, state: AppState) {
+async fn serve_socket(socket: WebSocket, state: AppState, details: bool) {
     let (mut socket_tx, mut socket_rx) = socket.split();
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(512);
     let writer = tokio::spawn(async move {
@@ -177,13 +190,23 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
     let event_outbound = outbound_tx.clone();
     let event_forwarder = tokio::spawn(async move {
         loop {
-            let message = match events.recv().await {
+            let mut message = match events.recv().await {
                 Ok(message) => message,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     ServerMessage::ResyncRequired
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
+            if !details {
+                if matches!(&message, ServerMessage::StreamDetailsDelta { .. }) {
+                    continue;
+                }
+                if let ServerMessage::History { messages, .. } = &mut message {
+                    messages.retain(|message| {
+                        !message.text.is_empty() || message.attachment.is_some()
+                    });
+                }
+            }
             if !queue_server(&event_outbound, &message).await {
                 break;
             }
@@ -431,12 +454,36 @@ async fn upload_file(
     }
 }
 
-fn valid_attachment_key(value: &str) -> bool {
+fn valid_resource_key(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+async fn message_details(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((session_id, entry_id)): AxumPath<(String, String)>,
+) -> Response {
+    if !authorized(&headers, &state.config.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !valid_resource_key(&session_id) || !valid_resource_key(&entry_id) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match state.manager.message_details(&session_id, &entry_id).await {
+        Ok(details) => (
+            [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+            Json(ChatDetails { details }),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!(session = %session_id, entry = %entry_id, %error, "Tau message details were not available");
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
 }
 
 async fn download_attachment_thumbnail(
@@ -447,7 +494,7 @@ async fn download_attachment_thumbnail(
     if !authorized(&headers, &state.config.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if !valid_attachment_key(&session_id) || !valid_attachment_key(&entry_id) {
+    if !valid_resource_key(&session_id) || !valid_resource_key(&entry_id) {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let mut attachment = match state
@@ -507,7 +554,7 @@ async fn download_attachment(
     if !authorized(&headers, &state.config.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if !valid_attachment_key(&session_id) || !valid_attachment_key(&entry_id) {
+    if !valid_resource_key(&session_id) || !valid_resource_key(&entry_id) {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let attachment = match state

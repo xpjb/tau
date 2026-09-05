@@ -14,8 +14,9 @@ use tracing::{debug, error, warn};
 use crate::config::Config;
 use crate::pi::RpcProcess;
 use crate::protocol::{
-    AttachmentKind, ChatAttachment, ChatMessage, ChatRole, ExtensionUiRequest, ServerMessage,
-    SessionStatus, SessionSummary, SlashCommand, SlashCommandArgument, SlashCommandSource,
+    AttachmentKind, ChatAttachment, ChatDetail, ChatDetailKind, ChatMessage, ChatRole,
+    ExtensionUiRequest, ServerMessage, SessionStatus, SessionSummary, SlashCommand,
+    SlashCommandArgument, SlashCommandSource,
     UploadedFile, MAX_PROMPT_CHARS, MAX_TITLE_CHARS, MAX_UPLOAD_BYTES,
 };
 use crate::state::{SessionModel, StateStore};
@@ -25,6 +26,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const IMAGE_LIMIT: u64 = 10_000_000;
 const FILE_LIMIT: u64 = 50_000_000;
 const INTERNAL_FORK_COMMAND: &str = "tau-fork-at";
+const MAX_CHAT_DETAILS: usize = 128;
+const MAX_DETAIL_CHARS: usize = 40_000;
 const TUI_ONLY_COMMANDS: &[&str] = &[
     "settings",
     "tree",
@@ -212,7 +215,7 @@ impl AgentManager {
         }
         let _guard = runtime.operation.lock().await;
         let (entries, leaf_id) = self.entries_for_read(id, &runtime).await?;
-        let mut messages = active_chat_messages(&entries, leaf_id.as_deref())?;
+        let mut messages = active_chat_messages(&entries, leaf_id.as_deref(), false)?;
         self.populate_attachment_sizes(&entries, &mut messages).await;
         let _ = self.inner.events.send(ServerMessage::History {
             session_id: id.to_owned(),
@@ -225,6 +228,21 @@ impl AgentManager {
             detail: state.detail,
         });
         Ok(())
+    }
+
+    pub async fn message_details(&self, id: &str, entry_id: &str) -> Result<Vec<ChatDetail>> {
+        if entry_id.is_empty() || entry_id.len() > 128 {
+            bail!("invalid details entry id");
+        }
+        let runtime = self.runtime(id).await?;
+        let _guard = runtime.operation.lock().await;
+        let (entries, leaf_id) = self.entries_for_read(id, &runtime).await?;
+        active_chat_messages(&entries, leaf_id.as_deref(), true)?
+            .into_iter()
+            .find(|message| message.entry_id == entry_id)
+            .filter(|message| message.has_details)
+            .map(|message| message.details)
+            .context("message details are unavailable")
     }
 
     pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
@@ -1469,17 +1487,27 @@ impl AgentManager {
                 }
                 Some("message_update") => {
                     let update = event.get("assistantMessageEvent");
-                    if update.and_then(|update| update.get("type")).and_then(Value::as_str)
-                        == Some("text_delta")
-                        && let Some(delta) = update
-                            .and_then(|update| update.get("delta"))
-                            .and_then(Value::as_str)
-                        && !delta.is_empty()
-                    {
-                        let _ = self.inner.events.send(ServerMessage::StreamDelta {
-                            session_id: id.clone(),
-                            delta: delta.to_owned(),
-                        });
+                    let update_type = update
+                        .and_then(|update| update.get("type"))
+                        .and_then(Value::as_str);
+                    let delta = update
+                        .and_then(|update| update.get("delta"))
+                        .and_then(Value::as_str)
+                        .filter(|delta| !delta.is_empty());
+                    match (update_type, delta) {
+                        (Some("text_delta"), Some(delta)) => {
+                            let _ = self.inner.events.send(ServerMessage::StreamDelta {
+                                session_id: id.clone(),
+                                delta: delta.to_owned(),
+                            });
+                        }
+                        (Some("thinking_delta"), Some(delta)) => {
+                            let _ = self.inner.events.send(ServerMessage::StreamDetailsDelta {
+                                session_id: id.clone(),
+                                delta: delta.to_owned(),
+                            });
+                        }
+                        _ => {}
                     }
                 }
                 Some("message_end") => {
@@ -1622,7 +1650,7 @@ impl AgentManager {
             .and_then(Value::as_array)
             .context("Pi entries response had no entries")?;
         let leaf_id = data.get("leafId").and_then(Value::as_str);
-        let mut messages = active_chat_messages(entries, leaf_id)?;
+        let mut messages = active_chat_messages(entries, leaf_id, false)?;
         self.populate_attachment_sizes(entries, &mut messages).await;
         let _ = self.inner.events.send(ServerMessage::History {
             session_id: id.to_owned(),
@@ -1695,7 +1723,37 @@ fn session_model_from_pi_model(model: &Value) -> Option<SessionModel> {
     })
 }
 
-fn active_chat_messages(entries: &[Value], leaf_id: Option<&str>) -> Result<Vec<ChatMessage>> {
+fn flush_pending_details(
+    messages: &mut Vec<ChatMessage>,
+    has_details: &mut bool,
+    details: &mut Vec<ChatDetail>,
+    source: &mut Option<(String, Option<u64>)>,
+) {
+    if !*has_details {
+        return;
+    }
+    let Some((entry_id, timestamp_ms)) = source.take() else {
+        *has_details = false;
+        details.clear();
+        return;
+    };
+    messages.push(ChatMessage {
+        entry_id,
+        role: ChatRole::Assistant,
+        text: String::new(),
+        timestamp_ms,
+        has_details: true,
+        details: std::mem::take(details),
+        attachment: None,
+    });
+    *has_details = false;
+}
+
+fn active_chat_messages(
+    entries: &[Value],
+    leaf_id: Option<&str>,
+    include_details: bool,
+) -> Result<Vec<ChatMessage>> {
     let Some(mut current) = leaf_id else {
         return Ok(Vec::new());
     };
@@ -1721,43 +1779,213 @@ fn active_chat_messages(entries: &[Value], leaf_id: Option<&str>) -> Result<Vec<
     }
     branch.reverse();
 
-    Ok(branch
-        .into_iter()
-        .filter_map(|entry| {
-            let entry_id = entry.get("id")?.as_str()?.to_owned();
-            let entry_type = entry.get("type")?.as_str()?;
-            if entry_type == "custom_message"
-                && entry.get("display").and_then(Value::as_bool) == Some(true)
-            {
-                let text = content_text(entry.get("content")?);
-                return (!text.is_empty()).then_some(ChatMessage {
+    let tool_results = if include_details {
+        branch
+            .iter()
+            .filter_map(|entry| {
+                let message = entry.get("message")?;
+                if message.get("role").and_then(Value::as_str) != Some("toolResult") {
+                    return None;
+                }
+                let tool_call_id = message.get("toolCallId")?.as_str()?.to_owned();
+                let text = bounded(&content_text(message.get("content")?), MAX_DETAIL_CHARS);
+                let is_error = message
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                Some((tool_call_id, (text, is_error)))
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    let mut messages = Vec::new();
+    let mut pending_has_details = false;
+    let mut pending_details = Vec::new();
+    let mut pending_source = None;
+
+    for entry in branch {
+        let Some(entry_id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        let Some(entry_type) = entry.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if entry_type == "custom_message"
+            && entry.get("display").and_then(Value::as_bool) == Some(true)
+        {
+            let text = entry.get("content").map(content_text).unwrap_or_default();
+            if !text.is_empty() {
+                flush_pending_details(
+                    &mut messages,
+                    &mut pending_has_details,
+                    &mut pending_details,
+                    &mut pending_source,
+                );
+                messages.push(ChatMessage {
                     entry_id,
                     role: ChatRole::System,
                     text,
                     timestamp_ms: None,
+                    has_details: false,
+                    details: Vec::new(),
                     attachment: None,
                 });
             }
-            if entry_type != "message" {
-                return None;
+            continue;
+        }
+        if entry_type != "message" {
+            continue;
+        }
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        let timestamp_ms = message.get("timestamp").and_then(Value::as_u64);
+        match message.get("role").and_then(Value::as_str) {
+            Some("user") => {
+                flush_pending_details(
+                    &mut messages,
+                    &mut pending_has_details,
+                    &mut pending_details,
+                    &mut pending_source,
+                );
+                let text = message.get("content").map(content_text).unwrap_or_default();
+                if !text.is_empty() {
+                    messages.push(ChatMessage {
+                        entry_id,
+                        role: ChatRole::User,
+                        text,
+                        timestamp_ms,
+                        has_details: false,
+                        details: Vec::new(),
+                        attachment: None,
+                    });
+                }
             }
-            let message = entry.get("message")?;
-            if message.get("role").and_then(Value::as_str) == Some("toolResult") {
-                let request = attachment_request(entry)?;
-                let file_name = request
+            Some("assistant") => {
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
+                    for block in content {
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("thinking") => {
+                                let thinking = block
+                                    .get("thinking")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|thinking| !thinking.is_empty());
+                                if let Some(thinking) = thinking {
+                                    pending_has_details = true;
+                                    if include_details && pending_details.len() < MAX_CHAT_DETAILS {
+                                        pending_details.push(ChatDetail {
+                                            kind: ChatDetailKind::Thinking,
+                                            text: Some(bounded(thinking, MAX_DETAIL_CHARS)),
+                                            tool_name: None,
+                                            arguments: None,
+                                            result: None,
+                                            is_error: false,
+                                        });
+                                    }
+                                }
+                            }
+                            Some("toolCall") => {
+                                let tool_name = block
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|name| !name.is_empty());
+                                if let Some(tool_name) = tool_name {
+                                    pending_has_details = true;
+                                    if include_details && pending_details.len() < MAX_CHAT_DETAILS {
+                                        let arguments =
+                                            block.get("arguments").and_then(|arguments| {
+                                                if arguments
+                                                    .as_object()
+                                                    .is_some_and(serde_json::Map::is_empty)
+                                                {
+                                                    None
+                                                } else if let Some(arguments) = arguments.as_str() {
+                                                    Some(arguments.to_owned())
+                                                } else {
+                                                    serde_json::to_string_pretty(arguments).ok()
+                                                }
+                                            });
+                                        let result = block
+                                            .get("id")
+                                            .and_then(Value::as_str)
+                                            .and_then(|id| tool_results.get(id));
+                                        pending_details.push(ChatDetail {
+                                            kind: ChatDetailKind::Tool,
+                                            text: None,
+                                            tool_name: Some(bounded(tool_name, 160)),
+                                            arguments: arguments.map(|arguments| {
+                                                bounded(&arguments, MAX_DETAIL_CHARS)
+                                            }),
+                                            result: result
+                                                .map(|(text, _)| text.clone())
+                                                .filter(|text| !text.is_empty()),
+                                            is_error: result
+                                                .is_some_and(|(_, is_error)| *is_error),
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if pending_has_details {
+                    pending_source = Some((entry_id.clone(), timestamp_ms));
+                }
+                let mut text = message.get("content").map(content_text).unwrap_or_default();
+                if text.is_empty() {
+                    text = message
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                }
+                if !text.is_empty() {
+                    messages.push(ChatMessage {
+                        entry_id,
+                        role: ChatRole::Assistant,
+                        text,
+                        timestamp_ms,
+                        has_details: pending_has_details,
+                        details: std::mem::take(&mut pending_details),
+                        attachment: None,
+                    });
+                    pending_has_details = false;
+                    pending_source = None;
+                }
+            }
+            Some("toolResult") => {
+                let Some(request) = attachment_request(entry) else {
+                    continue;
+                };
+                let Some(file_name) = request
                     .path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
-                    .filter(|name| !name.is_empty())?;
+                    .filter(|name| !name.is_empty())
+                else {
+                    continue;
+                };
+                flush_pending_details(
+                    &mut messages,
+                    &mut pending_has_details,
+                    &mut pending_details,
+                    &mut pending_source,
+                );
                 let text = request.caption.clone().unwrap_or_else(|| match request.kind {
                     AttachmentKind::Image => format!("Image: {file_name}"),
                     AttachmentKind::File => format!("File: {file_name}"),
                 });
-                return Some(ChatMessage {
+                messages.push(ChatMessage {
                     entry_id,
                     role: ChatRole::System,
                     text,
-                    timestamp_ms: message.get("timestamp").and_then(Value::as_u64),
+                    timestamp_ms,
+                    has_details: false,
+                    details: Vec::new(),
                     attachment: Some(ChatAttachment {
                         kind: request.kind,
                         file_name,
@@ -1766,28 +1994,16 @@ fn active_chat_messages(entries: &[Value], leaf_id: Option<&str>) -> Result<Vec<
                     }),
                 });
             }
-            let role = match message.get("role")?.as_str()? {
-                "user" => ChatRole::User,
-                "assistant" => ChatRole::Assistant,
-                _ => return None,
-            };
-            let mut text = content_text(message.get("content")?);
-            if text.is_empty() && role == ChatRole::Assistant {
-                text = message
-                    .get("errorMessage")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-            }
-            (!text.is_empty()).then_some(ChatMessage {
-                entry_id,
-                role,
-                text,
-                timestamp_ms: message.get("timestamp").and_then(Value::as_u64),
-                attachment: None,
-            })
-        })
-        .collect())
+            _ => {}
+        }
+    }
+    flush_pending_details(
+        &mut messages,
+        &mut pending_has_details,
+        &mut pending_details,
+        &mut pending_source,
+    );
+    Ok(messages)
 }
 
 fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
@@ -1867,28 +2083,87 @@ mod tests {
             json!({"type":"message","id":"a2","parentId":"u2","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Result"},{"type":"toolCall","name":"send_file"}],"timestamp":5}}),
             json!({"type":"message","id":"t1","parentId":"a2","message":{"role":"toolResult","content":[{"type":"text","text":"queued"}],"details":{"tauAttachment":{"version":1,"kind":"file","path":"/tmp/outbox/result.zip","caption":"Build","size":123}},"timestamp":6}}),
         ];
-        let messages = active_chat_messages(&entries, Some("t1")).unwrap();
+        let messages = active_chat_messages(&entries, Some("t1"), true).unwrap();
         assert_eq!(
             messages,
             vec![
-                ChatMessage { entry_id: "u1".to_owned(), role: ChatRole::User, text: "Start".to_owned(), timestamp_ms: Some(1), attachment: None },
-                ChatMessage { entry_id: "a1".to_owned(), role: ChatRole::Assistant, text: "First".to_owned(), timestamp_ms: Some(2), attachment: None },
-                ChatMessage { entry_id: "u2".to_owned(), role: ChatRole::User, text: "New branch".to_owned(), timestamp_ms: Some(4), attachment: None },
-                ChatMessage { entry_id: "a2".to_owned(), role: ChatRole::Assistant, text: "Result".to_owned(), timestamp_ms: Some(5), attachment: None },
-                ChatMessage { entry_id: "t1".to_owned(), role: ChatRole::System, text: "Build".to_owned(), timestamp_ms: Some(6), attachment: Some(ChatAttachment { kind: AttachmentKind::File, file_name: "result.zip".to_owned(), caption: Some("Build".to_owned()), size: Some(123) }) },
+                ChatMessage { entry_id: "u1".to_owned(), role: ChatRole::User, text: "Start".to_owned(), timestamp_ms: Some(1), has_details: false, details: Vec::new(), attachment: None },
+                ChatMessage { entry_id: "a1".to_owned(), role: ChatRole::Assistant, text: "First".to_owned(), timestamp_ms: Some(2), has_details: false, details: Vec::new(), attachment: None },
+                ChatMessage { entry_id: "u2".to_owned(), role: ChatRole::User, text: "New branch".to_owned(), timestamp_ms: Some(4), has_details: false, details: Vec::new(), attachment: None },
+                ChatMessage {
+                    entry_id: "a2".to_owned(),
+                    role: ChatRole::Assistant,
+                    text: "Result".to_owned(),
+                    timestamp_ms: Some(5),
+                    has_details: true,
+                    details: vec![
+                        ChatDetail {
+                            kind: ChatDetailKind::Thinking,
+                            text: Some("hidden".to_owned()),
+                            tool_name: None,
+                            arguments: None,
+                            result: None,
+                            is_error: false,
+                        },
+                        ChatDetail {
+                            kind: ChatDetailKind::Tool,
+                            text: None,
+                            tool_name: Some("send_file".to_owned()),
+                            arguments: None,
+                            result: None,
+                            is_error: false,
+                        },
+                    ],
+                    attachment: None,
+                },
+                ChatMessage { entry_id: "t1".to_owned(), role: ChatRole::System, text: "Build".to_owned(), timestamp_ms: Some(6), has_details: false, details: Vec::new(), attachment: Some(ChatAttachment { kind: AttachmentKind::File, file_name: "result.zip".to_owned(), caption: Some("Build".to_owned()), size: Some(123) }) },
             ]
         );
     }
 
     #[test]
+    fn groups_tool_only_details_with_the_next_assistant_text() {
+        let entries = vec![
+            json!({"type":"message","id":"u","parentId":null,"message":{"role":"user","content":"Build it","timestamp":1}}),
+            json!({"type":"message","id":"a1","parentId":"u","message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":"Inspecting"},
+                {"type":"toolCall","id":"call-1","name":"bash","arguments":{"command":"cargo check"}}
+            ],"timestamp":2}}),
+            json!({"type":"message","id":"t1","parentId":"a1","message":{"role":"toolResult","toolCallId":"call-1","content":[{"type":"text","text":"Finished"}],"isError":false,"timestamp":3}}),
+            json!({"type":"message","id":"a2","parentId":"t1","message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":"Done checking"},
+                {"type":"text","text":"It builds."}
+            ],"timestamp":4}}),
+        ];
+
+        let messages = active_chat_messages(&entries, Some("a2"), true).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].entry_id, "a2");
+        assert_eq!(messages[1].text, "It builds.");
+        assert_eq!(messages[1].details.len(), 3);
+        assert_eq!(messages[1].details[0].text.as_deref(), Some("Inspecting"));
+        assert_eq!(messages[1].details[1].tool_name.as_deref(), Some("bash"));
+        assert_eq!(
+            messages[1].details[1].arguments.as_deref(),
+            Some("{\n  \"command\": \"cargo check\"\n}"),
+        );
+        assert_eq!(messages[1].details[1].result.as_deref(), Some("Finished"));
+        assert_eq!(messages[1].details[2].text.as_deref(), Some("Done checking"));
+
+        let summary = active_chat_messages(&entries, Some("a2"), false).unwrap();
+        assert!(summary[1].has_details);
+        assert!(summary[1].details.is_empty());
+    }
+
+    #[test]
     fn rejects_broken_or_cyclic_pi_branches() {
         let broken = vec![json!({"type":"message","id":"a","parentId":"missing","message":{"role":"user","content":"x"}})];
-        assert!(active_chat_messages(&broken, Some("a")).is_err());
+        assert!(active_chat_messages(&broken, Some("a"), false).is_err());
         let cyclic = vec![
             json!({"type":"message","id":"a","parentId":"b","message":{"role":"user","content":"x"}}),
             json!({"type":"message","id":"b","parentId":"a","message":{"role":"assistant","content":"y"}}),
         ];
-        assert!(active_chat_messages(&cyclic, Some("a")).is_err());
+        assert!(active_chat_messages(&cyclic, Some("a"), false).is_err());
     }
 
     #[cfg(unix)]
@@ -1975,9 +2250,10 @@ for line in sys.stdin:
         print(json.dumps(response), flush=True)
         def answer():
             time.sleep(0.05)
+            print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"Checking"}}), flush=True)
             print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}), flush=True)
             print(json.dumps({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"from Tau"}}), flush=True)
-            assistant = {"role":"assistant","content":[{"type":"text","text":"Hello from Tau"}],"timestamp":2}
+            assistant = {"role":"assistant","content":[{"type":"thinking","thinking":"Checking"},{"type":"text","text":"Hello from Tau"}],"timestamp":2}
             append({"type":"message","id":"a1","parentId":"u1","message":assistant})
             print(json.dumps({"type":"message_end","message":assistant}), flush=True)
             print(json.dumps({"type":"agent_settled"}), flush=True)
@@ -2037,7 +2313,7 @@ for line in sys.stdin:
             },
         })];
         let mut attachment_messages =
-            active_chat_messages(&attachment_entries, Some("attachment")).unwrap();
+            active_chat_messages(&attachment_entries, Some("attachment"), false).unwrap();
         manager
             .populate_attachment_sizes(&attachment_entries, &mut attachment_messages)
             .await;
@@ -2087,6 +2363,7 @@ for line in sys.stdin:
         );
 
         let mut streamed = String::new();
+        let mut streamed_details = String::new();
         let history = tokio::time::timeout(Duration::from_secs(5), async {
             let mut user_history_seen = false;
             loop {
@@ -2107,6 +2384,8 @@ for line in sys.stdin:
                         ),
                     ServerMessage::StreamDelta { session_id: event_session, delta }
                         if event_session == session_id => streamed.push_str(&delta),
+                    ServerMessage::StreamDetailsDelta { session_id: event_session, delta }
+                        if event_session == session_id => streamed_details.push_str(&delta),
                     _ => {}
                 }
             }
@@ -2114,9 +2393,14 @@ for line in sys.stdin:
         .await
         .expect("mock Pi chat did not settle");
         assert_eq!(streamed, "Hello from Tau");
+        assert_eq!(streamed_details, "Checking");
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].text, "Say hello");
         assert_eq!(history[1].text, "Hello from Tau");
+        assert!(history[1].has_details);
+        assert!(history[1].details.is_empty());
+        let details = manager.message_details(&session_id, "a1").await.unwrap();
+        assert_eq!(details[0].text.as_deref(), Some("Checking"));
 
         let commands = manager.commands(&session_id).await.unwrap();
         assert!(commands.iter().any(|command| {
@@ -2246,6 +2530,9 @@ for line in sys.stdin:
         assert_eq!(reopened_history.len(), 2);
         assert_eq!(reopened_history[0].text, "Say hello");
         assert_eq!(reopened_history[1].text, "Hello from Tau");
+        let cold_details = manager.message_details(&session_id, "a1").await.unwrap();
+        assert_eq!(cold_details[0].text.as_deref(), Some("Checking"));
+        assert!(runtime.process.lock().await.is_none());
 
         manager.delete_session(&session_id).await.unwrap();
         assert!(manager.inner.state.get(&session_id).is_none());

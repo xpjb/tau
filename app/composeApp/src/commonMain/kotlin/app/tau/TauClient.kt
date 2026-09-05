@@ -10,6 +10,7 @@ import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
+import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.prepareGet
@@ -45,8 +46,10 @@ class TauClient {
             "Server URL must start with http:// or https://"
         }
         val websocketUrl = when {
-            baseUrl.startsWith("https://") -> "wss://${baseUrl.removePrefix("https://")}/v1/ws"
-            else -> "ws://${baseUrl.removePrefix("http://")}/v1/ws"
+            baseUrl.startsWith("https://") -> {
+                "wss://${baseUrl.removePrefix("https://")}/v1/ws?features=details"
+            }
+            else -> "ws://${baseUrl.removePrefix("http://")}/v1/ws?features=details"
         }
         client.webSocket(
             request = {
@@ -79,6 +82,24 @@ class TauClient {
         } catch (error: Throwable) {
             throw TauConnectionException("Tau connection was lost", error)
         }
+    }
+
+    suspend fun messageDetails(
+        settings: ConnectionSettings,
+        sessionId: String,
+        entryId: String,
+    ): List<ChatDetail> {
+        val baseUrl = settings.serverUrl.trim().trimEnd('/')
+        val response = client.get(
+            "$baseUrl/v1/sessions/$sessionId/messages/$entryId/details",
+        ) {
+            header(HttpHeaders.Authorization, "Bearer ${settings.token}")
+            header(HttpHeaders.Accept, ContentType.Application.Json)
+        }
+        check(response.status.isSuccess()) {
+            "Details could not be loaded (${response.status.value})"
+        }
+        return TauJson.decodeFromString<MessageDetails>(response.body<String>()).details
     }
 
     suspend fun downloadAttachment(

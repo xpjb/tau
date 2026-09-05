@@ -140,6 +140,10 @@ data class StreamReset(val sessionId: String) : ServerMessage
 data class StreamDelta(val sessionId: String, val delta: String) : ServerMessage
 
 @Serializable
+@SerialName("stream_details_delta")
+data class StreamDetailsDelta(val sessionId: String, val delta: String) : ServerMessage
+
+@Serializable
 @SerialName("stream_end")
 data class StreamEnd(val sessionId: String) : ServerMessage
 
@@ -217,13 +221,34 @@ enum class SessionStatus {
 }
 
 @Serializable
+enum class ChatDetailKind {
+    @SerialName("thinking") Thinking,
+    @SerialName("tool") Tool,
+}
+
+@Serializable
+data class ChatDetail(
+    val kind: ChatDetailKind,
+    val text: String? = null,
+    val toolName: String? = null,
+    val arguments: String? = null,
+    val result: String? = null,
+    val isError: Boolean = false,
+)
+
+@Serializable
 data class ChatMessage(
     val entryId: String,
     val role: ChatRole,
     val text: String,
     val timestampMs: Long? = null,
+    val hasDetails: Boolean = false,
+    val details: List<ChatDetail> = emptyList(),
     val attachment: ChatAttachment? = null,
 )
+
+@Serializable
+data class MessageDetails(val details: List<ChatDetail>)
 
 @Serializable
 data class UploadedFile(

@@ -60,6 +60,21 @@ class ProtocolTest {
         assertEquals("tau.zip", history.messages.single().attachment?.fileName)
         assertEquals(12345L, history.messages.single().attachment?.size)
 
+        val detailedHistory = assertIs<History>(TauJson.decodeFromString<ServerMessage>(
+            """{"type":"history","sessionId":"chat","messages":[{"entryId":"answer","role":"assistant","text":"Done","hasDetails":true,"details":[{"kind":"thinking","text":"Checking"},{"kind":"tool","toolName":"bash","arguments":"cargo check","result":"Finished","isError":false}]}]}""",
+        ))
+        assertEquals(true, detailedHistory.messages.single().hasDetails)
+        assertEquals("Checking", detailedHistory.messages.single().details[0].text)
+        assertEquals("bash", detailedHistory.messages.single().details[1].toolName)
+        assertEquals("Finished", detailedHistory.messages.single().details[1].result)
+
+        val detailsDelta = assertIs<StreamDetailsDelta>(
+            TauJson.decodeFromString<ServerMessage>(
+                """{"type":"stream_details_delta","sessionId":"chat","delta":"Planning"}""",
+            ),
+        )
+        assertEquals("Planning", detailsDelta.delta)
+
         val commands = assertIs<Commands>(TauJson.decodeFromString<ServerMessage>(
             """{"type":"commands","sessionId":"chat","commands":[{"name":"model","description":"Select model","source":"builtin","argumentHint":"<provider/model>","arguments":[{"value":"test/model","description":"Test"}]}]}""",
         ))

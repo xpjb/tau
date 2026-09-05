@@ -45,6 +45,20 @@ data class ExtensionWidget(
 
 data class AttachmentDownloadKey(val sessionId: String, val entryId: String)
 
+data class DetailExpansionKey(val sessionId: String, val entryId: String)
+
+enum class DetailContentKind {
+    Arguments,
+    Result,
+}
+
+data class DetailContentExpansionKey(
+    val sessionId: String,
+    val entryId: String,
+    val detailIndex: Int,
+    val content: DetailContentKind,
+)
+
 enum class AttachmentDownloadStatus {
     Downloading,
     Downloaded,
@@ -71,6 +85,13 @@ data class TauUiState(
     val histories: Map<String, List<ChatMessage>> = emptyMap(),
     val outgoingMessages: Map<String, List<OutgoingMessage>> = emptyMap(),
     val partials: Map<String, String> = emptyMap(),
+    val partialDetails: Map<String, String> = emptyMap(),
+    val detailsExpandedBySession: Map<String, Boolean> = emptyMap(),
+    val detailExpansions: Map<DetailExpansionKey, Boolean> = emptyMap(),
+    val expandedDetailContent: Set<DetailContentExpansionKey> = emptySet(),
+    val messageDetails: Map<DetailExpansionKey, List<ChatDetail>> = emptyMap(),
+    val loadingMessageDetails: Set<DetailExpansionKey> = emptySet(),
+    val messageDetailErrors: Map<DetailExpansionKey, String> = emptyMap(),
     val drafts: Map<String, String> = emptyMap(),
     val attachments: Map<String, List<PickedFile>> = emptyMap(),
     val slashCommands: Map<String, List<SlashCommand>> = emptyMap(),
@@ -93,6 +114,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
     private val pending = mutableMapOf<String, PendingAction>()
     private val openedSessions = mutableSetOf<String>()
     private val downloadJobs = mutableMapOf<AttachmentDownloadKey, Job>()
+    private val detailJobs = mutableMapOf<DetailExpansionKey, Job>()
     private var connectionJob: Job? = null
     private var requestSequence = 1L
     private var crashUploadAttempted = false
@@ -194,6 +216,117 @@ class TauController(dispatcher: CoroutineDispatcher) {
             val id = nextRequestId()
             pending[id] = PendingAction.Commands(sessionId)
             send(GetCommands(id, sessionId))
+        }
+    }
+
+    fun setDetailsExpanded(sessionId: String, entryId: String?, expanded: Boolean) {
+        val key = entryId?.let { DetailExpansionKey(sessionId, it) }
+        if (!expanded && key != null) {
+            detailJobs.remove(key)?.cancel()
+        }
+        var loadDetails = false
+        mutableState.update { current ->
+            val previousDefault = current.detailsExpandedBySession[sessionId] ?: false
+            val expansions = current.detailExpansions.toMutableMap()
+            current.histories[sessionId]
+                .orEmpty()
+                .filter { message -> message.hasDetails || message.details.isNotEmpty() }
+                .forEach { message ->
+                    expansions.putIfAbsent(
+                        DetailExpansionKey(sessionId, message.entryId),
+                        previousDefault,
+                    )
+                }
+            if (key != null) {
+                expansions[key] = expanded
+            }
+            val message = entryId?.let { id ->
+                current.histories[sessionId]
+                    .orEmpty()
+                    .firstOrNull { message -> message.entryId == id }
+            }
+            loadDetails = expanded && key != null && message?.hasDetails == true &&
+                key !in current.messageDetails &&
+                key !in current.loadingMessageDetails &&
+                key !in current.messageDetailErrors
+            current.copy(
+                detailsExpandedBySession = current.detailsExpandedBySession +
+                    (sessionId to expanded),
+                detailExpansions = expansions,
+                expandedDetailContent = if (!expanded && entryId != null) {
+                    current.expandedDetailContent.filterTo(mutableSetOf()) { content ->
+                        content.sessionId != sessionId || content.entryId != entryId
+                    }
+                } else {
+                    current.expandedDetailContent
+                },
+                messageDetails = if (!expanded && key != null) {
+                    current.messageDetails - key
+                } else {
+                    current.messageDetails
+                },
+                loadingMessageDetails = when {
+                    loadDetails -> current.loadingMessageDetails + checkNotNull(key)
+                    !expanded && key != null -> current.loadingMessageDetails - key
+                    else -> current.loadingMessageDetails
+                },
+                messageDetailErrors = if (key != null) {
+                    current.messageDetailErrors - key
+                } else {
+                    current.messageDetailErrors
+                },
+            )
+        }
+        if (!loadDetails || key == null) return
+        lateinit var job: Job
+        job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val details = client.messageDetails(
+                    mutableState.value.settings,
+                    key.sessionId,
+                    key.entryId,
+                )
+                mutableState.update { current ->
+                    if (current.detailExpansions[key] != true) {
+                        current
+                    } else {
+                        current.copy(
+                            messageDetails = current.messageDetails + (key to details),
+                            messageDetailErrors = current.messageDetailErrors - key,
+                        )
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { current ->
+                    current.copy(
+                        messageDetailErrors = current.messageDetailErrors +
+                            (key to (error.message ?: "Details could not be loaded.").take(240)),
+                    )
+                }
+            } finally {
+                mutableState.update { current ->
+                    current.copy(
+                        loadingMessageDetails = current.loadingMessageDetails - key,
+                    )
+                }
+                if (detailJobs[key] === job) detailJobs.remove(key)
+            }
+        }
+        detailJobs[key] = job
+        job.start()
+    }
+
+    fun toggleDetailContent(key: DetailContentExpansionKey) {
+        mutableState.update { current ->
+            current.copy(
+                expandedDetailContent = if (key in current.expandedDetailContent) {
+                    current.expandedDetailContent - key
+                } else {
+                    current.expandedDetailContent + key
+                },
+            )
         }
     }
 
@@ -570,9 +703,18 @@ class TauController(dispatcher: CoroutineDispatcher) {
         connectionJob?.cancel()
         downloadJobs.values.forEach { job -> job.cancel() }
         downloadJobs.clear()
+        detailJobs.values.forEach { job -> job.cancel() }
+        detailJobs.clear()
         openedSessions.clear()
         pending.clear()
-        mutableState.update { it.copy(attachmentDownloads = emptyMap()) }
+        mutableState.update {
+            it.copy(
+                attachmentDownloads = emptyMap(),
+                messageDetails = emptyMap(),
+                loadingMessageDetails = emptySet(),
+                messageDetailErrors = emptyMap(),
+            )
+        }
         crashUploadAttempted = false
         connectionJob = scope.launch {
             while (isActive) {
@@ -810,6 +952,9 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 downloadJobs.keys
                     .filter { key -> key.sessionId !in activeIds }
                     .forEach { key -> downloadJobs.remove(key)?.cancel() }
+                detailJobs.keys
+                    .filter { key -> key.sessionId !in activeIds }
+                    .forEach { key -> detailJobs.remove(key)?.cancel() }
                 val currentSelection = mutableState.value.selectedSessionId
                 val selected = currentSelection
                     ?.takeIf { it in activeIds }
@@ -826,6 +971,27 @@ class TauController(dispatcher: CoroutineDispatcher) {
                             sessionId in activeIds
                         },
                         partials = it.partials.filterKeys { sessionId -> sessionId in activeIds },
+                        partialDetails = it.partialDetails.filterKeys { sessionId ->
+                            sessionId in activeIds
+                        },
+                        detailsExpandedBySession = it.detailsExpandedBySession.filterKeys {
+                            sessionId -> sessionId in activeIds
+                        },
+                        detailExpansions = it.detailExpansions.filterKeys { key ->
+                            key.sessionId in activeIds
+                        },
+                        expandedDetailContent = it.expandedDetailContent.filterTo(mutableSetOf()) {
+                            key -> key.sessionId in activeIds
+                        },
+                        messageDetails = it.messageDetails.filterKeys { key ->
+                            key.sessionId in activeIds
+                        },
+                        loadingMessageDetails = it.loadingMessageDetails.filterTo(mutableSetOf()) {
+                            key -> key.sessionId in activeIds
+                        },
+                        messageDetailErrors = it.messageDetailErrors.filterKeys { key ->
+                            key.sessionId in activeIds
+                        },
                         drafts = it.drafts.filterKeys { sessionId -> sessionId in activeIds },
                         attachments = it.attachments.filterKeys { sessionId -> sessionId in activeIds },
                         slashCommands = it.slashCommands.filterKeys { sessionId -> sessionId in activeIds },
@@ -853,6 +1019,12 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 if (selected != null && selected !in openedSessions) openSession(selected, false)
             }
             is History -> {
+                val activeEntries = message.messages.mapTo(mutableSetOf(), ChatMessage::entryId)
+                detailJobs.keys
+                    .filter { key ->
+                        key.sessionId == message.sessionId && key.entryId !in activeEntries
+                    }
+                    .forEach { key -> detailJobs.remove(key)?.cancel() }
                 mutableState.update { current ->
                     val outgoing = reconcileOutgoingMessages(
                         current.outgoingMessages[message.sessionId].orEmpty(),
@@ -866,6 +1038,26 @@ class TauController(dispatcher: CoroutineDispatcher) {
                             current.outgoingMessages + (message.sessionId to outgoing)
                         },
                         partials = current.partials - message.sessionId,
+                        partialDetails = current.partialDetails - message.sessionId,
+                        detailExpansions = current.detailExpansions.filterKeys { key ->
+                            key.sessionId != message.sessionId || key.entryId in activeEntries
+                        },
+                        expandedDetailContent = current.expandedDetailContent.filterTo(
+                            mutableSetOf(),
+                        ) { key ->
+                            key.sessionId != message.sessionId || key.entryId in activeEntries
+                        },
+                        messageDetails = current.messageDetails.filterKeys { key ->
+                            key.sessionId != message.sessionId || key.entryId in activeEntries
+                        },
+                        loadingMessageDetails = current.loadingMessageDetails.filterTo(
+                            mutableSetOf(),
+                        ) { key ->
+                            key.sessionId != message.sessionId || key.entryId in activeEntries
+                        },
+                        messageDetailErrors = current.messageDetailErrors.filterKeys { key ->
+                            key.sessionId != message.sessionId || key.entryId in activeEntries
+                        },
                     )
                 }
             }
@@ -913,7 +1105,10 @@ class TauController(dispatcher: CoroutineDispatcher) {
             }
             is StreamReset -> {
                 mutableState.update {
-                    it.copy(partials = it.partials + (message.sessionId to ""))
+                    it.copy(
+                        partials = it.partials + (message.sessionId to ""),
+                        partialDetails = it.partialDetails + (message.sessionId to ""),
+                    )
                 }
             }
             is StreamDelta -> {
@@ -921,6 +1116,15 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     it.copy(
                         partials = it.partials +
                             (message.sessionId to (it.partials[message.sessionId].orEmpty() + message.delta)),
+                    )
+                }
+            }
+            is StreamDetailsDelta -> {
+                mutableState.update {
+                    it.copy(
+                        partialDetails = it.partialDetails + (message.sessionId to (
+                            it.partialDetails[message.sessionId].orEmpty() + message.delta
+                        )),
                     )
                 }
             }
