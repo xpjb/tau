@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "tau-launcher"
-version = "0.4.3"
+version = "0.4.5"
 dependencies = [
  "sha2",
  "windows-sys",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "tau-setup"
-version = "0.4.3"
+version = "0.4.5"
 dependencies = [
  "lzma-rs",
  "semver",
