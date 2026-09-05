@@ -7,9 +7,11 @@ build = "build.rs"
 [build-dependencies]
 winresource = "0.1"
 
+[dependencies]
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
 [target.'cfg(windows)'.dependencies]
 sha2 = "0.10"
-zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com_Urlmon",
