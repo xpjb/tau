@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-version=${TAU_VERSION:-0.4.6}
+version=${TAU_VERSION:-0.4.7}
 work="$root/target/windows-sfx-$version"
 bundle="$work/bundle"
 payload="$work/tau-windows-payload.tar.lzma"
