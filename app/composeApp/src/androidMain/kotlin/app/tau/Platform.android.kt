@@ -283,6 +283,14 @@ actual object PlatformServices {
         }
         TauAndroidContext.require().startActivity(intent)
     }
+
+    actual fun showDownload(download: SavedDownload) {
+        error("Showing downloaded files is supported only on Windows.")
+    }
+
+    actual fun extractAndOpenDownload(download: SavedDownload) {
+        error("Extracting downloaded ZIP files is supported only on Windows.")
+    }
 }
 
 actual fun Modifier.onSecondaryClick(onClick: (Offset) -> Unit): Modifier = this

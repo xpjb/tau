@@ -297,20 +297,42 @@ actual object PlatformServices {
     actual fun openDownload(download: SavedDownload) {
         val path = Path.of(download.reference)
         check(Files.isRegularFile(path)) { "The downloaded file no longer exists." }
-        if (platformName == "windows") {
-            val launcher = System.getenv("LOCALAPPDATA")
-                ?.let { directory -> Path.of(directory, "Tau", "Tau.exe") }
-            if (launcher != null && Files.isRegularFile(launcher)) {
-                ProcessBuilder(launcher.toString(), "--open", path.toString()).start()
-                return
-            }
-        }
+        if (launchWindowsDownloadAction("--open", path)) return
         check(Desktop.isDesktopSupported()) { "Opening files is not supported on this desktop." }
         val desktop = Desktop.getDesktop()
         check(desktop.isSupported(Desktop.Action.OPEN)) {
             "Opening files is not supported on this desktop."
         }
         desktop.open(path.toFile())
+    }
+
+    actual fun showDownload(download: SavedDownload) {
+        val path = Path.of(download.reference)
+        check(Files.isRegularFile(path)) { "The downloaded file no longer exists." }
+        check(launchWindowsDownloadAction("--show", path)) {
+            "Showing downloaded files is supported only on Windows."
+        }
+    }
+
+    actual fun extractAndOpenDownload(download: SavedDownload) {
+        val path = Path.of(download.reference)
+        check(Files.isRegularFile(path)) { "The downloaded file no longer exists." }
+        check(path.fileName.toString().endsWith(".zip", ignoreCase = true)) {
+            "The downloaded file is not a ZIP archive."
+        }
+        check(launchWindowsDownloadAction("--extract-open", path)) {
+            "Extracting downloaded ZIP files is supported only on Windows."
+        }
+    }
+
+    private fun launchWindowsDownloadAction(action: String, path: Path): Boolean {
+        if (platformName != "windows") return false
+        val launcher = System.getenv("LOCALAPPDATA")
+            ?.let { directory -> Path.of(directory, "Tau", "Tau.exe") }
+            ?.takeIf(Files::isRegularFile)
+            ?: return false
+        ProcessBuilder(launcher.toString(), action, path.toString()).start()
+        return true
     }
 }
 

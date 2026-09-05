@@ -50,6 +50,7 @@ data class AttachmentDownloadKey(val sessionId: String, val entryId: String)
 data class DetailExpansionKey(val sessionId: String, val entryId: String)
 
 enum class DetailContentKind {
+    Tool,
     Arguments,
     Result,
 }
@@ -86,12 +87,11 @@ data class TauUiState(
     val focusComposerSessionId: String? = null,
     val histories: Map<String, List<ChatMessage>> = emptyMap(),
     val outgoingMessages: Map<String, List<OutgoingMessage>> = emptyMap(),
-    val partials: Map<String, String> = emptyMap(),
-    val partialDetails: Map<String, String> = emptyMap(),
+    val liveAttempts: Map<String, List<ChatAttempt>> = emptyMap(),
     val detailsExpandedBySession: Map<String, Boolean> = emptyMap(),
     val detailExpansions: Map<DetailExpansionKey, Boolean> = emptyMap(),
     val expandedDetailContent: Set<DetailContentExpansionKey> = emptySet(),
-    val messageDetails: Map<DetailExpansionKey, List<ChatDetail>> = emptyMap(),
+    val messageDetails: Map<DetailExpansionKey, MessageDetails> = emptyMap(),
     val loadingMessageDetails: Set<DetailExpansionKey> = emptySet(),
     val messageDetailErrors: Map<DetailExpansionKey, String> = emptyMap(),
     val drafts: Map<String, String> = emptyMap(),
@@ -117,6 +117,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
     private val openedSessions = mutableSetOf<String>()
     private val downloadJobs = mutableMapOf<AttachmentDownloadKey, Job>()
     private val detailJobs = mutableMapOf<DetailExpansionKey, Job>()
+    private val detailContentJobs = mutableMapOf<DetailContentExpansionKey, Job>()
     private var connectionJob: Job? = null
     private var requestSequence = 1L
     private var crashUploadAttempted = false
@@ -225,6 +226,11 @@ class TauController(dispatcher: CoroutineDispatcher) {
         val key = entryId?.let { DetailExpansionKey(sessionId, it) }
         if (!expanded && key != null) {
             detailJobs.remove(key)?.cancel()
+            detailContentJobs.keys
+                .filter { content ->
+                    content.sessionId == sessionId && content.entryId == entryId
+                }
+                .forEach { content -> detailContentJobs.remove(content)?.cancel() }
         }
         var loadDetails = false
         mutableState.update { current ->
@@ -232,23 +238,30 @@ class TauController(dispatcher: CoroutineDispatcher) {
             val expansions = current.detailExpansions.toMutableMap()
             current.histories[sessionId]
                 .orEmpty()
-                .filter { message -> message.hasDetails || message.details.isNotEmpty() }
+                .filter(ChatMessage::hasDetails)
                 .forEach { message ->
                     expansions.putIfAbsent(
-                        DetailExpansionKey(sessionId, message.entryId),
+                        DetailExpansionKey(sessionId, message.groupId ?: message.entryId),
                         previousDefault,
                     )
                 }
             val message = entryId?.let { id ->
                 current.histories[sessionId]
                     .orEmpty()
-                    .firstOrNull { message -> message.entryId == id }
+                    .firstOrNull { message ->
+                        (message.groupId ?: message.entryId) == id
+                    }
             }
+            val loadedDetails = key?.let(current.messageDetails::get)
+            val detailsStale = message != null && loadedDetails != null &&
+                message.attempts.any { attempt ->
+                    loadedDetails.attempts.none { loaded -> loaded.entryId == attempt.entryId }
+                }
             loadDetails = expanded && key != null && message?.hasDetails == true &&
-                key !in current.messageDetails &&
+                (loadedDetails == null || detailsStale) &&
                 key !in current.loadingMessageDetails &&
                 key !in current.messageDetailErrors
-            val waitingForDetails = expanded && key != null &&
+            val waitingForDetails = expanded && key != null && loadedDetails == null &&
                 (loadDetails || key in current.loadingMessageDetails)
             if (key != null) {
                 expansions[key] = expanded && !waitingForDetails
@@ -264,11 +277,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 } else {
                     current.expandedDetailContent
                 },
-                messageDetails = if (!expanded && key != null) {
-                    current.messageDetails - key
-                } else {
-                    current.messageDetails
-                },
+                messageDetails = current.messageDetails,
                 loadingMessageDetails = when {
                     loadDetails -> current.loadingMessageDetails + checkNotNull(key)
                     !expanded && key != null -> current.loadingMessageDetails - key
@@ -296,7 +305,19 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     } else {
                         current.copy(
                             detailExpansions = current.detailExpansions + (key to true),
-                            messageDetails = current.messageDetails + (key to details),
+                            messageDetails = current.messageDetails + (
+                                key to details.copy(
+                                    attempts = details.attempts.map { attempt ->
+                                        current.messageDetails[key]
+                                            ?.attempts
+                                            ?.firstOrNull { prior ->
+                                                prior.entryId == attempt.entryId
+                                            }
+                                            ?.let(attempt::withMissingContentFrom)
+                                            ?: attempt
+                                    },
+                                )
+                            ),
                             loadingMessageDetails = current.loadingMessageDetails - key,
                             messageDetailErrors = current.messageDetailErrors - key,
                         )
@@ -333,15 +354,93 @@ class TauController(dispatcher: CoroutineDispatcher) {
     }
 
     fun toggleDetailContent(key: DetailContentExpansionKey) {
-        mutableState.update { current ->
-            current.copy(
-                expandedDetailContent = if (key in current.expandedDetailContent) {
-                    current.expandedDetailContent - key
-                } else {
-                    current.expandedDetailContent + key
-                },
-            )
+        val current = mutableState.value
+        if (key in current.expandedDetailContent) {
+            detailContentJobs.remove(key)?.cancel()
+            mutableState.update {
+                it.copy(expandedDetailContent = it.expandedDetailContent - key)
+            }
+            return
         }
+        val messageKey = DetailExpansionKey(key.sessionId, key.entryId)
+        val content = current.messageDetails[messageKey]
+            ?.attempts
+            ?.asSequence()
+            ?.flatMap { attempt -> attempt.content.asSequence() }
+            ?.firstOrNull { content -> content.detailIndex == key.detailIndex }
+        val needsToolContent = key.content == DetailContentKind.Tool &&
+            content?.kind == ChatContentKind.Tool &&
+            ((content.hasArguments && content.arguments == null) ||
+                (content.hasResult && content.result == null))
+        if (!needsToolContent) {
+            mutableState.update {
+                it.copy(expandedDetailContent = it.expandedDetailContent + key)
+            }
+            return
+        }
+        if (key in detailContentJobs) return
+
+        lateinit var job: Job
+        job = scope.launch(start = CoroutineStart.LAZY) {
+            val loaded = try {
+                client.messageDetail(
+                    mutableState.value.settings,
+                    key.sessionId,
+                    key.entryId,
+                    key.detailIndex,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                ChatDetail(
+                    kind = ChatDetailKind.Tool,
+                    toolName = content.toolName,
+                    result = error.message ?: "Tool details could not be loaded.",
+                    hasArguments = content.hasArguments,
+                    hasResult = true,
+                    isError = true,
+                )
+            }
+            mutableState.update { state ->
+                if (detailContentJobs[key] !== job) {
+                    state
+                } else {
+                    val details = state.messageDetails[messageKey]
+                    if (details == null) {
+                        state
+                    } else {
+                        state.copy(
+                            expandedDetailContent = state.expandedDetailContent + key,
+                            messageDetails = state.messageDetails + (
+                                messageKey to MessageDetails(
+                                    attempts = details.attempts.map { attempt ->
+                                        attempt.copy(
+                                            content = attempt.content.map { content ->
+                                                if (content.detailIndex == key.detailIndex) {
+                                                    content.copy(
+                                                        toolName = loaded.toolName,
+                                                        arguments = loaded.arguments,
+                                                        result = loaded.result,
+                                                        hasArguments = loaded.hasArguments,
+                                                        hasResult = loaded.hasResult,
+                                                        isError = loaded.isError,
+                                                    )
+                                                } else {
+                                                    content
+                                                }
+                                            },
+                                        )
+                                    },
+                                )
+                            ),
+                        )
+                    }
+                }
+            }
+            if (detailContentJobs[key] === job) detailContentJobs.remove(key)
+        }
+        detailContentJobs[key] = job
+        job.start()
     }
 
     fun pickFiles() {
@@ -710,6 +809,32 @@ class TauController(dispatcher: CoroutineDispatcher) {
         }
     }
 
+    fun showAttachmentDownload(message: ChatMessage) {
+        val sessionId = mutableState.value.selectedSessionId ?: return
+        val key = AttachmentDownloadKey(sessionId, message.entryId)
+        val download = mutableState.value.attachmentDownloads[key]?.saved ?: return
+        try {
+            PlatformServices.showDownload(download)
+        } catch (error: Throwable) {
+            mutableState.update {
+                it.copy(error = error.message ?: "The downloaded file could not be shown.")
+            }
+        }
+    }
+
+    fun extractAndOpenAttachmentDownload(message: ChatMessage) {
+        val sessionId = mutableState.value.selectedSessionId ?: return
+        val key = AttachmentDownloadKey(sessionId, message.entryId)
+        val download = mutableState.value.attachmentDownloads[key]?.saved ?: return
+        try {
+            PlatformServices.extractAndOpenDownload(download)
+        } catch (error: Throwable) {
+            mutableState.update {
+                it.copy(error = error.message ?: "The downloaded ZIP could not be extracted.")
+            }
+        }
+    }
+
     fun dismissError() {
         mutableState.update { it.copy(error = null) }
     }
@@ -724,12 +849,63 @@ class TauController(dispatcher: CoroutineDispatcher) {
         scope.cancel()
     }
 
+    private fun appendLiveDelta(
+        sessionId: String,
+        attemptId: String,
+        contentIndex: Int,
+        kind: ChatContentKind,
+        delta: String,
+    ) {
+        updateLiveContent(sessionId, attemptId, contentIndex) { previous ->
+            if (previous?.kind == kind) {
+                previous.copy(text = previous.text.orEmpty() + delta)
+            } else {
+                ChatContent(
+                    kind = kind,
+                    contentIndex = contentIndex,
+                    detailIndex = null,
+                    text = delta,
+                    hasContent = true,
+                )
+            }
+        }
+    }
+
+    private fun updateLiveContent(
+        sessionId: String,
+        attemptId: String,
+        contentIndex: Int,
+        update: (ChatContent?) -> ChatContent,
+    ) {
+        mutableState.update { current ->
+            val attempts = current.liveAttempts[sessionId].orEmpty()
+            val attemptIndex = attempts.indexOfFirst { attempt -> attempt.entryId == attemptId }
+            if (attemptIndex < 0) return@update current
+            val attempt = attempts[attemptIndex]
+            val previous = attempt.content.firstOrNull { content ->
+                content.contentIndex == contentIndex
+            }
+            val content = attempt.content
+                .filterNot { existing -> existing.contentIndex == contentIndex }
+                .plus(update(previous))
+                .sortedBy(ChatContent::contentIndex)
+            val updatedAttempts = attempts.toMutableList().also { list ->
+                list[attemptIndex] = attempt.copy(content = content)
+            }
+            current.copy(
+                liveAttempts = current.liveAttempts + (sessionId to updatedAttempts),
+            )
+        }
+    }
+
     private fun connect(settings: ConnectionSettings) {
         connectionJob?.cancel()
         downloadJobs.values.forEach { job -> job.cancel() }
         downloadJobs.clear()
         detailJobs.values.forEach { job -> job.cancel() }
         detailJobs.clear()
+        detailContentJobs.values.forEach { job -> job.cancel() }
+        detailContentJobs.clear()
         openedSessions.clear()
         pending.clear()
         mutableState.update {
@@ -982,6 +1158,9 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 detailJobs.keys
                     .filter { key -> key.sessionId !in activeIds }
                     .forEach { key -> detailJobs.remove(key)?.cancel() }
+                detailContentJobs.keys
+                    .filter { key -> key.sessionId !in activeIds }
+                    .forEach { key -> detailContentJobs.remove(key)?.cancel() }
                 val currentSelection = mutableState.value.selectedSessionId
                 val selected = currentSelection
                     ?.takeIf { it in activeIds }
@@ -997,8 +1176,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
                         outgoingMessages = it.outgoingMessages.filterKeys { sessionId ->
                             sessionId in activeIds
                         },
-                        partials = it.partials.filterKeys { sessionId -> sessionId in activeIds },
-                        partialDetails = it.partialDetails.filterKeys { sessionId ->
+                        liveAttempts = it.liveAttempts.filterKeys { sessionId ->
                             sessionId in activeIds
                         },
                         detailsExpandedBySession = it.detailsExpandedBySession.filterKeys {
@@ -1046,26 +1224,54 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 if (selected != null && selected !in openedSessions) openSession(selected, false)
             }
             is History -> {
-                val activeEntries = message.messages.mapTo(mutableSetOf(), ChatMessage::entryId)
+                val activeEntries = message.messages.flatMapTo(mutableSetOf()) { chatMessage ->
+                    listOfNotNull(chatMessage.entryId, chatMessage.groupId)
+                }
+                val canonicalAttemptTimestamps = message.messages
+                    .asSequence()
+                    .flatMap { chatMessage -> chatMessage.attempts.asSequence() }
+                    .mapNotNull(ChatAttempt::timestampMs)
+                    .toSet()
                 detailJobs.keys
                     .filter { key ->
                         key.sessionId == message.sessionId && key.entryId !in activeEntries
                     }
                     .forEach { key -> detailJobs.remove(key)?.cancel() }
+                detailContentJobs.keys
+                    .filter { key ->
+                        key.sessionId == message.sessionId && key.entryId !in activeEntries
+                    }
+                    .forEach { key -> detailContentJobs.remove(key)?.cancel() }
                 mutableState.update { current ->
+                    val messages = preserveAttemptContent(
+                        incoming = message.messages,
+                        previous = current.histories[message.sessionId].orEmpty(),
+                        live = current.liveAttempts[message.sessionId].orEmpty(),
+                    )
                     val outgoing = reconcileOutgoingMessages(
                         current.outgoingMessages[message.sessionId].orEmpty(),
-                        message.messages,
+                        messages,
                     )
                     current.copy(
-                        histories = current.histories + (message.sessionId to message.messages),
+                        histories = current.histories + (message.sessionId to messages),
                         outgoingMessages = if (outgoing.isEmpty()) {
                             current.outgoingMessages - message.sessionId
                         } else {
                             current.outgoingMessages + (message.sessionId to outgoing)
                         },
-                        partials = current.partials - message.sessionId,
-                        partialDetails = current.partialDetails - message.sessionId,
+                        liveAttempts = current.liveAttempts[message.sessionId]
+                            .orEmpty()
+                            .filterNot { attempt ->
+                                attempt.timestampMs != null &&
+                                    attempt.timestampMs in canonicalAttemptTimestamps
+                            }
+                            .let { attempts ->
+                                if (attempts.isEmpty()) {
+                                    current.liveAttempts - message.sessionId
+                                } else {
+                                    current.liveAttempts + (message.sessionId to attempts)
+                                }
+                            },
                         detailExpansions = current.detailExpansions.filterKeys { key ->
                             key.sessionId != message.sessionId || key.entryId in activeEntries
                         },
@@ -1130,32 +1336,79 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     )
                 }
             }
-            is StreamReset -> {
-                mutableState.update {
-                    it.copy(
-                        partials = it.partials + (message.sessionId to ""),
-                        partialDetails = it.partialDetails + (message.sessionId to ""),
+            is StreamReset -> mutableState.update { current ->
+                val attempts = current.liveAttempts[message.sessionId].orEmpty()
+                if (attempts.any { attempt -> attempt.entryId == message.attemptId }) {
+                    current
+                } else {
+                    current.copy(
+                        liveAttempts = current.liveAttempts + (
+                            message.sessionId to attempts + ChatAttempt(
+                                entryId = message.attemptId,
+                                timestampMs = message.timestampMs,
+                            )
+                        ),
                     )
                 }
             }
-            is StreamDelta -> {
-                mutableState.update {
-                    it.copy(
-                        partials = it.partials +
-                            (message.sessionId to (it.partials[message.sessionId].orEmpty() + message.delta)),
+            is StreamDelta -> appendLiveDelta(
+                message.sessionId,
+                message.attemptId,
+                message.contentIndex,
+                ChatContentKind.Text,
+                message.delta,
+            )
+            is StreamDetailsDelta -> appendLiveDelta(
+                message.sessionId,
+                message.attemptId,
+                message.contentIndex,
+                ChatContentKind.Thinking,
+                message.delta,
+            )
+            is StreamTool -> updateLiveContent(
+                message.sessionId,
+                message.attemptId,
+                message.contentIndex,
+            ) {
+                ChatContent(
+                    kind = ChatContentKind.Tool,
+                    contentIndex = message.contentIndex,
+                    detailIndex = null,
+                    toolName = message.toolName,
+                    arguments = message.arguments,
+                    hasContent = true,
+                    hasArguments = message.arguments != null,
+                )
+            }
+            is StreamSnapshot -> {
+                mutableState.update { current ->
+                    current.copy(
+                        liveAttempts = if (message.attempts.isEmpty()) {
+                            current.liveAttempts - message.sessionId
+                        } else {
+                            current.liveAttempts + (message.sessionId to message.attempts)
+                        },
                     )
                 }
             }
-            is StreamDetailsDelta -> {
-                mutableState.update {
-                    it.copy(
-                        partialDetails = it.partialDetails + (message.sessionId to (
-                            it.partialDetails[message.sessionId].orEmpty() + message.delta
-                        )),
-                    )
+            is StreamEnd -> {
+                message.attempt?.let { completed ->
+                    mutableState.update { current ->
+                        val attempts = current.liveAttempts[message.sessionId].orEmpty()
+                        val index = attempts.indexOfFirst { attempt ->
+                            attempt.entryId == completed.entryId
+                        }
+                        val updated = if (index < 0) {
+                            attempts + completed
+                        } else {
+                            attempts.toMutableList().also { it[index] = completed }
+                        }
+                        current.copy(
+                            liveAttempts = current.liveAttempts + (message.sessionId to updated),
+                        )
+                    }
                 }
             }
-            is StreamEnd -> Unit
             ResyncRequired -> {
                 openedSessions.clear()
                 val id = nextRequestId()
@@ -1239,6 +1492,89 @@ class TauController(dispatcher: CoroutineDispatcher) {
             val canonicalOccurrence: Int,
         ) : PendingAction
     }
+}
+
+private fun ChatAttempt.withMissingContentFrom(source: ChatAttempt): ChatAttempt = copy(
+    content = content.map { content ->
+        val prior = source.content.firstOrNull { candidate ->
+            candidate.contentIndex == content.contentIndex && candidate.kind == content.kind
+        } ?: return@map content
+        content.copy(
+            text = content.text ?: prior.text,
+            toolName = content.toolName ?: prior.toolName,
+            arguments = content.arguments ?: prior.arguments,
+            result = content.result ?: prior.result,
+            hasContent = content.hasContent || prior.hasContent,
+            hasArguments = content.hasArguments || prior.hasArguments,
+            hasResult = content.hasResult || prior.hasResult,
+            isError = content.isError || prior.isError,
+        )
+    },
+)
+
+internal fun preserveAttemptContent(
+    incoming: List<ChatMessage>,
+    previous: List<ChatMessage>,
+    live: List<ChatAttempt>,
+): List<ChatMessage> {
+    val previousAttempts = previous
+        .asSequence()
+        .flatMap { message -> message.attempts.asSequence() }
+        .associateBy(ChatAttempt::entryId)
+    val liveByTimestamp = live.mapNotNull { attempt ->
+        attempt.timestampMs?.let { timestamp -> timestamp to attempt }
+    }.toMap()
+    return incoming.map { message ->
+        message.copy(
+            attempts = message.attempts.map attemptMap@ { attempt ->
+                val source = previousAttempts[attempt.entryId]
+                    ?: attempt.timestampMs?.let(liveByTimestamp::get)
+                    ?: return@attemptMap attempt
+                attempt.withMissingContentFrom(source)
+            },
+        )
+    }
+}
+
+internal fun mergeLiveAttempts(
+    messages: List<ChatMessage>,
+    liveAttempts: List<ChatAttempt>,
+): List<ChatMessage> {
+    if (liveAttempts.isEmpty()) return messages
+    val result = messages.toMutableList()
+    val last = result.lastOrNull()
+    val lastAttempt = last?.attempts?.lastOrNull()
+    val mergeWithLast = last?.role == ChatRole.Assistant && lastAttempt != null &&
+        lastAttempt.stopReason in setOf(null, "toolUse", "error", "aborted")
+    val liveText = liveAttempts
+        .flatMap(ChatAttempt::content)
+        .filter { content -> content.kind == ChatContentKind.Text }
+        .mapNotNull(ChatContent::text)
+        .filter(String::isNotEmpty)
+    if (mergeWithLast) {
+        result[result.lastIndex] = checkNotNull(last).copy(
+            text = (listOf(last.text) + liveText)
+                .filter(String::isNotEmpty)
+                .joinToString("\n\n"),
+            attempts = last.attempts + liveAttempts,
+        )
+        return result
+    }
+    val timestamp = liveAttempts.first().timestampMs
+    val message = ChatMessage(
+        entryId = "live-${liveAttempts.first().entryId}",
+        role = ChatRole.Assistant,
+        text = liveText.joinToString("\n\n"),
+        timestampMs = timestamp,
+        attempts = liveAttempts,
+    )
+    val insertion = timestamp?.let { liveTimestamp ->
+        result.indexOfFirst { canonical ->
+            canonical.timestampMs?.let { it > liveTimestamp } == true
+        }
+    } ?: -1
+    if (insertion < 0) result += message else result.add(insertion, message)
+    return result
 }
 
 internal fun reconcileOutgoingMessages(

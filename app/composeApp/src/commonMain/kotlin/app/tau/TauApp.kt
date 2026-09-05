@@ -3,6 +3,7 @@
 package app.tau
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -107,6 +108,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.ImageLoader
@@ -132,9 +134,16 @@ private val InlineImagePreviewHeight = 260.dp
 private val AttachmentTopSpacing = 8.dp
 private val AttachmentControlHeight = 68.dp
 private val ImageDownloadSpacing = 4.dp
-private val DetailsAnswerSpacing = 8.dp
-private val DetailsBlockSpacing = 6.dp
+private val MessageBlockSpacing = 8.dp
+private val AttemptBoundaryVerticalPadding = 4.dp
+private val DetailsBlockSpacing = 3.dp
 private val DetailsHeaderVerticalPadding = 4.dp
+private val DetailsToggleVerticalPadding = 2.dp
+private val ToolHeaderVerticalPadding = 3.dp
+private val ToolInsetHorizontalPadding = 8.dp
+private val ToolInsetBottomPadding = 6.dp
+private val ToolSectionSpacing = 2.dp
+private val ToolSectionGap = 5.dp
 private const val LargeDetailContentChars = 1_200
 private const val LargeDetailContentLines = 16
 
@@ -168,10 +177,18 @@ internal fun fuzzyCompletionScore(value: String, query: String): Int? {
 private enum class DetailTextKind {
     Thinking,
     StreamingThinking,
-    Heading,
-    Code,
     ErrorCode,
 }
+
+private data class DetailToolSection(
+    val key: String,
+    val content: DetailContentKind,
+    val label: String,
+    val text: String,
+    val toggleLabel: String?,
+    val showText: Boolean,
+    val error: Boolean,
+)
 
 private sealed interface DetailBlock {
     val key: String
@@ -182,105 +199,239 @@ private sealed interface DetailBlock {
         val kind: DetailTextKind,
     ) : DetailBlock
 
-    data class Toggle(
+    data class Tool(
         override val key: String,
-        val detailIndex: Int,
-        val content: DetailContentKind,
-        val label: String,
+        val detailIndex: Int?,
+        val name: String,
+        val expanded: Boolean,
         val error: Boolean,
+        val sections: List<DetailToolSection>,
     ) : DetailBlock
 }
 
+private data class IndexedChatDetail(
+    val key: String,
+    val index: Int,
+    val detail: ChatDetail,
+)
+
+private sealed interface MessageBlock {
+    val key: String
+
+    data class Text(
+        override val key: String,
+        val text: String,
+        val markdown: Boolean,
+    ) : MessageBlock
+
+    data class Details(
+        override val key: String,
+        val blocks: List<DetailBlock>,
+    ) : MessageBlock
+
+    data class Boundary(
+        override val key: String,
+        val label: String,
+    ) : MessageBlock
+
+    data class Failure(
+        override val key: String,
+        val label: String,
+    ) : MessageBlock
+}
+
 private fun buildDetailBlocks(
-    details: List<ChatDetail>,
+    details: List<IndexedChatDetail>,
     expandedContent: Set<Pair<Int, DetailContentKind>>,
     streaming: Boolean,
 ): List<DetailBlock> = buildList {
-    fun addToolContent(
+    fun toolSection(
         detailIndex: Int,
         content: DetailContentKind,
         label: String,
         value: String?,
         error: Boolean,
-    ) {
-        val text = value?.takeIf(String::isNotBlank) ?: return
+    ): DetailToolSection? {
+        val text = value?.takeIf(String::isNotBlank) ?: return null
         val lines = text.count { character -> character == '\n' } + 1
         val large = text.length > LargeDetailContentChars || lines > LargeDetailContentLines
-        if (!large) {
-            add(DetailBlock.Text("$detailIndex-${content.name}-label", label, DetailTextKind.Heading))
-            add(
-                DetailBlock.Text(
-                    "$detailIndex-${content.name}-text",
-                    text,
-                    if (error) DetailTextKind.ErrorCode else DetailTextKind.Code,
-                ),
-            )
-            return
-        }
         val expanded = (detailIndex to content) in expandedContent
         val amount = if (lines > 1) "$lines lines" else "${text.length} characters"
-        add(
-            DetailBlock.Toggle(
-                key = "$detailIndex-${content.name}-toggle",
-                detailIndex = detailIndex,
-                content = content,
-                label = "${if (expanded) "Hide" else "Show"} ${label.lowercase()} · $amount",
-                error = error,
-            ),
+        return DetailToolSection(
+            key = "$detailIndex-${content.name}",
+            content = content,
+            label = label,
+            text = text,
+            toggleLabel = if (large) {
+                "${if (expanded) "Hide" else "Show"} ${label.lowercase()} · $amount"
+            } else {
+                null
+            },
+            showText = !large || expanded,
+            error = error,
         )
-        if (expanded) {
-            add(
-                DetailBlock.Text(
-                    "$detailIndex-${content.name}-text",
-                    text,
-                    if (error) DetailTextKind.ErrorCode else DetailTextKind.Code,
-                ),
-            )
-        }
     }
 
-    details.forEachIndexed { index, detail ->
+    details.forEach { indexed ->
+        val index = indexed.index.takeIf { it >= 0 }
+        val detail = indexed.detail
         when (detail.kind) {
             ChatDetailKind.Thinking -> detail.text
                 ?.takeIf(String::isNotBlank)
                 ?.let { thinking ->
-                    add(
-                        DetailBlock.Text(
-                            "$index-thinking",
-                            thinking,
-                            if (streaming) {
-                                DetailTextKind.StreamingThinking
-                            } else {
-                                DetailTextKind.Thinking
-                            },
+                    val kind = if (streaming) {
+                        DetailTextKind.StreamingThinking
+                    } else {
+                        DetailTextKind.Thinking
+                    }
+                    val previous = lastOrNull() as? DetailBlock.Text
+                    if (previous?.kind == kind) {
+                        removeAt(lastIndex)
+                        add(previous.copy(text = "${previous.text}\n\n$thinking"))
+                    } else {
+                        add(DetailBlock.Text(indexed.key, thinking, kind))
+                    }
+                }
+            ChatDetailKind.Tool -> add(
+                DetailBlock.Tool(
+                    key = indexed.key,
+                    detailIndex = index,
+                    name = detail.toolName ?: "unknown",
+                    expanded = index?.let { detailIndex ->
+                        (detailIndex to DetailContentKind.Tool) in expandedContent
+                    } ?: false,
+                    error = detail.isError,
+                    sections = index?.let { detailIndex ->
+                        listOfNotNull(
+                            toolSection(
+                                detailIndex,
+                                DetailContentKind.Arguments,
+                                "Input",
+                                detail.arguments,
+                                false,
+                            ),
+                            toolSection(
+                                detailIndex,
+                                DetailContentKind.Result,
+                                if (detail.isError) "Error" else "Output",
+                                detail.result,
+                                detail.isError,
+                            ),
+                        )
+                    }.orEmpty(),
+                ),
+            )
+        }
+    }
+}
+
+private fun buildAttemptBlocks(
+    attempts: List<ChatAttempt>,
+    expandedContent: Set<Pair<Int, DetailContentKind>>,
+    streaming: Boolean,
+): List<MessageBlock> = buildList {
+    val pendingDetails = mutableListOf<IndexedChatDetail>()
+
+    fun flushDetails() {
+        if (pendingDetails.isEmpty()) return
+        val details = pendingDetails.toList()
+        pendingDetails.clear()
+        add(
+            MessageBlock.Details(
+                key = "details-${details.first().key}",
+                blocks = buildDetailBlocks(details, expandedContent, streaming),
+            ),
+        )
+    }
+
+    var previousFailed = false
+    attempts.forEachIndexed { attemptIndex, attempt ->
+        val attemptKey = attempt.timestampMs?.toString() ?: attempt.entryId
+        if (attemptIndex > 0 && previousFailed) {
+            flushDetails()
+            val timestamp = attempt.timestampMs
+                ?.let(PlatformServices::formatMessageTime)
+                ?.takeIf(String::isNotEmpty)
+            add(
+                MessageBlock.Boundary(
+                    key = "boundary-$attemptKey",
+                    label = listOfNotNull("Retry", timestamp).joinToString(" · "),
+                ),
+            )
+        }
+        attempt.content.sortedBy(ChatContent::contentIndex).forEach { content ->
+            val contentKey = "$attemptKey-${content.contentIndex}"
+            when (content.kind) {
+                ChatContentKind.Text -> content.text
+                    ?.takeIf(String::isNotEmpty)
+                    ?.let { text ->
+                        flushDetails()
+                        val previous = lastOrNull() as? MessageBlock.Text
+                        if (previous?.markdown == !streaming) {
+                            removeAt(lastIndex)
+                            add(previous.copy(text = "${previous.text}\n\n$text"))
+                        } else {
+                            add(
+                                MessageBlock.Text(
+                                    key = "text-$contentKey",
+                                    text = text,
+                                    markdown = !streaming,
+                                ),
+                            )
+                        }
+                    }
+                ChatContentKind.Thinking -> if (content.hasContent) {
+                    pendingDetails += IndexedChatDetail(
+                        key = "thinking-$contentKey",
+                        index = content.detailIndex ?: -content.contentIndex - 1,
+                        detail = ChatDetail(
+                            kind = ChatDetailKind.Thinking,
+                            text = content.text,
                         ),
                     )
                 }
-            ChatDetailKind.Tool -> {
-                add(
-                    DetailBlock.Text(
-                        "$index-tool",
-                        "Tool · ${detail.toolName ?: "unknown"}",
-                        DetailTextKind.Heading,
-                    ),
-                )
-                addToolContent(
-                    index,
-                    DetailContentKind.Arguments,
-                    "Input",
-                    detail.arguments,
-                    false,
-                )
-                addToolContent(
-                    index,
-                    DetailContentKind.Result,
-                    if (detail.isError) "Error" else "Output",
-                    detail.result,
-                    detail.isError,
-                )
+                ChatContentKind.Tool -> if (content.hasContent) {
+                    pendingDetails += IndexedChatDetail(
+                        key = "tool-$contentKey",
+                        index = content.detailIndex ?: -content.contentIndex - 1,
+                        detail = ChatDetail(
+                            kind = ChatDetailKind.Tool,
+                            toolName = content.toolName,
+                            arguments = content.arguments,
+                            result = content.result,
+                            hasArguments = content.hasArguments,
+                            hasResult = content.hasResult,
+                            isError = content.isError,
+                        ),
+                    )
+                }
             }
         }
+        val failed = attempt.stopReason == "error" || attempt.stopReason == "aborted"
+        if (failed) {
+            flushDetails()
+            val prefix = if (attempt.stopReason == "aborted") {
+                "Stopped"
+            } else {
+                "Response interrupted"
+            }
+            val reason = attempt.errorMessage
+                ?.takeIf(String::isNotBlank)
+                ?: if (attempt.stopReason == "aborted") {
+                    "Request was aborted"
+                } else {
+                    "Provider response failed"
+                }
+            add(
+                MessageBlock.Failure(
+                    key = "failure-$attemptKey",
+                    label = "$prefix · $reason",
+                ),
+            )
+        }
+        previousFailed = failed
     }
+    flushDetails()
 }
 
 private fun formatByteCount(bytes: Long): String {
@@ -427,15 +578,27 @@ fun TauApp(controller: TauController) {
                             )
                         }
                     }
-                    (state.error ?: state.notice)?.let { message ->
+                    val notification = state.error ?: state.notice
+                    val notificationIsError = state.error != null
+                    LaunchedEffect(notification, notificationIsError) {
+                        if (notification != null) {
+                            delay(if (notificationIsError) 8_000 else 4_000)
+                            if (notificationIsError) {
+                                controller.dismissError()
+                            } else {
+                                controller.dismissNotice()
+                            }
+                        }
+                    }
+                    notification?.let { message ->
                         Snackbar(
                             modifier = Modifier
-                                .align(Alignment.BottomCenter)
+                                .align(Alignment.TopCenter)
                                 .padding(16.dp)
                                 .widthIn(max = 640.dp),
                             action = {
                                 TextButton(
-                                    onClick = if (state.error != null) {
+                                    onClick = if (notificationIsError) {
                                         controller::dismissError
                                     } else {
                                         controller::dismissNotice
@@ -673,21 +836,13 @@ private sealed interface TranscriptRow {
         override val key = "outgoing-${message.requestId}"
     }
 
-    data class Partial(
-        override val key: String,
-        val text: String,
-        val hasDetails: Boolean,
-        val detailBlocks: List<DetailBlock>,
-        val detailsExpanded: Boolean,
-    ) : TranscriptRow
-
     data class Message(
         override val key: String,
         val message: ChatMessage,
         val timestamp: String?,
-        val hasDetails: Boolean,
-        val detailBlocks: List<DetailBlock>,
+        val blocks: List<MessageBlock>,
         val detailsExpanded: Boolean,
+        val canonical: Boolean = true,
     ) : TranscriptRow
 }
 
@@ -700,41 +855,135 @@ private data class TranscriptMeasureContext(
     val styles: TranscriptTextStyles,
 )
 
+private data class TranscriptDocumentKey(
+    val rowKey: String,
+    val blockKey: String,
+    val text: String,
+    val markdown: Boolean,
+)
+
 private data class DetailDocumentKey(
     val rowKey: String,
-    val block: DetailBlock.Text,
+    val blockKey: String,
+    val text: String,
+)
+
+private data class MeasuredDetailToolSection(
+    val section: DetailToolSection,
+    val labelHeight: Int,
+    val toggleHeight: Int,
+    val text: MeasuredTranscriptText?,
+    val height: Int,
 )
 
 private data class MeasuredDetailBlock(
     val block: DetailBlock,
     val text: MeasuredTranscriptText?,
+    val toolSections: List<MeasuredDetailToolSection>,
+    val headerHeight: Int,
     val height: Int,
 )
 
 private data class MeasuredTranscriptDetails(
     val blocks: List<MeasuredDetailBlock>,
+    val headerHeight: Int,
     val height: Int,
 )
 
+private sealed interface MeasuredMessageBlock {
+    val block: MessageBlock
+    val height: Int
+
+    data class Text(
+        override val block: MessageBlock.Text,
+        val text: MeasuredTranscriptText,
+    ) : MeasuredMessageBlock {
+        override val height = text.height
+    }
+
+    data class Details(
+        override val block: MessageBlock.Details,
+        val details: MeasuredTranscriptDetails,
+    ) : MeasuredMessageBlock {
+        override val height = details.height
+    }
+
+    data class Boundary(
+        override val block: MessageBlock.Boundary,
+        override val height: Int,
+    ) : MeasuredMessageBlock
+
+    data class Failure(
+        override val block: MessageBlock.Failure,
+        override val height: Int,
+    ) : MeasuredMessageBlock
+}
+
 private data class MeasuredTranscriptRow(
     val text: MeasuredTranscriptText?,
-    val details: MeasuredTranscriptDetails?,
+    val blocks: List<MeasuredMessageBlock>,
     val height: Int,
+)
+
+private data class TranscriptResizeControl(
+    val messageBlockKey: String,
+    val detailBlockKey: String? = null,
+    val sectionKey: String? = null,
 )
 
 private data class TranscriptResizeAnchor(
     val row: TranscriptRow,
-    val itemEnd: Double,
+    val control: TranscriptResizeControl,
+    val position: Double,
     val scrollOffset: Double,
     val firstVisibleItemIndex: Int,
     val firstVisibleItemScrollOffset: Int,
 )
 
+private fun MeasuredTranscriptRow.controlOffset(
+    control: TranscriptResizeControl,
+    cardTopPadding: Int,
+    messageBlockSpacing: Int,
+    detailsBlockSpacing: Int,
+    toolSectionSpacing: Int,
+    toolSectionGap: Int,
+): Int? {
+    var messageOffset = cardTopPadding
+    for (measuredMessage in blocks) {
+        if (measuredMessage.block.key != control.messageBlockKey) {
+            messageOffset += measuredMessage.height + messageBlockSpacing
+            continue
+        }
+        val details = (measuredMessage as? MeasuredMessageBlock.Details)?.details
+            ?: return null
+        if (control.detailBlockKey == null) return messageOffset
+        var detailOffset = messageOffset + details.headerHeight
+        for (measuredDetail in details.blocks) {
+            detailOffset += detailsBlockSpacing
+            if (measuredDetail.block.key != control.detailBlockKey) {
+                detailOffset += measuredDetail.height
+                continue
+            }
+            if (control.sectionKey == null) return detailOffset
+            var sectionOffset = detailOffset + measuredDetail.headerHeight
+            for (measuredSection in measuredDetail.toolSections) {
+                if (measuredSection.section.key == control.sectionKey) {
+                    return sectionOffset + measuredSection.labelHeight + toolSectionSpacing
+                }
+                sectionOffset += measuredSection.height + toolSectionGap
+            }
+            return null
+        }
+        return null
+    }
+    return null
+}
+
 private class TranscriptMeasureCache {
     var styles: TranscriptTextStyles? = null
     var detailStyles: List<TranscriptTextStyles>? = null
     var context: TranscriptMeasureContext? = null
-    val documents = mutableMapOf<TranscriptRow, TranscriptTextDocument>()
+    val documents = mutableMapOf<TranscriptDocumentKey, TranscriptTextDocument>()
     val detailDocuments = mutableMapOf<DetailDocumentKey, TranscriptTextDocument>()
     val rows = mutableMapOf<TranscriptRow, MeasuredTranscriptRow>()
 }
@@ -747,15 +996,16 @@ private fun ColumnScope.TranscriptDetails(
     headingStyles: TranscriptTextStyles,
     codeStyles: TranscriptTextStyles,
     errorStyles: TranscriptTextStyles,
-    onToggle: () -> Unit,
-    onContentToggle: (DetailBlock.Toggle) -> Unit,
+    control: TranscriptResizeControl,
+    onToggle: (TranscriptResizeControl) -> Unit,
+    onContentToggle: (Int, DetailContentKind, TranscriptResizeControl) -> Unit,
 ) {
     DisableSelection {
         Text(
             if (expanded) "▾ Details" else "▸ Details",
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onToggle)
+                .clickable { onToggle(control) }
                 .padding(vertical = DetailsHeaderVerticalPadding),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -771,24 +1021,171 @@ private fun ColumnScope.TranscriptDetails(
                 styles = when (block.kind) {
                     DetailTextKind.Thinking,
                     DetailTextKind.StreamingThinking -> thinkingStyles
-                    DetailTextKind.Heading -> headingStyles
-                    DetailTextKind.Code -> codeStyles
                     DetailTextKind.ErrorCode -> errorStyles
                 },
             )
-            is DetailBlock.Toggle -> DisableSelection {
-                Text(
-                    block.label,
+            is DetailBlock.Tool -> {
+                val shape = RoundedCornerShape(6.dp)
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.background.copy(alpha = 0.52f),
+                    ),
+                    shape = shape,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onContentToggle(block) }
-                        .padding(vertical = DetailsHeaderVerticalPadding),
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape),
+                ) {
+                    DisableSelection {
+                        val header = Modifier.fillMaxWidth().let { modifier ->
+                            block.detailIndex?.let { detailIndex ->
+                                modifier.clickable {
+                                    onContentToggle(
+                                        detailIndex,
+                                        DetailContentKind.Tool,
+                                        control.copy(detailBlockKey = block.key),
+                                    )
+                                }
+                            } ?: modifier
+                        }
+                        Text(
+                            buildString {
+                                block.detailIndex?.let {
+                                    append(if (block.expanded) "▾ " else "▸ ")
+                                }
+                                append("Tool · ").append(block.name)
+                            },
+                            modifier = header.padding(
+                                horizontal = ToolInsetHorizontalPadding,
+                                vertical = ToolHeaderVerticalPadding,
+                            ),
+                            style = headingStyles.body,
+                            color = if (block.error) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                    if (block.expanded && measured.toolSections.isNotEmpty()) {
+                        Column(
+                            Modifier.padding(
+                                start = ToolInsetHorizontalPadding,
+                                end = ToolInsetHorizontalPadding,
+                                bottom = ToolInsetBottomPadding,
+                            ),
+                        ) {
+                            measured.toolSections.forEachIndexed { sectionIndex, toolSection ->
+                                if (sectionIndex > 0) Spacer(Modifier.height(ToolSectionGap))
+                                Text(
+                                    toolSection.section.label,
+                                    style = headingStyles.body,
+                                    color = if (toolSection.section.error) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                                Spacer(Modifier.height(ToolSectionSpacing))
+                                toolSection.section.toggleLabel?.let { label ->
+                                    DisableSelection {
+                                        Text(
+                                            label,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    onContentToggle(
+                                                        checkNotNull(block.detailIndex),
+                                                        toolSection.section.content,
+                                                        control.copy(
+                                                            detailBlockKey = block.key,
+                                                            sectionKey = toolSection.section.key,
+                                                        ),
+                                                    )
+                                                }
+                                                .padding(vertical = DetailsToggleVerticalPadding),
+                                            style = headingStyles.body,
+                                            color = if (toolSection.section.error) {
+                                                MaterialTheme.colorScheme.error
+                                            } else {
+                                                MaterialTheme.colorScheme.primary
+                                            },
+                                        )
+                                    }
+                                    if (toolSection.text != null) {
+                                        Spacer(Modifier.height(ToolSectionSpacing))
+                                    }
+                                }
+                                toolSection.text?.let { text ->
+                                    ChatText(
+                                        text = text,
+                                        styles = if (toolSection.section.error) {
+                                            errorStyles
+                                        } else {
+                                            codeStyles
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ColumnScope.TranscriptMessageBlocks(
+    blocks: List<MeasuredMessageBlock>,
+    detailsExpanded: Boolean,
+    textStyles: TranscriptTextStyles,
+    thinkingStyles: TranscriptTextStyles,
+    headingStyles: TranscriptTextStyles,
+    codeStyles: TranscriptTextStyles,
+    errorStyles: TranscriptTextStyles,
+    onDetailsToggle: (TranscriptResizeControl) -> Unit,
+    onContentToggle: (Int, DetailContentKind, TranscriptResizeControl) -> Unit,
+) {
+    blocks.forEachIndexed { index, measured ->
+        if (index > 0) Spacer(Modifier.height(MessageBlockSpacing))
+        when (measured) {
+            is MeasuredMessageBlock.Text -> ChatText(
+                text = measured.text,
+                styles = textStyles,
+            )
+            is MeasuredMessageBlock.Details -> TranscriptDetails(
+                details = measured.details,
+                expanded = detailsExpanded,
+                thinkingStyles = thinkingStyles,
+                headingStyles = headingStyles,
+                codeStyles = codeStyles,
+                errorStyles = errorStyles,
+                control = TranscriptResizeControl(measured.block.key),
+                onToggle = onDetailsToggle,
+                onContentToggle = onContentToggle,
+            )
+            is MeasuredMessageBlock.Boundary -> DisableSelection {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = AttemptBoundaryVerticalPadding),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    HorizontalDivider(Modifier.weight(1f))
+                    Text(
+                        measured.block.label,
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    HorizontalDivider(Modifier.weight(1f))
+                }
+            }
+            is MeasuredMessageBlock.Failure -> DisableSelection {
+                Text(
+                    measured.block.label,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (block.error) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.primary
-                    },
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
         }
@@ -809,7 +1206,7 @@ private fun TranscriptRowContent(
     sessionId: String,
     attachmentDownload: AttachmentDownload?,
     selectionState: SelectionState,
-    beforeDetailsResize: () -> Unit,
+    beforeDetailsResize: (TranscriptResizeControl) -> Unit,
 ) {
     when (row) {
         TranscriptRow.BottomAnchor -> Spacer(Modifier.height(1.dp))
@@ -840,38 +1237,6 @@ private fun TranscriptRowContent(
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
                         )
                     }
-                }
-            }
-        }
-        is TranscriptRow.Partial -> Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-            ),
-            modifier = Modifier.fillMaxWidth(0.9f),
-        ) {
-            Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                measured.details?.let { details ->
-                    TranscriptDetails(
-                        details = details,
-                        expanded = row.detailsExpanded,
-                        thinkingStyles = detailStyles,
-                        headingStyles = detailHeadingStyles,
-                        codeStyles = detailCodeStyles,
-                        errorStyles = detailErrorStyles,
-                        onToggle = {
-                            beforeDetailsResize()
-                            controller.setDetailsExpanded(
-                                sessionId,
-                                null,
-                                !row.detailsExpanded,
-                            )
-                        },
-                        onContentToggle = {},
-                    )
-                }
-                measured.text?.let { text ->
-                    if (measured.details != null) Spacer(Modifier.height(DetailsAnswerSpacing))
-                    ChatText(text = text, styles = styles)
                 }
             }
         }
@@ -911,41 +1276,36 @@ private fun TranscriptRowContent(
                         modifier = Modifier.fillMaxWidth().then(menuModifier),
                     ) {
                         Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                            measured.details?.let { details ->
-                                TranscriptDetails(
-                                    details = details,
-                                    expanded = row.detailsExpanded,
-                                    thinkingStyles = detailStyles,
-                                    headingStyles = detailHeadingStyles,
-                                    codeStyles = detailCodeStyles,
-                                    errorStyles = detailErrorStyles,
-                                    onToggle = {
-                                        beforeDetailsResize()
-                                        controller.setDetailsExpanded(
-                                            sessionId,
-                                            message.entryId,
-                                            !row.detailsExpanded,
-                                        )
-                                    },
-                                    onContentToggle = { block ->
-                                        beforeDetailsResize()
+                            TranscriptMessageBlocks(
+                                blocks = measured.blocks,
+                                detailsExpanded = row.detailsExpanded,
+                                textStyles = styles,
+                                thinkingStyles = detailStyles,
+                                headingStyles = detailHeadingStyles,
+                                codeStyles = detailCodeStyles,
+                                errorStyles = detailErrorStyles,
+                                onDetailsToggle = { control ->
+                                    beforeDetailsResize(control)
+                                    controller.setDetailsExpanded(
+                                        sessionId,
+                                        (message.groupId ?: message.entryId).takeIf { row.canonical },
+                                        !row.detailsExpanded,
+                                    )
+                                },
+                                onContentToggle = { detailIndex, content, control ->
+                                    if (row.canonical) {
+                                        beforeDetailsResize(control)
                                         controller.toggleDetailContent(
                                             DetailContentExpansionKey(
                                                 sessionId = sessionId,
-                                                entryId = message.entryId,
-                                                detailIndex = block.detailIndex,
-                                                content = block.content,
+                                                entryId = message.groupId ?: message.entryId,
+                                                detailIndex = detailIndex,
+                                                content = content,
                                             ),
                                         )
-                                    },
-                                )
-                            }
-                            measured.text?.let { text ->
-                                if (measured.details != null) {
-                                    Spacer(Modifier.height(DetailsAnswerSpacing))
-                                }
-                                ChatText(text, styles)
-                            }
+                                    }
+                                },
+                            )
                             message.attachment?.let { attachment ->
                                 DisableSelection {
                                     Column(Modifier.fillMaxWidth()) {
@@ -1193,11 +1553,27 @@ private fun TranscriptRowContent(
                                                                 controller.cancelAttachmentDownload(message)
                                                             },
                                                         ) { Text("Cancel") }
-                                                        AttachmentDownloadStatus.Downloaded -> TextButton(
-                                                            onClick = {
-                                                                controller.openAttachmentDownload(message)
-                                                            },
-                                                        ) { Text("Open") }
+                                                        AttachmentDownloadStatus.Downloaded -> {
+                                                            TextButton(
+                                                                onClick = {
+                                                                    controller.openAttachmentDownload(message)
+                                                                },
+                                                            ) { Text("Open") }
+                                                            if (PlatformServices.platformName == "windows") {
+                                                                TextButton(
+                                                                    onClick = {
+                                                                        controller.showAttachmentDownload(message)
+                                                                    },
+                                                                ) { Text("Show") }
+                                                                if (attachment.fileName.endsWith(".zip", ignoreCase = true)) {
+                                                                    TextButton(
+                                                                        onClick = {
+                                                                            controller.extractAndOpenAttachmentDownload(message)
+                                                                        },
+                                                                    ) { Text("Extract") }
+                                                                }
+                                                            }
+                                                        }
                                                         AttachmentDownloadStatus.Failed -> TextButton(
                                                             onClick = {
                                                                 controller.downloadAttachment(message)
@@ -1266,14 +1642,16 @@ private fun TranscriptRowContent(
                                     menuPointer = null
                                 },
                             )
-                            DropdownMenuItem(
-                                text = { Text("Fork here") },
-                                onClick = {
-                                    menuExpanded = false
-                                    menuPointer = null
-                                    controller.fork(message.entryId)
-                                },
-                            )
+                            if (row.canonical) {
+                                DropdownMenuItem(
+                                    text = { Text("Fork here") },
+                                    onClick = {
+                                        menuExpanded = false
+                                        menuPointer = null
+                                        controller.fork(message.entryId)
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -1386,10 +1764,16 @@ private fun SessionList(
                                     )
                                     Spacer(Modifier.height(2.dp))
                                 }
+                                val failed = session.detail == null &&
+                                    state.histories[session.id].latestResponseFailed()
                                 Text(
-                                    session.detail ?: session.status.label,
+                                    session.detail ?: if (failed) "Failed" else session.status.label,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = session.status.color,
+                                    color = if (failed) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        session.status.color
+                                    },
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -1503,7 +1887,6 @@ private fun ChatPanel(
         return
     }
     val outgoingMessages = state.outgoingMessages[sessionId].orEmpty()
-    val partial = state.partials[sessionId].orEmpty()
     val attachments = state.attachments[sessionId].orEmpty()
     val draft = state.drafts[sessionId].orEmpty()
     val editorFocusRequester = remember(sessionId) { FocusRequester() }
@@ -1639,6 +2022,10 @@ private fun ChatPanel(
     var transcriptResizeAnchor by remember(sessionId) {
         mutableStateOf<TranscriptResizeAnchor?>(null)
     }
+    val transcriptScrolling = listState.isScrollInProgress
+    LaunchedEffect(transcriptScrolling) {
+        if (transcriptScrolling) transcriptResizeAnchor = null
+    }
     val transcriptSelectionState = rememberSelectionState()
     val density = LocalDensity.current
     val layoutDirection = LocalLayoutDirection.current
@@ -1684,21 +2071,30 @@ private fun ChatPanel(
         blockSpacing = 6.dp,
         codePadding = 8.dp,
     )
+    val compactToolTextStyle = MaterialTheme.typography.labelSmall.copy(
+        fontSize = 10.sp,
+        lineHeight = 14.sp,
+    )
     val detailHeadingStyles = detailStyles.copy(
-        body = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+        body = compactToolTextStyle.copy(fontWeight = FontWeight.SemiBold),
     )
     val detailCodeStyles = detailStyles.copy(
-        body = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        body = compactToolTextStyle.copy(fontFamily = FontFamily.Monospace),
     )
     val detailErrorStyles = detailCodeStyles.copy(
         body = detailCodeStyles.body.copy(color = MaterialTheme.colorScheme.error),
     )
-    val partialDetails = state.partialDetails[sessionId].orEmpty()
+    val liveAttempts = state.liveAttempts[sessionId].orEmpty()
+    val displayMessages = remember(messages, liveAttempts) {
+        mergeLiveAttempts(messages, liveAttempts)
+    }
+    val canonicalEntryIds = remember(messages) {
+        messages.mapTo(mutableSetOf(), ChatMessage::entryId)
+    }
     val transcriptRows = remember(
+        displayMessages,
         messages,
         outgoingMessages,
-        partial,
-        partialDetails,
         state.detailsExpandedBySession,
         state.detailExpansions,
         state.expandedDetailContent,
@@ -1709,80 +2105,86 @@ private fun ChatPanel(
         buildList {
             val defaultDetailsExpanded = state.detailsExpandedBySession[sessionId] ?: false
             add(TranscriptRow.BottomAnchor)
-            if (
-                messages.isEmpty() && outgoingMessages.isEmpty() &&
-                partial.isEmpty() && partialDetails.isEmpty()
-            ) {
+            if (displayMessages.isEmpty() && outgoingMessages.isEmpty()) {
                 add(TranscriptRow.Empty)
             }
             outgoingMessages.asReversed().forEach { outgoing ->
                 add(TranscriptRow.Outgoing(outgoing))
             }
-            if (partial.isNotEmpty() || partialDetails.isNotEmpty()) {
-                val details = if (partialDetails.isEmpty()) {
+            displayMessages.indices.reversed().forEach { index ->
+                val message = displayMessages[index]
+                val canonical = message.entryId in canonicalEntryIds
+                val detailEntryId = message.groupId ?: message.entryId
+                val detailKey = DetailExpansionKey(sessionId, detailEntryId)
+                val detailsExpanded = if (canonical) {
+                    state.detailExpansions[detailKey] ?: defaultDetailsExpanded
+                } else {
+                    defaultDetailsExpanded
+                }
+                val expandedContent = if (canonical) {
+                    state.expandedDetailContent
+                        .asSequence()
+                        .filter { expanded ->
+                            expanded.sessionId == sessionId && expanded.entryId == detailEntryId
+                        }
+                        .map { expanded -> expanded.detailIndex to expanded.content }
+                        .toSet()
+                } else {
+                    emptySet()
+                }
+                val loaded = state.messageDetails[detailKey]
+                val attempts = if (message.attempts.isEmpty()) {
                     emptyList()
                 } else {
+                    val loadedById = loaded?.attempts
+                        .orEmpty()
+                        .associateBy(ChatAttempt::entryId)
+                    message.attempts.map { attempt ->
+                        loadedById[attempt.entryId] ?: attempt
+                    }
+                }
+                var blocks = if (message.role == ChatRole.Assistant) {
+                    buildAttemptBlocks(
+                        attempts = attempts,
+                        expandedContent = expandedContent,
+                        streaming = !canonical,
+                    )
+                } else if (message.text.isNotEmpty()) {
                     listOf(
-                        ChatDetail(
-                            kind = ChatDetailKind.Thinking,
-                            text = partialDetails,
+                        MessageBlock.Text(
+                            key = "content-${message.entryId}",
+                            text = message.text,
+                            markdown = message.role == ChatRole.System,
                         ),
                     )
+                } else {
+                    emptyList()
                 }
-                add(
-                    TranscriptRow.Partial(
-                        key = "assistant-after-${messages.lastOrNull()?.entryId ?: "start"}",
-                        text = partial,
-                        hasDetails = details.isNotEmpty(),
-                        detailBlocks = buildDetailBlocks(
-                            details,
-                            emptySet(),
-                            streaming = true,
-                        ),
-                        detailsExpanded = defaultDetailsExpanded,
-                    ),
-                )
-            }
-            messages.indices.reversed().forEach { index ->
-                val message = messages[index]
+                if (
+                    canonical && detailsExpanded && message.hasDetails && loaded == null
+                ) {
+                    val status = state.messageDetailErrors[detailKey]?.let { error ->
+                        DetailBlock.Text("details-error", error, DetailTextKind.ErrorCode)
+                    } ?: DetailBlock.Text(
+                        "details-loading",
+                        "Loading details…",
+                        DetailTextKind.StreamingThinking,
+                    )
+                    var replaced = false
+                    blocks = blocks.map { block ->
+                        if (!replaced && block is MessageBlock.Details) {
+                            replaced = true
+                            block.copy(blocks = listOf(status))
+                        } else {
+                            block
+                        }
+                    }
+                }
+                val firstAttempt = message.attempts.firstOrNull()
                 val key = if (message.role == ChatRole.Assistant) {
-                    "assistant-after-${messages.getOrNull(index - 1)?.entryId ?: "start"}"
+                    "assistant-${firstAttempt?.timestampMs ?: firstAttempt?.entryId ?: message.entryId}"
                 } else {
                     "message-${message.entryId}"
-                }
-                val detailKey = DetailExpansionKey(sessionId, message.entryId)
-                val detailsExpanded = state.detailExpansions[detailKey]
-                    ?: defaultDetailsExpanded
-                val hasDetails = message.hasDetails || message.details.isNotEmpty()
-                val expandedContent = state.expandedDetailContent
-                    .asSequence()
-                    .filter { expanded ->
-                        expanded.sessionId == sessionId && expanded.entryId == message.entryId
-                    }
-                    .map { expanded -> expanded.detailIndex to expanded.content }
-                    .toSet()
-                val loadedDetails = state.messageDetails[detailKey] ?: message.details
-                val detailBlocks = when {
-                    !detailsExpanded || !hasDetails -> emptyList()
-                    loadedDetails.isNotEmpty() -> buildDetailBlocks(
-                        loadedDetails,
-                        expandedContent,
-                        streaming = false,
-                    )
-                    detailKey in state.messageDetailErrors -> listOf(
-                        DetailBlock.Text(
-                            key = "details-error",
-                            text = state.messageDetailErrors.getValue(detailKey),
-                            kind = DetailTextKind.ErrorCode,
-                        ),
-                    )
-                    else -> listOf(
-                        DetailBlock.Text(
-                            key = "details-loading",
-                            text = "Loading details…",
-                            kind = DetailTextKind.StreamingThinking,
-                        ),
-                    )
                 }
                 add(
                     TranscriptRow.Message(
@@ -1791,9 +2193,9 @@ private fun ChatPanel(
                         timestamp = message.timestampMs
                             ?.let(PlatformServices::formatMessageTime)
                             ?.takeIf(String::isNotEmpty),
-                        hasDetails = hasDetails,
-                        detailBlocks = detailBlocks,
+                        blocks = blocks,
                         detailsExpanded = detailsExpanded,
+                        canonical = canonical,
                     ),
                 )
             }
@@ -1809,15 +2211,25 @@ private fun ChatPanel(
     ) {
         val defaultExpanded = state.detailsExpandedBySession[sessionId] ?: false
         messages.forEach { message ->
-            val key = DetailExpansionKey(sessionId, message.entryId)
+            val key = DetailExpansionKey(sessionId, message.groupId ?: message.entryId)
             val expanded = state.detailExpansions[key] ?: defaultExpanded
+            val loaded = state.messageDetails[key]
+            val stale = loaded != null && message.attempts.any { attempt ->
+                loaded.attempts.none { loadedAttempt ->
+                    loadedAttempt.entryId == attempt.entryId
+                }
+            }
             if (
-                expanded && message.hasDetails && message.details.isEmpty() &&
-                key !in state.messageDetails &&
+                expanded && message.hasDetails &&
+                (loaded == null || stale) &&
                 key !in state.loadingMessageDetails &&
                 key !in state.messageDetailErrors
             ) {
-                controller.setDetailsExpanded(sessionId, message.entryId, true)
+                controller.setDetailsExpanded(
+                    sessionId,
+                    message.groupId ?: message.entryId,
+                    true,
+                )
             }
         }
     }
@@ -1880,16 +2292,23 @@ private fun ChatPanel(
                         )
                         ConnectionDot(state.connectionStatus)
                     }
+                    val extensionStatus = state.extensionStatuses[sessionId]
+                        .orEmpty()
+                        .toSortedMap()
+                        .values
+                        .joinToString(" · ")
+                    val failed = session.detail == null && extensionStatus.isEmpty() &&
+                        messages.latestResponseFailed()
                     Text(
-                        session.detail
-                            ?: state.extensionStatuses[sessionId]
-                                .orEmpty()
-                                .toSortedMap()
-                                .values
-                                .joinToString(" · ")
-                                .ifEmpty { session.status.label },
+                        session.detail ?: extensionStatus.ifEmpty {
+                            if (failed) "Failed" else session.status.label
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = session.status.color,
+                        color = if (failed) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            session.status.color
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -1917,7 +2336,8 @@ private fun ChatPanel(
                     .onTranscriptAutoscroll(listState),
             ) {
                 val transcriptPadding = with(density) { 16.dp.roundToPx() } * 2
-                val cardPadding = with(density) { 12.dp.roundToPx() } * 2
+                val cardTopPadding = with(density) { 12.dp.roundToPx() }
+                val cardPadding = cardTopPadding * 2
                 val itemWidth = (constraints.maxWidth - transcriptPadding).coerceAtLeast(0)
                 val bubbleWidth = (itemWidth * 0.9f).roundToInt()
                 val textWidth = (bubbleWidth - cardPadding).coerceAtLeast(0)
@@ -1949,16 +2369,66 @@ private fun ChatPanel(
                     transcriptMeasureCache.rows.clear()
                 }
                 val retainedRows = transcriptRows.toSet()
-                transcriptMeasureCache.documents.keys.retainAll(retainedRows)
                 transcriptMeasureCache.rows.keys.retainAll(retainedRows)
+                val retainedTranscriptDocuments = transcriptRows.flatMap { row ->
+                    when (row) {
+                        TranscriptRow.Empty -> listOf(
+                            TranscriptDocumentKey(
+                                row.key,
+                                row.key,
+                                "Start a conversation with Pi.",
+                                false,
+                            ),
+                        )
+                        is TranscriptRow.Outgoing -> listOf(
+                            TranscriptDocumentKey(
+                                row.key,
+                                row.key,
+                                row.message.text,
+                                false,
+                            ),
+                        )
+                        is TranscriptRow.Message -> row.blocks
+                            .filterIsInstance<MessageBlock.Text>()
+                            .map { block ->
+                                TranscriptDocumentKey(
+                                    row.key,
+                                    block.key,
+                                    block.text,
+                                    block.markdown,
+                                )
+                            }
+                        TranscriptRow.BottomAnchor -> emptyList()
+                    }
+                }.toSet()
+                transcriptMeasureCache.documents.keys.retainAll(retainedTranscriptDocuments)
                 val retainedDetailDocuments = transcriptRows
                     .flatMap { row ->
                         when (row) {
-                            is TranscriptRow.Partial -> row.detailBlocks
-                            is TranscriptRow.Message -> row.detailBlocks
+                            is TranscriptRow.Message -> row.blocks
                             else -> emptyList()
-                        }.filterIsInstance<DetailBlock.Text>()
-                            .map { block -> DetailDocumentKey(row.key, block) }
+                        }.filterIsInstance<MessageBlock.Details>().flatMap { messageBlock ->
+                            messageBlock.blocks.flatMap { block ->
+                                when (block) {
+                                    is DetailBlock.Text -> listOf(
+                                        DetailDocumentKey(row.key, block.key, block.text),
+                                    )
+                                    is DetailBlock.Tool -> if (block.expanded) {
+                                        block.sections
+                                            .filter(DetailToolSection::showText)
+                                            .map { section ->
+                                                DetailDocumentKey(
+                                                    row.key,
+                                                    section.key,
+                                                    section.text,
+                                                )
+                                            }
+                                    } else {
+                                        emptyList()
+                                    }
+                                }
+                            }
+                        }
                     }
                     .toSet()
                 transcriptMeasureCache.detailDocuments.keys.retainAll(retainedDetailDocuments)
@@ -1967,20 +2437,40 @@ private fun ChatPanel(
                 val attachmentTopSpacing = with(density) { AttachmentTopSpacing.roundToPx() }
                 val imagePreviewHeight = with(density) { InlineImagePreviewHeight.roundToPx() }
                 val imageDownloadSpacing = with(density) { ImageDownloadSpacing.roundToPx() }
-                val detailsAnswerSpacing = with(density) { DetailsAnswerSpacing.roundToPx() }
+                val messageBlockSpacing = with(density) { MessageBlockSpacing.roundToPx() }
+                val attemptBoundaryPadding = with(density) {
+                    AttemptBoundaryVerticalPadding.roundToPx() * 2
+                }
                 val detailsBlockSpacing = with(density) { DetailsBlockSpacing.roundToPx() }
                 val detailsHeaderPadding = with(density) {
                     DetailsHeaderVerticalPadding.roundToPx() * 2
                 }
+                val detailsTogglePadding = with(density) {
+                    DetailsToggleVerticalPadding.roundToPx() * 2
+                }
+                val toolHeaderPadding = with(density) {
+                    ToolHeaderVerticalPadding.roundToPx() * 2
+                }
+                val toolInsetHorizontalPadding = with(density) {
+                    ToolInsetHorizontalPadding.roundToPx() * 2
+                }
+                val toolInsetBottomPadding = with(density) {
+                    ToolInsetBottomPadding.roundToPx()
+                }
+                val toolSectionSpacing = with(density) { ToolSectionSpacing.roundToPx() }
+                val toolSectionGap = with(density) { ToolSectionGap.roundToPx() }
                 val detailsHeaderTextStyle = MaterialTheme.typography.labelMedium
-                val detailsToggleTextStyle = MaterialTheme.typography.labelSmall
+                val transcriptLabelStyle = MaterialTheme.typography.labelSmall
                 fun measuredText(
                     row: TranscriptRow,
+                    blockKey: String,
                     content: String,
                     markdown: Boolean,
                     width: Int,
                 ) = measureChatText(
-                    document = transcriptMeasureCache.documents.getOrPut(row) {
+                    document = transcriptMeasureCache.documents.getOrPut(
+                        TranscriptDocumentKey(row.key, blockKey, content, markdown),
+                    ) {
                         buildChatText(content, markdown, transcriptTextStyles)
                     },
                     maxWidth = width,
@@ -2001,7 +2491,11 @@ private fun ChatPanel(
                         constraints = Constraints(maxWidth = textWidth),
                     ).size.height + detailsHeaderPadding
                     if (!expanded) {
-                        return MeasuredTranscriptDetails(emptyList(), headerHeight)
+                        return MeasuredTranscriptDetails(
+                            blocks = emptyList(),
+                            headerHeight = headerHeight,
+                            height = headerHeight,
+                        )
                     }
                     val measuredBlocks = blocks.map { block ->
                         when (block) {
@@ -2009,11 +2503,13 @@ private fun ChatPanel(
                                 val blockStyles = when (block.kind) {
                                     DetailTextKind.Thinking,
                                     DetailTextKind.StreamingThinking -> detailStyles
-                                    DetailTextKind.Heading -> detailHeadingStyles
-                                    DetailTextKind.Code -> detailCodeStyles
                                     DetailTextKind.ErrorCode -> detailErrorStyles
                                 }
-                                val documentKey = DetailDocumentKey(row.key, block)
+                                val documentKey = DetailDocumentKey(
+                                    row.key,
+                                    block.key,
+                                    block.text,
+                                )
                                 val text = measureChatText(
                                     document = transcriptMeasureCache.detailDocuments.getOrPut(
                                         documentKey,
@@ -2029,44 +2525,186 @@ private fun ChatPanel(
                                     styles = blockStyles,
                                     density = density,
                                 )
-                                MeasuredDetailBlock(block, text, text.height)
+                                MeasuredDetailBlock(
+                                    block = block,
+                                    text = text,
+                                    toolSections = emptyList(),
+                                    headerHeight = 0,
+                                    height = text.height,
+                                )
                             }
-                            is DetailBlock.Toggle -> {
-                                val height = textMeasurer.measure(
-                                    text = block.label,
-                                    style = detailsToggleTextStyle,
-                                    constraints = Constraints(maxWidth = textWidth),
-                                ).size.height + detailsHeaderPadding
-                                MeasuredDetailBlock(block, null, height)
+                            is DetailBlock.Tool -> {
+                                val toolTextWidth = (
+                                    textWidth - toolInsetHorizontalPadding
+                                ).coerceAtLeast(0)
+                                val headerHeight = textMeasurer.measure(
+                                    text = buildString {
+                                        block.detailIndex?.let {
+                                            append(if (block.expanded) "▾ " else "▸ ")
+                                        }
+                                        append("Tool · ").append(block.name)
+                                    },
+                                    style = detailHeadingStyles.body,
+                                    constraints = Constraints(maxWidth = toolTextWidth),
+                                ).size.height + toolHeaderPadding
+                                val sections = if (block.expanded) {
+                                    block.sections.map { section ->
+                                        val labelHeight = textMeasurer.measure(
+                                            text = section.label,
+                                            style = detailHeadingStyles.body,
+                                            constraints = Constraints(maxWidth = toolTextWidth),
+                                        ).size.height
+                                        val toggleHeight = section.toggleLabel?.let { label ->
+                                            textMeasurer.measure(
+                                                text = label,
+                                                style = detailHeadingStyles.body,
+                                                constraints = Constraints(maxWidth = toolTextWidth),
+                                            ).size.height + detailsTogglePadding
+                                        } ?: 0
+                                        val text = if (section.showText) {
+                                            val sectionStyles = if (section.error) {
+                                                detailErrorStyles
+                                            } else {
+                                                detailCodeStyles
+                                            }
+                                            val documentKey = DetailDocumentKey(
+                                                row.key,
+                                                section.key,
+                                                section.text,
+                                            )
+                                            measureChatText(
+                                                document = transcriptMeasureCache.detailDocuments
+                                                    .getOrPut(documentKey) {
+                                                        buildChatText(
+                                                            section.text,
+                                                            false,
+                                                            sectionStyles,
+                                                        )
+                                                    },
+                                                maxWidth = toolTextWidth,
+                                                textMeasurer = textMeasurer,
+                                                styles = sectionStyles,
+                                                density = density,
+                                            )
+                                        } else {
+                                            null
+                                        }
+                                        val contentHeight = if (toggleHeight > 0) {
+                                            toggleHeight + if (text != null) {
+                                                toolSectionSpacing + text.height
+                                            } else {
+                                                0
+                                            }
+                                        } else {
+                                            text?.height ?: 0
+                                        }
+                                        MeasuredDetailToolSection(
+                                            section = section,
+                                            labelHeight = labelHeight,
+                                            toggleHeight = toggleHeight,
+                                            text = text,
+                                            height = labelHeight + toolSectionSpacing + contentHeight,
+                                        )
+                                    }
+                                } else {
+                                    emptyList()
+                                }
+                                val bodyHeight = if (sections.isNotEmpty()) {
+                                    toolInsetBottomPadding +
+                                        sections.sumOf(MeasuredDetailToolSection::height) +
+                                        toolSectionGap * (sections.size - 1)
+                                } else {
+                                    0
+                                }
+                                MeasuredDetailBlock(
+                                    block = block,
+                                    text = null,
+                                    toolSections = sections,
+                                    headerHeight = headerHeight,
+                                    height = headerHeight + bodyHeight,
+                                )
                             }
                         }
                     }
                     val contentHeight = measuredBlocks.sumOf(MeasuredDetailBlock::height) +
                         detailsBlockSpacing * measuredBlocks.size
                     return MeasuredTranscriptDetails(
-                        measuredBlocks,
-                        headerHeight + contentHeight,
+                        blocks = measuredBlocks,
+                        headerHeight = headerHeight,
+                        height = headerHeight + contentHeight,
                     )
+                }
+                fun measuredMessageBlocks(
+                    row: TranscriptRow,
+                    blocks: List<MessageBlock>,
+                    detailsExpanded: Boolean,
+                ): List<MeasuredMessageBlock> = blocks.map { block ->
+                    when (block) {
+                        is MessageBlock.Text -> MeasuredMessageBlock.Text(
+                            block = block,
+                            text = measuredText(
+                                row,
+                                block.key,
+                                block.text,
+                                block.markdown,
+                                textWidth,
+                            ),
+                        )
+                        is MessageBlock.Details -> MeasuredMessageBlock.Details(
+                            block = block,
+                            details = checkNotNull(
+                                measuredDetails(
+                                    row,
+                                    true,
+                                    block.blocks,
+                                    detailsExpanded,
+                                ),
+                            ),
+                        )
+                        is MessageBlock.Boundary -> MeasuredMessageBlock.Boundary(
+                            block = block,
+                            height = textMeasurer.measure(
+                                text = block.label,
+                                style = transcriptLabelStyle,
+                                constraints = Constraints(maxWidth = textWidth),
+                            ).size.height + attemptBoundaryPadding,
+                        )
+                        is MessageBlock.Failure -> MeasuredMessageBlock.Failure(
+                            block = block,
+                            height = textMeasurer.measure(
+                                text = block.label,
+                                style = transcriptLabelStyle,
+                                constraints = Constraints(maxWidth = textWidth),
+                            ).size.height,
+                        )
+                    }
                 }
                 for (row in transcriptRows) {
                     if (row in transcriptMeasureCache.rows) continue
                     transcriptMeasureCache.rows[row] = when (row) {
                         TranscriptRow.BottomAnchor -> MeasuredTranscriptRow(
                             text = null,
-                            details = null,
+                            blocks = emptyList(),
                             height = with(density) { 1.dp.roundToPx() },
                         )
                         TranscriptRow.Empty -> {
                             val text = measuredText(
                                 row,
+                                row.key,
                                 "Start a conversation with Pi.",
                                 false,
                                 itemWidth,
                             )
-                            MeasuredTranscriptRow(text, null, text.height)
+                            MeasuredTranscriptRow(text, emptyList(), text.height)
                         }
                         is TranscriptRow.Outgoing -> {
-                            val text = measuredText(row, row.message.text, false, textWidth)
+                            val text = measuredText(
+                                row,
+                                row.key,
+                                row.message.text,
+                                false,
+                                textWidth,
+                            )
                             val waitingHeight = textMeasurer.measure(
                                 text = "Waiting for Pi",
                                 style = MaterialTheme.typography.labelSmall,
@@ -2074,46 +2712,14 @@ private fun ChatPanel(
                             ).size.height
                             MeasuredTranscriptRow(
                                 text = text,
-                                details = null,
+                                blocks = emptyList(),
                                 height = cardPadding + text.height + waitingSpacing + waitingHeight,
                             )
                         }
-                        is TranscriptRow.Partial -> {
-                            val text = row.text.takeIf(String::isNotEmpty)?.let { content ->
-                                measuredText(row, content, false, textWidth)
-                            }
-                            val details = measuredDetails(
-                                row,
-                                row.hasDetails,
-                                row.detailBlocks,
-                                row.detailsExpanded,
-                            )
-                            MeasuredTranscriptRow(
-                                text = text,
-                                details = details,
-                                height = cardPadding +
-                                    (text?.height ?: 0) +
-                                    (details?.height ?: 0) +
-                                    if (text != null && details != null) {
-                                        detailsAnswerSpacing
-                                    } else {
-                                        0
-                                    },
-                            )
-                        }
                         is TranscriptRow.Message -> {
-                            val text = row.message.text.takeIf(String::isNotEmpty)?.let { content ->
-                                measuredText(
-                                    row,
-                                    content,
-                                    row.message.role != ChatRole.User,
-                                    textWidth,
-                                )
-                            }
-                            val details = measuredDetails(
+                            val blocks = measuredMessageBlocks(
                                 row,
-                                row.hasDetails,
-                                row.detailBlocks,
+                                row.blocks,
                                 row.detailsExpanded,
                             )
                             val timestampHeight = row.timestamp?.let { timestamp ->
@@ -2130,16 +2736,12 @@ private fun ChatPanel(
                                     imageDownloadSpacing + attachmentControlHeight
                             }
                             MeasuredTranscriptRow(
-                                text = text,
-                                details = details,
+                                text = null,
+                                blocks = blocks,
                                 height = cardPadding +
-                                    (text?.height ?: 0) +
-                                    (details?.height ?: 0) +
-                                    (if (text != null && details != null) {
-                                        detailsAnswerSpacing
-                                    } else {
-                                        0
-                                    }) + timestampHeight + attachmentHeight,
+                                    blocks.sumOf(MeasuredMessageBlock::height) +
+                                    messageBlockSpacing * (blocks.size - 1).coerceAtLeast(0) +
+                                    timestampHeight + attachmentHeight,
                             )
                         }
                     }
@@ -2159,16 +2761,29 @@ private fun ChatPanel(
                             if (transcriptResizeAnchor === anchor) transcriptResizeAnchor = null
                         }
                     } else if (resizedRow != anchor.row) {
+                        val controlOffset = transcriptMeasureCache.rows
+                            .getValue(resizedRow)
+                            .controlOffset(
+                                control = anchor.control,
+                                cardTopPadding = cardTopPadding,
+                                messageBlockSpacing = messageBlockSpacing,
+                                detailsBlockSpacing = detailsBlockSpacing,
+                                toolSectionSpacing = toolSectionSpacing,
+                                toolSectionGap = toolSectionGap,
+                            )
                         val viewportUnchanged = !listState.isScrollInProgress &&
                             listState.firstVisibleItemIndex == anchor.firstVisibleItemIndex &&
                             listState.firstVisibleItemScrollOffset ==
                             anchor.firstVisibleItemScrollOffset
-                        val position = geometry.positionAt(
-                            anchor.scrollOffset + geometry.itemEnd(resizedIndex) - anchor.itemEnd,
-                        )
+                        val position = controlOffset?.let { offset ->
+                            geometry.positionAt(
+                                anchor.scrollOffset +
+                                    geometry.itemEnd(resizedIndex) - offset - anchor.position,
+                            )
+                        }
                         SideEffect {
                             if (transcriptResizeAnchor === anchor) {
-                                if (viewportUnchanged) {
+                                if (viewportUnchanged && position != null) {
                                     listState.requestScrollToItem(
                                         position.index,
                                         position.scrollOffset,
@@ -2224,12 +2839,22 @@ private fun ChatPanel(
                                         sessionId = sessionId,
                                         attachmentDownload = attachmentDownload,
                                         selectionState = transcriptSelectionState,
-                                        beforeDetailsResize = {
+                                        beforeDetailsResize = { control ->
                                             val rowIndex = transcriptRows.indexOf(row)
-                                            if (rowIndex >= 0) {
+                                            val controlOffset = measured.controlOffset(
+                                                control = control,
+                                                cardTopPadding = cardTopPadding,
+                                                messageBlockSpacing = messageBlockSpacing,
+                                                detailsBlockSpacing = detailsBlockSpacing,
+                                                toolSectionSpacing = toolSectionSpacing,
+                                                toolSectionGap = toolSectionGap,
+                                            )
+                                            if (rowIndex >= 0 && controlOffset != null) {
                                                 transcriptResizeAnchor = TranscriptResizeAnchor(
                                                     row = row,
-                                                    itemEnd = geometry.itemEnd(rowIndex),
+                                                    control = control,
+                                                    position = geometry.itemEnd(rowIndex) -
+                                                        controlOffset,
                                                     scrollOffset = geometry.scrollOffset(
                                                         listState.firstVisibleItemIndex,
                                                         listState.firstVisibleItemScrollOffset,
@@ -2691,6 +3316,15 @@ private val StopIcon = ImageVector.Builder(
         close()
     }
 }.build()
+
+private fun List<ChatMessage>?.latestResponseFailed(): Boolean {
+    val latest = this
+        ?.asReversed()
+        ?.firstOrNull { message -> message.role != ChatRole.System }
+        ?: return false
+    return latest.role == ChatRole.Assistant &&
+        latest.attempts.lastOrNull()?.stopReason == "error"
+}
 
 private val SessionStatus.label: String
     get() = when (this) {

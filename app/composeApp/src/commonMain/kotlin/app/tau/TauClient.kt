@@ -47,9 +47,9 @@ class TauClient {
         }
         val websocketUrl = when {
             baseUrl.startsWith("https://") -> {
-                "wss://${baseUrl.removePrefix("https://")}/v1/ws?features=details"
+                "wss://${baseUrl.removePrefix("https://")}/v1/ws"
             }
-            else -> "ws://${baseUrl.removePrefix("http://")}/v1/ws?features=details"
+            else -> "ws://${baseUrl.removePrefix("http://")}/v1/ws"
         }
         client.webSocket(
             request = {
@@ -88,7 +88,7 @@ class TauClient {
         settings: ConnectionSettings,
         sessionId: String,
         entryId: String,
-    ): List<ChatDetail> {
+    ): MessageDetails {
         val baseUrl = settings.serverUrl.trim().trimEnd('/')
         val response = client.get(
             "$baseUrl/v1/sessions/$sessionId/messages/$entryId/details",
@@ -99,7 +99,26 @@ class TauClient {
         check(response.status.isSuccess()) {
             "Details could not be loaded (${response.status.value})"
         }
-        return TauJson.decodeFromString<MessageDetails>(response.body<String>()).details
+        return TauJson.decodeFromString(response.body<String>())
+    }
+
+    suspend fun messageDetail(
+        settings: ConnectionSettings,
+        sessionId: String,
+        entryId: String,
+        detailIndex: Int,
+    ): ChatDetail {
+        val baseUrl = settings.serverUrl.trim().trimEnd('/')
+        val response = client.get(
+            "$baseUrl/v1/sessions/$sessionId/messages/$entryId/details/$detailIndex",
+        ) {
+            header(HttpHeaders.Authorization, "Bearer ${settings.token}")
+            header(HttpHeaders.Accept, ContentType.Application.Json)
+        }
+        check(response.status.isSuccess()) {
+            "Tool details could not be loaded (${response.status.value})"
+        }
+        return TauJson.decodeFromString(response.body<String>())
     }
 
     suspend fun downloadAttachment(

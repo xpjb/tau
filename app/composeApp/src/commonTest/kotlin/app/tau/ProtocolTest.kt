@@ -61,18 +61,22 @@ class ProtocolTest {
         assertEquals(12345L, history.messages.single().attachment?.size)
 
         val detailedHistory = assertIs<History>(TauJson.decodeFromString<ServerMessage>(
-            """{"type":"history","sessionId":"chat","messages":[{"entryId":"answer","role":"assistant","text":"Done","hasDetails":true,"details":[{"kind":"thinking","text":"Checking"},{"kind":"tool","toolName":"bash","arguments":"cargo check","result":"Finished","isError":false}]}]}""",
+            """{"type":"history","sessionId":"chat","messages":[{"entryId":"answer","role":"assistant","text":"Starting","attempts":[{"entryId":"answer","timestampMs":4,"stopReason":"error","errorMessage":"terminated","content":[{"kind":"text","contentIndex":0,"text":"Starting","hasContent":true},{"kind":"thinking","contentIndex":1,"detailIndex":0,"text":"Checking","hasContent":true},{"kind":"tool","contentIndex":2,"detailIndex":1,"toolName":"bash","arguments":"cargo check","result":"Finished","hasContent":true,"hasArguments":true,"hasResult":true}]}]}]}""",
         ))
-        assertEquals(true, detailedHistory.messages.single().hasDetails)
-        assertEquals("Checking", detailedHistory.messages.single().details[0].text)
-        assertEquals("bash", detailedHistory.messages.single().details[1].toolName)
-        assertEquals("Finished", detailedHistory.messages.single().details[1].result)
+        val attempt = detailedHistory.messages.single().attempts.single()
+        assertEquals("Starting", attempt.content[0].text)
+        assertEquals("Checking", attempt.content[1].text)
+        assertEquals("bash", attempt.content[2].toolName)
+        assertEquals("Finished", attempt.content[2].result)
+        assertEquals("terminated", attempt.errorMessage)
 
         val detailsDelta = assertIs<StreamDetailsDelta>(
             TauJson.decodeFromString<ServerMessage>(
-                """{"type":"stream_details_delta","sessionId":"chat","delta":"Planning"}""",
+                """{"type":"stream_details_delta","sessionId":"chat","attemptId":"live-1","contentIndex":1,"delta":"Planning"}""",
             ),
         )
+        assertEquals("live-1", detailsDelta.attemptId)
+        assertEquals(1, detailsDelta.contentIndex)
         assertEquals("Planning", detailsDelta.delta)
 
         val commands = assertIs<Commands>(TauJson.decodeFromString<ServerMessage>(

@@ -43,6 +43,8 @@ expect object PlatformServices {
     suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile>
     fun saveDownload(fileName: String, bytes: ByteArray): SavedDownload
     fun openDownload(download: SavedDownload)
+    fun showDownload(download: SavedDownload)
+    fun extractAndOpenDownload(download: SavedDownload)
 }
 
 expect fun Modifier.onSecondaryClick(onClick: (Offset) -> Unit): Modifier

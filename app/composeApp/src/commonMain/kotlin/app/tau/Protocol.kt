@@ -6,7 +6,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonClassDiscriminator
 
-const val TauProtocolVersion = 1
+const val TauProtocolVersion = 2
 
 val TauJson = Json {
     classDiscriminator = "type"
@@ -133,19 +133,53 @@ data class SessionState(
 
 @Serializable
 @SerialName("stream_reset")
-data class StreamReset(val sessionId: String) : ServerMessage
+data class StreamReset(
+    val sessionId: String,
+    val attemptId: String,
+    val timestampMs: Long? = null,
+) : ServerMessage
 
 @Serializable
 @SerialName("stream_delta")
-data class StreamDelta(val sessionId: String, val delta: String) : ServerMessage
+data class StreamDelta(
+    val sessionId: String,
+    val attemptId: String,
+    val contentIndex: Int,
+    val delta: String,
+) : ServerMessage
 
 @Serializable
 @SerialName("stream_details_delta")
-data class StreamDetailsDelta(val sessionId: String, val delta: String) : ServerMessage
+data class StreamDetailsDelta(
+    val sessionId: String,
+    val attemptId: String,
+    val contentIndex: Int,
+    val delta: String,
+) : ServerMessage
+
+@Serializable
+@SerialName("stream_tool")
+data class StreamTool(
+    val sessionId: String,
+    val attemptId: String,
+    val contentIndex: Int,
+    val toolName: String,
+    val arguments: String? = null,
+) : ServerMessage
+
+@Serializable
+@SerialName("stream_snapshot")
+data class StreamSnapshot(
+    val sessionId: String,
+    val attempts: List<ChatAttempt>,
+) : ServerMessage
 
 @Serializable
 @SerialName("stream_end")
-data class StreamEnd(val sessionId: String) : ServerMessage
+data class StreamEnd(
+    val sessionId: String,
+    val attempt: ChatAttempt? = null,
+) : ServerMessage
 
 @Serializable
 @SerialName("resync_required")
@@ -233,7 +267,40 @@ data class ChatDetail(
     val toolName: String? = null,
     val arguments: String? = null,
     val result: String? = null,
+    val hasArguments: Boolean = arguments != null,
+    val hasResult: Boolean = result != null,
     val isError: Boolean = false,
+)
+
+@Serializable
+enum class ChatContentKind {
+    @SerialName("text") Text,
+    @SerialName("thinking") Thinking,
+    @SerialName("tool") Tool,
+}
+
+@Serializable
+data class ChatContent(
+    val kind: ChatContentKind,
+    val contentIndex: Int,
+    val detailIndex: Int? = null,
+    val text: String? = null,
+    val toolName: String? = null,
+    val arguments: String? = null,
+    val result: String? = null,
+    val hasContent: Boolean = false,
+    val hasArguments: Boolean = false,
+    val hasResult: Boolean = false,
+    val isError: Boolean = false,
+)
+
+@Serializable
+data class ChatAttempt(
+    val entryId: String,
+    val timestampMs: Long? = null,
+    val stopReason: String? = null,
+    val errorMessage: String? = null,
+    val content: List<ChatContent> = emptyList(),
 )
 
 @Serializable
@@ -241,14 +308,21 @@ data class ChatMessage(
     val entryId: String,
     val role: ChatRole,
     val text: String,
+    val groupId: String? = null,
     val timestampMs: Long? = null,
-    val hasDetails: Boolean = false,
-    val details: List<ChatDetail> = emptyList(),
+    val attempts: List<ChatAttempt> = emptyList(),
     val attachment: ChatAttachment? = null,
 )
 
+val ChatMessage.hasDetails: Boolean
+    get() = attempts.any { attempt ->
+        attempt.content.any { content -> content.kind != ChatContentKind.Text }
+    }
+
 @Serializable
-data class MessageDetails(val details: List<ChatDetail>)
+data class MessageDetails(
+    val attempts: List<ChatAttempt>,
+)
 
 @Serializable
 data class UploadedFile(
