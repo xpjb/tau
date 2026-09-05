@@ -8,6 +8,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,6 +27,12 @@ enum class ConnectionStatus {
     Offline,
 }
 
+enum class OutgoingStatus(val label: String) {
+    Sending("Sending…"),
+    Waiting("Waiting for Pi"),
+    Unconfirmed("Delivery unconfirmed"),
+}
+
 data class OutgoingMessage(
     val requestId: String,
     val text: String,
@@ -33,6 +40,7 @@ data class OutgoingMessage(
     val afterEntryId: String?,
     val occurrence: Int,
     val canonicalOccurrence: Int,
+    val status: OutgoingStatus = OutgoingStatus.Waiting,
 )
 
 data class SessionExtensionUi(
@@ -125,8 +133,7 @@ class TauController(dispatcher: CoroutineDispatcher) {
 
     val state: StateFlow<TauUiState> = mutableState.asStateFlow()
 
-    fun start() {
-        val settings = PlatformServices.loadConnection()
+    fun start(settings: ConnectionSettings = PlatformServices.loadConnection()) {
         mutableState.update {
             it.copy(
                 settings = settings,
@@ -553,37 +560,33 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 val afterEntryId = history.lastOrNull()?.entryId
                 val occurrence = current.outgoingMessages[sessionId]
                     .orEmpty()
-                    .count { outgoing -> outgoing.afterEntryId == afterEntryId } +
-                    pending.values.count { action ->
-                        action is PendingAction.Prompt &&
-                            action.sessionId == sessionId &&
-                            action.afterEntryId == afterEntryId
-                    }
+                    .count { outgoing -> outgoing.afterEntryId == afterEntryId }
                 val canonicalOccurrence = history.count { canonical ->
                     canonical.role == ChatRole.User && canonical.text == message
                 } + current.outgoingMessages[sessionId]
                     .orEmpty()
-                    .count { outgoing -> outgoing.canonicalText == message } +
-                    pending.values.count { action ->
-                        action is PendingAction.Prompt &&
-                            action.sessionId == sessionId &&
-                            action.canonicalText == message
-                    }
+                    .count { outgoing -> outgoing.canonicalText == message }
                 pending[id] = PendingAction.Prompt(
                     sessionId = sessionId,
                     text = text,
                     files = files,
-                    displayText = introduction,
+                )
+                val outgoing = OutgoingMessage(
+                    requestId = id,
+                    text = introduction,
                     canonicalText = message,
                     afterEntryId = afterEntryId,
                     occurrence = occurrence,
                     canonicalOccurrence = canonicalOccurrence,
+                    status = OutgoingStatus.Sending,
                 )
-                client.send(Prompt(id, sessionId, message))
                 mutableState.update { current ->
                     val remaining = current.attachments[sessionId].orEmpty()
                         .filterNot { candidate -> files.any { it === candidate } }
                     current.copy(
+                        outgoingMessages = current.outgoingMessages + (
+                            sessionId to current.outgoingMessages[sessionId].orEmpty() + outgoing
+                        ),
                         drafts = if (current.drafts[sessionId] == text) {
                             current.drafts + (sessionId to "")
                         } else {
@@ -597,13 +600,27 @@ class TauController(dispatcher: CoroutineDispatcher) {
                         error = null,
                     )
                 }
+                client.send(Prompt(id, sessionId, message))
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
                 requestId?.let(pending::remove)
                 mutableState.update {
                     if (error is TauConnectionException) {
-                        it.copy(connectionStatus = ConnectionStatus.Offline)
+                        it.copy(
+                            connectionStatus = ConnectionStatus.Offline,
+                            outgoingMessages = it.outgoingMessages.mapValues { (_, messages) ->
+                                messages.map { message ->
+                                    if (message.requestId == requestId &&
+                                        message.status == OutgoingStatus.Sending
+                                    ) {
+                                        message.copy(status = OutgoingStatus.Unconfirmed)
+                                    } else {
+                                        message
+                                    }
+                                }
+                            },
+                        )
                     } else {
                         it.copy(error = error.message ?: "Message was not sent.")
                     }
@@ -914,6 +931,16 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 messageDetails = emptyMap(),
                 loadingMessageDetails = emptySet(),
                 messageDetailErrors = emptyMap(),
+                liveAttempts = emptyMap(),
+                outgoingMessages = it.outgoingMessages.mapValues { (_, messages) ->
+                    messages.map { message ->
+                        if (message.status == OutgoingStatus.Sending) {
+                            message.copy(status = OutgoingStatus.Unconfirmed)
+                        } else {
+                            message
+                        }
+                    }
+                },
             )
         }
         crashUploadAttempted = false
@@ -924,9 +951,8 @@ class TauController(dispatcher: CoroutineDispatcher) {
                 }
                 try {
                     client.run(settings, ::receive)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
                 } catch (error: Throwable) {
+                    ensureActive()
                     val connectionError = if (reportNextConnectionError) {
                         error.message?.take(240) ?: "Tau connection failed."
                     } else {
@@ -946,6 +972,16 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     it.copy(
                         connectionStatus = ConnectionStatus.Offline,
                         daemonVersion = null,
+                        liveAttempts = emptyMap(),
+                        outgoingMessages = it.outgoingMessages.mapValues { (_, messages) ->
+                            messages.map { message ->
+                                if (message.status == OutgoingStatus.Sending) {
+                                    message.copy(status = OutgoingStatus.Unconfirmed)
+                                } else {
+                                    message
+                                }
+                            }
+                        },
                         slashCommands = emptyMap(),
                         loadingCommands = emptySet(),
                         extensionDialogs = emptyList(),
@@ -988,6 +1024,11 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     if (action is PendingAction.Open) openedSessions.remove(action.sessionId)
                     mutableState.update {
                         it.copy(
+                            outgoingMessages = it.outgoingMessages.mapValues { (_, messages) ->
+                                messages.filterNot { outgoing ->
+                                    outgoing.requestId == message.requestId
+                                }
+                            },
                             drafts = if (action is PendingAction.Prompt
                                 && it.drafts[action.sessionId].isNullOrEmpty()
                             ) {
@@ -1018,29 +1059,27 @@ class TauController(dispatcher: CoroutineDispatcher) {
                     }
                 } else if (action is PendingAction.Prompt) {
                     mutableState.update { current ->
-                        if (message.commandHandled == true) {
-                            current.copy(notice = message.notice ?: current.notice)
-                        } else {
-                            val outgoing = reconcileOutgoingMessages(
-                                current.outgoingMessages[action.sessionId].orEmpty() +
-                                    OutgoingMessage(
-                                        requestId = message.requestId,
-                                        text = action.displayText,
-                                        canonicalText = action.canonicalText,
-                                        afterEntryId = action.afterEntryId,
-                                        occurrence = action.occurrence,
-                                        canonicalOccurrence = action.canonicalOccurrence,
-                                    ),
-                                current.histories[action.sessionId].orEmpty(),
-                            )
-                            current.copy(
-                                outgoingMessages = if (outgoing.isEmpty()) {
-                                    current.outgoingMessages - action.sessionId
+                        val outgoing = reconcileOutgoingMessages(
+                            current.outgoingMessages[action.sessionId].orEmpty().mapNotNull {
+                                outgoing ->
+                                if (outgoing.requestId != message.requestId) {
+                                    outgoing
+                                } else if (message.commandHandled == true) {
+                                    null
                                 } else {
-                                    current.outgoingMessages + (action.sessionId to outgoing)
-                                },
-                            )
-                        }
+                                    outgoing.copy(status = OutgoingStatus.Waiting)
+                                }
+                            },
+                            current.histories[action.sessionId].orEmpty(),
+                        )
+                        current.copy(
+                            outgoingMessages = if (outgoing.isEmpty()) {
+                                current.outgoingMessages - action.sessionId
+                            } else {
+                                current.outgoingMessages + (action.sessionId to outgoing)
+                            },
+                            notice = message.notice ?: current.notice,
+                        )
                     }
                 } else if (action is PendingAction.Commands) {
                     mutableState.update {
@@ -1485,11 +1524,6 @@ class TauController(dispatcher: CoroutineDispatcher) {
             val sessionId: String,
             val text: String,
             val files: List<PickedFile>,
-            val displayText: String,
-            val canonicalText: String,
-            val afterEntryId: String?,
-            val occurrence: Int,
-            val canonicalOccurrence: Int,
         ) : PendingAction
     }
 }
@@ -1589,6 +1623,7 @@ internal fun reconcileOutgoingMessages(
         .drop(pending.canonicalOccurrence)
         .any()
     if (acceptedByContent) return@filter false
+    if (pending.status != OutgoingStatus.Waiting) return@filter true
 
     val start = if (pending.afterEntryId == null) {
         0

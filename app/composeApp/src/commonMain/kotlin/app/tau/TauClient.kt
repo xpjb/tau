@@ -23,7 +23,12 @@ import io.ktor.http.isSuccess
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.decodeFromString
@@ -35,7 +40,9 @@ class TauClient {
     private val client = HttpClient(platformHttpEngine()) {
         install(BodyProgress)
         install(HttpTimeout)
-        install(WebSockets)
+        install(WebSockets) {
+            pingIntervalMillis = TauHeartbeatMillis
+        }
     }
     private val socketGate = Mutex()
     private var socket: DefaultClientWebSocketSession? = null
@@ -57,16 +64,22 @@ class TauClient {
                 header(HttpHeaders.Authorization, "Bearer ${settings.token}")
             },
         ) {
-            socketGate.withLock { socket = this }
+            val active = this
+            socketGate.withLock { socket = active }
             try {
                 for (frame in incoming) {
                     if (frame is Frame.Text) {
-                        onMessage(TauJson.decodeFromString<ServerMessage>(frame.readText()))
+                        val message = withContext(Dispatchers.Default) {
+                            TauJson.decodeFromString<ServerMessage>(frame.readText())
+                        }
+                        onMessage(message)
                     }
                 }
             } finally {
-                socketGate.withLock {
-                    if (socket === this) socket = null
+                withContext(NonCancellable) {
+                    socketGate.withLock {
+                        if (socket === active) socket = null
+                    }
                 }
             }
         }
@@ -77,9 +90,9 @@ class TauClient {
             ?: throw TauConnectionException("Tau is not connected")
         try {
             active.send(Frame.Text(TauJson.encodeToString<ClientRequest>(request)))
-        } catch (cancelled: CancellationException) {
-            throw cancelled
         } catch (error: Throwable) {
+            currentCoroutineContext().ensureActive()
+            active.cancel("Tau connection was lost", error)
             throw TauConnectionException("Tau connection was lost", error)
         }
     }

@@ -18,7 +18,8 @@ Tau starts a Pi RPC process when a chat receives a prompt and stops it after one
 - Discover Pi extension, prompt-template, and skill commands when `/` is entered, with command and supported built-in argument completion.
 - Run extension dialogs inside Tau and expose extension notices, status text, widgets, and composer updates.
 - Send prompts, steer an active run, and abort.
-- Show accepted prompts immediately while they wait in Pi's steering queue.
+- Show sent prompts immediately, keep unconfirmed sends visible across reconnects, and never automatically resend them.
+- Detect failed connections and reload the selected chat and live Pi state automatically.
 - Fork from any visible user message.
 - Attach local files for Pi to inspect, view images from Pi inline, and download files produced through Pi's `send_image` and `send_file` tools.
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.

@@ -331,4 +331,8 @@ actual fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit) {
     BackHandler(enabled, onBack)
 }
 
-actual fun platformHttpEngine(): HttpClientEngine = OkHttp.create()
+actual fun platformHttpEngine(): HttpClientEngine = OkHttp.create {
+    config {
+        pingInterval(TauHeartbeatMillis, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+}

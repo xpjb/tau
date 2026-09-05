@@ -237,12 +237,10 @@ impl AgentManager {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if !attempts.is_empty() {
-            let _ = self.inner.events.send(ServerMessage::StreamSnapshot {
-                session_id: id.to_owned(),
-                attempts,
-            });
-        }
+        let _ = self.inner.events.send(ServerMessage::StreamSnapshot {
+            session_id: id.to_owned(),
+            attempts,
+        });
         let state = runtime.snapshot();
         let _ = self.inner.events.send(ServerMessage::SessionState {
             session_id: id.to_owned(),
@@ -1269,6 +1267,15 @@ impl AgentManager {
             .get("isStreaming")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        runtime
+            .live_attempts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        let _ = self.inner.events.send(ServerMessage::StreamSnapshot {
+            session_id: id.to_owned(),
+            attempts: Vec::new(),
+        });
         *slot = Some(process.clone());
         self.set_runtime_state(
             id,
@@ -2033,6 +2040,10 @@ impl AgentManager {
                             .write()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .clear();
+                        let _ = self.inner.events.send(ServerMessage::StreamSnapshot {
+                            session_id: id.clone(),
+                            attempts: Vec::new(),
+                        });
                     }
                     self.broadcast_sessions().await;
                 }
@@ -2978,6 +2989,17 @@ for line in sys.stdin:
             .clone();
         assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
         assert!(runtime.process.lock().await.is_none());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let ServerMessage::StreamSnapshot { session_id: event_session, attempts } =
+                    events.recv().await.unwrap()
+                    && event_session == session_id
+                {
+                    assert!(attempts.is_empty());
+                    break;
+                }
+            }
+        }).await.expect("opening a sleeping chat did not replace its live snapshot");
         manager.prompt(&session_id, "Say hello").await.unwrap();
         let spawn_arguments = fs::read_to_string(root.join("pi-sessions/spawn-args"))
             .await
@@ -3027,6 +3049,17 @@ for line in sys.stdin:
         .expect("mock Pi chat did not settle");
         assert_eq!(streamed, "Hello from Tau");
         assert_eq!(streamed_details, "Checking");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let ServerMessage::StreamSnapshot { session_id: event_session, attempts } =
+                    events.recv().await.unwrap()
+                    && event_session == session_id
+                {
+                    assert!(attempts.is_empty());
+                    break;
+                }
+            }
+        }).await.expect("settled Pi output did not clear the live snapshot");
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].text, "Say hello");
         assert_eq!(history[1].text, "Hello from Tau");

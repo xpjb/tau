@@ -1232,7 +1232,7 @@ private fun TranscriptRowContent(
                     ChatText(checkNotNull(measured.text), styles)
                     DisableSelection {
                         Text(
-                            "Waiting for Pi",
+                            row.message.status.label,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f),
                         )
@@ -2706,7 +2706,7 @@ private fun ChatPanel(
                                 textWidth,
                             )
                             val waitingHeight = textMeasurer.measure(
-                                text = "Waiting for Pi",
+                                text = row.message.status.label,
                                 style = MaterialTheme.typography.labelSmall,
                                 constraints = Constraints(maxWidth = textWidth),
                             ).size.height

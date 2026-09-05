@@ -60,6 +60,12 @@ kotlin {
         commonTest.dependencies {
             implementation(kotlin("test"))
         }
+        val desktopTest by getting {
+            dependencies {
+                implementation("io.ktor:ktor-server-cio-jvm:3.5.2")
+                implementation("io.ktor:ktor-server-websockets-jvm:3.5.2")
+            }
+        }
     }
 }
 
