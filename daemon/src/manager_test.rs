@@ -123,6 +123,10 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert_eq!(after_lag.queue.requests.len(), 1);
     let error = process.request(json!({"type":"mock_reject"})).await.unwrap_err();
     assert!(!error.is::<crate::pi::UnconfirmedCommand>());
+    manager.abort(&id).await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, .. })).await;
+    manager.sleep_if_idle(&id, runtime.snapshot().idle_since.unwrap()).await;
+    assert!(runtime.content.lock().await.process.is_some());
     let error = process.request(json!({"type":"mock_exit"})).await.unwrap_err();
     assert!(error.is::<crate::pi::UnconfirmedCommand>());
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Interrupted, .. })).await;

@@ -63,7 +63,7 @@ for line in sys.stdin:
     kind = command.get("type")
     response = {"id": ident, "type": "response", "command": kind, "success": True}
     if kind == "get_state":
-        response["data"] = {"sessionFile": session_file, "isStreaming": run_id is not None, "isCompacting": False,
+        response["data"] = {"sessionFile": session_file, "isStreaming": run_id is not None, "isCompacting": False, "pendingMessageCount": len(queue),
                             "model": {"provider": provider, "id": model_id}, **queue_state()}
     elif kind == "get_transcript":
         subscribed = True

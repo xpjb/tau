@@ -595,11 +595,25 @@ impl AgentManager {
         {
             return;
         }
-        let process = {
+        let process = runtime.content.lock().await.process.clone();
+        if let Some(process) = process.as_ref().filter(|process| process.is_alive()) {
+            let Ok(state) = process.request(json!({ "type": "get_state" })).await else { return; };
+            let Some(data) = state.get("data") else { return; };
+            if data.get("isStreaming").and_then(Value::as_bool) == Some(true)
+                || data.get("isCompacting").and_then(Value::as_bool) == Some(true)
+                || data.get("paused").and_then(Value::as_bool) == Some(true)
+                || data.get("pendingMessageCount").and_then(Value::as_u64).is_some_and(|count| count > 0)
+            { return; }
+        }
+        {
             let mut content = runtime.content.lock().await;
-            if content.transcript.as_ref().is_some_and(|transcript| transcript.queue.paused || !transcript.queue.requests.is_empty()) { return; }
-            content.process.take()
-        };
+            let state = runtime.snapshot();
+            if state.status != SessionStatus::Idle || state.idle_since != Some(expected_idle_since) { return; }
+            if process.as_ref().is_some_and(|expected| !expected.is_alive()
+                || content.process.as_ref().is_none_or(|current| !Arc::ptr_eq(current, expected)))
+            { return; }
+            content.process.take();
+        }
         *runtime
             .commands
             .write()
@@ -916,7 +930,9 @@ impl AgentManager {
         } else {
             false
         };
-        if runtime.content.lock().await.transcript.as_ref().is_some_and(|transcript| transcript.queue.paused || !transcript.queue.requests.is_empty()) {
+        if state.pointer("/data/paused").and_then(Value::as_bool) == Some(true)
+            || state.pointer("/data/pendingMessageCount").and_then(Value::as_u64).is_some_and(|count| count > 0)
+        {
             bail!("Resume or clear the pending queue before forking");
         }
         self.persist_session_file(id, &process).await?;
