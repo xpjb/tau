@@ -46,6 +46,10 @@ internal object TauAndroidContext {
         filePicker = picker
     }
 
+    fun detach(picker: ActivityResultLauncher<Array<String>>) {
+        if (filePicker === picker) filePicker = null
+    }
+
     fun require(): Context = checkNotNull(applicationContext) { "Tau Android context is not ready" }
 
     suspend fun selectFiles(): List<Uri> = suspendCancellableCoroutine { continuation ->
@@ -89,6 +93,8 @@ actual object PlatformServices {
     actual val osVersion: String = "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})"
     actual val thumbnailCacheDirectory: String
         get() = File(TauAndroidContext.require().cacheDir, "image-thumbnails").absolutePath
+    actual val transcriptDatabasePath: String
+        get() = File(TauAndroidContext.require().filesDir, "transcript.db").absolutePath
 
     actual fun loadConnection(): ConnectionSettings {
         val preferences = TauAndroidContext.require()
@@ -322,7 +328,6 @@ actual fun rememberTranscriptScrollMotion() = TranscriptScrollMotion(
 @Composable
 actual fun TranscriptScrollbar(
     state: LazyListState,
-    geometry: TranscriptGeometry,
     modifier: Modifier,
 ) = Unit
 

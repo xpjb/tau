@@ -89,6 +89,8 @@ tasks.withType<JavaExec>().configureEach {
 }
 tasks.withType<Test>().configureEach {
     javaLauncher.set(java21)
+    environment("XDG_DATA_HOME", temporaryDir.resolve("data").absolutePath)
+    environment("LOCALAPPDATA", temporaryDir.resolve("data").absolutePath)
 }
 
 tasks.register<Sync>("prepareWindowsApp") {

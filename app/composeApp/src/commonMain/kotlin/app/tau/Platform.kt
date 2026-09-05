@@ -32,6 +32,7 @@ expect object PlatformServices {
     val appVersion: String
     val osVersion: String
     val thumbnailCacheDirectory: String
+    val transcriptDatabasePath: String
 
     fun loadConnection(): ConnectionSettings
     fun saveConnection(settings: ConnectionSettings)
@@ -79,7 +80,6 @@ expect fun rememberTranscriptScrollMotion(): TranscriptScrollMotion
 @Composable
 expect fun TranscriptScrollbar(
     state: LazyListState,
-    geometry: TranscriptGeometry,
     modifier: Modifier = Modifier,
 )
 

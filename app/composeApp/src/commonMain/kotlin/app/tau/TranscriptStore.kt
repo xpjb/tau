@@ -20,8 +20,8 @@ class TranscriptStore(
     private var closed = false
     private val chats = mutableMapOf<ChatKey, RetainedChat>()
 
-    private suspend fun <T> access(block: (SQLiteConnection) -> T): T = withContext(dispatcher) {
-        gate.withLock {
+    private suspend fun <T> access(block: (SQLiteConnection) -> T): T = gate.withLock {
+        withContext(dispatcher) {
             check(!closed) { "Transcript store is closed" }
             val db = connection ?: BundledSQLiteDriver().open(path()).also { opened ->
                 try {
@@ -33,6 +33,8 @@ class TranscriptStore(
                     opened.transaction {
                         opened.execSQL("CREATE TABLE IF NOT EXISTS records (connection TEXT NOT NULL, chat TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(connection,chat,kind,id))")
                         opened.execSQL("CREATE TABLE IF NOT EXISTS files (connection TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(connection,chat,id))")
+                        opened.execSQL("CREATE INDEX IF NOT EXISTS records_order ON records(connection,chat,kind)")
+                        opened.execSQL("CREATE INDEX IF NOT EXISTS records_requests ON records(connection,id) WHERE kind IN ('pending','control')")
                         opened.execSQL("PRAGMA user_version=1")
                     }
                     connection = opened
@@ -112,9 +114,11 @@ class TranscriptStore(
         val controls = reconcileControls(chat.controls, snapshot.queue, snapshot.generation != chat.position.generation)
         val delivered = entries.values.mapNotNullTo(mutableSetOf()) { it.origin.requestId.takeIf { _ -> it.phase == EntryPhase.Saved } }
         val pending = reconcilePending(chat.pending, snapshot.queue, delivered, controls, true)
+        val preferences = chat.defaultExpansions(entries.values)
         db.transaction {
-            db.remove(key, "entry")
-            db.write(key, "entry", entries.values.map { it.id to TauJson.encodeToString(it) })
+            db.write(key, "preference", preferences)
+            for (id in chat.byId.keys) if (id !in entries) db.remove(key, "entry", id)
+            db.write(key, "entry", entries.values.filter { chat.byId[it.id]?.entry != it }.map { it.id to TauJson.encodeToString(it) })
             db.write(key, "position", listOf("current" to TauJson.encodeToString(position)))
             db.replacePending(key, pending, controls)
         }
@@ -127,6 +131,7 @@ class TranscriptStore(
                 chat.byId[entry.id] = row
             }
             chat.position = position
+            chat.mutablePreferences.putAll(preferences)
             chat.mutablePending.replace(pending)
             chat.mutableControls.replace(controls)
             chat.synchronized = true
@@ -198,7 +203,9 @@ class TranscriptStore(
         val queueChanged = position.queue != chat.queue
         val controls = if (queueChanged) reconcileControls(chat.controls, position.queue, false) else chat.controls
         val pending = if (queueChanged || delivered.isNotEmpty()) reconcilePending(chat.pending, position.queue, delivered, controls, false) else chat.pending
+        val preferences = chat.defaultExpansions(changed.values)
         db.transaction {
+            db.write(key, "preference", preferences)
             for (id in removed) db.remove(key, "entry", id)
             db.write(key, "entry", changed.values.map { it.id to TauJson.encodeToString(it) })
             db.write(key, "position", listOf("current" to TauJson.encodeToString(position)))
@@ -221,6 +228,7 @@ class TranscriptStore(
                 if (prior == null) newRows.add(row)
             }
             chat.position = position
+            chat.mutablePreferences.putAll(preferences)
             chat.mutablePending.replace(pending)
             chat.mutableControls.replace(controls)
             chat.synchronized = valid
@@ -251,6 +259,14 @@ class TranscriptStore(
         val chat = loadChat(db, key)
         db.write(key, "preference", listOf(name to value))
         chat.mutablePreferences[name] = value
+    }
+
+    suspend fun setExpanded(key: ChatKey, name: String, expanded: Boolean) = access { db ->
+        val chat = loadChat(db, key)
+        val preferences = mutableListOf("expanded:$name" to expanded.toString())
+        if (name.startsWith("details:")) preferences.add("detailsDefault" to expanded.toString())
+        db.transaction { db.write(key, "preference", preferences) }
+        Snapshot.withMutableSnapshot { chat.mutablePreferences.putAll(preferences) }
     }
 
     suspend fun addFiles(key: ChatKey, files: List<PickedFile>) = access { db ->
@@ -320,6 +336,7 @@ class TranscriptStore(
         val pending = chat.pending.firstOrNull { it.requestId == id } ?: return@access
         require(pending.status == SendStatus.Rejected) { "Only a definitely unsent message can be restored" }
         require(chat.files.size + pending.files.size <= MaxUploadFiles)
+        require(chat.files.sumOf { it.size } + pending.files.sumOf { it.size } <= MaxUploadBytes)
         val draft = listOf(pending.text, chat.preferences["draft"].orEmpty()).filter { it.isNotBlank() }.joinToString("\n\n")
         db.transaction {
             db.remove(key, "pending", id)
@@ -355,7 +372,7 @@ class TranscriptStore(
             var pending = chat.pending.mapNotNull { message ->
                 if (message.requestId != id) message
                 else if (ok && disposition == "handled") null
-                else if (ok && message.status == SendStatus.Queued) message
+                else if (message.status == SendStatus.Queued && chat.synchronized && chat.queue.available && chat.queue.requests.any { it.requestId == id }) message
                 else message.copy(status = when { uncertain -> SendStatus.Unconfirmed; !ok -> SendStatus.Rejected; else -> SendStatus.Accepted }, detail = detail)
             }
             val controls = chat.controls.map { control ->
@@ -405,6 +422,19 @@ class TranscriptStore(
         }
     }
 
+    suspend fun invalidate(identity: String) = access {
+        Snapshot.withMutableSnapshot { for ((key, chat) in chats) if (key.connection == identity) chat.synchronized = false }
+    }
+
+    suspend fun dismissPending(key: ChatKey, id: String) = access { db ->
+        val chat = loadChat(db, key)
+        val record = chat.pending.firstOrNull { it.requestId == id } ?: return@access
+        require(record.status == SendStatus.Unconfirmed || record.status == SendStatus.Rejected) { "Use Delete to change Pi's queue" }
+        val pending = chat.pending.filterNot { it.requestId == id }
+        db.transaction { db.replacePending(key, pending, chat.controls) }
+        chat.mutablePending.replace(pending)
+    }
+
     suspend fun removeChat(key: ChatKey) = access { db ->
         db.transaction {
             for (table in listOf("records", "files")) db.prepare("DELETE FROM $table WHERE connection=? AND chat=?").use { statement ->
@@ -433,7 +463,7 @@ private fun reconcilePending(previous: List<PendingSend>, queue: QueueState, del
         if (id in delivered) pending.remove(id)
         else if (id !in queued && (snapshot && record.status == SendStatus.Accepted || record.status == SendStatus.Queued)) pending[id] = record.copy(status = SendStatus.Unconfirmed)
     }
-    return pending.values.toList()
+    return queue.requests.mapNotNull { pending.remove(it.requestId) } + pending.values
 }
 
 private fun reconcileControls(previous: List<PendingControl>, queue: QueueState, replaced: Boolean): List<PendingControl> = previous.map { record ->
@@ -492,3 +522,12 @@ private fun SQLiteConnection.replacePending(key: ChatKey, pending: List<PendingS
 }
 
 private fun <T> MutableList<T>.replace(values: List<T>) { if (this != values) { clear(); addAll(values) } }
+
+private fun RetainedChat.defaultExpansions(entries: Collection<TranscriptEntry>): List<Pair<String, String>> {
+    if (preferences["detailsDefault"] != "true") return emptyList()
+    return entries.mapNotNull { entry ->
+        val key = "expanded:details:${entry.displayKey}"
+        if ((entry.role == EntryRole.Assistant || entry.role == EntryRole.Tool) && entry.id !in byId &&
+            entry.origin.streamId?.let { "live-$it" } !in byId && key !in preferences) key to "true" else null
+    }
+}

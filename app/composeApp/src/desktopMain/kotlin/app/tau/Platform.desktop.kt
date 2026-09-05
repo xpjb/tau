@@ -12,7 +12,7 @@ import androidx.compose.foundation.gestures.FlingBehavior
 import androidx.compose.foundation.gestures.ScrollScope
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.v2.ScrollbarAdapter
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -122,6 +122,8 @@ actual object PlatformServices {
     actual val thumbnailCacheDirectory: String by lazy {
         dataDirectory.resolve("image-thumbnails").toString()
     }
+    actual val transcriptDatabasePath: String
+        get() = dataDirectory.resolve("transcript.db").toString()
 
     actual fun loadConnection(): ConnectionSettings {
         val path = dataDirectory.resolve("connection.json")
@@ -644,33 +646,10 @@ actual fun rememberTranscriptScrollMotion(): TranscriptScrollMotion {
 @OptIn(ExperimentalComposeUiApi::class)
 actual fun TranscriptScrollbar(
     state: LazyListState,
-    geometry: TranscriptGeometry,
     modifier: Modifier,
 ) {
-    if (geometry.maxScrollOffset == 0.0) return
-    val currentGeometry by rememberUpdatedState(geometry)
-    val adapter = remember(state) {
-        object : ScrollbarAdapter {
-            override val viewportSize: Double
-                get() = currentGeometry.viewportSize.toDouble()
-
-            override val contentSize: Double
-                get() = currentGeometry.contentSize
-
-            override val scrollOffset: Double
-                get() = currentGeometry.scrollOffset(
-                    state.firstVisibleItemIndex,
-                    state.firstVisibleItemScrollOffset,
-                )
-
-            override suspend fun scrollTo(scrollOffset: Double) {
-                val position = currentGeometry.positionAt(scrollOffset)
-                state.scrollToItem(position.index, position.scrollOffset)
-            }
-        }
-    }
     VerticalScrollbar(
-        adapter = adapter,
+        adapter = rememberScrollbarAdapter(state),
         modifier = modifier,
         reverseLayout = true,
         style = LocalScrollbarStyle.current.copy(

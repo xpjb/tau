@@ -12,10 +12,27 @@ Eight daemon tests pass, including RPC recovery, retired-process rejection,
 interrupted thinking, stale snapshots, and attachment security. Clippy passes.
 Held queues prevent automatic idle shutdown; forking requires a resumed or empty
 queue so process replacement cannot silently discard queued work.
-The shared SQLite store core now passes three desktop tests for durable content,
-atomic rollback, pending identities, controls, attachments, connection isolation,
-and a 10,000-entry history. It is not yet connected to the controller or UI;
-the client still uses protocol 2. Do not deploy this daemon with that client.
+The shared SQLite store is connected to the protocol-3 client and controller.
+Nine client tests pass, including three store tests and two real WebSocket tests.
+They cover atomic rollback, 10,000 historical entries, batched streaming, retained
+thinking, stale/gapped updates, explicit pending identities, frozen queue controls,
+reconnect, offline process recreation, files, and a final draft edit at shutdown.
+Android uses a ViewModel-owned controller; desktop owns it at application scope.
+Both restore the local selected chat before connecting. Lazy stable rows replace
+whole-history measurement and separate history/live/details caches.
+
+The pending menu implements Delete and inclusive Do up to here, with captured
+run, generation and revisions. Models without reusable checkpoints explicitly
+show an after-turn action. Held queues expose Resume and pending waits expose
+Cancel wait. Broader queue editing and pause UI remain deferred.
+
+Android release compilation and desktop ProGuard packaging pass. A Windows-JRE
+probe under Wine found that desktop ProGuard ignores SQLite's bundled keep rule;
+the project now preserves its registered JNI methods. The minified Windows jars
+pass a native SQLite Unicode write/close/reopen probe. Android's APK includes
+SQLite for all four ABIs. Physical-client and full-pipeline acceptance remain
+open. Builds still carry development version 0.4.8: do not distribute them or
+replace the deployed protocol-2 daemon before the coordinated release.
 
 Pi follow-up `3c543e3` persists identified sessions before publishing, including
 new sessions and forks without an assistant reply. Legacy RPC keeps lazy initial

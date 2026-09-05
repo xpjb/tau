@@ -10,7 +10,6 @@ import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
-import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.prepareGet
@@ -46,8 +45,9 @@ class TauClient {
     }
     private val socketGate = Mutex()
     private var socket: DefaultClientWebSocketSession? = null
+    private var socketId = 0L
 
-    suspend fun run(settings: ConnectionSettings, onMessage: suspend (ServerMessage) -> Unit) {
+    suspend fun run(settings: ConnectionSettings, onMessages: suspend (List<ServerMessage>, Long) -> Unit) {
         val baseUrl = settings.serverUrl.trim().trimEnd('/')
         require(baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) {
             "Server URL must start with http:// or https://"
@@ -65,15 +65,19 @@ class TauClient {
             },
         ) {
             val active = this
-            socketGate.withLock { socket = active }
+            val connectionId = socketGate.withLock { socket = active; ++socketId }
             try {
                 for (frame in incoming) {
-                    if (frame is Frame.Text) {
-                        val message = withContext(Dispatchers.Default) {
-                            TauJson.decodeFromString<ServerMessage>(frame.readText())
-                        }
-                        onMessage(message)
+                    if (frame !is Frame.Text) continue
+                    val frames = mutableListOf(frame)
+                    while (frames.size < 64) {
+                        val next = incoming.tryReceive().getOrNull() ?: break
+                        if (next is Frame.Text) frames.add(next)
                     }
+                    val messages = withContext(Dispatchers.Default) {
+                        frames.map { TauJson.decodeFromString<ServerMessage>(it.readText()) }
+                    }
+                    onMessages(messages, connectionId)
                 }
             } finally {
                 withContext(NonCancellable) {
@@ -85,53 +89,17 @@ class TauClient {
         }
     }
 
-    suspend fun send(request: ClientRequest) {
-        val active = socketGate.withLock { socket }
+    suspend fun send(request: ClientRequest, connectionId: Long) = socketGate.withLock {
+        val active = socket?.takeIf { socketId == connectionId }
             ?: throw TauConnectionException("Tau is not connected")
         try {
-            active.send(Frame.Text(TauJson.encodeToString<ClientRequest>(request)))
+            val frame = withContext(Dispatchers.Default) { Frame.Text(TauJson.encodeToString<ClientRequest>(request)) }
+            active.send(frame)
         } catch (error: Throwable) {
             currentCoroutineContext().ensureActive()
             active.cancel("Tau connection was lost", error)
             throw TauConnectionException("Tau connection was lost", error)
         }
-    }
-
-    suspend fun messageDetails(
-        settings: ConnectionSettings,
-        sessionId: String,
-        entryId: String,
-    ): MessageDetails {
-        val baseUrl = settings.serverUrl.trim().trimEnd('/')
-        val response = client.get(
-            "$baseUrl/v1/sessions/$sessionId/messages/$entryId/details",
-        ) {
-            header(HttpHeaders.Authorization, "Bearer ${settings.token}")
-            header(HttpHeaders.Accept, ContentType.Application.Json)
-        }
-        check(response.status.isSuccess()) {
-            "Details could not be loaded (${response.status.value})"
-        }
-        return TauJson.decodeFromString(response.body<String>())
-    }
-
-    suspend fun messageDetail(
-        settings: ConnectionSettings,
-        sessionId: String,
-        entryId: String,
-        detailIndex: Int,
-    ): ChatDetail {
-        val baseUrl = settings.serverUrl.trim().trimEnd('/')
-        val response = client.get(
-            "$baseUrl/v1/sessions/$sessionId/messages/$entryId/details/$detailIndex",
-        ) {
-            header(HttpHeaders.Authorization, "Bearer ${settings.token}")
-            header(HttpHeaders.Accept, ContentType.Application.Json)
-        }
-        check(response.status.isSuccess()) {
-            "Tool details could not be loaded (${response.status.value})"
-        }
-        return TauJson.decodeFromString(response.body<String>())
     }
 
     suspend fun downloadAttachment(
@@ -156,7 +124,7 @@ class TauClient {
             }
             val bytes = response.body<ByteArray>()
             if (bytes.size > 50_000_000) error("Attachment exceeds Tau's download limit")
-            PlatformServices.saveDownload(fileName, bytes)
+            withContext(Dispatchers.IO) { PlatformServices.saveDownload(fileName, bytes) }
         }
     }
 

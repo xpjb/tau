@@ -7,10 +7,16 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.Dispatchers
 
+class TauViewModel : ViewModel() {
+    val controller = TauController(Dispatchers.Main.immediate)
+    override fun onCleared() { controller.dispose() }
+}
+
 class MainActivity : ComponentActivity() {
-    private lateinit var controller: TauController
     private val filePicker = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
         TauAndroidContext::completeFileSelection,
@@ -24,7 +30,12 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
-        controller = TauController(Dispatchers.Main.immediate)
+        val controller = ViewModelProvider(this)[TauViewModel::class.java].controller
         setContent { TauApp(controller) }
+    }
+
+    override fun onDestroy() {
+        TauAndroidContext.detach(filePicker)
+        super.onDestroy()
     }
 }

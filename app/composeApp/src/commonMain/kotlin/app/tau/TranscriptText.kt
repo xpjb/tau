@@ -1,32 +1,11 @@
 package app.tau
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.unit.Constraints
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.annotator.DefaultAnnotatorSettings
@@ -75,37 +54,13 @@ internal data class TranscriptTextBlock(
     val kind: TranscriptTextBlockKind,
 )
 
-internal data class MeasuredTranscriptTextBlock(
-    private val source: TranscriptTextBlock,
-    val height: Int,
-) {
-    val text: AnnotatedString
-        get() = source.text
-    val style: TextStyle
-        get() = source.style
-    val kind: TranscriptTextBlockKind
-        get() = source.kind
-}
-
 internal data class TranscriptTextDocument(
     val blocks: List<TranscriptTextBlock>,
-)
-
-internal data class MeasuredTranscriptText(
-    val blocks: List<MeasuredTranscriptTextBlock>,
-    val height: Int,
 )
 
 private val MarkdownSyntax = Regex(
     """(?m)(https?://|[*_`\[\]#>|~<]|^\s*(?:(?:-{3,})\s*$|[-+] |\d+[.)] ))""",
 )
-private val ChatMarkdownFlavour = GFMFlavourDescriptor()
-private val ChatMarkdownParser = MarkdownParser(
-    ChatMarkdownFlavour,
-    false,
-    CancellationToken.NonCancellable,
-)
-
 internal fun buildChatText(
     text: String,
     markdown: Boolean,
@@ -120,10 +75,11 @@ internal fun buildChatText(
             ),
         )
     } else {
+        val flavour = GFMFlavourDescriptor()
         val parsed = parseMarkdown(
             content = text,
-            flavour = ChatMarkdownFlavour,
-            parser = ChatMarkdownParser,
+            flavour = flavour,
+            parser = MarkdownParser(flavour, false, CancellationToken.NonCancellable),
         )
         if (parsed !is State.Success) {
             listOf(
@@ -350,143 +306,4 @@ internal fun buildChatText(
     }
 
     return TranscriptTextDocument(blocks)
-}
-
-internal fun measureChatText(
-    document: TranscriptTextDocument,
-    maxWidth: Int,
-    textMeasurer: androidx.compose.ui.text.TextMeasurer,
-    styles: TranscriptTextStyles,
-    density: Density,
-): MeasuredTranscriptText {
-    val codePadding = with(density) { styles.codePadding.roundToPx() }
-    val quoteInset = with(density) {
-        styles.quoteIndent.roundToPx() + styles.quoteBarWidth.roundToPx()
-    }
-    val measured = document.blocks.map { block ->
-        if (block.kind == TranscriptTextBlockKind.Rule) {
-            MeasuredTranscriptTextBlock(
-                source = block,
-                height = with(density) { 1.dp.roundToPx() },
-            )
-        } else {
-            val contentWidth = when (block.kind) {
-                TranscriptTextBlockKind.Quote -> (maxWidth - quoteInset).coerceAtLeast(0)
-                TranscriptTextBlockKind.Table -> (maxWidth - codePadding * 2).coerceAtLeast(0)
-                else -> maxWidth
-            }
-            val softWrap = block.kind != TranscriptTextBlockKind.Code
-            val layout = textMeasurer.measure(
-                text = block.text,
-                style = block.style,
-                softWrap = softWrap,
-                constraints = if (softWrap) {
-                    Constraints(maxWidth = contentWidth)
-                } else {
-                    Constraints()
-                },
-                skipCache = true,
-            )
-            MeasuredTranscriptTextBlock(
-                source = block,
-                height = layout.size.height + if (
-                    block.kind == TranscriptTextBlockKind.Code ||
-                    block.kind == TranscriptTextBlockKind.Table
-                ) {
-                    codePadding * 2
-                } else {
-                    0
-                },
-            )
-        }
-    }
-    val spacing = with(density) { styles.blockSpacing.roundToPx() }
-    return MeasuredTranscriptText(
-        blocks = measured,
-        height = measured.sumOf(MeasuredTranscriptTextBlock::height) +
-            spacing * (measured.size - 1).coerceAtLeast(0),
-    )
-}
-
-@Composable
-internal fun ChatText(
-    text: MeasuredTranscriptText,
-    styles: TranscriptTextStyles,
-    modifier: Modifier = Modifier,
-) {
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    Column(
-        modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(styles.blockSpacing),
-    ) {
-        text.blocks.forEach { block ->
-            val height = with(density) { block.height.toDp() }
-            when (block.kind) {
-                TranscriptTextBlockKind.Flow -> Text(
-                    text = block.text,
-                    style = block.style,
-                    modifier = Modifier.fillMaxWidth().height(height),
-                )
-                TranscriptTextBlockKind.Heading -> Text(
-                    text = block.text,
-                    style = block.style,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(height)
-                        .semantics { heading() },
-                )
-                TranscriptTextBlockKind.Code -> Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(height)
-                        .background(styles.codeBackground, MaterialTheme.shapes.small)
-                        .horizontalScroll(rememberScrollState())
-                        .padding(styles.codePadding),
-                ) {
-                    Text(
-                        text = block.text,
-                        style = block.style,
-                        softWrap = false,
-                    )
-                }
-                TranscriptTextBlockKind.Table -> Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(height)
-                        .background(styles.codeBackground, MaterialTheme.shapes.small)
-                        .padding(styles.codePadding),
-                ) {
-                    Text(
-                        text = block.text,
-                        style = block.style,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                TranscriptTextBlockKind.Quote -> Row(
-                    Modifier.fillMaxWidth().height(height),
-                ) {
-                    Box(
-                        Modifier
-                            .width(styles.quoteBarWidth)
-                            .fillMaxHeight()
-                            .background(styles.quoteBar),
-                    )
-                    Text(
-                        text = block.text,
-                        style = block.style,
-                        modifier = Modifier
-                            .padding(start = styles.quoteIndent)
-                            .fillMaxWidth()
-                            .height(height),
-                    )
-                }
-                TranscriptTextBlockKind.Rule -> Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(height)
-                        .background(MaterialTheme.colorScheme.outlineVariant),
-                )
-            }
-        }
-    }
 }

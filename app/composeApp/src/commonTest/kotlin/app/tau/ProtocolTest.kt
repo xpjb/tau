@@ -53,31 +53,18 @@ class ProtocolTest {
         assertEquals("openai-codex", sessions.sessions.single().model?.provider)
         assertEquals("gpt-5.6-sol", sessions.sessions.single().model?.modelId)
 
-        val history = assertIs<History>(TauJson.decodeFromString<ServerMessage>(
-            """{"type":"history","sessionId":"chat","messages":[{"entryId":"tool","role":"system","text":"Build","attachment":{"kind":"file","fileName":"tau.zip","caption":"Build","size":12345}}]}""",
+        val snapshot = assertIs<TranscriptSnapshot>(TauJson.decodeFromString<ServerMessage>(
+            """{"type":"transcript_snapshot","sessionId":"chat","snapshot":{"generation":"process","sequence":4,"head":"tool","entries":[{"id":"tool","entryType":"message","phase":"saved","role":"tool","content":[{"kind":"text","text":"Build"}],"attachment":{"kind":"file","fileName":"tau.zip","caption":"Build","size":12345}}],"queue":{"available":true,"requests":[],"runId":null,"paused":false,"capabilities":["queue_run_prefix"],"boundaries":["turn"]}}}""",
         ))
-        assertEquals(AttachmentKind.File, history.messages.single().attachment?.kind)
-        assertEquals("tau.zip", history.messages.single().attachment?.fileName)
-        assertEquals(12345L, history.messages.single().attachment?.size)
-
-        val detailedHistory = assertIs<History>(TauJson.decodeFromString<ServerMessage>(
-            """{"type":"history","sessionId":"chat","messages":[{"entryId":"answer","role":"assistant","text":"Starting","attempts":[{"entryId":"answer","timestampMs":4,"stopReason":"error","errorMessage":"terminated","content":[{"kind":"text","contentIndex":0,"text":"Starting","hasContent":true},{"kind":"thinking","contentIndex":1,"detailIndex":0,"text":"Checking","hasContent":true},{"kind":"tool","contentIndex":2,"detailIndex":1,"toolName":"bash","arguments":"cargo check","result":"Finished","hasContent":true,"hasArguments":true,"hasResult":true}]}]}]}""",
+        assertEquals(AttachmentKind.File, snapshot.snapshot.entries.single().attachment?.kind)
+        assertEquals("tau.zip", snapshot.snapshot.entries.single().attachment?.fileName)
+        assertEquals(12345L, snapshot.snapshot.entries.single().attachment?.size)
+        val delta = assertIs<TranscriptUpdate>(TauJson.decodeFromString<ServerMessage>(
+            """{"type":"transcript_update","sessionId":"chat","generation":"process","sequence":5,"change":{"type":"delta","entryId":"live-a","index":1,"delta":"Planning"}}""",
         ))
-        val attempt = detailedHistory.messages.single().attempts.single()
-        assertEquals("Starting", attempt.content[0].text)
-        assertEquals("Checking", attempt.content[1].text)
-        assertEquals("bash", attempt.content[2].toolName)
-        assertEquals("Finished", attempt.content[2].result)
-        assertEquals("terminated", attempt.errorMessage)
-
-        val detailsDelta = assertIs<StreamDetailsDelta>(
-            TauJson.decodeFromString<ServerMessage>(
-                """{"type":"stream_details_delta","sessionId":"chat","attemptId":"live-1","contentIndex":1,"delta":"Planning"}""",
-            ),
-        )
-        assertEquals("live-1", detailsDelta.attemptId)
-        assertEquals(1, detailsDelta.contentIndex)
-        assertEquals("Planning", detailsDelta.delta)
+        assertEquals(TranscriptChange.Delta("live-a", 1, "Planning"), delta.change)
+        val prefix = ControlQueue("control", "chat", "process", QueueOperation.Prefix(null, listOf(QueueRef("prompt", 3)), "turn"))
+        assertEquals(prefix, TauJson.decodeFromString<ClientRequest>(TauJson.encodeToString<ClientRequest>(prefix)))
 
         val commands = assertIs<Commands>(TauJson.decodeFromString<ServerMessage>(
             """{"type":"commands","sessionId":"chat","commands":[{"name":"model","description":"Select model","source":"builtin","argumentHint":"<provider/model>","arguments":[{"value":"test/model","description":"Test"}]}]}""",
@@ -91,9 +78,9 @@ class ProtocolTest {
         assertEquals(listOf("One", "Two"), extensionUi.request.options)
 
         val response = assertIs<Response>(TauJson.decodeFromString<ServerMessage>(
-            """{"type":"response","requestId":"11","ok":true,"commandHandled":true,"notice":"Done"}""",
+            """{"type":"response","requestId":"11","ok":true,"disposition":"handled","notice":"Done"}""",
         ))
-        assertEquals(true, response.commandHandled)
+        assertEquals("handled", response.disposition)
         assertEquals("Done", response.notice)
     }
 }
