@@ -2,6 +2,16 @@
 
 Status: implementation approved. Replaces Tau protocol 2 in one coordinated release.
 
+Development checkpoint: Pi transcript and queue controls are committed through
+`4f12801` on `feat/transcript-identity`. The isolated `/opt/pi-fork/4f12801/pi`
+package passes SDK/CLI and no-provider RPC checks. Focused checks pass 270 tests;
+13 legacy tests are skipped. No production installation changed.
+
+Tau's daemon draft passes `cargo check --workspace`; its tests still need migration.
+Queue content/revisions and control state still need Tau protocol projection.
+The shared durable store and UI migration remain unfinished; the client still
+uses protocol 2. Do not deploy this daemon draft with that client.
+
 ## Authority and identity
 
 Pi's existing JSONL entries remain authoritative. Tau retains the entry ID, parent
@@ -45,10 +55,10 @@ requestId resolves a pending prompt even if its acknowledgement was lost.
 
 ## Queue and run controls
 
-Status: agreed feature scope; proposed control contract. Controls are not yet
-implemented or advertised. Define the wire rules with protocol 3; UI delivery
-can follow the transcript rebuild. Pi owns queue selection and run control;
-Tau does not add a second scheduler.
+Status: implementation in progress. Delete and Do up to here belong in the
+first pending-message menu: right-click on Windows, long-press on Android.
+Edit and pause/resume have protocol foundations; their broader UI can follow.
+Pi owns queue selection and run control; Tau does not add a second scheduler.
 
 An identified queued message contains its requestId, revision, queue kind and
 editable content. Tau receives display-safe content and attachment references,
@@ -59,8 +69,12 @@ revision. The eventual saved entry identifies the delivered request revision.
 The operations are:
 
 - Edit or delete a queued message, using requestId and expected revision.
-- Run a selected queued message next, using those same identifiers and a boundary.
-  Selection changes delivery priority; it does not duplicate or resubmit the prompt.
+- Do up to here: select the inclusive pending prefix through the clicked message,
+  using every member's requestId and expected revision. Deliver those messages,
+  in order, together in one next model request at the next reusable thinking
+  checkpoint. Keep later messages queued until explicit resume or another prefix
+  selection. If already idle, deliver the selected prefix without a checkpoint
+  wait. Selection claims the existing messages; it never resubmits them.
 - Pause at a boundary, resume, or cancel a pending boundary request.
 
 A boundary is one of:
@@ -83,15 +97,24 @@ finishes first, use its completed turn boundary. Never silently escalate to
 insert an instruction into an active request or guarantee zero repeated thinking.
 All received display content remains retained at every boundary.
 
-Pi checks queue revision, selected session and active run/response identity when
-accepting and applying a control. A stale command cannot affect a replacement
+Pi checks queue revisions, selected session and active run identity when
+accepting and applying a control. An active run ID changes for every agent run;
+null identifies an idle session. The accepted prefix freezes its member IDs and
+revisions, not its length in a changing queue. New messages stay behind that
+selection even when their normal queue kind has higher priority. An edit or
+deletion of any selected member cancels the pending selection. Editing later
+messages leaves it intact. Pi gates its existing queue polling while a boundary
+control waits and while the queue is paused; retries and post-run continuation
+must obey that same gate. A stale command cannot affect a replacement
 run or an already delivered message. Pi serializes selection, interruption and
 delivery so other queued work cannot slip between Stop and Send. No partial tool
 call is executed or replayed by an interrupt. Editing or deleting a selected
 message cancels its pending selection before changing the queue. Already-started
-delivery rejects edits and deletion. Stop, session replacement or a terminal
+delivery rejects edits and deletion. Stop, model/session replacement or a terminal
 failure cancels pending boundary controls rather than moving them to another
-run. Initially allow one pending boundary control per session, not a list of
+run. Stop, model changes and response failure hold affected queued messages; an
+automatic retry cannot consume them. Prefix delivery keeps the existing compaction
+checks and checks the selection again after any awaited compaction. Initially allow one pending boundary control per session, not a list of
 future pause points.
 
 Command acceptance is distinct from the boundary being reached. Snapshot and
