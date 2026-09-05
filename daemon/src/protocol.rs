@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::SessionModel;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -90,17 +90,38 @@ pub enum ServerMessage {
     },
     StreamReset {
         session_id: String,
+        attempt_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timestamp_ms: Option<u64>,
     },
     StreamDelta {
         session_id: String,
+        attempt_id: String,
+        content_index: usize,
         delta: String,
     },
     StreamDetailsDelta {
         session_id: String,
+        attempt_id: String,
+        content_index: usize,
         delta: String,
+    },
+    StreamTool {
+        session_id: String,
+        attempt_id: String,
+        content_index: usize,
+        tool_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        arguments: Option<String>,
+    },
+    StreamSnapshot {
+        session_id: String,
+        attempts: Vec<ChatAttempt>,
     },
     StreamEnd {
         session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attempt: Option<ChatAttempt>,
     },
     ResyncRequired,
 }
@@ -253,19 +274,62 @@ pub struct ChatDetail {
     pub arguments: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    pub has_arguments: bool,
+    pub has_result: bool,
     pub is_error: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatContentKind {
+    Text,
+    Thinking,
+    Tool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatContent {
+    pub kind: ChatContentKind,
+    pub content_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    pub has_content: bool,
+    pub has_arguments: bool,
+    pub has_result: bool,
+    pub is_error: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAttempt {
+    pub entry_id: String,
+    pub timestamp_ms: Option<u64>,
+    pub stop_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub content: Vec<ChatContent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub entry_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     pub role: ChatRole,
     pub text: String,
     pub timestamp_ms: Option<u64>,
-    pub has_details: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub details: Vec<ChatDetail>,
+    pub attempts: Vec<ChatAttempt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment: Option<ChatAttachment>,
 }
@@ -273,7 +337,7 @@ pub struct ChatMessage {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatDetails {
-    pub details: Vec<ChatDetail>,
+    pub attempts: Vec<ChatAttempt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
