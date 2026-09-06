@@ -9,8 +9,9 @@ Windows and Android 0.5.1 use the existing 0.5.0 daemon and protocol 3. No daemo
 - Expansion pins the clicked header, including later text layout changes. User input releases that temporary pin.
 - Empty loading views use the compact spinner. Repeated explanatory status text is removed.
 - Crash reports always encode schema 1, including reports restored from older clients.
+- Command completions reload for an existing slash draft after reconnect or chat selection. Unanswered loads stop after 10 seconds; delayed command lists remain usable. Only read-only requests are retried.
 
-Acceptance: 11 client tests passed, including a working message path with control-frame pongs withheld and a failed return path that reconnects without replay. Android and minified Windows builds passed. Windows/Wine checked the prior 0.4.8 and restored presentation on the same fixture, plus details/tool expansion and collapse with a fixed header position. The final Android APK has versionCode 18 and the same signing certificate as 0.5.0. These checks do not establish physical-device acceptance or the original cause of the user's missing pong.
+Acceptance: 11 client tests passed, including a working message path with control-frame pongs withheld and a failed return path that reconnects without replay. Android and minified Windows builds passed. Windows/Wine checked the prior 0.4.8 and restored presentation on the same fixture, plus details/tool expansion and collapse with a fixed header position. The final Android APK has versionCode 18 and the same signing certificate as 0.5.0. The command follow-up passed the extended desktop end-to-end test for `/model astra`, reconnect retry, timeout and delayed recovery. The live server returned 374 model completions, including Astra, in 11 ms. These checks do not establish physical-device acceptance or the original cause of the user's missing pong.
 
 Status: Tau 0.5.0 deployed; protocol-3 Windows and Android installers delivered.
 Replaces Tau protocol 2 without migrating or replacing existing JSONL.

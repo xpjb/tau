@@ -22,6 +22,7 @@ import kotlinx.serialization.encodeToString
 import kotlin.time.TimeSource
 
 private const val ReconnectDelayMillis = 2_000L
+private const val CommandLoadMillis = 10_000L
 private const val DownloadProgressIntervalMillis = 200L
 
 enum class ConnectionStatus { NotConfigured, Connecting, Connected, Offline }
@@ -120,7 +121,10 @@ class TauController(
         launch {
             loadChat(key)
             store.select(key)
-            if (state.value.settings.identity == key.connection) openSession(sessionId)
+            if (state.value.settings.identity == key.connection) {
+                openSession(sessionId)
+                loadCommands(sessionId)
+            }
         }
     }
 
@@ -132,7 +136,13 @@ class TauController(
         val key = ChatKey(state.value.settings.identity, sessionId)
         mutableState.update { it.copy(drafts = it.drafts + (sessionId to draft)) }
         launch { withContext(NonCancellable) { store.setPreference(key, "draft", draft) } }
-        if (draft.startsWith('/') && state.value.connectionStatus == ConnectionStatus.Connected && sessionId !in state.value.slashCommands && sessionId !in state.value.loadingCommands) {
+        loadCommands(sessionId)
+    }
+
+    private fun loadCommands(sessionId: String) {
+        val current = state.value
+        if (current.drafts[sessionId]?.startsWith('/') == true && current.connectionStatus == ConnectionStatus.Connected &&
+            sessionId !in current.slashCommands && sessionId !in current.loadingCommands) {
             mutableState.update { it.copy(loadingCommands = it.loadingCommands + sessionId) }
             send(GetCommands(newRequestId(), sessionId), PendingAction.Commands(sessionId))
         }
@@ -527,7 +537,7 @@ class TauController(
                     check(message.protocolVersion == TauProtocolVersion) { "Tau protocol ${message.protocolVersion} needs a matching client and daemon update" }
                     socketId = connectionId
                     mutableState.update { it.copy(connectionStatus = ConnectionStatus.Connected, daemonVersion = message.daemonVersion, error = null) }
-                    state.value.selectedSessionId?.let(::openSession)
+                    state.value.selectedSessionId?.let { openSession(it); loadCommands(it) }
                 }
                 is TranscriptSnapshot -> {
                     val key = ChatKey(identity, message.sessionId)
@@ -649,7 +659,15 @@ class TauController(
         val version = connectionVersion
         pending[request.id] = action
         launch {
-            try { client.send(request, connectionId) }
+            try {
+                client.send(request, connectionId)
+                if (action is PendingAction.Commands) {
+                    delay(CommandLoadMillis)
+                    if (pending.remove(request.id) == action) mutableState.update {
+                        it.copy(loadingCommands = it.loadingCommands - action.sessionId, error = "Pi command list timed out")
+                    }
+                }
+            }
             catch (error: Throwable) {
                 if (version == connectionVersion) {
                     pending.remove(request.id)

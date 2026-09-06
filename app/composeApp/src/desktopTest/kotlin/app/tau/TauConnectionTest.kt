@@ -86,7 +86,7 @@ class TauConnectionTest {
         var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
-            val socket = withTimeout(10_000) { sockets.receive() }
+            var socket = withTimeout(10_000) { sockets.receive() }
             val open = assertIs<OpenSession>(requests.nextRequest())
             val user = TranscriptEntry("u0", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Start")))
             socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
@@ -164,6 +164,33 @@ class TauConnectionTest {
             controller.awaitState { it.transcripts[chat.id]?.rows?.lastOrNull()?.entry?.phase == EntryPhase.Interrupted }
             assertEquals("unconfirmed", retained.controls.single().status)
             assertTrue(retained.pending.all { it.status == SendStatus.Unconfirmed })
+
+            withContext(Dispatchers.Swing) { controller.setDraft(chat.id, "/model astra") }
+            val abandonedCommands = assertIs<GetCommands>(requests.nextRequest())
+            socket.close(CloseReason(CloseReason.Codes.GOING_AWAY, "Command response lost"))
+            controller.awaitState { it.connectionStatus == ConnectionStatus.Offline }
+            socket = withTimeout(10_000) { sockets.receive() }
+            val commandRecovery = assertIs<OpenSession>(requests.nextRequest())
+            val retriedCommands = assertIs<GetCommands>(requests.nextRequest())
+            assertNotEquals(abandonedCommands.id, retriedCommands.id)
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("replacement", 0, saved.id, listOf(user, saved), queue.copy(runId = null))))
+            socket.sendMessage(Response(commandRecovery.id, true, chat.id))
+            socket.sendMessage(SessionState(chat.id, SessionStatus.Idle, contextUsage = ContextUsage(96000, 128000)))
+            val modelCommands = listOf(SlashCommand("model", source = SlashCommandSource.Builtin,
+                arguments = listOf(SlashCommandArgument("openai-codex/gpt-6-astra", "GPT-6 Astra"))))
+            socket.sendMessage(Commands(chat.id, modelCommands))
+            socket.sendMessage(Response(retriedCommands.id, true, chat.id))
+            controller.awaitState { it.slashCommands[chat.id] == modelCommands && chat.id !in it.loadingCommands }
+            assertEquals("/model astra", controller.state.value.drafts[chat.id])
+            assertTrue(requests.tryReceive().isFailure, "Only read-only command loading is retried")
+            socket.sendMessage(SessionState(chat.id, SessionStatus.Sleeping, contextUsage = ContextUsage(96000, 128000)))
+            controller.awaitState { chat.id !in it.slashCommands }
+            withContext(Dispatchers.Swing) { controller.setDraft(chat.id, "/model astra ") }
+            val delayedCommands = assertIs<GetCommands>(requests.nextRequest())
+            controller.awaitState(15_000) { chat.id !in it.loadingCommands && it.error == "Pi command list timed out" }
+            socket.sendMessage(Commands(chat.id, modelCommands))
+            socket.sendMessage(Response(delayedCommands.id, true, chat.id))
+            controller.awaitState { it.slashCommands[chat.id] == modelCommands }
 
             withContext(Dispatchers.Swing) { controller.setDraft(chat.id, "No acknowledgement"); controller.sendPrompt() }
             val unacknowledged = assertIs<Prompt>(requests.nextRequest())
