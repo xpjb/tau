@@ -1,5 +1,17 @@
 # Retained transcript contract
 
+## Client hotfix — 0.5.1
+
+Windows and Android 0.5.1 use the existing 0.5.0 daemon and protocol 3. No daemon or Pi change is required.
+
+- Heartbeats use the existing read-only session-list request, with one request every 15 seconds and a 30-second response limit. They do not start Pi or repeat prompts or controls. Native control-frame ping timers are disabled.
+- Details follow transcript content order. Tool input and output share one nested tool block, matched by tool-call ID. Presentation groups reference retained entries; storage, ancestry and model input are unchanged.
+- Expansion pins the clicked header, including later text layout changes. User input releases that temporary pin.
+- Empty loading views use the compact spinner. Repeated explanatory status text is removed.
+- Crash reports always encode schema 1, including reports restored from older clients.
+
+Acceptance: 11 client tests passed, including a working message path with control-frame pongs withheld and a failed return path that reconnects without replay. Android and minified Windows builds passed. Windows/Wine checked the prior 0.4.8 and restored presentation on the same fixture, plus details/tool expansion and collapse with a fixed header position. The final Android APK has versionCode 18 and the same signing certificate as 0.5.0. These checks do not establish physical-device acceptance or the original cause of the user's missing pong.
+
 Status: Tau 0.5.0 deployed; protocol-3 Windows and Android installers delivered.
 Replaces Tau protocol 2 without migrating or replacing existing JSONL.
 
