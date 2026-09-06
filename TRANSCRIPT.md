@@ -394,3 +394,8 @@ connection received none of those replies. This was a local cold-transcript chec
 not a physical-device or provider test. Warm native builds passed; Android UI
 acceptance remains deferred. Pi and its JSONL format are unchanged. Deployment
 requires the matching 0.5.3 clients because the wire protocol is now 4.
+
+Tau 0.5.3/protocol 4 was deployed on 2026-09-06 after all chats became idle and
+the user explicitly approved the restart. All 30 prior chat IDs and 29 JSONL
+byte prefixes were verified. The live daemon returned a bounded recent page
+from the largest saved chat. Pi, configuration and Telegram remain unchanged.
