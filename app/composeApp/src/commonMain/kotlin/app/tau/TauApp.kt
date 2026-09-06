@@ -61,6 +61,7 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -938,14 +939,14 @@ private fun ChatPanel(
             suggestion.replaceEnd,
             "${suggestion.value} ",
         )
-        editorValue = TextFieldValue(completed, TextRange(completed.length))
         controller.setDraft(sessionId, completed)
+        editorValue = TextFieldValue(completed, TextRange(completed.length))
     }
     val completeBareModelCommand: () -> Boolean = {
         if (attachments.isEmpty() && editorValue.text == "/model") {
             val completed = "/model "
-            editorValue = TextFieldValue(completed, TextRange(completed.length))
             controller.setDraft(sessionId, completed)
+            editorValue = TextFieldValue(completed, TextRange(completed.length))
             true
         } else {
             false
@@ -980,8 +981,10 @@ private fun ChatPanel(
             }
         }.filterNotNull().distinctUntilChanged().collect { controller.saveScroll(sessionId, it) }
     }
-    LaunchedEffect(draft) {
-        if (editorValue.text != draft) editorValue = TextFieldValue(draft, TextRange(draft.length))
+    SideEffect {
+        if (draft == controller.state.value.drafts[sessionId].orEmpty() && editorValue.text != draft) {
+            editorValue = TextFieldValue(draft, TextRange(draft.length))
+        }
     }
     LaunchedEffect(shouldFocusComposer) {
         if (shouldFocusComposer) {
@@ -1623,8 +1626,8 @@ private fun ChatPanel(
                 OutlinedTextField(
                     value = editorValue,
                     onValueChange = {
-                        editorValue = it
                         controller.setDraft(sessionId, it.text)
+                        editorValue = it
                     },
                     placeholder = { Text("Message Pi") },
                     minLines = 1,
@@ -1739,11 +1742,11 @@ private fun ChatPanel(
                                             editorValue.selection.end,
                                         )
                                         val updated = editorValue.text.replaceRange(start, end, "\n")
+                                        controller.setDraft(sessionId, updated)
                                         editorValue = TextFieldValue(
                                             updated,
                                             TextRange(start + 1),
                                         )
-                                        controller.setDraft(sessionId, updated)
                                     }
                                     true
                                 }
