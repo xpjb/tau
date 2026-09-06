@@ -1,43 +1,80 @@
 # Retained transcript contract
 
-Status: implementation approved. Replaces Tau protocol 2 in one coordinated release.
+Status: implementation approved; coordinated release acceptance remains open.
+Replaces Tau protocol 2 without migrating or replacing existing JSONL.
 
-Development checkpoint: Pi transcript and queue controls are committed through
-`4f12801` on `feat/transcript-identity`. The isolated `/opt/pi-fork/4f12801/pi`
-package passes SDK/CLI and no-provider RPC checks. Focused checks pass 270 tests;
-13 legacy tests are skipped. No production installation changed.
+## Development checkpoint — 2026-09-06
 
-Tau's daemon now projects queue content, revisions, run identity and controls.
-Eight daemon tests pass, including RPC recovery, retired-process rejection,
-interrupted thinking, stale snapshots, and attachment security. Clippy passes.
-Held queues prevent automatic idle shutdown; forking requires a resumed or empty
-queue so process replacement cannot silently discard queued work.
-The shared SQLite store is connected to the protocol-3 client and controller.
-Nine client tests pass, including three store tests and two real WebSocket tests.
-They cover atomic rollback, 10,000 historical entries, batched streaming, retained
-thinking, stale/gapped updates, explicit pending identities, frozen queue controls,
-reconnect, offline process recreation, files, and a final draft edit at shutdown.
-Android uses a ViewModel-owned controller; desktop owns it at application scope.
-Both restore the local selected chat before connecting. Lazy stable rows replace
-whole-history measurement and separate history/live/details caches.
+Pi is committed through `b043181` on `feat/transcript-identity`. The isolated
+`/opt/pi-fork/b043181/pi` package passes installed SDK and both CLI checks.
+The latest focused run passes 357 tests: 263 coding-agent, 46 agent-core and
+48 Codex tests. Read-only lint, types, dependencies, imports, entry graphs,
+lockfiles and browser checks pass. Production Pi remains unchanged.
 
-The pending menu implements Delete and inclusive Do up to here, with captured
-run, generation and revisions. Models without reusable checkpoints explicitly
-show an after-turn action. Held queues expose Resume and pending waits expose
-Cancel wait. Broader queue editing and pause UI remain deferred.
+Pi transcript identity and ordered snapshots (`68225d2`, `f6bcc89`), queue controls
+(`4f12801`) and identified initial/no-assistant persistence (`3c543e3`) are in place.
+`b043181` fixes idle held prompt admission, preserves prepared extension input
+across a late pause, and lets Resume consume queued input in a fresh session.
+Legacy lazy session persistence and immediate handled commands remain intact.
 
-Android release compilation and desktop ProGuard packaging pass. A Windows-JRE
-probe under Wine found that desktop ProGuard ignores SQLite's bundled keep rule;
-the project now preserves its registered JNI methods. The minified Windows jars
-pass a native SQLite Unicode write/close/reopen probe. Android's APK includes
-SQLite for all four ABIs. Physical-client and full-pipeline acceptance remain
-open. Builds still carry development version 0.4.8: do not distribute them or
-replace the deployed protocol-2 daemon before the coordinated release.
+Tau's daemon projects retained entries, queue revisions, run identity and controls.
+Eight daemon tests and strict Clippy pass. Held work prevents idle retirement;
+forking requires an unpaused, empty queue. `9f8e857` refreshes actual runtime status
+after queued acceptance, keeping idle held input from displaying false activity.
+An installed Pi/daemon check confirms this without provider activity.
 
-Pi follow-up `3c543e3` persists identified sessions before publishing, including
-new sessions and forks without an assistant reply. Legacy RPC keeps lazy initial
-persistence. Its isolated package passes consumer and no-provider persistence
-checks; 169 persistence/control regression tests and read-only checks pass.
+The shared SQLite store and protocol-3 client are connected (`f0942d1`, `4c2f9b8`).
+Nine client tests pass, covering atomic rollback, 10,000 historical entries,
+1,000 Unicode deltas, stable rows, interrupted thinking, gaps/stale snapshots,
+frozen controls, reconnect, process loss, files and a final draft edit at shutdown.
+Android owns its controller in a ViewModel; desktop owns it at application scope.
+Local restoration precedes networking. Old history/live/details caches and
+whole-history measurement are removed.
+
+The pending menu implements Delete and inclusive Do up to here. Models without
+reusable checkpoints show an explicit after-turn action. Held queues expose
+Resume; pending waits expose Cancel wait. `4694989` excludes popup labels from
+transcript selection and fixes the Windows popup crash. Actual transcript text
+remains selectable. `62e5bba` publishes editor changes to the controller first and
+applies only current external drafts in the composition apply phase. This removes
+the asynchronous draft effect that could overwrite newer typing.
+
+Android release and minified Windows builds pass. SQLite JNI loading, Unicode
+transactions and reopening pass under Windows JRE 21/Wine. Android emulator
+acceptance covers the 10,002-entry offline fixture, long-press menus, rotation,
+force-stop and restoration of thinking, unconfirmed sends and drafts.
+
+Installed Pi -> daemon -> native Windows/Android acceptance passes with synthetic
+SSE and all Pi socket access blocked. Checks cover native Delete/prefix menus,
+one-request inclusive batches, later arrivals, wait cancellation, the same wait
+across Android process loss, reusable reasoning in the next request, buffered
+answer cutoff, saved aborted thinking, explicit Resume, exactly-once input and
+preservation of the original JSONL prefix. This is not live-provider acceptance.
+
+The final repeat streams 20 thinking updates per second. Windows retains repeated
+1,296-character zero-delay input batches. Android retains every tested addition,
+restores its 3,905-character draft and visible thinking after force-stop, and
+submits that exact draft through the native button. It stays outside the frozen
+prefix until Resume. Both checkpoint and final Resume receipts pass.
+
+Earlier evidence remains intact: the paused-idle failure, popup crash, original
+Android character loss and an incorrectly transcribed expected string are separate
+findings. The corrected assertions do not erase the typing failure. A first draft
+guard passed Android; an intermediate Windows stress probe still failed. Final
+synchronous/current-draft code and focus-aware native input checks pass on both
+clients. The exact cause of every intermediate native timing failure is not proven.
+
+Evidence: `/tmp/tau-pipeline/{native-acceptance,streaming-acceptance,status-acceptance,client-native-acceptance}.json`,
+its screenshots/logs, `/tmp/tau-pipeline-before-final-stream.tgz`, and
+`/tmp/tau-native-check/`. Helper scripts consume planned fixture state; do not
+rerun them blindly. The six synthetic provider responses are now consumed.
+
+Remaining: broader feature/race review, physical Windows/Android acceptance and
+live-provider acceptance before a coordinated versioned release. Candidate builds
+still say 0.4.8 and remain build outputs only. Do not distribute them, overwrite
+released dist files or deploy the protocol-3 daemon alone. No production service,
+configuration, chat or deployed Pi installation changed; no rebuild was pushed
+or delivered.
 
 ## Authority and identity
 
@@ -82,9 +119,9 @@ requestId resolves a pending prompt even if its acknowledgement was lost.
 
 ## Queue and run controls
 
-Status: implementation in progress. Delete and Do up to here belong in the
-first pending-message menu: right-click on Windows, long-press on Android.
-Edit and pause/resume have protocol foundations; their broader UI can follow.
+Status: implemented for acceptance. Delete and Do up to here use the first
+pending-message menu: right-click on Windows, long-press on Android. Resume and
+Cancel wait are present. Broader edit, pause and reorder UI remain deferred.
 Pi owns queue selection and run control; Tau does not add a second scheduler.
 
 An identified queued message contains its requestId, revision, queue kind and
@@ -132,7 +169,11 @@ selection even when their normal queue kind has higher priority. An edit or
 deletion of any selected member cancels the pending selection. Editing later
 messages leaves it intact. Pi gates its existing queue polling while a boundary
 control waits and while the queue is paused; retries and post-run continuation
-must obey that same gate. A stale command cannot affect a replacement
+must obey that same gate. Ordinary prompt admission also obeys it while idle,
+including a recheck after asynchronous preparation. Prepared input and extension
+context stay queued without repeated preparation. Resume can drain a fresh,
+empty-history session; empty history without deliverable input still rejects.
+A stale command cannot affect a replacement
 run or an already delivered message. Pi serializes selection, interruption and
 delivery so other queued work cannot slip between Stop and Send. No partial tool
 call is executed or replayed by an interrupt. Editing or deleting a selected
