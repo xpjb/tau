@@ -83,6 +83,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     let process = runtime.content.lock().await.process.clone().unwrap();
     manager.prompt(&id, "same", "q1").await.unwrap();
     manager.prompt(&id, "same", "q2").await.unwrap();
+    assert_eq!(runtime.snapshot().status, SessionStatus::Running);
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if queue.requests.len() == 2)).await;
     let snapshot = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
     assert_eq!(snapshot.queue.requests[0].request_id, "q1");
@@ -149,6 +150,11 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
 
     manager.queue_control(&id, &restarted.generation, "pause", QueueOperation::Pause { run_id: None, boundary: "turn".to_owned() }).await.unwrap();
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if queue.paused)).await;
+    assert!(matches!(manager.prompt(&id, "held while idle", "idle-held").await.unwrap().disposition, PromptDisposition::Queued));
+    assert_eq!(runtime.snapshot().status, SessionStatus::Idle);
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if queue.requests.iter().any(|request| request.request_id == "idle-held"))).await;
+    assert_eq!(manager.queue_control(&id, &restarted.generation, "delete-idle", QueueOperation::Delete { request_id: "idle-held".to_owned(), revision: 0 }).await.unwrap(), "deleted");
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if queue.paused && queue.requests.is_empty())).await;
     manager.sleep_if_idle(&id, runtime.snapshot().idle_since.unwrap()).await;
     assert!(runtime.content.lock().await.process.is_some());
     assert!(manager.clone_session(&id).await.is_err());

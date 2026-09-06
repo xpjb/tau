@@ -448,7 +448,7 @@ impl AgentManager {
             self.inner.state.touch(id).await?;
         }
         self.persist_session_file(id, &process).await?;
-        if command_handled {
+        if command_handled || matches!(disposition, PromptDisposition::Queued) {
             self.refresh_runtime_status(id, &runtime, &process).await?;
         }
             Ok(())
