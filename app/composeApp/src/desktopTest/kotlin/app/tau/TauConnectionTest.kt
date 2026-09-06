@@ -101,10 +101,8 @@ class TauConnectionTest {
             socket.sendMessage(SessionState(chat.id, SessionStatus.Idle, contextUsage = ContextUsage(96000, 128000)))
             controller.awaitState { it.sessions.first { session -> session.id == chat.id }.contextUsage == ContextUsage(96000, 128000) }
 
-            assertTrue(open.exclusive)
             withContext(Dispatchers.Swing) { controller.selectSession(other.id) }
             val openOther = assertIs<OpenSession>(requests.nextRequest())
-            assertTrue(openOther.exclusive)
             socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 0, entries = emptyList(), queue = queue)))
             socket.sendMessage(Response(openOther.id, true, other.id))
             controller.awaitState { it.transcripts[other.id]?.synchronized == true }
@@ -261,6 +259,89 @@ class TauConnectionTest {
             withContext(Dispatchers.Swing) { controller.dispose() }.join()
             server.stop(0, 1_000)
             sockets.close(); requests.close()
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pages_history_with_live_updates_stale_replies_and_local_cache(): Unit = runBlocking {
+        val directory = Files.createTempDirectory("tau-controller")
+        val path = directory.resolve("transcript.db").toString()
+        val other = chat.copy(id = "other", title = "Other chat")
+        val sockets = Channel<DefaultWebSocketServerSession>(Channel.UNLIMITED)
+        val requests = Channel<ClientRequest>(Channel.UNLIMITED)
+        val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
+            install(WebSockets)
+            routing {
+                webSocket("/v1/ws") {
+                    assertEquals("Bearer test-token", call.request.headers[HttpHeaders.Authorization])
+                    sendMessage(Hello(TauProtocolVersion, "test"))
+                    sendMessage(Sessions(listOf(chat, other)))
+                    sockets.send(this)
+                    for (frame in incoming) if (frame is Frame.Text) {
+                        val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
+                        if (request is ListSessions && request.id.startsWith("heartbeat-")) sendMessage(Response(request.id, true))
+                        else requests.send(request)
+                    }
+                }
+            }
+        }.start(wait = false)
+        val port = server.engine.resolvedConnectors().single().port
+        val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
+        val controller = TauController(Dispatchers.Swing, TranscriptStore({ path }))
+        try {
+            withContext(Dispatchers.Swing) { controller.start(settings) }
+            val socket = withTimeout(10_000) { sockets.receive() }
+            val initial = assertIs<OpenSession>(requests.nextRequest())
+            val user = TranscriptEntry("u0", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Start")))
+            val old = TranscriptEntry("history", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Older history")))
+            val recent = user.copy(id = "recent", parentId = old.id)
+            val paged = TranscriptCut("pages", 0, recent.id, listOf(recent), queue, old.id)
+            socket.sendMessage(TranscriptSnapshot(chat.id, paged))
+            socket.sendMessage(Response(initial.id, true, chat.id))
+            controller.awaitState { it.transcripts[chat.id]?.before == old.id }
+            withContext(Dispatchers.Swing) { controller.loadOlder(chat.id); controller.loadOlder(chat.id) }
+            val stalePage = assertIs<GetHistory>(requests.nextRequest())
+            assertEquals(old.id, stalePage.before)
+            assertTrue(requests.tryReceive().isFailure, "One history request at a time")
+            socket.sendMessage(ResyncRequired(chat.id))
+            val refreshPage = assertIs<OpenSession>(requests.nextRequest())
+            socket.sendMessage(TranscriptSnapshot(chat.id, paged))
+            socket.sendMessage(Response(refreshPage.id, true, chat.id))
+            socket.sendMessage(TranscriptPage(stalePage.id, chat.id, "pages", old.id, HistoryPage(listOf(old))))
+            socket.sendMessage(SessionState(other.id, SessionStatus.Idle, detail = "Stale page barrier"))
+            controller.awaitState { it.sessions.any { session -> session.detail == "Stale page barrier" } }
+            assertEquals(1, controller.state.value.transcripts.getValue(chat.id).rows.size)
+            withContext(Dispatchers.Swing) { controller.loadOlder(chat.id) }
+            val historyRequest = assertIs<GetHistory>(requests.nextRequest())
+            val pagingLive = TranscriptEntry("live-paging", recent.id, phase = EntryPhase.Live, origin = EntryOrigin(streamId = "paging"),
+                role = EntryRole.Assistant, content = listOf(EntryContent(ContentKind.Thinking, "π")))
+            socket.sendMessage(TranscriptUpdate(chat.id, "pages", 1, TranscriptChange.Entry(pagingLive)))
+            socket.sendMessage(TranscriptUpdate(chat.id, "pages", 2, TranscriptChange.Delta(pagingLive.id, 0, "🧠")))
+            socket.sendMessage(TranscriptPage(historyRequest.id, chat.id, "pages", old.id, HistoryPage(listOf(old))))
+            socket.sendMessage(Response(historyRequest.id, true, chat.id))
+            controller.awaitState { it.transcripts[chat.id]?.before == null && it.transcripts[chat.id]?.position?.sequence == 2L }
+            assertEquals("π🧠", controller.state.value.transcripts.getValue(chat.id).rows.last().entry.content.single().text)
+            withContext(Dispatchers.Swing) { controller.selectSession(other.id) }
+            val away = assertIs<OpenSession>(requests.nextRequest())
+            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 0, entries = emptyList(), queue = queue)))
+            socket.sendMessage(Response(away.id, true, other.id))
+            controller.awaitState { it.transcripts[other.id]?.synchronized == true }
+            withContext(Dispatchers.Swing) { controller.selectSession(chat.id) }
+            val back = assertIs<OpenSession>(requests.nextRequest())
+            assertEquals(listOf("paging"), back.streams)
+            socket.sendMessage(TranscriptSnapshot(chat.id, paged.copy(sequence = 2, entries = listOf(recent, pagingLive.copy(content = listOf(EntryContent(ContentKind.Thinking, "π🧠")))))))
+            socket.sendMessage(Response(back.id, true, chat.id))
+            controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
+            withContext(Dispatchers.Swing) { controller.loadOlder(chat.id) }
+            controller.awaitState { it.transcripts[chat.id]?.before == null && chat.id !in it.loadingHistory }
+            assertTrue(requests.tryReceive().isFailure, "Cached history stays local")
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue, savedStreams = listOf("paging"))))
+            controller.awaitState { it.transcripts[chat.id]?.position?.generation == "g" }
+
+        } finally {
+            withContext(Dispatchers.Swing) { controller.dispose() }.join()
+            server.stop(0, 1000)
             directory.toFile().deleteRecursively()
         }
     }

@@ -10,7 +10,7 @@ import kotlinx.serialization.Serializable
 
 const val MaxUploadBytes = 50_000_000
 const val MaxUploadFiles = 8
-const val TauClientVersion = "0.5.2"
+const val TauClientVersion = "0.5.3"
 internal const val TauHeartbeatMillis = 15_000L
 
 @Serializable

@@ -50,7 +50,7 @@ class TranscriptStoreTest {
                 db.prepare("DROP TRIGGER reject_import").use { it.step() }
                 assertEquals(StoredConnection(sessions, key.session), store.loadConnection(key.connection))
                 assertEquals(listOf(other), store.loadConnection("account-b").sessions)
-                db.prepare("PRAGMA user_version").use { it.step(); assertEquals(2, it.getInt(0)) }
+                db.prepare("PRAGMA user_version").use { it.step(); assertEquals(3, it.getInt(0)) }
                 db.prepare("SELECT count(*) FROM records WHERE kind='connection' AND id='sessions'").use { it.step(); assertEquals(0, it.getInt(0)) }
                 for (table in listOf("records", "files")) for (operation in listOf("INSERT", "UPDATE", "DELETE")) {
                     db.prepare("CREATE TRIGGER protect_${table}_$operation BEFORE $operation ON $table BEGIN SELECT RAISE(ABORT,'unrelated data write'); END").use { it.step() }
@@ -89,13 +89,13 @@ class TranscriptStoreTest {
                 store.close()
                 store = TranscriptStore({ path })
                 assertEquals(StoredConnection(expected, key.session), store.loadConnection(key.connection))
-                assertEquals(listOf(entry), store.snapshot(key).entries)
-                assertEquals(4L, store.snapshot(key).sequence)
+                assertTrue(store.snapshot(key).entries.isEmpty())
+                assertEquals(0L, store.snapshot(key).sequence)
                 assertEquals("Retained draft", store.chat(key).preferences["draft"])
                 assertTrue(store.readFile(key, store.chat(key).files.single()).bytes.contentEquals(byteArrayOf(1, 2, 3, 4)))
                 store.saveSessions(key.connection, emptyList())
                 assertTrue(store.loadConnection(key.connection).sessions.isEmpty())
-                assertEquals(listOf(entry), store.snapshot(key).entries)
+                assertTrue(store.snapshot(key).entries.isEmpty())
                 assertEquals(listOf(other), store.loadConnection("account-b").sessions)
                 store.removeChat(ChatKey("account-b", other.id))
                 assertTrue(store.loadConnection("account-b").sessions.isEmpty())
@@ -262,4 +262,76 @@ class TranscriptStoreTest {
             assertEquals("thinking \uD83E\uDDE0 ".repeat(1000), tail.entry.content[0].text)
         } finally { store.close() }
     }
+    @Test
+    fun pagesHistoryWithoutAdvancingLiveStateAndRestoresOnlyRecentEntries() = runBlocking {
+        val root = Files.createTempDirectory("tau-paged-store-").toFile()
+        val path = root.resolve("transcript.db").path
+        var store = TranscriptStore({ path })
+        val key = ChatKey("paged", "chat")
+        val entries = (0 until 10_000).map { index -> TranscriptEntry("e$index", if (index == 0) null else "e${index - 1}",
+            role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Message $index π🧠"))) }
+        try {
+            val delivered = store.beginSend(key, "Already delivered outside the page", "")
+            store.addFiles(key, listOf(PickedFile("kept.txt", "retained file".encodeToByteArray())))
+            val uncertain = store.beginSend(key, "Keep uncertain work", "Kept draft")
+            store.updateSend(key, uncertain.copy(status = SendStatus.Unconfirmed))
+            val cut = TranscriptCut("g", 0, entries.last().id, entries.takeLast(50), QueueState(), "e9949", listOf(delivered.requestId))
+            assertTrue(store.applySnapshot(key, cut))
+            val chat = store.chat(key)
+            val pageKey = chat.pages.single().key
+            assertEquals(50, chat.rows.size)
+            assertEquals(listOf(uncertain.requestId), chat.pending.map { it.requestId })
+            assertEquals("e9949", chat.before)
+            assertEquals(null, store.cachedHistory(key, "g", "e9949"))
+            val page = HistoryPage(entries.subList(9900, 9950), "e9899")
+            assertFalse(store.applyHistory(key, "old", "e9949", page))
+            assertFalse(store.applyHistory(key, "g", "wrong", page))
+            assertTrue(store.applyHistory(key, "g", "e9949", page))
+            assertEquals(100, chat.rows.size)
+            assertEquals(pageKey, chat.pages.last().key)
+            assertEquals(0L, chat.position.sequence)
+            assertEquals("e9949", chat.position.before)
+            assertEquals("e9899", chat.before)
+            BundledSQLiteDriver().open(path).use { db ->
+                db.prepare("CREATE TRIGGER reject_page BEFORE INSERT ON records WHEN NEW.kind='entry' AND NEW.id='e9850' BEGIN SELECT RAISE(ABORT,'page failure'); END").use { it.step() }
+                assertFailsWith<Exception> { store.applyHistory(key, "g", "e9899", HistoryPage(entries.subList(9850, 9900), "e9849")) }
+                assertEquals(100, chat.rows.size)
+                assertEquals("e9899", chat.before)
+                db.prepare("DROP TRIGGER reject_page").use { it.step() }
+            }
+            var end = 9900
+            while (end > 0) {
+                val start = (end - 50).coerceAtLeast(0)
+                assertTrue(store.applyHistory(key, "g", "e${end - 1}", HistoryPage(entries.subList(start, end), if (start == 0) null else "e${start - 1}")))
+                end = start
+            }
+            assertEquals(10_000, chat.rows.size)
+            assertEquals(200, chat.pages.size)
+            val live = TranscriptEntry("live-stream", entries.last().id, phase = EntryPhase.Live, origin = EntryOrigin(streamId = "stream"),
+                role = EntryRole.Assistant, content = listOf(EntryContent(ContentKind.Thinking, "π")))
+            assertTrue(store.applyUpdates(key, listOf(TranscriptPatch("g", 1, TranscriptChange.Entry(live)),
+                TranscriptPatch("g", 2, TranscriptChange.Delta(live.id, 0, "🧠")))))
+            store.trimHistory(key)
+            assertEquals(51, chat.byId.size)
+            assertEquals(2L, chat.position.sequence)
+            assertEquals("π🧠", chat.rows.last().entry.content.single().text)
+            store.close(); store = TranscriptStore({ path })
+            val restored = store.chat(key)
+            assertEquals(51, restored.byId.size)
+            assertEquals("e9949", restored.before)
+            assertEquals("π🧠", restored.rows.last().entry.content.single().text)
+            assertEquals("Kept draft", restored.preferences["draft"])
+            assertEquals(uncertain.requestId, restored.pending.single().requestId)
+            assertEquals("retained file", store.readFile(key, uncertain.files.single()).bytes.decodeToString())
+            val cached = requireNotNull(store.cachedHistory(key, "g", "e9949"))
+            assertTrue(store.applyHistory(key, "g", "e9949", cached))
+            assertEquals(101, restored.byId.size)
+            assertEquals(2L, restored.position.sequence)
+            assertTrue(store.applySnapshot(key, cut.copy(generation = "new", savedStreams = listOf("stream"))))
+            assertEquals(50, restored.byId.size)
+            assertEquals(null, store.cachedHistory(key, "new", "e9949"))
+            assertFalse(store.applyHistory(key, "g", "e9949", page))
+        } finally { store.close(); root.deleteRecursively() }
+    }
+
 }

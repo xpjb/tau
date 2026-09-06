@@ -1026,10 +1026,9 @@ private fun ChatPanel(
             false
         }
     }
-    val presentation by remember(chat) {
+    val pages by remember(chat) {
         derivedStateOf {
-            val rows = chat.rows.toList()
-            Snapshot.withoutReadObservation { presentTranscript(rows) }
+            chat.pages.map { page -> page.key to Snapshot.withoutReadObservation { presentTranscript(page.rows) } }
         }
     }
     val expansionPin = remember(chat) { ExpansionPin() }
@@ -1039,10 +1038,10 @@ private fun ChatPanel(
     val initialIndex = remember(chat) {
         if (savedScroll.follow || savedScroll.key == null) 0 else {
             val pendingIndex = chat.pending.indexOfFirst { "request:${it.requestId}" == savedScroll.key }
-            val entryIndex = presentation.groups.indexOfFirst { group -> group.rows.any { it.key == savedScroll.key } }
+            val entryIndex = pages.indexOfFirst { (key, page) -> key == savedScroll.key || page.groups.any { group -> group.rows.any { it.key == savedScroll.key } } }
             when {
                 pendingIndex >= 0 -> 1 + chat.pending.lastIndex - pendingIndex
-                entryIndex >= 0 -> 1 + chat.pending.size + presentation.groups.lastIndex - entryIndex
+                entryIndex >= 0 -> 1 + chat.pending.size + pages.lastIndex - entryIndex
                 else -> 0
             }
         }
@@ -1214,8 +1213,10 @@ private fun ChatPanel(
                             }
                             if (PlatformServices.platformName == "android") DisableSelection { pendingBubble() } else pendingBubble()
                         }
-                        items(count = presentation.groups.size, key = { index -> presentation.groups[presentation.groups.lastIndex - index].key }) { index ->
-                            val group = presentation.groups[presentation.groups.lastIndex - index]
+                        items(count = pages.size, key = { index -> pages[pages.lastIndex - index].first }) { index ->
+                            val presentation = pages[pages.lastIndex - index].second
+                            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            presentation.groups.forEach { group -> key(group.key) {
                             val row = group.rows.first()
                             val message = group.rows.last().entry
                             val parts = transcriptParts(group, presentation)
@@ -1612,7 +1613,18 @@ private fun ChatPanel(
                                 }
                             }
                         }
-                        if (chat.synchronized && chat.rows.isEmpty() && chat.pending.isEmpty()) item(key = "empty") {
+                            } }
+                        }
+                        if (chat.before != null) item(key = "older") {
+                            DisableSelection {
+                                TextButton(onClick = { controller.loadOlder(sessionId) }, enabled = sessionId !in state.loadingHistory,
+                                    modifier = Modifier.fillMaxWidth()) {
+                                    if (sessionId in state.loadingHistory) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    else Text("Load older")
+                                }
+                            }
+                        }
+                        if (chat.synchronized && chat.before == null && chat.rows.isEmpty() && chat.pending.isEmpty()) item(key = "empty") {
                             Text("Start a conversation with Pi.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }

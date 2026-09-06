@@ -30,7 +30,7 @@ class TranscriptStore(
                     opened.execSQL("PRAGMA synchronous=FULL")
                     opened.execSQL("PRAGMA busy_timeout=5000")
                     val version = opened.prepare("PRAGMA user_version").use { it.step(); it.getInt(0) }
-                    check(version <= 2) { "This transcript store needs a newer Tau client" }
+                    check(version <= 3) { "This transcript store needs a newer Tau client" }
                     if (version < 2) opened.transaction {
                         opened.execSQL("CREATE TABLE IF NOT EXISTS records (connection TEXT NOT NULL, chat TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(connection,chat,kind,id))")
                         opened.execSQL("CREATE TABLE IF NOT EXISTS files (connection TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(connection,chat,id))")
@@ -52,6 +52,10 @@ class TranscriptStore(
                         }
                         opened.execSQL("DELETE FROM records WHERE chat='' AND kind='connection' AND id='sessions'")
                         opened.execSQL("PRAGMA user_version=2")
+                    }
+                    if (version < 3) opened.transaction {
+                        opened.execSQL("DELETE FROM records WHERE kind IN ('entry','position','page')")
+                        opened.execSQL("PRAGMA user_version=3")
                     }
                     connection = opened
                 } catch (error: Throwable) { opened.close(); throw error }
@@ -117,10 +121,18 @@ class TranscriptStore(
     private fun loadChat(db: SQLiteConnection, key: ChatKey): RetainedChat = chats.getOrPut(key) {
         RetainedChat(key).also { chat ->
             chat.position = db.records(key, "position").firstOrNull()?.second?.let { TauJson.decodeFromString(it) } ?: StoredPosition()
-            for ((_, encoded) in db.records(key, "entry")) {
-                val entry = TauJson.decodeFromString<TranscriptEntry>(encoded)
-                chat.byId[entry.id] = EntryRow(entry)
+            val recent = chat.position.recent
+            if (recent.isNotEmpty()) db.prepare("SELECT value FROM records WHERE connection=? AND chat=? AND kind='entry' AND id IN (${recent.joinToString(",") { "?" }})").use { statement ->
+                statement.bindText(1, key.connection); statement.bindText(2, key.session)
+                recent.forEachIndexed { index, id -> statement.bindText(index + 3, id) }
+                val entries = mutableMapOf<String, TranscriptEntry>()
+                while (statement.step()) {
+                    val entry = TauJson.decodeFromString<TranscriptEntry>(statement.getText(0))
+                    entries[entry.id] = entry
+                }
+                for (id in recent) chat.byId[id] = EntryRow(checkNotNull(entries[id]) { "Recent cached entry is missing" })
             }
+            chat.before = chat.position.before
             Snapshot.withMutableSnapshot {
                 chat.mutablePending.addAll(db.records(key, "pending").map { TauJson.decodeFromString<PendingSend>(it.second) })
                 chat.mutableControls.addAll(db.records(key, "control").map { TauJson.decodeFromString<PendingControl>(it.second) })
@@ -136,7 +148,7 @@ class TranscriptStore(
 
     suspend fun snapshot(key: ChatKey): TranscriptCut = access { db ->
         val chat = loadChat(db, key)
-        TranscriptCut(chat.position.generation, chat.position.sequence, chat.position.head, chat.byId.values.map { it.entry }, chat.queue)
+        TranscriptCut(chat.position.generation, chat.position.sequence, chat.position.head, chat.byId.values.map { it.entry }, chat.queue, chat.before)
     }
 
     suspend fun applySnapshot(key: ChatKey, snapshot: TranscriptCut): Boolean = access { db ->
@@ -145,7 +157,18 @@ class TranscriptStore(
         require(snapshot.generation.isNotEmpty() && snapshot.sequence >= 0) { "Invalid transcript position" }
         val entries = snapshot.entries.associateByTo(linkedMapOf()) { it.id }
         require(entries.size == snapshot.entries.size) { "Duplicate transcript entry" }
-        val savedStreams = entries.values.filter { it.phase == EntryPhase.Saved }.mapNotNullTo(mutableSetOf()) { it.origin.streamId }
+        require(snapshot.before == null || snapshot.before !in entries) { "Invalid snapshot boundary" }
+        var before = snapshot.before
+        val replaced = snapshot.generation != chat.position.generation
+        if (!replaced) {
+            while (before != null) {
+                val prior = chat.byId[before]?.entry?.takeIf { it.phase == EntryPhase.Saved } ?: break
+                entries[prior.id] = prior
+                before = prior.parentId
+            }
+        }
+        val savedStreams = snapshot.savedStreams.toMutableSet()
+        savedStreams.addAll(entries.values.filter { it.phase == EntryPhase.Saved }.mapNotNull { it.origin.streamId })
         for (row in chat.byId.values) {
             val prior = row.entry
             if (prior.phase == EntryPhase.Saved || prior.id in entries || prior.origin.streamId in savedStreams) continue
@@ -156,24 +179,27 @@ class TranscriptStore(
             require(entry.id.isNotEmpty()) { "Empty transcript identity" }
             val path = mutableSetOf<String>()
             var cursor: String? = entry.id
-            while (cursor != null && cursor !in checked) {
+            while (cursor != null && cursor != before && cursor !in checked) {
                 require(path.add(cursor)) { "Cyclic transcript ancestry" }
                 val ancestor = requireNotNull(entries[cursor]) { "Missing transcript parent" }
-                ancestor.parentId?.let { require(entries[it]?.phase == EntryPhase.Saved) { "Provisional transcript parent" } }
+                ancestor.parentId?.let { require(it == before || entries[it]?.phase == EntryPhase.Saved) { "Provisional transcript parent" } }
                 cursor = ancestor.parentId
             }
             checked.addAll(path)
         }
         snapshot.head?.let { require(entries[it]?.phase == EntryPhase.Saved) { "Invalid transcript head" } }
-        val position = StoredPosition(snapshot.generation, snapshot.sequence, snapshot.head, snapshot.queue)
+        val position = recentPosition(StoredPosition(snapshot.generation, snapshot.sequence, snapshot.head, snapshot.queue), entries::get,
+            entries.values.filter { it.phase != EntryPhase.Saved })
         val controls = reconcileControls(chat.controls, snapshot.queue, snapshot.generation != chat.position.generation)
-        val delivered = entries.values.mapNotNullTo(mutableSetOf()) { it.origin.requestId.takeIf { _ -> it.phase == EntryPhase.Saved } }
+        val delivered = snapshot.delivered.toMutableSet()
+        entries.values.mapNotNullTo(delivered) { it.origin.requestId.takeIf { _ -> it.phase == EntryPhase.Saved } }
         val pending = reconcilePending(chat.pending, snapshot.queue, delivered, controls, true)
         val preferences = chat.defaultExpansions(entries.values)
         db.transaction {
             db.write(key, "preference", preferences)
-            for (id in chat.byId.keys) if (id !in entries) db.remove(key, "entry", id)
-            db.write(key, "entry", entries.values.filter { chat.byId[it.id]?.entry != it }.map { it.id to TauJson.encodeToString(it) })
+            if (replaced) db.remove(key, "entry")
+            else for ((id, row) in chat.byId) if (row.entry.phase != EntryPhase.Saved && id !in entries) db.remove(key, "entry", id)
+            db.write(key, "entry", entries.values.filter { replaced || chat.byId[it.id]?.entry != it }.map { it.id to TauJson.encodeToString(it) })
             db.write(key, "position", listOf("current" to TauJson.encodeToString(position)))
             db.replacePending(key, pending, controls)
         }
@@ -186,6 +212,9 @@ class TranscriptStore(
                 chat.byId[entry.id] = row
             }
             chat.position = position
+            chat.before = before
+            if (replaced) chat.pageStarts.clear()
+            if (chat.pageStarts.isEmpty()) snapshot.entries.firstOrNull { it.role != null }?.let { chat.pageStarts.add(it.displayKey) }
             chat.mutablePreferences.putAll(preferences)
             chat.mutablePending.replace(pending)
             chat.mutableControls.replace(controls)
@@ -193,6 +222,77 @@ class TranscriptStore(
             chat.rebuildRows()
         }
         true
+    }
+
+    suspend fun cachedHistory(key: ChatKey, generation: String, cursor: String): HistoryPage? = access { db ->
+        val chat = loadChat(db, key)
+        if (generation != chat.position.generation) return@access null
+        var before: String? = cursor
+        val entries = mutableListOf<TranscriptEntry>()
+        var bytes = 0L
+        val seen = mutableSetOf<String>()
+        db.prepare("SELECT value FROM records WHERE connection=? AND chat=? AND kind='entry' AND id=?").use { statement ->
+            statement.bindText(1, key.connection); statement.bindText(2, key.session)
+            while (before != null) {
+                require(seen.add(before)) { "Cyclic cached history" }
+                statement.bindText(3, before)
+                if (!statement.step()) break
+                val entry = TauJson.decodeFromString<TranscriptEntry>(statement.getText(0))
+                statement.reset()
+                require(entry.phase == EntryPhase.Saved) { "Provisional history cursor" }
+                if (entries.isNotEmpty() && (entries.size >= HistoryPageEntries || bytes + entry.pageBytes > HistoryPageBytes)) break
+                entries.add(entry); bytes += entry.pageBytes; before = entry.parentId
+            }
+        }
+        if (entries.isEmpty()) null else HistoryPage(entries.asReversed(), before)
+    }
+
+    suspend fun applyHistory(key: ChatKey, generation: String, cursor: String, page: HistoryPage): Boolean = access { db ->
+        val chat = loadChat(db, key)
+        if (generation != chat.position.generation || cursor != chat.before) return@access false
+        val entries = page.entries.associateByTo(linkedMapOf()) { it.id }
+        require(entries.size == page.entries.size && entries.isNotEmpty()) { "Invalid history page" }
+        var parent: String? = cursor
+        val branch = mutableSetOf<String>()
+        while (parent != null && parent != page.before) {
+            require(branch.add(parent)) { "Cyclic history page" }
+            val entry = requireNotNull(entries[parent]) { "Missing history parent" }
+            require(entry.phase == EntryPhase.Saved) { "Provisional history parent" }
+            parent = entry.parentId
+        }
+        require(parent == page.before && cursor in branch) { "Invalid history boundary" }
+        for (entry in entries.values) {
+            require(entry.id.isNotEmpty() && (entry.id in branch || entry.phase == EntryPhase.Interrupted && entry.parentId in branch)) { "Unrelated history entry" }
+            val prior = chat.byId[entry.id]?.entry
+            require(prior == null || prior == entry) { "History page changed a retained entry" }
+        }
+        val preferences = chat.defaultExpansions(entries.values)
+        val position = chat.position.copy(recent = (chat.position.recent + entries.values.filter { it.phase == EntryPhase.Interrupted }.map { it.id }).distinct())
+        db.transaction {
+            db.write(key, "preference", preferences)
+            db.write(key, "entry", entries.values.filter { chat.byId[it.id]?.entry != it }.map { it.id to TauJson.encodeToString(it) })
+            if (position != chat.position) db.write(key, "position", listOf("current" to TauJson.encodeToString(position)))
+        }
+        Snapshot.withMutableSnapshot {
+            chat.position = position
+            for (entry in entries.values) if (entry.id !in chat.byId) chat.byId[entry.id] = EntryRow(entry)
+            chat.before = page.before
+            page.entries.firstOrNull { it.role != null }?.let { chat.pageStarts.add(it.displayKey) }
+            chat.mutablePreferences.putAll(preferences)
+            chat.rebuildRows()
+        }
+        true
+    }
+
+    suspend fun trimHistory(key: ChatKey) = access { db ->
+        val chat = loadChat(db, key)
+        Snapshot.withMutableSnapshot {
+            val recent = chat.position.recent.toSet()
+            chat.byId.keys.retainAll(recent)
+            chat.before = chat.position.before
+            chat.pageStarts.clear()
+            chat.rebuildRows()
+        }
     }
 
     suspend fun applyUpdates(key: ChatKey, updates: List<TranscriptPatch>): Boolean = access { db ->
@@ -255,6 +355,12 @@ class TranscriptStore(
             } catch (_: IllegalArgumentException) { valid = false; break }
         }
         if (position.sequence == chat.position.sequence) { chat.synchronized = valid; return@access valid }
+        val membershipChanged = position.head != chat.position.head || removed.isNotEmpty() || changed.values.any { it.id !in chat.byId }
+        if (membershipChanged) {
+            val provisional = (chat.byId.values.map { changed[it.entry.id] ?: it.entry } + changed.values)
+                .filter { it.phase != EntryPhase.Saved && it.id !in removed }.distinctBy { it.id }
+            position = recentPosition(position, { id -> changed[id] ?: chat.byId[id]?.entry?.takeUnless { id in removed } }, provisional)
+        }
         val queueChanged = position.queue != chat.queue
         val controls = if (queueChanged) reconcileControls(chat.controls, position.queue, false) else chat.controls
         val pending = if (queueChanged || delivered.isNotEmpty()) reconcilePending(chat.pending, position.queue, delivered, controls, false) else chat.pending
@@ -289,7 +395,7 @@ class TranscriptStore(
             chat.synchronized = valid
             val extension = mutableListOf<EntryRow>()
             var cursor = position.head
-            while (cursor != null && cursor != oldHead) {
+            while (cursor != null && cursor != oldHead && cursor != chat.before) {
                 val row = checkNotNull(chat.byId[cursor])
                 extension.add(row)
                 cursor = row.entry.parentId
@@ -297,6 +403,18 @@ class TranscriptStore(
             if (cursor != oldHead || newRows.any { it.entry.phase != EntryPhase.Saved && it.entry.parentId != position.head }) {
                 chat.rebuildRows()
             } else {
+                if (membershipChanged) {
+                    val lastPage = chat.pages.lastOrNull()
+                    var count = lastPage?.rows?.size ?: 0
+                    var bytes = lastPage?.rows?.sumOf { it.entry.pageBytes } ?: 0L
+                    for (row in extension.asReversed() + newRows.filter { it.entry.phase != EntryPhase.Saved }) {
+                        if (row.entry.role == null || lastPage?.rows?.contains(row) == true) continue
+                        if (count > 0 && (count >= HistoryPageEntries || bytes + row.entry.pageBytes > HistoryPageBytes)) {
+                            chat.pageStarts.add(row.key); count = 0; bytes = 0
+                        }
+                        count++; bytes += row.entry.pageBytes
+                    }
+                }
                 for (row in extension.asReversed()) {
                     chat.branch.add(row.entry.id)
                     if (row.entry.role != null && chat.visibleKeys.add(row.key)) chat.mutableRows.add(row)
@@ -305,6 +423,7 @@ class TranscriptStore(
                     val entry = row.entry
                     if (entry.phase != EntryPhase.Saved && (entry.parentId == null || entry.parentId in chat.branch) && entry.role != null && chat.visibleKeys.add(row.key)) chat.mutableRows.add(row)
                 }
+                if (membershipChanged) chat.rebuildPages()
             }
         }
         valid
@@ -507,6 +626,18 @@ class TranscriptStore(
     suspend fun close() = withContext(dispatcher) {
         gate.withLock { closed = true; connection?.close(); connection = null; chats.clear() }
     }
+}
+
+private fun recentPosition(position: StoredPosition, entry: (String) -> TranscriptEntry?, provisional: Collection<TranscriptEntry>): StoredPosition {
+    val ids = mutableListOf<String>()
+    var cursor = position.head
+    var bytes = 0L
+    while (cursor != null) {
+        val row = entry(cursor) ?: break
+        if (ids.isNotEmpty() && (ids.size >= HistoryPageEntries || bytes + row.pageBytes > HistoryPageBytes)) break
+        ids.add(row.id); bytes += row.pageBytes; cursor = row.parentId
+    }
+    return position.copy(before = cursor, recent = ids.asReversed() + provisional.map { it.id })
 }
 
 private fun reconcilePending(previous: List<PendingSend>, queue: QueueState, delivered: Set<String>, controls: List<PendingControl>, snapshot: Boolean): List<PendingSend> {

@@ -125,7 +125,13 @@ data class TranscriptCut(
     val head: String? = null,
     val entries: List<TranscriptEntry>,
     val queue: QueueState,
+    val before: String? = null,
+    val delivered: List<String> = emptyList(),
+    val savedStreams: List<String> = emptyList(),
 )
+
+@Serializable
+data class HistoryPage(val entries: List<TranscriptEntry>, val before: String? = null)
 
 @Serializable
 data class TranscriptPatch(val generation: String, val sequence: Long, val change: TranscriptChange)
@@ -192,7 +198,14 @@ internal data class StoredPosition(
     val sequence: Long = 0,
     val head: String? = null,
     val queue: QueueState = QueueState(),
+    val before: String? = null,
+    val recent: List<String> = emptyList(),
 )
+
+internal const val HistoryPageEntries = 50
+internal const val HistoryPageBytes = 256 * 1024
+internal val TranscriptEntry.pageBytes: Long get() = 512L + content.sumOf { it.text.length * 3L }
+internal data class RetainedPage(val key: String, val rows: List<EntryRow>)
 
 data class ChatKey(val connection: String, val session: String)
 
@@ -212,6 +225,10 @@ class RetainedChat internal constructor(val key: ChatKey) {
     internal val visibleKeys = mutableSetOf<String>()
     internal var position: StoredPosition by mutableStateOf(StoredPosition())
     internal val mutableRows = mutableStateListOf<EntryRow>()
+    internal val pageStarts = mutableSetOf<String>()
+    internal val pages = mutableStateListOf<RetainedPage>()
+    var before: String? by mutableStateOf(null)
+        internal set
     internal val mutablePending = mutableStateListOf<PendingSend>()
     internal val mutableControls = mutableStateListOf<PendingControl>()
     internal val mutableFiles = mutableStateListOf<DraftFile>()
@@ -229,7 +246,7 @@ class RetainedChat internal constructor(val key: ChatKey) {
         branch.clear()
         val path = mutableListOf<EntryRow>()
         var cursor = position.head
-        while (cursor != null) {
+        while (cursor != null && cursor != before) {
             check(branch.add(cursor)) { "Cyclic transcript branch" }
             val row = checkNotNull(byId[cursor]) { "Missing transcript parent" }
             path.add(row)
@@ -247,5 +264,19 @@ class RetainedChat internal constructor(val key: ChatKey) {
         for (row in provisional[null].orEmpty()) {
             if (row.entry.role != null) { mutableRows.add(row); visibleKeys.add(row.key) }
         }
+        rebuildPages()
+    }
+
+    internal fun rebuildPages() {
+        val next = mutableListOf<RetainedPage>()
+        var rows = mutableListOf<EntryRow>()
+        for (row in mutableRows) {
+            if (row.key in pageStarts && rows.isNotEmpty()) {
+                next.add(RetainedPage(rows.first().key, rows)); rows = mutableListOf()
+            }
+            rows.add(row)
+        }
+        if (rows.isNotEmpty()) next.add(RetainedPage(rows.first().key, rows))
+        if (pages != next) { pages.clear(); pages.addAll(next) }
     }
 }

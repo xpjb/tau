@@ -359,3 +359,38 @@ Tau 0.5.2 was deployed on 2026-09-06 after the game-development run finished and
 the user approved the restart. All 30 prior chat IDs and 29 JSONL byte prefixes
 were preserved. Health reports 0.5.2/protocol 3. Configuration, the immutable Pi
 installation and Telegram were unchanged. Both client installers were sent.
+
+## Tau 0.5.3: on-demand history pages
+
+Protocol 4 replaces full client snapshots with a recent page and current queue
+state. Pages target 50 whole saved entries and 256 KiB of entry JSON; an oversized
+entry stays whole. Live/interrupted entries belonging to that page remain visible.
+`open_session` also accepts outstanding request and stream IDs, so saved work
+outside the page can be reconciled without transferring its body.
+
+`get_history(sessionId,generation,before)` follows saved parent links starting at
+`before`, inclusive. Its private `transcript_page` reply includes the request ID,
+full entries and the next unfetched ancestor. IDs are opaque. A history read does
+not change the live sequence. Source replacement and head changes send scoped
+resync notices; the next bootstrap is another recent page, never full history.
+
+Store schema 3 clears remote entries and positions once. Sessions, drafts,
+preferences, pending work and file bodies remain. The saved position records only
+recent entry membership. Reopen reads those indexed rows. Load older first walks
+cached parent links, then requests missing history. Transactions precede display;
+stale page replies do not replace current content or advance the live cursor.
+
+Each page is a lazy-list item with the existing components and grouping inside.
+Tool results across a page boundary remain standalone rather than disappearing.
+Loaded older pages stay in memory until leaving the chat, when memory returns to
+the recent set. Older disk rows remain cached. This first version starts from the
+recent window; it adds neither a replay journal nor a Pi/server memory index.
+
+Checks include nine daemon tests and Clippy, five store tests, two protocol tests,
+and two focused controller/socket tests. The paging tests were rerun after review.
+An isolated 43,419,257-byte saved-chat copy opened with an 84,009-byte first page
+(50 entries) in 202 ms. Five older reads returned another 250 entries; a second
+connection received none of those replies. This was a local cold-transcript check,
+not a physical-device or provider test. Warm native builds passed; Android UI
+acceptance remains deferred. Pi and its JSONL format are unchanged. Deployment
+requires the matching 0.5.3 clients because the wire protocol is now 4.
