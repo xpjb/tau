@@ -226,13 +226,13 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 };
                 let manager = state.manager.clone();
                 let response_outbound = outbound_tx.clone();
-                if let ClientCommand::OpenSession { session_id, exclusive } = &request.command {
-                    if *exclusive {
-                        for (_, task) in subscriptions.drain() { task.abort(); let _ = task.await; }
-                    } else if let Some(task) = subscriptions.remove(session_id) { task.abort(); let _ = task.await; }
+                if let ClientCommand::OpenSession { session_id, requests, streams } = &request.command {
+                    for (_, task) in subscriptions.drain() { task.abort(); let _ = task.await; }
                     let session_id = session_id.clone();
+                    let requests = requests.clone();
+                    let streams = streams.clone();
                     subscriptions.insert(session_id.clone(), tokio::spawn(async move {
-                        let mut feed = match manager.open_session(&session_id).await {
+                        let mut feed = match manager.open_session(&session_id, &requests, &streams).await {
                             Ok(feed) => feed,
                             Err(error) => {
                                 let mut response = ServerMessage::command_failure(request.id, error);
@@ -276,6 +276,21 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             Err(error) => ServerMessage::command_failure(request_id, error),
                         },
                         ClientCommand::OpenSession { .. } => unreachable!("open requests own their transcript feed"),
+                        ClientCommand::GetHistory { session_id, generation, before } => {
+                            match manager.history_page(&session_id, &generation, &before).await {
+                                Ok(page) => {
+                                    if !queue_server(&response_outbound, &ServerMessage::TranscriptPage {
+                                        request_id: request_id.clone(), session_id: session_id.clone(), generation, cursor: before, page,
+                                    }).await { return; }
+                                    ServerMessage::success(request_id, Some(session_id), None)
+                                }
+                                Err(error) => {
+                                    let mut response = ServerMessage::command_failure(request_id, error);
+                                    if let ServerMessage::Response { session_id: field, .. } = &mut response { *field = Some(session_id); }
+                                    response
+                                }
+                            }
+                        }
                         ClientCommand::GetCommands { session_id } => {
                             match manager.commands(&session_id).await {
                                 Ok(commands) => {

@@ -39,7 +39,7 @@ impl Events {
     }
 
     async fn open(&mut self, manager: &AgentManager, id: &str) {
-        let feed = manager.open_session(id).await.unwrap();
+        let feed = manager.open_session(id, &[], &[]).await.unwrap();
         self.initial = feed.initial.into();
         self.transcript = Some(feed.events);
     }
@@ -76,7 +76,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert!(matches!(manager.prompt(&id, "Say hello", "request-1").await.unwrap().disposition, PromptDisposition::Submitted));
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Entry { entry }, .. } if entry.role == Some(EntryRole::Assistant) && entry.phase == EntryPhase::Saved)).await;
     receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, .. })).await;
-    let snapshot = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
+    let snapshot = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]);
     assert_eq!(snapshot.entries.len(), 2);
     assert_eq!(runtime.snapshot().context_usage, Some(ContextUsage { tokens: Some(64000), context_window: 200000 }));
     assert_eq!(snapshot.entries[0].origin.request_id.as_deref(), Some("request-1"));
@@ -128,7 +128,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     manager.prompt(&id, "same", "q2").await.unwrap();
     assert_eq!(runtime.snapshot().status, SessionStatus::Running);
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if queue.requests.len() == 2)).await;
-    let snapshot = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
+    let snapshot = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]);
     assert_eq!(snapshot.queue.requests[0].request_id, "q1");
     assert_eq!(snapshot.queue.requests[1].request_id, "q2");
     assert_eq!(manager.queue_control(&id, &snapshot.generation, "edit", QueueOperation::Edit { request_id: "q1".to_owned(), revision: 0, text: "edited".to_owned() }).await.unwrap(), "edited");
@@ -149,20 +149,21 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert_eq!(manager.queue_control(&id, &snapshot.generation, "delete", QueueOperation::Delete { request_id: "q2".to_owned(), revision: 0 }).await.unwrap(), "deleted");
     let old_snapshot = process.request(json!({"type":"get_transcript"})).await.unwrap();
     process.request(json!({"type":"mock_gap"})).await.unwrap();
-    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.entries.last().is_some_and(|entry| entry.content[0].text == "Checking."))).await;
+    receive(&mut events, |event| matches!(event, ServerMessage::ResyncRequired { .. })).await;
+    assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]).entries.last().unwrap().content[0].text, "Checking.");
     {
         let mut content = runtime.content.lock().await;
         let generation = content.transcript.as_ref().unwrap().generation.clone();
         assert!(manager.replace_transcript(&id, &mut content, &old_snapshot["data"]).await.is_err());
         assert_eq!(content.transcript.as_ref().unwrap().generation, generation);
     }
-    let before_lag = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
+    let before_lag = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]);
     {
         let _content = runtime.content.lock().await;
         process.request(json!({"type":"mock_lag"})).await.unwrap();
     }
-    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.entries.last().is_some_and(|entry| entry.content[0].text.len() == 2109))).await;
-    let after_lag = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
+    receive(&mut events, |event| matches!(event, ServerMessage::ResyncRequired { .. })).await;
+    let after_lag = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]);
     assert_ne!(before_lag.generation, after_lag.generation);
     assert_eq!(after_lag.queue.requests.len(), 1);
     let error = process.request(json!({"type":"mock_reject"})).await.unwrap_err();
@@ -175,12 +176,12 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert!(error.is::<crate::pi::UnconfirmedCommand>());
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Interrupted, .. })).await;
     events.open(&manager, &id).await;
-    let interrupted = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
+    let interrupted = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]);
     assert_eq!(interrupted.entries.last().unwrap().phase, EntryPhase::Interrupted);
     assert_eq!(interrupted.entries.last().unwrap().content[0].text.len(), 2109);
     assert!(!interrupted.queue.available);
     manager.commands(&id).await.unwrap();
-    let restarted = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
+    let restarted = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]);
     assert_ne!(interrupted.generation, restarted.generation);
     assert_eq!(restarted.entries.last().unwrap().content[0].text.len(), 2109);
     assert_eq!(restarted.entries.last().unwrap().phase, EntryPhase::Interrupted);
@@ -206,9 +207,9 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     let child = manager.clone_session(&id).await.unwrap();
     events.open(&manager, &child).await;
     let child_runtime = manager.runtime(&child).await.unwrap();
-    assert_eq!(child_runtime.content.lock().await.transcript.as_ref().unwrap().snapshot().entries.len(), 3);
+    assert_eq!(child_runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]).entries.len(), 3);
     events.open(&manager, &id).await;
-    assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().snapshot().entries.last().unwrap().phase, EntryPhase::Interrupted);
+    assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]).entries.last().unwrap().phase, EntryPhase::Interrupted);
     manager.shutdown().await;
     fs::remove_dir_all(root).await.unwrap();
 }
@@ -237,7 +238,7 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     let ServerMessage::TranscriptSnapshot { snapshot: TranscriptSnapshot { entries, head, .. }, .. } =
         receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { .. })).await else { unreachable!() };
     assert_eq!(head.as_deref(), Some("image"));
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].attachment.as_ref().unwrap().size, Some(8));
     assert_eq!(entries[0].attachment.as_ref().unwrap().file_name, "result.zip");
     assert_eq!(manager.resolve_attachment(&id, "artifact").await.unwrap().size, 8);
@@ -251,7 +252,7 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
     let bad = manager.create_session().await.unwrap();
     manager.inner.state.set_session_file(&bad, outside.to_string_lossy().into_owned()).await.unwrap();
-    assert!(manager.open_session(&bad).await.is_err());
+    assert!(manager.open_session(&bad, &[], &[]).await.is_err());
     assert!(manager.commands(&bad).await.is_err());
     assert!(manager.delete_session(&bad).await.is_err());
     assert_eq!(fs::read(&outside).await.unwrap(), b"private");

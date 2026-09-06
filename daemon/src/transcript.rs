@@ -8,6 +8,9 @@ use uuid::Uuid;
 
 use crate::protocol::{AttachmentKind, ChatAttachment};
 
+pub const PAGE_ENTRIES: usize = 50;
+pub const PAGE_BYTES: usize = 256 * 1024;
+
 pub const IMAGE_LIMIT: u64 = 10_000_000;
 pub const FILE_LIMIT: u64 = 50_000_000;
 
@@ -206,6 +209,16 @@ pub struct TranscriptSnapshot {
     pub head: Option<String>,
     pub entries: Vec<Entry>,
     pub queue: QueueState,
+    pub before: Option<String>,
+    pub delivered: Vec<String>,
+    pub saved_streams: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub entries: Vec<Entry>,
+    pub before: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -428,10 +441,46 @@ impl Transcript {
         })
     }
 
-    pub fn snapshot(&self) -> TranscriptSnapshot {
+    pub fn page(&self, before: Option<&str>) -> Result<HistoryPage> {
+        let mut cursor = before.or(self.head.as_deref());
+        let mut saved = Vec::new();
+        let mut bytes = 0;
+        while let Some(id) = cursor {
+            let entry = &self.entries[*self.by_id.get(id).context("History cursor is unavailable; reopen this chat")?];
+            if entry.phase != EntryPhase::Saved { bail!("History cursor is provisional"); }
+            let size = serde_json::to_vec(entry)?.len();
+            if !saved.is_empty() && (saved.len() >= PAGE_ENTRIES || bytes + size > PAGE_BYTES) { break; }
+            bytes += size;
+            saved.push(entry);
+            cursor = entry.parent_id.as_deref();
+        }
+        let provisional = self.entries.iter().filter(|entry| entry.phase != EntryPhase::Saved &&
+            (before.is_none() || entry.phase == EntryPhase::Interrupted)).collect::<Vec<_>>();
+        let mut entries = Vec::new();
+        for entry in saved.into_iter().rev() {
+            entries.push(entry.clone());
+            entries.extend(provisional.iter().filter(|tail| tail.parent_id.as_deref() == Some(&entry.id)).map(|tail| (*tail).clone()));
+        }
+        if before.is_none() {
+            entries.extend(provisional.into_iter().filter(|entry| entry.parent_id.is_none()).cloned());
+        }
+        Ok(HistoryPage { entries, before: cursor.map(str::to_owned) })
+    }
+
+    pub fn snapshot(&self, requests: &[String], streams: &[String]) -> TranscriptSnapshot {
+        let page = self.page(None).expect("retained ancestry was validated");
+        let requests = requests.iter().collect::<HashSet<_>>();
+        let streams = streams.iter().collect::<HashSet<_>>();
+        let mut delivered = Vec::new();
+        let mut saved_streams = Vec::new();
+        for entry in &self.entries {
+            if entry.phase != EntryPhase::Saved { continue; }
+            if let Some(id) = &entry.origin.request_id && requests.contains(id) { delivered.push(id.clone()); }
+            if let Some(id) = &entry.origin.stream_id && streams.contains(id) { saved_streams.push(id.clone()); }
+        }
         TranscriptSnapshot {
             generation: self.generation.clone(), sequence: self.sequence, head: self.head.clone(),
-            entries: self.entries.clone(), queue: self.queue.clone(),
+            entries: page.entries, queue: self.queue.clone(), before: page.before, delivered, saved_streams,
         }
     }
 

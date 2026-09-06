@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::state::SessionModel;
-use crate::transcript::{QueueRef, TranscriptChange, TranscriptSnapshot};
+use crate::transcript::{HistoryPage, QueueRef, TranscriptChange, TranscriptSnapshot};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -22,7 +22,8 @@ pub struct ClientRequest {
 pub enum ClientCommand {
     ListSessions,
     CreateSession,
-    OpenSession { session_id: String, #[serde(default)] exclusive: bool },
+    OpenSession { session_id: String, #[serde(default)] requests: Vec<String>, #[serde(default)] streams: Vec<String> },
+    GetHistory { session_id: String, generation: String, before: String },
     GetCommands { session_id: String },
     Prompt { session_id: String, text: String },
     ExtensionUiResponse {
@@ -97,6 +98,13 @@ pub enum ServerMessage {
     TranscriptSnapshot {
         session_id: String,
         snapshot: TranscriptSnapshot,
+    },
+    TranscriptPage {
+        request_id: String,
+        session_id: String,
+        generation: String,
+        cursor: String,
+        page: HistoryPage,
     },
     TranscriptUpdate {
         session_id: String,

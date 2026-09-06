@@ -204,7 +204,7 @@ impl AgentManager {
         Ok(id)
     }
 
-    pub async fn open_session(&self, id: &str) -> Result<SessionFeed> {
+    pub async fn open_session(&self, id: &str, requests: &[String], streams: &[String]) -> Result<SessionFeed> {
         let runtime = self.runtime(id).await?;
         let pending = self
             .inner
@@ -232,7 +232,7 @@ impl AgentManager {
         let events = content.events.subscribe();
         initial.push(ServerMessage::TranscriptSnapshot {
             session_id: id.to_owned(),
-            snapshot: content.transcript.as_ref().expect("transcript was loaded").snapshot(),
+            snapshot: content.transcript.as_ref().expect("transcript was loaded").snapshot(requests, streams),
         });
         drop(content);
         let state = runtime.snapshot();
@@ -243,6 +243,14 @@ impl AgentManager {
             context_usage: state.context_usage,
         });
         Ok(SessionFeed { initial, events })
+    }
+
+    pub async fn history_page(&self, id: &str, generation: &str, before: &str) -> Result<crate::transcript::HistoryPage> {
+        let runtime = self.runtime(id).await?;
+        let content = runtime.content.lock().await;
+        let transcript = content.transcript.as_ref().context("Open this chat before reading history")?;
+        if content.recovering || transcript.generation != generation { bail!("History changed; reopen this chat"); }
+        transcript.page(Some(before))
     }
 
     pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
@@ -1540,10 +1548,12 @@ impl AgentManager {
                     }.await;
                     match result {
                         Ok(Some(change)) => {
-                            let message = ServerMessage::TranscriptUpdate {
+                            let message = if matches!(change, TranscriptChange::Head { .. }) {
+                                ServerMessage::ResyncRequired { session_id: Some(id.clone()) }
+                            } else { ServerMessage::TranscriptUpdate {
                                 session_id: id.clone(), generation: transcript.generation.clone(),
                                 sequence: transcript.sequence, change,
-                            };
+                            } };
                             let _ = content.events.send(Arc::new(message));
                         }
                         Ok(None) => {}
@@ -1707,10 +1717,7 @@ impl AgentManager {
             QueueState::from_pi(data)?,
         )?;
         if let Some(previous) = content.transcript.as_ref() { next.retain_interrupted(previous); }
-        if content.events.receiver_count() > 0 {
-            let message = ServerMessage::TranscriptSnapshot { session_id: id.to_owned(), snapshot: next.snapshot() };
-            let _ = content.events.send(Arc::new(message));
-        }
+        let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id: Some(id.to_owned()) }));
         content.transcript = Some(next);
         content.recovering = false;
         Ok(())
