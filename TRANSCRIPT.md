@@ -232,6 +232,14 @@ The store is scoped by connection identity and chat; switching servers cannot
 mix their data. An ordered working view and ID index reference those same entries.
 The view is not another writable transcript cache.
 
+Session metadata uses a separate `sessions` table keyed by connection and chat ID,
+with typed columns for title, status, model, lineage, timestamps and context usage.
+Individual state updates write only the matching row. Full session lists reconcile
+metadata and order in one transaction, skipping unchanged rows. Removing a row
+from a list does not delete its retained transcript. Schema 2 atomically imports
+the old summary-list JSON once, preserving all other records and attachment bytes.
+This changes neither the transcript representation nor the wire protocol.
+
 Snapshots reconcile by ID. A saved entry's streamId replaces its provisional
 entry explicitly. An abandoned provisional entry keeps its received text and is
 marked interrupted; it is not represented as saved Pi history. Content omitted

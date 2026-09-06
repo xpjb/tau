@@ -3,6 +3,7 @@ package app.tau
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.encodeToString
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -11,6 +12,97 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class TranscriptStoreTest {
+    @Test
+    fun migratesSessionMetadataAndWritesOnlyChangedRows() = runBlocking {
+        val root = Files.createTempDirectory("tau-session-rows-").toFile()
+        val path = root.resolve("transcript.db").path
+        val key = ChatKey("account-a", "chat")
+        val first = SessionSummary(key.session, "Chat 🧠", SessionStatus.Idle, "Ready", SessionModel("provider", "model"), "parent", 1, 2, ContextUsage(64000, 200000))
+        val sessions = listOf(first) + (1..200).map { first.copy(id = "other-$it", model = null, parentId = null, contextUsage = null) }
+        val other = first.copy(title = "Other account", contextUsage = ContextUsage(null, 128000))
+        val entry = TranscriptEntry("saved", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Retained history")))
+        var store = TranscriptStore({ path })
+        try {
+            BundledSQLiteDriver().open(path).use { db ->
+                for (sql in listOf(
+                    "CREATE TABLE records (connection TEXT NOT NULL, chat TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(connection,chat,kind,id))",
+                    "CREATE TABLE files (connection TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(connection,chat,id))",
+                    "PRAGMA user_version=1",
+                )) db.prepare(sql).use { it.step() }
+                db.prepare("INSERT INTO records VALUES (?,?,?,?,?)").use { statement ->
+                    for (row in listOf(
+                        listOf(key.connection, "", "connection", "sessions", TauJson.encodeToString(sessions)),
+                        listOf("account-b", "", "connection", "sessions", TauJson.encodeToString(listOf(other))),
+                        listOf(key.connection, "", "connection", "selected", key.session),
+                        listOf(key.connection, key.session, "entry", entry.id, TauJson.encodeToString(entry)),
+                        listOf(key.connection, key.session, "position", "current", TauJson.encodeToString(StoredPosition("g", 4, entry.id))),
+                        listOf(key.connection, key.session, "preference", "draft", "Retained draft"),
+                    )) {
+                        row.forEachIndexed { index, value -> statement.bindText(index + 1, value) }
+                        statement.step(); statement.reset()
+                    }
+                }
+                db.prepare("INSERT INTO files VALUES ('account-a','chat','file','','kept.txt',4,?)").use { it.bindBlob(1, byteArrayOf(1, 2, 3, 4)); it.step() }
+                db.prepare("CREATE TRIGGER reject_import BEFORE DELETE ON records WHEN OLD.kind='connection' AND OLD.id='sessions' BEGIN SELECT RAISE(ABORT,'injected import failure'); END").use { it.step() }
+                assertFailsWith<Exception> { store.loadConnection(key.connection) }
+                db.prepare("PRAGMA user_version").use { it.step(); assertEquals(1, it.getInt(0)) }
+                db.prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sessions'").use { it.step(); assertEquals(0, it.getInt(0)) }
+                db.prepare("DROP TRIGGER reject_import").use { it.step() }
+                assertEquals(StoredConnection(sessions, key.session), store.loadConnection(key.connection))
+                assertEquals(listOf(other), store.loadConnection("account-b").sessions)
+                db.prepare("PRAGMA user_version").use { it.step(); assertEquals(2, it.getInt(0)) }
+                db.prepare("SELECT count(*) FROM records WHERE kind='connection' AND id='sessions'").use { it.step(); assertEquals(0, it.getInt(0)) }
+                for (table in listOf("records", "files")) for (operation in listOf("INSERT", "UPDATE", "DELETE")) {
+                    db.prepare("CREATE TRIGGER protect_${table}_$operation BEFORE $operation ON $table BEGIN SELECT RAISE(ABORT,'unrelated data write'); END").use { it.step() }
+                }
+                db.prepare("CREATE TABLE writes (operation TEXT,connection TEXT,id TEXT)").use { it.step() }
+                for (operation in listOf("INSERT", "UPDATE", "DELETE")) {
+                    val row = if (operation == "DELETE") "OLD" else "NEW"
+                    db.prepare("CREATE TRIGGER count_$operation AFTER $operation ON sessions BEGIN INSERT INTO writes VALUES ('$operation',$row.connection,$row.id); END").use { it.step() }
+                }
+                store.saveSessions(key.connection, sessions)
+                db.prepare("SELECT count(*) FROM writes").use { it.step(); assertEquals(0, it.getInt(0)) }
+                val state = SessionState(key.session, SessionStatus.Running, "Generating", ContextUsage(null, 128000))
+                store.updateSessionState(key.connection, state)
+                store.updateSessionState(key.connection, state)
+                store.updateSessionState(key.connection, state.copy(sessionId = "missing"))
+                var expected = listOf(first.copy(status = state.status, detail = state.detail, contextUsage = state.contextUsage)) + sessions.drop(1)
+                store.saveSessions(key.connection, expected)
+                db.prepare("SELECT operation,connection,id FROM writes").use {
+                    assertTrue(it.step()); assertEquals("UPDATE", it.getText(0)); assertEquals(key.connection, it.getText(1)); assertEquals(key.session, it.getText(2)); assertFalse(it.step())
+                }
+                assertEquals(expected, store.loadConnection(key.connection).sessions)
+                assertEquals(listOf(other), store.loadConnection("account-b").sessions)
+                db.prepare("DELETE FROM writes").use { it.step() }
+                db.prepare("CREATE TRIGGER reject_title BEFORE UPDATE ON sessions WHEN NEW.title='Rejected title' BEGIN SELECT RAISE(ABORT,'injected snapshot failure'); END").use { it.step() }
+                assertFailsWith<Exception> { store.saveSessions(key.connection, listOf(expected.first().copy(title = "Rejected title")) + expected.drop(1).dropLast(1)) }
+                assertEquals(expected, store.loadConnection(key.connection).sessions)
+                db.prepare("SELECT count(*) FROM writes").use { it.step(); assertEquals(0, it.getInt(0)) }
+                db.prepare("DROP TRIGGER reject_title").use { it.step() }
+                expected = listOf(expected.first().copy(title = "Renamed", model = null, parentId = null, contextUsage = null)) + expected.drop(1).dropLast(1) + other.copy(id = "new")
+                store.saveSessions(key.connection, expected)
+                db.prepare("SELECT count(*) FROM writes").use { it.step(); assertEquals(3, it.getInt(0)) }
+                store.saveSessions(key.connection, expected)
+                db.prepare("SELECT count(*) FROM writes").use { it.step(); assertEquals(3, it.getInt(0)) }
+                expected = expected.reversed()
+                store.saveSessions(key.connection, expected)
+                store.close()
+                store = TranscriptStore({ path })
+                assertEquals(StoredConnection(expected, key.session), store.loadConnection(key.connection))
+                assertEquals(listOf(entry), store.snapshot(key).entries)
+                assertEquals(4L, store.snapshot(key).sequence)
+                assertEquals("Retained draft", store.chat(key).preferences["draft"])
+                assertTrue(store.readFile(key, store.chat(key).files.single()).bytes.contentEquals(byteArrayOf(1, 2, 3, 4)))
+                store.saveSessions(key.connection, emptyList())
+                assertTrue(store.loadConnection(key.connection).sessions.isEmpty())
+                assertEquals(listOf(entry), store.snapshot(key).entries)
+                assertEquals(listOf(other), store.loadConnection("account-b").sessions)
+                store.removeChat(ChatKey("account-b", other.id))
+                assertTrue(store.loadConnection("account-b").sessions.isEmpty())
+            }
+        } finally { store.close(); root.deleteRecursively() }
+    }
+
     @Test
     fun retainsBranchesThinkingIdenticalPendingAndControlsAcrossRecreation() = runBlocking {
         val root = Files.createTempDirectory("tau-store-").toFile()

@@ -2,6 +2,7 @@ package app.tau
 
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -29,13 +30,28 @@ class TranscriptStore(
                     opened.execSQL("PRAGMA synchronous=FULL")
                     opened.execSQL("PRAGMA busy_timeout=5000")
                     val version = opened.prepare("PRAGMA user_version").use { it.step(); it.getInt(0) }
-                    check(version <= 1) { "This transcript store needs a newer Tau client" }
-                    opened.transaction {
+                    check(version <= 2) { "This transcript store needs a newer Tau client" }
+                    if (version < 2) opened.transaction {
                         opened.execSQL("CREATE TABLE IF NOT EXISTS records (connection TEXT NOT NULL, chat TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(connection,chat,kind,id))")
                         opened.execSQL("CREATE TABLE IF NOT EXISTS files (connection TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(connection,chat,id))")
                         opened.execSQL("CREATE INDEX IF NOT EXISTS records_order ON records(connection,chat,kind)")
                         opened.execSQL("CREATE INDEX IF NOT EXISTS records_requests ON records(connection,id) WHERE kind IN ('pending','control')")
-                        opened.execSQL("PRAGMA user_version=1")
+                        opened.execSQL("""
+                            CREATE TABLE sessions (
+                                connection TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL,
+                                title TEXT NOT NULL, status TEXT NOT NULL, detail TEXT,
+                                provider TEXT, model_id TEXT, parent_id TEXT,
+                                created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+                                context_tokens INTEGER, context_window INTEGER,
+                                PRIMARY KEY(connection,id)
+                            )
+                        """.trimIndent())
+                        opened.execSQL("CREATE INDEX sessions_order ON sessions(connection,position)")
+                        opened.prepare("SELECT connection,value FROM records WHERE chat='' AND kind='connection' AND id='sessions'").use { statement ->
+                            while (statement.step()) opened.writeSessions(statement.getText(0), TauJson.decodeFromString(statement.getText(1)))
+                        }
+                        opened.execSQL("DELETE FROM records WHERE chat='' AND kind='connection' AND id='sessions'")
+                        opened.execSQL("PRAGMA user_version=2")
                     }
                     connection = opened
                 } catch (error: Throwable) { opened.close(); throw error }
@@ -45,12 +61,51 @@ class TranscriptStore(
     }
 
     suspend fun loadConnection(identity: String): StoredConnection = access { db ->
-        val records = db.records(ChatKey(identity, ""), "connection").toMap()
-        StoredConnection(records["sessions"]?.let { TauJson.decodeFromString(it) } ?: emptyList(), records["selected"])
+        val sessions = db.prepare("""
+            SELECT id,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window
+            FROM sessions WHERE connection=? ORDER BY position
+        """.trimIndent()).use { statement ->
+            statement.bindText(1, identity)
+            buildList {
+                while (statement.step()) add(SessionSummary(
+                    id = statement.getText(0), title = statement.getText(1), status = SessionStatus.valueOf(statement.getText(2)),
+                    detail = if (statement.isNull(3)) null else statement.getText(3),
+                    model = if (statement.isNull(4)) null else SessionModel(statement.getText(4), statement.getText(5)),
+                    parentId = if (statement.isNull(6)) null else statement.getText(6),
+                    createdAtMs = statement.getLong(7), updatedAtMs = statement.getLong(8),
+                    contextUsage = if (statement.isNull(10)) null else ContextUsage(
+                        if (statement.isNull(9)) null else statement.getLong(9), statement.getLong(10)),
+                ))
+            }
+        }
+        StoredConnection(sessions, db.records(ChatKey(identity, ""), "connection").firstOrNull { it.first == "selected" }?.second)
     }
 
     suspend fun saveSessions(identity: String, sessions: List<SessionSummary>) = access { db ->
-        db.write(ChatKey(identity, ""), "connection", listOf("sessions" to TauJson.encodeToString(sessions)))
+        val ids = sessions.mapTo(mutableSetOf()) { it.id }
+        require(ids.size == sessions.size) { "Duplicate session identity" }
+        db.transaction {
+            val removed = db.prepare("SELECT id FROM sessions WHERE connection=?").use { statement ->
+                statement.bindText(1, identity)
+                buildList { while (statement.step()) { val id = statement.getText(0); if (id !in ids) add(id) } }
+            }
+            db.prepare("DELETE FROM sessions WHERE connection=? AND id=?").use { statement ->
+                statement.bindText(1, identity)
+                for (id in removed) { statement.bindText(2, id); statement.step(); statement.reset() }
+            }
+            db.writeSessions(identity, sessions)
+        }
+    }
+
+    suspend fun updateSessionState(identity: String, state: SessionState) = access { db ->
+        db.prepare("""
+            UPDATE sessions SET status=?1,detail=?2,context_tokens=?3,context_window=?4
+            WHERE connection=?5 AND id=?6 AND (status,detail,context_tokens,context_window) IS NOT (?1,?2,?3,?4)
+        """.trimIndent()).use { statement ->
+            statement.bindText(1, state.status.name); statement.bindTextOrNull(2, state.detail)
+            statement.bindLongOrNull(3, state.contextUsage?.tokens); statement.bindLongOrNull(4, state.contextUsage?.contextWindow)
+            statement.bindText(5, identity); statement.bindText(6, state.sessionId); statement.step()
+        }
     }
 
     suspend fun select(key: ChatKey) = access { db ->
@@ -440,6 +495,9 @@ class TranscriptStore(
             for (table in listOf("records", "files")) db.prepare("DELETE FROM $table WHERE connection=? AND chat=?").use { statement ->
                 statement.bindText(1, key.connection); statement.bindText(2, key.session); statement.step()
             }
+            db.prepare("DELETE FROM sessions WHERE connection=? AND id=?").use { statement ->
+                statement.bindText(1, key.connection); statement.bindText(2, key.session); statement.step()
+            }
         }
         chats.remove(key)
     }
@@ -472,6 +530,33 @@ private fun reconcileControls(previous: List<PendingControl>, queue: QueueState,
     else if (replaced && record.status in setOf("sending", "accepted", "waiting", "applying")) record.copy(status = "unconfirmed")
     else record
 }
+
+private fun SQLiteConnection.writeSessions(identity: String, sessions: List<SessionSummary>) {
+    prepare("""
+        INSERT INTO sessions (connection,id,position,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(connection,id) DO UPDATE SET
+            position=excluded.position,title=excluded.title,status=excluded.status,detail=excluded.detail,
+            provider=excluded.provider,model_id=excluded.model_id,parent_id=excluded.parent_id,
+            created_at_ms=excluded.created_at_ms,updated_at_ms=excluded.updated_at_ms,
+            context_tokens=excluded.context_tokens,context_window=excluded.context_window
+        WHERE (position,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window)
+            IS NOT (excluded.position,excluded.title,excluded.status,excluded.detail,excluded.provider,excluded.model_id,excluded.parent_id,
+                excluded.created_at_ms,excluded.updated_at_ms,excluded.context_tokens,excluded.context_window)
+    """.trimIndent()).use { statement ->
+        for ((index, session) in sessions.withIndex()) {
+            statement.bindText(1, identity); statement.bindText(2, session.id); statement.bindInt(3, index)
+            statement.bindText(4, session.title); statement.bindText(5, session.status.name); statement.bindTextOrNull(6, session.detail)
+            statement.bindTextOrNull(7, session.model?.provider); statement.bindTextOrNull(8, session.model?.modelId); statement.bindTextOrNull(9, session.parentId)
+            statement.bindLong(10, session.createdAtMs); statement.bindLong(11, session.updatedAtMs)
+            statement.bindLongOrNull(12, session.contextUsage?.tokens); statement.bindLongOrNull(13, session.contextUsage?.contextWindow)
+            statement.step(); statement.reset()
+        }
+    }
+}
+
+private fun SQLiteStatement.bindTextOrNull(index: Int, value: String?) { if (value == null) bindNull(index) else bindText(index, value) }
+private fun SQLiteStatement.bindLongOrNull(index: Int, value: Long?) { if (value == null) bindNull(index) else bindLong(index, value) }
 
 private fun SQLiteConnection.execSQL(sql: String) { prepare(sql).use { it.step() } }
 
