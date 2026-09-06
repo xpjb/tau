@@ -251,7 +251,6 @@ class TauController(
         val chat = state.value.transcripts[sessionId] ?: return
         launch {
             store.dismissPending(chat.key, id)
-            mutableState.update { it.copy(notice = "Local copy removed. Pi was not stopped.") }
         }
     }
 

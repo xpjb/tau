@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -97,6 +99,11 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -131,12 +138,15 @@ import io.ktor.http.encodeURLPathPart
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okio.Path.Companion.toPath
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.semantics.heading
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -553,6 +563,54 @@ private fun ConnectionDot(status: ConnectionStatus) {
     )
 }
 
+private class ExpansionPin {
+    var key: String? = null
+    var y = 0f
+    var correcting = false
+}
+
+@Composable
+private fun ExpansionLabel(
+    label: String,
+    expanded: Boolean,
+    preference: String,
+    sessionId: String,
+    controller: TauController,
+    listState: LazyListState,
+    pin: ExpansionPin,
+    error: Boolean = false,
+) {
+    var coordinates by remember(preference) { mutableStateOf<LayoutCoordinates?>(null) }
+    val scope = rememberCoroutineScope()
+    DisableSelection {
+        Text(
+            (if (expanded) "▾ " else "▸ ") + label,
+            modifier = Modifier.fillMaxWidth().onGloballyPositioned { current ->
+                coordinates = current
+                if (pin.key == preference && !pin.correcting && abs(pin.y - current.localToRoot(Offset.Zero).y) > 0.5f) {
+                    pin.correcting = true
+                    scope.launch {
+                        try {
+                            withFrameNanos {}
+                            val anchor = coordinates
+                            if (pin.key == preference && anchor?.isAttached == true) {
+                                val delta = pin.y - anchor.localToRoot(Offset.Zero).y
+                                val consumed = listState.scrollBy(delta)
+                                if (abs(consumed - delta) > 0.5f) pin.key = null
+                            }
+                        } finally { pin.correcting = false }
+                    }
+                }
+            }.clickable {
+                coordinates?.takeIf { it.isAttached }?.let { pin.key = preference; pin.y = it.localToRoot(Offset.Zero).y }
+                controller.setExpanded(sessionId, preference, !expanded)
+            }.padding(vertical = 4.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 @Composable
 private fun RetainedText(text: String, markdown: Boolean, small: Boolean = false, code: Boolean = false) {
     val colors = MaterialTheme.colorScheme
@@ -823,7 +881,8 @@ private fun ChatPanel(
     val session = state.sessions.firstOrNull { it.id == sessionId }
     if (sessionId == null || session == null) {
         Box(modifier, contentAlignment = Alignment.Center) {
-            Text(if (state.restoring) "Restoring local chats…" else "Select or create a chat.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (state.restoring) CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
+            else Text("Select or create a chat.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         return
     }
@@ -967,16 +1026,23 @@ private fun ChatPanel(
             false
         }
     }
+    val presentation by remember(chat) {
+        derivedStateOf {
+            val rows = chat.rows.toList()
+            Snapshot.withoutReadObservation { presentTranscript(rows) }
+        }
+    }
+    val expansionPin = remember(chat) { ExpansionPin() }
     val savedScroll = remember(chat) {
         runCatching { TauJson.decodeFromString<ScrollPosition>(chat.preferences["scroll"].orEmpty()) }.getOrDefault(ScrollPosition())
     }
     val initialIndex = remember(chat) {
         if (savedScroll.follow || savedScroll.key == null) 0 else {
             val pendingIndex = chat.pending.indexOfFirst { "request:${it.requestId}" == savedScroll.key }
-            val entryIndex = chat.rows.indexOfFirst { it.key == savedScroll.key }
+            val entryIndex = presentation.groups.indexOfFirst { group -> group.rows.any { it.key == savedScroll.key } }
             when {
                 pendingIndex >= 0 -> 1 + chat.pending.lastIndex - pendingIndex
-                entryIndex >= 0 -> 1 + chat.pending.size + chat.rows.lastIndex - entryIndex
+                entryIndex >= 0 -> 1 + chat.pending.size + presentation.groups.lastIndex - entryIndex
                 else -> 0
             }
         }
@@ -1009,7 +1075,16 @@ private fun ChatPanel(
         }
     }
 
-    Box(modifier.onFilesDropped(canAttach, { draggingFiles = it }, controller::attachDroppedFiles)) {
+    Box(modifier.onFilesDropped(canAttach, { draggingFiles = it }, controller::attachDroppedFiles)
+        .onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown) expansionPin.key = null; false }
+        .pointerInput(expansionPin) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    if (event.type == PointerEventType.Press || event.type == PointerEventType.Scroll) expansionPin.key = null
+                }
+            }
+        }) {
         Column(Modifier.fillMaxSize()) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -1043,17 +1118,14 @@ private fun ChatPanel(
             val control = queue.control
             val controlsReady = chat.synchronized && queue.available && state.connectionStatus == ConnectionStatus.Connected
             val waiting = control?.status == "waiting" || control?.status == "applying"
-            if (!chat.synchronized || state.connectionStatus != ConnectionStatus.Connected || queue.paused || waiting) {
+            if (queue.paused || waiting) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         when {
-                            state.connectionStatus != ConnectionStatus.Connected -> "Offline · showing retained content"
-                            !chat.synchronized -> "Synchronizing · keeping retained content visible"
-                            control?.status == "applying" -> "Applying queue control"
-                            control?.status == "waiting" && control.boundary == "reasoning_checkpoint" -> "Waiting for a reusable thinking checkpoint or the completed turn"
-                            control?.status == "waiting" -> "Waiting for the turn and its tools to finish"
-                            queue.runId != null -> "Later messages held · selected work is running"
-                            else -> "Queue paused · later messages stay held"
+                            control?.status == "applying" -> "Applying"
+                            control?.status == "waiting" && control.boundary == "reasoning_checkpoint" -> "Waiting for checkpoint"
+                            control?.status == "waiting" -> "Waiting for turn"
+                            else -> "Queue paused"
                         },
                         modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1070,7 +1142,7 @@ private fun ChatPanel(
             }
             chat.controls.filter { it.status == "unconfirmed" || it.status == "failed" }.takeLast(3).forEach { pending ->
                 Text(
-                    if (pending.status == "unconfirmed") "Queue control unconfirmed · it will not be repeated automatically"
+                    if (pending.status == "unconfirmed") "Queue control unconfirmed"
                     else "Queue control failed · ${pending.detail.orEmpty()}",
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 3.dp),
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error,
@@ -1130,13 +1202,11 @@ private fun ChatPanel(
                                                             prefix.map { QueueRef(it.requestId, it.revision) }, boundary))
                                                     },
                                                 )
-                                                Text("Selected prefix runs together; later messages stay held.", Modifier.padding(horizontal = 12.dp, vertical = 6.dp).widthIn(max = 280.dp),
-                                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                             } else if (outgoing.status == SendStatus.Rejected) {
                                                 DropdownMenuItem(text = { Text("Restore to draft") }, onClick = { menu = null; controller.restorePending(sessionId, outgoing.requestId) })
                                                 DropdownMenuItem(text = { Text("Delete local copy") }, onClick = { menu = null; controller.dismissPending(sessionId, outgoing.requestId) })
                                             } else if (outgoing.status == SendStatus.Unconfirmed) {
-                                                DropdownMenuItem(text = { Text("Dismiss local copy · does not stop Pi") }, onClick = { menu = null; controller.dismissPending(sessionId, outgoing.requestId) })
+                                                DropdownMenuItem(text = { Text("Dismiss local copy") }, onClick = { menu = null; controller.dismissPending(sessionId, outgoing.requestId) })
                                             }
                                         }
                                     }
@@ -1144,15 +1214,13 @@ private fun ChatPanel(
                             }
                             if (PlatformServices.platformName == "android") DisableSelection { pendingBubble() } else pendingBubble()
                         }
-                        items(count = chat.rows.size, key = { index -> chat.rows[chat.rows.lastIndex - index].key }) { index ->
-                            val row = chat.rows[chat.rows.lastIndex - index]
-                            val message = row.entry
-                            val attachmentDownload = state.attachmentDownloads[AttachmentDownloadKey(sessionId, message.id)]
+                        items(count = presentation.groups.size, key = { index -> presentation.groups[presentation.groups.lastIndex - index].key }) { index ->
+                            val group = presentation.groups[presentation.groups.lastIndex - index]
+                            val row = group.rows.first()
+                            val message = group.rows.last().entry
+                            val parts = transcriptParts(group, presentation)
                             var menuExpanded by remember(row.key) { mutableStateOf(false) }
                             var menuPointer by remember(row.key) { mutableStateOf<Offset?>(null) }
-                            val detailsKey = "details:${row.key}"
-                            val detailsExpanded = chat.preferences["expanded:$detailsKey"] == "true"
-                            val hasDetails = message.role == EntryRole.Tool || message.content.any { it.kind == ContentKind.Thinking || it.kind == ContentKind.Tool }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = if (message.role == EntryRole.User) Arrangement.End else Arrangement.Start) {
                                 Box(Modifier.fillMaxWidth(0.9f)) {
                                     Card(
@@ -1166,46 +1234,64 @@ private fun ChatPanel(
                                             .combinedClickable(onClick = {}, onLongClick = { menuPointer = null; menuExpanded = true }),
                                     ) {
                                         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            if (hasDetails) DisableSelection {
-                                                Text(
-                                                    (if (detailsExpanded) "▾ " else "▸ ") + if (message.role == EntryRole.Tool) "Tool output · ${message.toolName ?: "tool"}" else "Details",
-                                                    modifier = Modifier.fillMaxWidth().clickable { controller.setExpanded(sessionId, detailsKey, !detailsExpanded) }.padding(vertical = 4.dp),
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    color = if (message.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                )
-                                            }
-                                            message.content.forEachIndexed { contentIndex, content ->
-                                                when (content.kind) {
-                                                    ContentKind.Text -> if (content.text.isNotEmpty() && (message.role != EntryRole.Tool || detailsExpanded)) RetainedText(
-                                                        content.text, markdown = message.phase == EntryPhase.Saved && message.role != EntryRole.User && message.role != EntryRole.Tool,
-                                                        small = message.role == EntryRole.Tool, code = message.role == EntryRole.Tool,
-                                                    )
-                                                    ContentKind.Thinking -> if (detailsExpanded && content.text.isNotEmpty()) RetainedText(content.text, markdown = message.phase == EntryPhase.Saved, small = true)
-                                                    ContentKind.Tool -> if (detailsExpanded) {
-                                                        val toolKey = "tool:${row.key}:$contentIndex"
-                                                        val expanded = chat.preferences["expanded:$toolKey"] == "true"
-                                                        Surface(color = MaterialTheme.colorScheme.background.copy(alpha = 0.52f), shape = MaterialTheme.shapes.small) {
-                                                            Column(Modifier.fillMaxWidth().padding(8.dp)) {
-                                                                DisableSelection {
-                                                                    Text((if (expanded) "▾ " else "▸ ") + "Tool input · ${content.toolName ?: "tool"}",
-                                                                        Modifier.fillMaxWidth().clickable { controller.setExpanded(sessionId, toolKey, !expanded) }, style = MaterialTheme.typography.labelMedium)
+                                            parts.forEach { part ->
+                                                when (part) {
+                                                    is TranscriptPart.Text -> {
+                                                        val source = part.row.entry
+                                                        val content = source.content[part.index]
+                                                        RetainedText(if (content.kind == ContentKind.Image) "[Image]" else content.text,
+                                                            markdown = source.phase == EntryPhase.Saved && source.role != EntryRole.User)
+                                                    }
+                                                    is TranscriptPart.Details -> key(part.key) {
+                                                        val expanded = (chat.preferences["expanded:${part.key}"]
+                                                            ?: chat.preferences["expanded:details:${part.blocks.first().row.key}"]) == "true"
+                                                        ExpansionLabel("Details", expanded, part.key, sessionId, controller, listState, expansionPin)
+                                                        if (expanded) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                                            part.blocks.forEach { detail -> key(detail.key) {
+                                                                val source = detail.row.entry
+                                                                val content = source.content.getOrNull(detail.index)
+                                                                if (content?.kind == ContentKind.Thinking) {
+                                                                    RetainedText(content.text, markdown = source.phase == EntryPhase.Saved, small = true)
+                                                                } else {
+                                                                    val result = detail.result?.entry
+                                                                    val toolExpanded = chat.preferences["expanded:${detail.key}"] == "true"
+                                                                    Surface(color = MaterialTheme.colorScheme.background.copy(alpha = 0.52f), shape = MaterialTheme.shapes.small) {
+                                                                        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+                                                                            ExpansionLabel("Tool · ${content?.toolName ?: source.toolName ?: "tool"}", toolExpanded, detail.key,
+                                                                                sessionId, controller, listState, expansionPin, error = result?.isError == true)
+                                                                            if (toolExpanded) {
+                                                                                val sections = listOf("Input" to content?.text,
+                                                                                    (if (result?.isError == true) "Error" else "Output") to result?.content?.filter { it.kind == ContentKind.Text }?.joinToString("\n\n") { it.text })
+                                                                                sections.forEach { (label, text) ->
+                                                                                    if (!text.isNullOrEmpty()) {
+                                                                                        val sectionKey = "${detail.key}:$label"
+                                                                                        val large = text.length > 1200 || text.count { it == '\n' } >= 16
+                                                                                        val show = !large || chat.preferences["expanded:$sectionKey"] == "true"
+                                                                                        if (large) ExpansionLabel(label, show, sectionKey, sessionId, controller, listState, expansionPin, error = label == "Error")
+                                                                                        else DisableSelection { Text(label, style = MaterialTheme.typography.labelSmall,
+                                                                                            color = if (label == "Error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant) }
+                                                                                        if (show) RetainedText(text, markdown = false, small = true, code = true)
+                                                                                        Spacer(Modifier.height(6.dp))
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
                                                                 }
-                                                                if (expanded) RetainedText(content.text, markdown = false, small = true, code = true)
-                                                            }
+                                                            } }
                                                         }
                                                     }
-                                                    ContentKind.Image -> if (message.attachment == null) Text("[Image]", style = MaterialTheme.typography.labelSmall)
-                                                    ContentKind.Hidden -> Unit
-                                                }
-                                            }
-                                            if (message.phase == EntryPhase.Live && message.content.isEmpty()) Text("Working…", style = MaterialTheme.typography.labelSmall)
-                                            if (message.phase == EntryPhase.Interrupted || message.stopReason == "aborted" || message.stopReason == "error" || message.isError) {
-                                                Text(when {
-                                                    message.phase == EntryPhase.Interrupted -> "Interrupted · received content retained"
-                                                    message.stopReason == "aborted" -> "Stopped · received content retained"
-                                                    else -> message.errorMessage ?: "Response failed"
-                                                }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
-                                            }
+                                                    is TranscriptPart.Failure -> {
+                                                        val source = part.row.entry
+                                                        Text(when {
+                                                            source.phase == EntryPhase.Interrupted -> "Interrupted"
+                                                            source.stopReason == "aborted" -> "Stopped"
+                                                            else -> source.errorMessage ?: "Response failed"
+                                                        }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                                                    }
+                                                    is TranscriptPart.Attachment -> key(part.row.key) {
+                                                        val message = part.row.entry
+                                                        val attachmentDownload = state.attachmentDownloads[AttachmentDownloadKey(sessionId, message.id)]
                                             message.attachment?.let { attachment ->
                                                 DisableSelection {
                                                     Column(Modifier.fillMaxWidth()) {
@@ -1506,6 +1592,10 @@ private fun ChatPanel(
                                                     }
                                                 }
                                             }
+                                                    }
+                                                }
+                                            }
+                                            if (parts.isEmpty() && message.phase == EntryPhase.Live) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                                             val timestamp = message.timestampMs ?: message.timestamp?.let { runCatching { Instant.parse(it).toEpochMilliseconds() }.getOrNull() }
                                             timestamp?.let { Text(PlatformServices.formatMessageTime(it), Modifier.align(Alignment.End), style = MaterialTheme.typography.labelSmall, color = LocalContentColor.current.copy(alpha = 0.62f)) }
                                         }
@@ -1513,7 +1603,7 @@ private fun ChatPanel(
                                     PositionedDropdownMenu(menuExpanded, menuPointer, { menuExpanded = false; menuPointer = null }) {
                                         val selectedText = transcriptSelectionState.selectedTexts.joinToString("\n") { it.text }
                                         DropdownMenuItem(text = { Text(if (selectedText.isEmpty()) "Copy message" else "Copy selection") }, onClick = {
-                                            PlatformServices.copyText(selectedText.ifEmpty { message.content.filter { it.kind != ContentKind.Hidden }.joinToString("\n\n") { it.text } })
+                                            PlatformServices.copyText(selectedText.ifEmpty { group.rows.flatMap { it.entry.content }.filter { it.kind == ContentKind.Text }.joinToString("\n\n") { it.text } })
                                             menuExpanded = false
                                         })
                                         if (message.phase == EntryPhase.Saved) DropdownMenuItem(text = { Text("Fork here") }, enabled = state.connectionStatus == ConnectionStatus.Connected,
@@ -1522,10 +1612,13 @@ private fun ChatPanel(
                                 }
                             }
                         }
-                        if (chat.rows.isEmpty() && chat.pending.isEmpty()) item(key = "empty") {
-                            Text(if (chat.synchronized) "Start a conversation with Pi." else "Loading retained chat…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (chat.synchronized && chat.rows.isEmpty() && chat.pending.isEmpty()) item(key = "empty") {
+                            Text("Start a conversation with Pi.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
+                }
+                if (!chat.synchronized && chat.rows.isEmpty() && chat.pending.isEmpty()) {
+                    CircularProgressIndicator(Modifier.align(Alignment.Center).size(28.dp), strokeWidth = 2.dp)
                 }
                 TranscriptScrollbar(listState, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(horizontal = 2.dp, vertical = 4.dp))
                 if (showScrollToBottom) FilledTonalIconButton(
