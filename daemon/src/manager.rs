@@ -83,11 +83,22 @@ struct SessionRuntime {
     state: StdRwLock<RuntimeState>,
 }
 
-#[derive(Default)]
 struct SessionContent {
     process: Option<Arc<RpcProcess>>,
     transcript: Option<Transcript>,
     recovering: bool,
+    events: broadcast::Sender<Arc<ServerMessage>>,
+}
+
+impl Default for SessionContent {
+    fn default() -> Self {
+        Self { process: None, transcript: None, recovering: false, events: broadcast::channel(EVENT_BUFFER).0 }
+    }
+}
+
+pub struct SessionFeed {
+    pub initial: Vec<ServerMessage>,
+    pub events: broadcast::Receiver<Arc<ServerMessage>>,
 }
 
 #[derive(Clone, Default)]
@@ -193,7 +204,7 @@ impl AgentManager {
         Ok(id)
     }
 
-    pub async fn open_session(&self, id: &str) -> Result<()> {
+    pub async fn open_session(&self, id: &str) -> Result<SessionFeed> {
         let runtime = self.runtime(id).await?;
         let pending = self
             .inner
@@ -204,12 +215,9 @@ impl AgentManager {
             .filter(|((session_id, _), _)| session_id == id)
             .map(|(_, pending)| pending.request.clone())
             .collect::<Vec<_>>();
-        for request in pending {
-            let _ = self.inner.events.send(ServerMessage::ExtensionUi {
-                session_id: id.to_owned(),
-                request: Box::new(request),
-            });
-        }
+        let mut initial = pending.into_iter().map(|request| ServerMessage::ExtensionUi {
+            session_id: id.to_owned(), request: Box::new(request),
+        }).collect::<Vec<_>>();
         let _guard = runtime.operation.lock().await;
         let mut content = runtime.content.lock().await;
         if content.transcript.is_none() {
@@ -221,19 +229,20 @@ impl AgentManager {
         if content.recovering && let Some(process) = content.process.as_ref() {
             process.notify(json!({ "type": "get_transcript" })).await?;
         }
-        let _ = self.inner.events.send(ServerMessage::TranscriptSnapshot {
+        let events = content.events.subscribe();
+        initial.push(ServerMessage::TranscriptSnapshot {
             session_id: id.to_owned(),
             snapshot: content.transcript.as_ref().expect("transcript was loaded").snapshot(),
         });
         drop(content);
         let state = runtime.snapshot();
-        let _ = self.inner.events.send(ServerMessage::SessionState {
+        initial.push(ServerMessage::SessionState {
             session_id: id.to_owned(),
             status: state.status,
             detail: state.detail,
             context_usage: state.context_usage,
         });
-        Ok(())
+        Ok(SessionFeed { initial, events })
     }
 
     pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
@@ -1531,10 +1540,11 @@ impl AgentManager {
                     }.await;
                     match result {
                         Ok(Some(change)) => {
-                            let _ = self.inner.events.send(ServerMessage::TranscriptUpdate {
+                            let message = ServerMessage::TranscriptUpdate {
                                 session_id: id.clone(), generation: transcript.generation.clone(),
                                 sequence: transcript.sequence, change,
-                            });
+                            };
+                            let _ = content.events.send(Arc::new(message));
                         }
                         Ok(None) => {}
                         Err(error) => {
@@ -1668,10 +1678,11 @@ impl AgentManager {
             let change = TranscriptChange::Interrupted;
             transcript.apply(&change, None).expect("interrupting entries is infallible");
             transcript.source = None;
-            let _ = self.inner.events.send(ServerMessage::TranscriptUpdate {
+            let message = ServerMessage::TranscriptUpdate {
                 session_id: id.to_owned(), generation: transcript.generation.clone(),
                 sequence: transcript.sequence, change,
-            });
+            };
+            let _ = content.events.send(Arc::new(message));
         }
     }
 
@@ -1696,10 +1707,12 @@ impl AgentManager {
             QueueState::from_pi(data)?,
         )?;
         if let Some(previous) = content.transcript.as_ref() { next.retain_interrupted(previous); }
-        let message = ServerMessage::TranscriptSnapshot { session_id: id.to_owned(), snapshot: next.snapshot() };
+        if content.events.receiver_count() > 0 {
+            let message = ServerMessage::TranscriptSnapshot { session_id: id.to_owned(), snapshot: next.snapshot() };
+            let _ = content.events.send(Arc::new(message));
+        }
         content.transcript = Some(next);
         content.recovering = false;
-        let _ = self.inner.events.send(message);
         Ok(())
     }
 

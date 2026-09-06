@@ -330,3 +330,28 @@ Rust through cargo nextest and Clippy. Run Pi's dependency, import, entry-graph,
 shrinkwrap, type and browser checks read-only. Its default check/pre-commit invokes
 an automatic formatter; replace that invocation with equivalent read-only checks.
 Never run automated formatting. User chat files and bearer tokens stay out of Git.
+
+## Tau 0.5.2: scoped transcript traffic
+
+Opening a chat returns its snapshot and pending dialogs only to the requesting
+connection. Each chat has its own bounded transcript feed. Subscription and the
+initial cut share the session content lock. The socket sends the initial cut
+before reading later updates. Replacing a subscription waits for the old task to
+stop, so a cancelled open cannot publish after its replacement.
+
+Protocol 3 adds optional `open_session.exclusive` and
+`resync_required.sessionId`. The current client selects one exclusive feed,
+ignores transcript traffic for other chats, and recovers only its selected chat.
+Repeated recovery notices share an outstanding open. Session metadata remains
+connection-wide. Older clients can retain multiple explicit subscriptions.
+
+This is the urgent isolation patch, not pagination or incremental reconnect.
+Opening or recovering the selected chat still transfers a full snapshot. Pi,
+JSONL, SQLite schema, transcript layout and queue scheduling remain unchanged.
+
+Checks: eight daemon tests, Clippy, the extended shared-controller socket test,
+and a three-client/two-chat WebSocket check. The latter checks private reopens,
+live fan-out, snapshot/update ordering, exclusive switching and metadata access.
+The warm Android build and its existing signing certificate passed. No Android
+UI testing or provider calls were used for this patch. Production cutover is a
+separate step while the active game-development run finishes.

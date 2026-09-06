@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::collections::VecDeque;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 
@@ -26,10 +27,35 @@ async fn fixture() -> (AgentManager, PathBuf) {
     (AgentManager::new(config, state), root)
 }
 
-async fn receive(events: &mut broadcast::Receiver<ServerMessage>, predicate: impl Fn(&ServerMessage) -> bool) -> ServerMessage {
+struct Events {
+    metadata: broadcast::Receiver<ServerMessage>,
+    initial: VecDeque<ServerMessage>,
+    transcript: Option<broadcast::Receiver<Arc<ServerMessage>>>,
+}
+
+impl Events {
+    fn new(manager: &AgentManager) -> Self {
+        Self { metadata: manager.subscribe(), initial: VecDeque::new(), transcript: None }
+    }
+
+    async fn open(&mut self, manager: &AgentManager, id: &str) {
+        let feed = manager.open_session(id).await.unwrap();
+        self.initial = feed.initial.into();
+        self.transcript = Some(feed.events);
+    }
+}
+
+async fn receive(events: &mut Events, predicate: impl Fn(&ServerMessage) -> bool) -> ServerMessage {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match events.recv().await {
+            let message = if let Some(message) = events.initial.pop_front() { Ok(message) } else {
+                tokio::select! {
+                    biased;
+                    message = events.transcript.as_mut().unwrap().recv() => message.map(Arc::unwrap_or_clone),
+                    message = events.metadata.recv() => message,
+                }
+            };
+            match message {
                 Ok(message) if predicate(&message) => break message,
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(error) => panic!("event channel closed: {error}"),
@@ -41,9 +67,9 @@ async fn receive(events: &mut broadcast::Receiver<ServerMessage>, predicate: imp
 #[tokio::test]
 async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc() {
     let (manager, root) = fixture().await;
-    let mut events = manager.subscribe();
+    let mut events = Events::new(&manager);
     let id = manager.create_session().await.unwrap();
-    manager.open_session(&id).await.unwrap();
+    events.open(&manager, &id).await;
     let runtime = manager.runtime(&id).await.unwrap();
     assert!(runtime.content.lock().await.process.is_none());
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.entries.is_empty())).await;
@@ -83,7 +109,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     let process = runtime.content.lock().await.process.clone().unwrap();
     process.request(json!({"type":"mock_context", "usage":{"tokens":32000,"contextWindow":128000}})).await.unwrap();
     receive(&mut events, |event| matches!(event, ServerMessage::SessionState { context_usage: Some(usage), .. } if usage.tokens == Some(32000))).await;
-    manager.open_session(&id).await.unwrap();
+    events.open(&manager, &id).await;
     receive(&mut events, |event| matches!(event, ServerMessage::SessionState { context_usage: Some(usage), .. } if usage.tokens == Some(32000))).await;
     let ServerMessage::Sessions { sessions } = manager.sessions_message().await else { unreachable!() };
     assert_eq!(sessions.iter().find(|session| session.id == id).unwrap().context_usage, runtime.snapshot().context_usage);
@@ -113,7 +139,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
         requests: vec![QueueRef { request_id: "q1".to_owned(), revision: 1 }],
     }).await.unwrap();
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if queue.control.as_ref().is_some_and(|control| control.command_id == "prefix"))).await;
-    manager.open_session(&id).await.unwrap();
+    events.open(&manager, &id).await;
     let reconnect = receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.queue.control.as_ref().is_some_and(|control| control.command_id == "prefix"))).await;
     if let ServerMessage::TranscriptSnapshot { snapshot, .. } = reconnect {
         assert_eq!(snapshot.queue.control.unwrap().status, "waiting");
@@ -148,7 +174,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     let error = process.request(json!({"type":"mock_exit"})).await.unwrap_err();
     assert!(error.is::<crate::pi::UnconfirmedCommand>());
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Interrupted, .. })).await;
-    manager.open_session(&id).await.unwrap();
+    events.open(&manager, &id).await;
     let interrupted = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
     assert_eq!(interrupted.entries.last().unwrap().phase, EntryPhase::Interrupted);
     assert_eq!(interrupted.entries.last().unwrap().content[0].text.len(), 2109);
@@ -178,10 +204,10 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     manager.queue_control(&id, &restarted.generation, "resume", QueueOperation::Resume { run_id: None }).await.unwrap();
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if !queue.paused && queue.control.as_ref().is_some_and(|control| control.action == "resume"))).await;
     let child = manager.clone_session(&id).await.unwrap();
-    manager.open_session(&child).await.unwrap();
+    events.open(&manager, &child).await;
     let child_runtime = manager.runtime(&child).await.unwrap();
     assert_eq!(child_runtime.content.lock().await.transcript.as_ref().unwrap().snapshot().entries.len(), 3);
-    manager.open_session(&id).await.unwrap();
+    events.open(&manager, &id).await;
     assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().snapshot().entries.last().unwrap().phase, EntryPhase::Interrupted);
     manager.shutdown().await;
     fs::remove_dir_all(root).await.unwrap();
@@ -206,8 +232,8 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     let original = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
     fs::write(&path, &original).await.unwrap();
     manager.inner.state.set_session_file(&id, path.to_string_lossy().into_owned()).await.unwrap();
-    let mut events = manager.subscribe();
-    manager.open_session(&id).await.unwrap();
+    let mut events = Events::new(&manager);
+    events.open(&manager, &id).await;
     let ServerMessage::TranscriptSnapshot { snapshot: TranscriptSnapshot { entries, head, .. }, .. } =
         receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { .. })).await else { unreachable!() };
     assert_eq!(head.as_deref(), Some("image"));

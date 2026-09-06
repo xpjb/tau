@@ -116,12 +116,17 @@ class TauController(
     fun fork(entryId: String) { state.value.selectedSessionId?.let { send(ForkSession(newRequestId(), it, entryId), PendingAction.Select) } }
 
     fun selectSession(sessionId: String) {
+        val previous = state.value.selectedSessionId
         mutableState.update { it.copy(selectedSessionId = sessionId, mobileChatVisible = true, error = null) }
+        syncing.retainAll(setOf(sessionId))
+        pending.entries.removeAll { (_, action) -> action is PendingAction.Open && action.sessionId != sessionId }
         val key = ChatKey(state.value.settings.identity, sessionId)
         launch {
+            if (previous != null) store.invalidate(key.connection, previous)
             loadChat(key)
-            store.select(key)
-            if (state.value.settings.identity == key.connection) {
+            store.invalidate(key.connection, sessionId)
+            if (state.value.settings.identity == key.connection && state.value.selectedSessionId == sessionId) {
+                store.select(key)
                 openSession(sessionId)
                 loadCommands(sessionId)
             }
@@ -540,6 +545,10 @@ class TauController(
                     state.value.selectedSessionId?.let { openSession(it); loadCommands(it) }
                 }
                 is TranscriptSnapshot -> {
+                    if (message.sessionId != state.value.selectedSessionId) {
+                        store.invalidate(identity, message.sessionId)
+                        continue
+                    }
                     val key = ChatKey(identity, message.sessionId)
                     val chat = loadChat(key)
                     if (store.applySnapshot(key, message.snapshot)) syncing.remove(message.sessionId)
@@ -549,6 +558,10 @@ class TauController(
                     }
                 }
                 is TranscriptUpdate -> {
+                    if (message.sessionId != state.value.selectedSessionId) {
+                        store.invalidate(identity, message.sessionId)
+                        continue
+                    }
                     val key = ChatKey(identity, message.sessionId)
                     loadChat(key)
                     val patches = mutableListOf(TranscriptPatch(message.generation, message.sequence, message.change))
@@ -565,7 +578,9 @@ class TauController(
                     val action = pending.remove(message.requestId)
                     if (!message.ok) {
                         if (action is PendingAction.Open) syncing.remove(action.sessionId)
-                        mutableState.update { it.copy(error = (if (message.uncertain) "Unconfirmed: " else "") + (message.error ?: "Tau rejected the request.")) }
+                        if (message.sessionId == null || message.sessionId == state.value.selectedSessionId) {
+                            mutableState.update { it.copy(error = (if (message.uncertain) "Unconfirmed: " else "") + (message.error ?: "Tau rejected the request.")) }
+                        }
                     } else {
                         if (action is PendingAction.Delete) {
                             store.removeChat(ChatKey(identity, action.sessionId))
@@ -639,19 +654,19 @@ class TauController(
                         }
                     }
                 }
-                ResyncRequired -> {
-                    store.invalidate(identity)
-                    syncing.clear()
-                    send(ListSessions(newRequestId()))
-                    for (id in state.value.transcripts.keys) openSession(id)
+                is ResyncRequired -> {
+                    store.invalidate(identity, message.sessionId)
+                    if (message.sessionId == null) send(ListSessions(newRequestId()))
+                    val selected = state.value.selectedSessionId
+                    if (selected != null && (message.sessionId == null || message.sessionId == selected)) openSession(selected)
                 }
             }
         }
     }
 
     private fun openSession(sessionId: String) {
-        if (socketId == null || !syncing.add(sessionId)) return
-        send(OpenSession(newRequestId(), sessionId), PendingAction.Open(sessionId))
+        if (socketId == null || state.value.selectedSessionId != sessionId || !syncing.add(sessionId)) return
+        send(OpenSession(newRequestId(), sessionId, exclusive = true), PendingAction.Open(sessionId))
     }
 
     private fun send(request: ClientRequest, action: PendingAction = PendingAction.Normal) {

@@ -32,7 +32,7 @@ data class CreateSession(override val id: String) : ClientRequest
 
 @Serializable
 @SerialName("open_session")
-data class OpenSession(override val id: String, val sessionId: String) : ClientRequest
+data class OpenSession(override val id: String, val sessionId: String, val exclusive: Boolean = false) : ClientRequest
 
 @Serializable
 @SerialName("get_commands")
@@ -149,7 +149,7 @@ data class SessionState(
 
 @Serializable
 @SerialName("resync_required")
-data object ResyncRequired : ServerMessage
+data class ResyncRequired(val sessionId: String? = null) : ServerMessage
 
 @Serializable
 data class SlashCommand(

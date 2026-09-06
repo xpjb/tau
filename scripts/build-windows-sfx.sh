@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-version=${TAU_VERSION:-0.5.1}
+version=${TAU_VERSION:-0.5.2}
 work="$root/target/windows-sfx-$version"
 bundle="$work/bundle"
 payload="$work/tau-windows-payload.tar.lzma"
@@ -13,7 +13,7 @@ mkdir -p "$root/dist"
 rm -rf "$work"
 mkdir -p "$bundle"
 
-"$root/app/gradlew" --no-daemon -p "$root/app" :composeApp:prepareWindowsApp
+"$root/app/gradlew" -p "$root/app" :composeApp:prepareWindowsApp
 mkdir -p "$bundle/app"
 cp -a "$root/app/composeApp/build/windows/app/lib" "$bundle/app/lib"
 

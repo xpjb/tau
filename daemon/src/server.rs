@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -180,7 +181,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
             let message = match events.recv().await {
                 Ok(message) => message,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    ServerMessage::ResyncRequired
+                    ServerMessage::ResyncRequired { session_id: None }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
@@ -190,6 +191,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
         }
     });
 
+    let mut subscriptions = HashMap::<String, tokio::task::JoinHandle<()>>::new();
     while let Some(incoming) = socket_rx.next().await {
         let message = match incoming {
             Ok(message) => message,
@@ -224,6 +226,38 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 };
                 let manager = state.manager.clone();
                 let response_outbound = outbound_tx.clone();
+                if let ClientCommand::OpenSession { session_id, exclusive } = &request.command {
+                    if *exclusive {
+                        for (_, task) in subscriptions.drain() { task.abort(); let _ = task.await; }
+                    } else if let Some(task) = subscriptions.remove(session_id) { task.abort(); let _ = task.await; }
+                    let session_id = session_id.clone();
+                    subscriptions.insert(session_id.clone(), tokio::spawn(async move {
+                        let mut feed = match manager.open_session(&session_id).await {
+                            Ok(feed) => feed,
+                            Err(error) => {
+                                let mut response = ServerMessage::command_failure(request.id, error);
+                                if let ServerMessage::Response { session_id: field, .. } = &mut response { *field = Some(session_id); }
+                                queue_server(&response_outbound, &response).await;
+                                return;
+                            }
+                        };
+                        for message in feed.initial {
+                            if !queue_server(&response_outbound, &message).await { return; }
+                        }
+                        if !queue_server(&response_outbound, &ServerMessage::success(request.id, Some(session_id.clone()), None)).await { return; }
+                        loop {
+                            match feed.events.recv().await {
+                                Ok(message) => if !queue_server(&response_outbound, &message).await { break; },
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    queue_server(&response_outbound, &ServerMessage::ResyncRequired { session_id: Some(session_id) }).await;
+                                    break;
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }));
+                    continue;
+                }
                 tokio::spawn(async move {
                     let request_id = request.id;
                     let response = match request.command {
@@ -241,16 +275,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             ),
                             Err(error) => ServerMessage::command_failure(request_id, error),
                         },
-                        ClientCommand::OpenSession { session_id } => {
-                            match manager.open_session(&session_id).await {
-                                Ok(()) => ServerMessage::success(
-                                    request_id,
-                                    Some(session_id),
-                                    None,
-                                ),
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
+                        ClientCommand::OpenSession { .. } => unreachable!("open requests own their transcript feed"),
                         ClientCommand::GetCommands { session_id } => {
                             match manager.commands(&session_id).await {
                                 Ok(commands) => {
@@ -397,6 +422,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
     }
 
     event_forwarder.abort();
+    for (_, task) in subscriptions { task.abort(); }
     drop(outbound_tx);
     let _ = writer.await;
 }

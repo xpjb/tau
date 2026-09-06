@@ -477,8 +477,10 @@ class TranscriptStore(
         }
     }
 
-    suspend fun invalidate(identity: String) = access {
-        Snapshot.withMutableSnapshot { for ((key, chat) in chats) if (key.connection == identity) chat.synchronized = false }
+    suspend fun invalidate(identity: String, sessionId: String? = null) = access {
+        Snapshot.withMutableSnapshot {
+            for ((key, chat) in chats) if (key.connection == identity && (sessionId == null || key.session == sessionId)) chat.synchronized = false
+        }
     }
 
     suspend fun dismissPending(key: ChatKey, id: String) = access { db ->

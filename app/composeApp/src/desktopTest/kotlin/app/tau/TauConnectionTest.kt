@@ -63,6 +63,7 @@ class TauConnectionTest {
     fun retains_ordered_content_queue_intents_and_local_work_across_socket_and_process_loss() = runBlocking {
         val directory = Files.createTempDirectory("tau-controller")
         val path = directory.resolve("transcript.db").toString()
+        val other = chat.copy(id = "other", title = "Other chat")
         val sockets = Channel<DefaultWebSocketServerSession>(Channel.UNLIMITED)
         val requests = Channel<ClientRequest>(Channel.UNLIMITED)
         val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
@@ -71,7 +72,7 @@ class TauConnectionTest {
                 webSocket("/v1/ws") {
                     assertEquals("Bearer test-token", call.request.headers[HttpHeaders.Authorization])
                     sendMessage(Hello(TauProtocolVersion, "test"))
-                    sendMessage(Sessions(listOf(chat)))
+                    sendMessage(Sessions(listOf(chat, other)))
                     sockets.send(this)
                     for (frame in incoming) if (frame is Frame.Text) {
                         val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
@@ -92,13 +93,43 @@ class TauConnectionTest {
             socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
             socket.sendMessage(Response(open.id, true, chat.id))
             controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
-            assertEquals(chat.contextUsage, controller.state.value.sessions.single().contextUsage)
+            assertEquals(chat.contextUsage, controller.state.value.sessions.first { it.id == chat.id }.contextUsage)
             socket.sendMessage(SessionState(chat.id, SessionStatus.Idle, contextUsage = ContextUsage(null, 128000)))
-            controller.awaitState { it.sessions.single().contextUsage == ContextUsage(null, 128000) }
+            controller.awaitState { it.sessions.first { session -> session.id == chat.id }.contextUsage == ContextUsage(null, 128000) }
             socket.sendMessage(SessionState(chat.id, SessionStatus.Idle))
-            controller.awaitState { it.sessions.single().contextUsage == null }
+            controller.awaitState { it.sessions.first { session -> session.id == chat.id }.contextUsage == null }
             socket.sendMessage(SessionState(chat.id, SessionStatus.Idle, contextUsage = ContextUsage(96000, 128000)))
-            controller.awaitState { it.sessions.single().contextUsage == ContextUsage(96000, 128000) }
+            controller.awaitState { it.sessions.first { session -> session.id == chat.id }.contextUsage == ContextUsage(96000, 128000) }
+
+            assertTrue(open.exclusive)
+            withContext(Dispatchers.Swing) { controller.selectSession(other.id) }
+            val openOther = assertIs<OpenSession>(requests.nextRequest())
+            assertTrue(openOther.exclusive)
+            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 0, entries = emptyList(), queue = queue)))
+            socket.sendMessage(Response(openOther.id, true, other.id))
+            controller.awaitState { it.transcripts[other.id]?.synchronized == true }
+            withContext(Dispatchers.Swing) { controller.selectSession(chat.id) }
+            val returnOpen = assertIs<OpenSession>(requests.nextRequest())
+            assertEquals(chat.id, returnOpen.sessionId)
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
+            socket.sendMessage(Response(returnOpen.id, true, chat.id))
+            controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
+            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 1, user.id, listOf(user), queue)))
+            socket.sendMessage(TranscriptUpdate(other.id, "other", 99, TranscriptChange.Head(user.id)))
+            socket.sendMessage(ResyncRequired(other.id))
+            socket.sendMessage(ResyncRequired())
+            val refreshList = assertIs<ListSessions>(requests.nextRequest())
+            val scopedOpen = assertIs<OpenSession>(requests.nextRequest())
+            assertEquals(chat.id, scopedOpen.sessionId)
+            socket.sendMessage(Response(refreshList.id, true))
+            socket.sendMessage(ResyncRequired(chat.id))
+            socket.sendMessage(SessionState(other.id, SessionStatus.Idle, detail = "Scope barrier"))
+            controller.awaitState { it.sessions.any { session -> session.detail == "Scope barrier" } }
+            assertTrue(controller.state.value.transcripts.getValue(other.id).rows.isEmpty())
+            assertTrue(requests.tryReceive().isFailure, "Recovery opens only the selected chat once")
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
+            socket.sendMessage(Response(scopedOpen.id, true, chat.id))
+            controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
 
             withContext(Dispatchers.Swing) { controller.setDraft(chat.id, "Repeat"); controller.sendPrompt() }
             val first = assertIs<Prompt>(requests.nextRequest())
@@ -215,7 +246,7 @@ class TauConnectionTest {
             val restored = controller.awaitState { !it.restoring && it.transcripts[chat.id]?.rows?.size == 3 }
             val reopened = restored.transcripts.getValue(chat.id)
             assertEquals("Final edit before closing", restored.drafts[chat.id])
-            assertEquals(ContextUsage(96000, 128000), restored.sessions.single().contextUsage)
+            assertEquals(ContextUsage(96000, 128000), restored.sessions.first { it.id == chat.id }.contextUsage)
             assertEquals("retained.png", reopened.files.single().name)
             assertEquals("Retained thinking through the gap", reopened.rows[1].entry.content.single().text)
             assertEquals("Unfinished work", reopened.rows.last().entry.content.single().text)

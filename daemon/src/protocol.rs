@@ -22,7 +22,7 @@ pub struct ClientRequest {
 pub enum ClientCommand {
     ListSessions,
     CreateSession,
-    OpenSession { session_id: String },
+    OpenSession { session_id: String, #[serde(default)] exclusive: bool },
     GetCommands { session_id: String },
     Prompt { session_id: String, text: String },
     ExtensionUiResponse {
@@ -111,7 +111,7 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    ResyncRequired,
+    ResyncRequired { #[serde(skip_serializing_if = "Option::is_none")] session_id: Option<String> },
 }
 
 impl ServerMessage {
