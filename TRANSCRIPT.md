@@ -353,5 +353,9 @@ Checks: eight daemon tests, Clippy, the extended shared-controller socket test,
 and a three-client/two-chat WebSocket check. The latter checks private reopens,
 live fan-out, snapshot/update ordering, exclusive switching and metadata access.
 The warm Android build and its existing signing certificate passed. No Android
-UI testing or provider calls were used for this patch. Production cutover is a
-separate step while the active game-development run finishes.
+UI testing or provider calls were used for this patch.
+
+Tau 0.5.2 was deployed on 2026-09-06 after the game-development run finished and
+the user approved the restart. All 30 prior chat IDs and 29 JSONL byte prefixes
+were preserved. Health reports 0.5.2/protocol 3. Configuration, the immutable Pi
+installation and Telegram were unchanged. Both client installers were sent.
