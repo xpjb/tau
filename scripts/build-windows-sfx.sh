@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-version=${TAU_VERSION:-0.4.8}
+version=${TAU_VERSION:-0.5.0}
 work="$root/target/windows-sfx-$version"
 bundle="$work/bundle"
 payload="$work/tau-windows-payload.tar.lzma"
@@ -23,7 +23,7 @@ cargo xwin build \
     --target x86_64-pc-windows-msvc \
     -p tau-launcher
 
-BUNDLE="$bundle" PAYLOAD="$payload" python - <<'PY'
+BUNDLE="$bundle" PAYLOAD="$payload" python -I - <<'PY'
 import lzma
 import os
 import tarfile

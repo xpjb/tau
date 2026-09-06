@@ -1,7 +1,23 @@
 # Retained transcript contract
 
-Status: implementation approved; coordinated release acceptance remains open.
+Status: Tau 0.5.0 release authorized; artifacts prepared, production cutover pending.
 Replaces Tau protocol 2 without migrating or replacing existing JSONL.
+
+## Release preparation — 2026-09-06
+
+Tau 0.5.0 and Pi `29b43c7` are built together as a release candidate. Ten client
+tests, eight daemon tests, strict Clippy, six Pi RPC tests and read-only Pi checks
+pass. Windows packaging and signed Android versionCode 17 builds pass. The new
+installed Pi and release daemon pass the isolated synthetic pipeline, including
+queue prefix/Resume, context counts, existing JSONL, commands, forks and media.
+The session-table change is separate in `e2cfe8c` and includes migration and
+changed-row write checks.
+
+The user authorized release, then requested preparation while finishing a chat.
+Wait for the cutover signal and recheck production activity before restarting Tau.
+Telegram keeps its existing Pi installation. Independent review, physical-device
+acceptance and a new live-provider run remain uncompleted; synthetic tests do not
+claim those results. The checkpoints below record the earlier development state.
 
 ## Development checkpoint — 2026-09-06
 

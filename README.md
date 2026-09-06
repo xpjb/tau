@@ -8,7 +8,9 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 - `app/`: one Compose Multiplatform client for Android and desktop JVM targets.
 - `windows/`: the portable launcher and version-aware self-extracting Windows setup.
 
-Tau starts a Pi RPC process when a chat receives a prompt and stops it after one idle hour. Tau reads Pi's JSONL session files directly when browsing or opening chats, without starting Pi. Chats resume from those files after client, process, or daemon restarts. The active chat branch is rebuilt from Pi entry IDs rather than from a second transcript database. New chats currently use `/root` as their working directory.
+Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects identified entries; clients keep a SQLite disk cache and a shared in-memory view for display. Drafts, pending sends and interrupted content survive client restarts. Cold chats can be read without starting Pi. Reconnect currently synchronizes with a full snapshot while keeping cached content visible. New chats use `/root` as their working directory.
+
+Tau 0.5.0 uses protocol 3 and requires matching daemon and client versions. Existing 0.4.8 clients must be upgraded together with the daemon. The daemon also requires the identified-transcript Pi fork; this release uses commit `29b43c7` from `xpjb/pi`. Existing JSONL files are preserved without migration.
 
 ## Current client operations
 
@@ -18,6 +20,8 @@ Tau starts a Pi RPC process when a chat receives a prompt and stops it after one
 - Discover Pi extension, prompt-template, and skill commands when `/` is entered, with command and supported built-in argument completion.
 - Run extension dialogs inside Tau and expose extension notices, status text, widgets, and composer updates.
 - Send prompts, steer an active run, and abort.
+- Delete queued messages or run the inclusive prefix through a selected message at a safe boundary; later messages stay held until another prefix or explicit Resume.
+- Show a circular context-usage estimate beside the composer, with token counts on Windows hover or Android tap.
 - Show sent prompts immediately, keep unconfirmed sends visible across reconnects, and never automatically resend them.
 - Detect failed connections and reload the selected chat and live Pi state automatically.
 - Fork from any visible user message.
