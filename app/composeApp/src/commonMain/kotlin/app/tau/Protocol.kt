@@ -1,5 +1,6 @@
 package app.tau
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -244,9 +245,10 @@ enum class AttachmentKind {
     @SerialName("file") File,
 }
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class CrashReport(
-    val schema: Int = 1,
+    @EncodeDefault val schema: Int = 1,
     val reportId: String,
     val platform: String,
     val appVersion: String,

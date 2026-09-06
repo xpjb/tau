@@ -82,5 +82,10 @@ class ProtocolTest {
         ))
         assertEquals("handled", response.disposition)
         assertEquals("Done", response.notice)
+
+        val pendingCrash = """{"reportId":"crash","platform":"windows","appVersion":"0.5.0","osVersion":"Windows","thread":"main","exceptionClass":"TestFailure","stack":[]}"""
+        val crash = TauJson.decodeFromString<CrashReport>(pendingCrash)
+        assertEquals(1, crash.schema)
+        assertEquals("{\"schema\":1," + pendingCrash.drop(1), TauJson.encodeToString(crash))
     }
 }

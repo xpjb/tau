@@ -24,6 +24,12 @@ import io.ktor.websocket.readText
 import io.ktor.websocket.send
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -39,9 +45,7 @@ class TauClient {
     private val client = HttpClient(platformHttpEngine()) {
         install(BodyProgress)
         install(HttpTimeout)
-        install(WebSockets) {
-            pingIntervalMillis = TauHeartbeatMillis
-        }
+        install(WebSockets)
     }
     private val socketGate = Mutex()
     private var socket: DefaultClientWebSocketSession? = null
@@ -66,6 +70,26 @@ class TauClient {
         ) {
             val active = this
             val connectionId = socketGate.withLock { socket = active; ++socketId }
+            val replies = Channel<String>(Channel.CONFLATED)
+            val heartbeat = launch(Dispatchers.Default) {
+                while (isActive) {
+                    delay(TauHeartbeatMillis)
+                    val request = ListSessions("heartbeat-${newRequestId()}")
+                    try {
+                        withTimeout(TauHeartbeatMillis * 2) {
+                            this@TauClient.send(request, connectionId)
+                            while (replies.receive() != request.id) Unit
+                        }
+                    } catch (_: TimeoutCancellationException) {
+                        active.cancel("Tau heartbeat timed out", TauConnectionException("Tau is not responding"))
+                        return@launch
+                    } catch (error: Throwable) {
+                        currentCoroutineContext().ensureActive()
+                        active.cancel("Tau connection was lost", error)
+                        return@launch
+                    }
+                }
+            }
             try {
                 for (frame in incoming) {
                     if (frame !is Frame.Text) continue
@@ -77,9 +101,17 @@ class TauClient {
                     val messages = withContext(Dispatchers.Default) {
                         frames.map { TauJson.decodeFromString<ServerMessage>(it.readText()) }
                     }
-                    onMessages(messages, connectionId)
+                    val updates = messages.filterNot { message ->
+                        if (message is Response && message.requestId.startsWith("heartbeat-")) {
+                            replies.trySend(message.requestId)
+                            true
+                        } else false
+                    }
+                    if (updates.isNotEmpty()) onMessages(updates, connectionId)
                 }
             } finally {
+                heartbeat.cancel()
+                replies.close()
                 withContext(NonCancellable) {
                     socketGate.withLock {
                         if (socket === active) socket = null

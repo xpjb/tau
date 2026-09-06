@@ -73,7 +73,11 @@ class TauConnectionTest {
                     sendMessage(Hello(TauProtocolVersion, "test"))
                     sendMessage(Sessions(listOf(chat)))
                     sockets.send(this)
-                    for (frame in incoming) if (frame is Frame.Text) requests.send(TauJson.decodeFromString<ClientRequest>(frame.readText()))
+                    for (frame in incoming) if (frame is Frame.Text) {
+                        val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
+                        if (request is ListSessions && request.id.startsWith("heartbeat-")) sendMessage(Response(request.id, true))
+                        else requests.send(request)
+                    }
                 }
             }
         }.start(wait = false)
@@ -208,6 +212,7 @@ class TauConnectionTest {
         val directory = Files.createTempDirectory("tau-heartbeat")
         val connections = AtomicInteger()
         val applied = AtomicBoolean()
+        val heartbeats = AtomicInteger()
         val requests = Channel<ClientRequest>(Channel.UNLIMITED)
         val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
             install(WebSockets)
@@ -217,9 +222,16 @@ class TauConnectionTest {
                     sendMessage(Hello(TauProtocolVersion, "test-$connection"))
                     sendMessage(Sessions(if (applied.get()) listOf(chat) else emptyList()))
                     for (frame in incoming) when (frame) {
-                        is Frame.Ping -> if (connection > 1) send(Frame.Pong(frame.data))
                         is Frame.Text -> {
                             val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
+                            if (request is ListSessions && request.id.startsWith("heartbeat-")) {
+                                if (connection > 1) {
+                                    heartbeats.incrementAndGet()
+                                    sendMessage(Sessions(listOf(chat)))
+                                    sendMessage(Response(request.id, true))
+                                }
+                                continue
+                            }
                             requests.send(request)
                             when (request) {
                                 is CreateSession -> applied.set(true)
@@ -246,6 +258,10 @@ class TauConnectionTest {
             assertTrue(applied.get())
             assertTrue(connections.get() >= 2)
             assertIs<OpenSession>(requests.nextRequest())
+            delay(TauHeartbeatMillis * 4)
+            assertEquals(2, connections.get(), "Normal replies keep the connection healthy without control-frame pongs")
+            assertTrue(heartbeats.get() >= 3)
+            assertEquals(ConnectionStatus.Connected, controller.state.value.connectionStatus)
             assertTrue(requests.tryReceive().isFailure, "Reconnect must not repeat the applied command")
         } finally {
             withContext(Dispatchers.Swing) { controller.dispose() }.join()
