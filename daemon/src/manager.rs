@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 use crate::config::Config;
 use crate::pi::RpcProcess;
 use crate::protocol::{
-    AttachmentKind, ExtensionUiRequest, PromptDisposition, QueueOperation, ServerMessage,
+    AttachmentKind, ContextUsage, ExtensionUiRequest, PromptDisposition, QueueOperation, ServerMessage,
     SessionStatus, SessionSummary, SlashCommand, SlashCommandArgument, SlashCommandSource,
     UploadedFile, MAX_PROMPT_CHARS, MAX_TITLE_CHARS, MAX_UPLOAD_BYTES,
 };
@@ -95,6 +95,7 @@ struct RuntimeState {
     status: SessionStatus,
     detail: Option<String>,
     idle_since: Option<Instant>,
+    context_usage: Option<ContextUsage>,
 }
 
 enum BranchOperation<'a> {
@@ -156,6 +157,7 @@ impl AgentManager {
                     title: stored.title,
                     status: runtime.status,
                     detail: runtime.detail,
+                    context_usage: runtime.context_usage,
                     model: stored.model,
                     parent_id: stored.parent_id,
                     created_at_ms: stored.created_at_ms,
@@ -229,6 +231,7 @@ impl AgentManager {
             session_id: id.to_owned(),
             status: state.status,
             detail: state.detail,
+            context_usage: state.context_usage,
         });
         Ok(())
     }
@@ -276,7 +279,7 @@ impl AgentManager {
             })
         {
             let previous_status = runtime.snapshot().status;
-            self.set_runtime_state(id, &runtime, SessionStatus::Running, None);
+            self.set_runtime_state(id, &runtime, SessionStatus::Running, None, None);
             let mut accepted = false;
             let result: Result<String> = async {
                 match name {
@@ -371,6 +374,7 @@ impl AgentManager {
                         status,
                         (status == SessionStatus::Error)
                             .then(|| bounded(&error.to_string(), 240)),
+                        None,
                     );
                     return Err(error);
                 }
@@ -396,7 +400,7 @@ impl AgentManager {
         }
 
         let previous_status = runtime.snapshot().status;
-        self.set_runtime_state(id, &runtime, SessionStatus::Running, None);
+        self.set_runtime_state(id, &runtime, SessionStatus::Running, None, None);
         let command = json!({
             "type": "prompt",
             "message": text,
@@ -420,6 +424,7 @@ impl AgentManager {
                 &runtime,
                 status,
                 (status == SessionStatus::Error).then(|| bounded(&error.to_string(), 240)),
+                None,
             );
                 return Err(error);
             }
@@ -574,7 +579,7 @@ impl AgentManager {
             .commands
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
+        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None, None);
         if let Some(process) = process {
             process.shutdown().await;
         }
@@ -618,7 +623,7 @@ impl AgentManager {
             .commands
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
+        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None, None);
         if let Some(process) = process {
             process.shutdown().await;
         }
@@ -638,7 +643,7 @@ impl AgentManager {
                 .commands
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-            self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
+            self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None, None);
             process.shutdown().await;
         }
 
@@ -952,7 +957,7 @@ impl AgentManager {
             content.process.take();
             self.interrupt_transcript(id, &mut content);
         }
-        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None);
+        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None, None);
         process.shutdown().await;
 
         let temporary = RpcProcess::spawn(&self.inner.config, Some(&parent_file))?;
@@ -1189,7 +1194,7 @@ impl AgentManager {
                 bail!("stored Pi session file is outside Tau's session directory or is not a file");
             }
         }
-        self.set_runtime_state(id, runtime, SessionStatus::Starting, None);
+        self.set_runtime_state(id, runtime, SessionStatus::Starting, None, None);
         let process = match RpcProcess::spawn(&self.inner.config, session) {
             Ok(process) => process,
             Err(error) => {
@@ -1198,12 +1203,13 @@ impl AgentManager {
                     runtime,
                     SessionStatus::Error,
                     Some(bounded(&error.to_string(), 240)),
+                    None,
                 );
                 return Err(error);
             }
         };
         let events = process.subscribe();
-        let started: Result<bool> = async {
+        let started: Result<(bool, Option<ContextUsage>)> = async {
             let state = process.request(json!({ "type": "get_state" })).await?;
             let data = state.get("data").context("Pi state response had no data")?;
             if let Some(model) = data.get("model").and_then(session_model_from_pi_model) {
@@ -1216,15 +1222,15 @@ impl AgentManager {
             let snapshot = process.request(json!({ "type": "get_transcript" })).await
                 .context("Pi does not provide the identified transcript protocol")?;
             self.replace_transcript(id, &mut slot, snapshot.get("data").context("Pi transcript has no data")?).await?;
-            Ok(streaming)
+            Ok((streaming, ContextUsage::from_pi(data)))
         }.await;
-        let streaming = match started {
-            Ok(streaming) => streaming,
+        let (streaming, context_usage) = match started {
+            Ok(state) => state,
             Err(error) => {
                 self.interrupt_transcript(id, &mut slot);
                 drop(slot);
                 process.shutdown().await;
-                self.set_runtime_state(id, runtime, SessionStatus::Error, Some(bounded(&error.to_string(), 240)));
+                self.set_runtime_state(id, runtime, SessionStatus::Error, Some(bounded(&error.to_string(), 240)), None);
                 return Err(error);
             }
         };
@@ -1238,6 +1244,7 @@ impl AgentManager {
                 SessionStatus::Idle
             },
             None,
+            Some(context_usage),
         );
 
         let manager = self.clone();
@@ -1503,7 +1510,7 @@ impl AgentManager {
                     });
                 }
                 Some("agent_start") => {
-                    self.set_runtime_state(&id, &runtime, SessionStatus::Running, None);
+                    self.set_runtime_state(&id, &runtime, SessionStatus::Running, None, None);
                 }
                 Some("transcript_update") => {
                     if content.recovering { continue; }
@@ -1551,7 +1558,7 @@ impl AgentManager {
                     content.recovering = result.is_err();
                     if let Err(error) = result {
                         warn!(session = %id, %error, "Pi transcript snapshot was rejected");
-                        self.set_runtime_state(&id, &runtime, SessionStatus::Error, Some("Transcript synchronization failed".to_owned()));
+                        self.set_runtime_state(&id, &runtime, SessionStatus::Error, Some("Transcript synchronization failed".to_owned()), None);
                     }
                 }
                 Some("compaction_start") => {
@@ -1560,6 +1567,7 @@ impl AgentManager {
                         &runtime,
                         SessionStatus::Running,
                         Some("Compacting context".to_owned()),
+                        None,
                     );
                 }
                 Some("auto_retry_start") => {
@@ -1568,7 +1576,13 @@ impl AgentManager {
                         &runtime,
                         SessionStatus::Running,
                         Some("Retrying".to_owned()),
+                        None,
                     );
+                }
+                Some("turn_end") | Some("compaction_end") => {
+                    if let Err(error) = self.refresh_runtime_status(&id, &runtime, &process).await {
+                        warn!(session = %id, %error, "failed to refresh Pi context usage");
+                    }
                 }
                 Some("agent_settled") => {
                     if let Err(error) = self.refresh_runtime_status(&id, &runtime, &process).await {
@@ -1595,7 +1609,7 @@ impl AgentManager {
                         .get("error")
                         .and_then(Value::as_str)
                         .map(|error| bounded(error, 240));
-                    self.set_runtime_state(&id, &runtime, SessionStatus::Error, detail);
+                    self.set_runtime_state(&id, &runtime, SessionStatus::Error, detail, None);
                     self.broadcast_sessions().await;
                     drop(content);
                     process.shutdown().await;
@@ -1631,6 +1645,7 @@ impl AgentManager {
                 SessionStatus::Idle
             },
             None,
+            Some(ContextUsage::from_pi(data)),
         );
         Ok(())
     }
@@ -1694,12 +1709,14 @@ impl AgentManager {
         runtime: &SessionRuntime,
         status: SessionStatus,
         detail: Option<String>,
+        context_usage: Option<Option<ContextUsage>>,
     ) {
         let mut current = runtime
             .state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if current.status == status && current.detail == detail {
+        let context_usage = context_usage.unwrap_or(current.context_usage);
+        if current.status == status && current.detail == detail && current.context_usage == context_usage {
             return;
         }
         let schedule_sleep = status == SessionStatus::Idle && current.status != SessionStatus::Idle;
@@ -1712,6 +1729,7 @@ impl AgentManager {
             status,
             detail,
             idle_since,
+            context_usage,
         };
         *current = next.clone();
         drop(current);
@@ -1719,6 +1737,7 @@ impl AgentManager {
             session_id: id.to_owned(),
             status: next.status,
             detail: next.detail,
+            context_usage: next.context_usage,
         });
 
         if schedule_sleep {

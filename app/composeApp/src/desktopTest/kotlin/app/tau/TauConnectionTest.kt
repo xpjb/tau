@@ -36,7 +36,8 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class TauConnectionTest {
-    private val chat = SessionSummary("chat", "Test chat", SessionStatus.Idle, createdAtMs = 1, updatedAtMs = 1)
+    private val chat = SessionSummary("chat", "Test chat", SessionStatus.Idle, createdAtMs = 1, updatedAtMs = 1,
+        contextUsage = ContextUsage(64000, 200000))
     private val queue = QueueState(available = true, runId = "run",
         capabilities = listOf("queue_edit", "queue_delete", "queue_run_prefix", "queue_resume", "queue_cancel_control"),
         boundaries = listOf("reasoning_checkpoint", "turn"))
@@ -87,6 +88,13 @@ class TauConnectionTest {
             socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
             socket.sendMessage(Response(open.id, true, chat.id))
             controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
+            assertEquals(chat.contextUsage, controller.state.value.sessions.single().contextUsage)
+            socket.sendMessage(SessionState(chat.id, SessionStatus.Idle, contextUsage = ContextUsage(null, 128000)))
+            controller.awaitState { it.sessions.single().contextUsage == ContextUsage(null, 128000) }
+            socket.sendMessage(SessionState(chat.id, SessionStatus.Idle))
+            controller.awaitState { it.sessions.single().contextUsage == null }
+            socket.sendMessage(SessionState(chat.id, SessionStatus.Idle, contextUsage = ContextUsage(96000, 128000)))
+            controller.awaitState { it.sessions.single().contextUsage == ContextUsage(96000, 128000) }
 
             withContext(Dispatchers.Swing) { controller.setDraft(chat.id, "Repeat"); controller.sendPrompt() }
             val first = assertIs<Prompt>(requests.nextRequest())
@@ -176,6 +184,7 @@ class TauConnectionTest {
             val restored = controller.awaitState { !it.restoring && it.transcripts[chat.id]?.rows?.size == 3 }
             val reopened = restored.transcripts.getValue(chat.id)
             assertEquals("Final edit before closing", restored.drafts[chat.id])
+            assertEquals(ContextUsage(96000, 128000), restored.sessions.single().contextUsage)
             assertEquals("retained.png", reopened.files.single().name)
             assertEquals("Retained thinking through the gap", reopened.rows[1].entry.content.single().text)
             assertEquals("Unfinished work", reopened.rows.last().entry.content.single().text)

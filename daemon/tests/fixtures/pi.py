@@ -26,6 +26,7 @@ paused = False
 control = None
 pending_prompt = None
 subscribed = False
+context_usage = {"tokens": 0, "contextWindow": 200000}
 
 
 def output(value):
@@ -64,7 +65,7 @@ for line in sys.stdin:
     response = {"id": ident, "type": "response", "command": kind, "success": True}
     if kind == "get_state":
         response["data"] = {"sessionFile": session_file, "isStreaming": run_id is not None, "isCompacting": False, "pendingMessageCount": len(queue),
-                            "model": {"provider": provider, "id": model_id}, **queue_state()}
+                            "model": {"provider": provider, "id": model_id}, "contextUsage": context_usage, **queue_state()}
     elif kind == "get_transcript":
         subscribed = True
         response["data"] = {"sessionId": "mock", "generation": generation, "sequence": sequence,
@@ -81,6 +82,13 @@ for line in sys.stdin:
     elif kind == "set_model":
         provider, model_id = command["provider"], command["modelId"]
         response["data"] = {"provider": provider, "id": model_id}
+        context_usage["contextWindow"] = 128000
+    elif kind == "compact":
+        context_usage["tokens"] = None
+        output({"type": "compaction_end"})
+    elif kind == "mock_context":
+        context_usage = command.get("usage")
+        output({"type": "turn_end"})
     elif kind == "prompt":
         assert command.get("streamingBehavior") == "steer"
         request_id = command.get("requestId")
@@ -107,6 +115,7 @@ for line in sys.stdin:
             if command["message"] != "hold":
                 append([{"type": "thinking", "thinking": "Checking"}, {"type": "text", "text": "Hello from Tau"}],
                        role="assistant", origin={"streamId": stream_id})
+                context_usage["tokens"] = 64000
                 live = []
                 run_id = None
                 update({"type": "queue", **queue_state()})

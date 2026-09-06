@@ -1,7 +1,8 @@
-@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 
 package app.tau
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -56,6 +57,11 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipAnchorPosition
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
@@ -65,6 +71,8 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
@@ -75,8 +83,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.Key
@@ -88,6 +99,8 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
@@ -116,8 +129,10 @@ import coil3.serviceLoaderEnabled
 import io.ktor.client.HttpClient
 import io.ktor.http.encodeURLPathPart
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import okio.Path.Companion.toPath
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.runtime.produceState
@@ -1649,30 +1664,85 @@ private fun ChatPanel(
                         }
                     },
                     trailingIcon = {
-                        if (uploading) {
-                            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                            }
-                        } else {
-                            FilledIconButton(
-                                onClick = {
-                                    if (!completeBareModelCommand()) {
-                                        listState.requestScrollToItem(0)
-                                        controller.sendPrompt()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            key(sessionId) {
+                                val tooltip = rememberTooltipState(isPersistent = true)
+                                val tooltipScope = rememberCoroutineScope()
+                                val capacity = session.contextUsage?.contextWindow?.takeIf { it > 0 }
+                                val used = session.contextUsage?.tokens?.takeIf { it >= 0 }
+                                val ratio = if (capacity != null && used != null) used.toDouble() / capacity else null
+                                val (usedText, capacityText) = listOf(used, capacity).map { count ->
+                                    count?.toString()?.reversed()?.chunked(3)?.joinToString(",")?.reversed() ?: "unknown"
+                                }
+                                val details = buildString {
+                                    when {
+                                        capacity == null -> append("Context usage unavailable")
+                                        ratio == null -> append("Context usage unknown\nCapacity: $capacityText tokens")
+                                        else -> append("Estimated context usage: ${(ratio * 100).roundToLong()}%\n$usedText of $capacityText tokens")
                                     }
-                                },
-                                enabled = canSend,
-                                modifier = Modifier.size(40.dp),
-                            ) {
-                                Icon(
-                                    imageVector = SendIcon,
-                                    contentDescription = if (session.status == SessionStatus.Running) {
-                                        "Steer Pi"
-                                    } else {
-                                        "Send message"
+                                    if (capacity != null && (state.connectionStatus != ConnectionStatus.Connected ||
+                                        !chat.synchronized || session.status !in listOf(SessionStatus.Idle, SessionStatus.Running))) {
+                                        append("\nLast known value")
+                                    }
+                                }
+                                val ringColor = MaterialTheme.colorScheme.primary
+                                val trackColor = MaterialTheme.colorScheme.outlineVariant
+                                TooltipBox(
+                                    positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
+                                    tooltip = { PlainTooltip { Text(details) } },
+                                    state = tooltip,
+                                    onDismissRequest = tooltip::dismiss,
+                                    focusable = false,
+                                    hasAction = false,
+                                ) {
+                                    IconButton(
+                                        onClick = {
+                                            if (tooltip.isVisible) tooltip.dismiss()
+                                            else tooltipScope.launch { tooltip.show() }
+                                        },
+                                        modifier = Modifier.size(40.dp).semantics {
+                                            contentDescription = details
+                                            if (ratio != null) progressBarRangeInfo = ProgressBarRangeInfo(ratio.toFloat().coerceIn(0f, 1f), 0f..1f)
+                                        },
+                                    ) {
+                                        Canvas(Modifier.size(20.dp)) {
+                                            val stroke = 2.dp.toPx()
+                                            drawCircle(trackColor, radius = (size.minDimension - stroke) / 2, style = Stroke(stroke))
+                                            if (ratio != null) drawArc(
+                                                ringColor, -90f, ratio.toFloat().coerceIn(0f, 1f) * 360f, false,
+                                                topLeft = Offset(stroke / 2, stroke / 2),
+                                                size = Size(size.width - stroke, size.height - stroke),
+                                                style = Stroke(stroke, cap = StrokeCap.Round),
+                                            ) else drawLine(ringColor, center - Offset(stroke, 0f), center + Offset(stroke, 0f), stroke)
+                                        }
+                                    }
+                                }
+                            }
+                            if (uploading) {
+                                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                                }
+                            } else {
+                                FilledIconButton(
+                                    onClick = {
+                                        if (!completeBareModelCommand()) {
+                                            listState.requestScrollToItem(0)
+                                            controller.sendPrompt()
+                                        }
                                     },
-                                    modifier = Modifier.size(20.dp),
-                                )
+                                    enabled = canSend,
+                                    modifier = Modifier.size(40.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = SendIcon,
+                                        contentDescription = if (session.status == SessionStatus.Running) {
+                                            "Steer Pi"
+                                        } else {
+                                            "Send message"
+                                        },
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
                             }
                         }
                     },

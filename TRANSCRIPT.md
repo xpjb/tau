@@ -76,6 +76,22 @@ released dist files or deploy the protocol-3 daemon alone. No production service
 configuration, chat or deployed Pi installation changed; no rebuild was pushed
 or delivered.
 
+## Context meter follow-up
+
+A separate addition shows a small circular meter beside Send. Hover on Windows
+or tap on Android shows estimated used/capacity tokens. Unknown usage stays
+unknown; offline or inactive-process values are labelled last known. Pi's existing
+context estimate is included in `get_state`; Tau carries it in existing session
+metadata and the existing client store. Turn/compaction boundaries refresh it;
+there is no polling timer, new token counter or transcript protocol change.
+
+Checks pass: six Pi RPC tests, nine client tests, eight daemon tests, read-only Pi
+checks, Clippy and both native builds. Windows/Wine hover and Android emulator
+tap show 64,000 of 200,000 tokens (32%) through an isolated daemon/Pi fixture.
+The Pi source change has RPC coverage; a new installed Pi package is still part
+of coordinated release preparation. Evidence: `/tmp/tau-context/`. This addition
+is separate from core review baselines Tau `01b4983` and Pi `b043181`.
+
 ## Authority and identity
 
 Pi's existing JSONL entries remain authoritative. Tau retains the entry ID, parent

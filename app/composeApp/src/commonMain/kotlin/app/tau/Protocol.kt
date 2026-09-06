@@ -143,6 +143,7 @@ data class SessionState(
     val sessionId: String,
     val status: SessionStatus,
     val detail: String? = null,
+    val contextUsage: ContextUsage? = null,
 ) : ServerMessage
 
 @Serializable
@@ -198,6 +199,9 @@ data class SessionModel(
 )
 
 @Serializable
+data class ContextUsage(val tokens: Long? = null, val contextWindow: Long)
+
+@Serializable
 data class SessionSummary(
     val id: String,
     val title: String,
@@ -207,6 +211,7 @@ data class SessionSummary(
     val parentId: String? = null,
     val createdAtMs: Long,
     val updatedAtMs: Long,
+    val contextUsage: ContextUsage? = null,
 )
 
 @Serializable

@@ -52,6 +52,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, .. })).await;
     let snapshot = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot();
     assert_eq!(snapshot.entries.len(), 2);
+    assert_eq!(runtime.snapshot().context_usage, Some(ContextUsage { tokens: Some(64000), context_window: 200000 }));
     assert_eq!(snapshot.entries[0].origin.request_id.as_deref(), Some("request-1"));
     assert_eq!(snapshot.entries[1].content[0].text, "Checking");
     assert_eq!(snapshot.entries[1].content[1].text, "Hello from Tau");
@@ -76,6 +77,22 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert!(matches!(manager.prompt(&id, "/thinking high", "thinking").await.unwrap().disposition, PromptDisposition::Handled));
     manager.prompt(&id, "/model test/other", "model").await.unwrap();
     assert_eq!(manager.inner.state.get(&id).unwrap().model.unwrap().model_id, "other");
+    assert_eq!(runtime.snapshot().context_usage.unwrap().context_window, 128000);
+    manager.prompt(&id, "/compact", "compact").await.unwrap();
+    assert_eq!(runtime.snapshot().context_usage, Some(ContextUsage { tokens: None, context_window: 128000 }));
+    let process = runtime.content.lock().await.process.clone().unwrap();
+    process.request(json!({"type":"mock_context", "usage":{"tokens":32000,"contextWindow":128000}})).await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::SessionState { context_usage: Some(usage), .. } if usage.tokens == Some(32000))).await;
+    manager.open_session(&id).await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::SessionState { context_usage: Some(usage), .. } if usage.tokens == Some(32000))).await;
+    let ServerMessage::Sessions { sessions } = manager.sessions_message().await else { unreachable!() };
+    assert_eq!(sessions.iter().find(|session| session.id == id).unwrap().context_usage, runtime.snapshot().context_usage);
+    for usage in [Value::Null, json!({"tokens": -1, "contextWindow": 128000}), json!({"tokens":1,"contextWindow":0})] {
+        process.request(json!({"type":"mock_context", "usage":usage})).await.unwrap();
+        manager.refresh_runtime_status(&id, &runtime, &process).await.unwrap();
+        assert!(runtime.snapshot().context_usage.is_none());
+    }
+    process.request(json!({"type":"mock_context", "usage":{"tokens":32000,"contextWindow":128000}})).await.unwrap();
     assert!(manager.prompt(&id, "/settings", "settings").await.is_err());
 
     manager.prompt(&id, "hold", "request-2").await.unwrap();

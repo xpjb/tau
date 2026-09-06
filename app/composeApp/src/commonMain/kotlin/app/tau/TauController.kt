@@ -592,7 +592,7 @@ class TauController(
                 is Commands -> mutableState.update { it.copy(slashCommands = it.slashCommands + (message.sessionId to message.commands), loadingCommands = it.loadingCommands - message.sessionId) }
                 is SessionState -> {
                     val stopped = message.status == SessionStatus.Sleeping || message.status == SessionStatus.Error
-                    val sessions = state.value.sessions.map { if (it.id == message.sessionId) it.copy(status = message.status, detail = message.detail) else it }
+                    val sessions = state.value.sessions.map { if (it.id == message.sessionId) it.copy(status = message.status, detail = message.detail, contextUsage = message.contextUsage) else it }
                     store.saveSessions(identity, sessions)
                     mutableState.update { it.copy(sessions = sessions,
                         slashCommands = if (stopped) it.slashCommands - message.sessionId else it.slashCommands,

@@ -107,6 +107,7 @@ pub enum ServerMessage {
     SessionState {
         session_id: String,
         status: SessionStatus,
+        context_usage: Option<ContextUsage>,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
@@ -242,6 +243,21 @@ pub enum SessionStatus {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub tokens: Option<u64>,
+    pub context_window: u64,
+}
+
+impl ContextUsage {
+    pub fn from_pi(data: &serde_json::Value) -> Option<Self> {
+        let usage: Self = serde_json::from_value(data.get("contextUsage")?.clone()).ok()?;
+        (usage.context_window > 0 && usage.context_window <= 9_007_199_254_740_991
+            && usage.tokens.is_none_or(|tokens| tokens <= 9_007_199_254_740_991)).then_some(usage)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
@@ -249,6 +265,7 @@ pub struct SessionSummary {
     pub title: String,
     pub status: SessionStatus,
     pub detail: Option<String>,
+    pub context_usage: Option<ContextUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<SessionModel>,
     pub parent_id: Option<String>,
