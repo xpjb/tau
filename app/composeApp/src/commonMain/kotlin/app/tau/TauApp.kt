@@ -495,29 +495,29 @@ private fun PositionedDropdownMenu(
     onDismissRequest: () -> Unit,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    if (pointerPosition == null) {
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = onDismissRequest,
-            content = content,
-        )
-        return
-    }
-    Box(
-        Modifier
-            .offset {
-                IntOffset(
-                    pointerPosition.x.roundToInt(),
-                    pointerPosition.y.roundToInt(),
-                )
-            }
-            .size(1.dp),
-    ) {
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = onDismissRequest,
-            content = content,
-        )
+    DisableSelection {
+        if (pointerPosition == null) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = onDismissRequest,
+                content = content,
+            )
+        } else Box(
+            Modifier
+                .offset {
+                    IntOffset(
+                        pointerPosition.x.roundToInt(),
+                        pointerPosition.y.roundToInt(),
+                    )
+                }
+                .size(1.dp),
+        ) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = onDismissRequest,
+                content = content,
+            )
+        }
     }
 }
 
@@ -1492,16 +1492,14 @@ private fun ChatPanel(
                                             timestamp?.let { Text(PlatformServices.formatMessageTime(it), Modifier.align(Alignment.End), style = MaterialTheme.typography.labelSmall, color = LocalContentColor.current.copy(alpha = 0.62f)) }
                                         }
                                     }
-                                    DisableSelection {
-                                        PositionedDropdownMenu(menuExpanded, menuPointer, { menuExpanded = false; menuPointer = null }) {
-                                            val selectedText = transcriptSelectionState.selectedTexts.joinToString("\n") { it.text }
-                                            DropdownMenuItem(text = { Text(if (selectedText.isEmpty()) "Copy message" else "Copy selection") }, onClick = {
-                                                PlatformServices.copyText(selectedText.ifEmpty { message.content.filter { it.kind != ContentKind.Hidden }.joinToString("\n\n") { it.text } })
-                                                menuExpanded = false
-                                            })
-                                            if (message.phase == EntryPhase.Saved) DropdownMenuItem(text = { Text("Fork here") }, enabled = state.connectionStatus == ConnectionStatus.Connected,
-                                                onClick = { menuExpanded = false; controller.fork(message.id) })
-                                        }
+                                    PositionedDropdownMenu(menuExpanded, menuPointer, { menuExpanded = false; menuPointer = null }) {
+                                        val selectedText = transcriptSelectionState.selectedTexts.joinToString("\n") { it.text }
+                                        DropdownMenuItem(text = { Text(if (selectedText.isEmpty()) "Copy message" else "Copy selection") }, onClick = {
+                                            PlatformServices.copyText(selectedText.ifEmpty { message.content.filter { it.kind != ContentKind.Hidden }.joinToString("\n\n") { it.text } })
+                                            menuExpanded = false
+                                        })
+                                        if (message.phase == EntryPhase.Saved) DropdownMenuItem(text = { Text("Fork here") }, enabled = state.connectionStatus == ConnectionStatus.Connected,
+                                            onClick = { menuExpanded = false; controller.fork(message.id) })
                                     }
                                 }
                             }
