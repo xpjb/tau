@@ -1,11 +1,11 @@
 # Retained transcript contract
 
-Status: Tau 0.5.0 release authorized; artifacts prepared, production cutover pending.
+Status: Tau 0.5.0 deployed; protocol-3 Windows and Android installers delivered.
 Replaces Tau protocol 2 without migrating or replacing existing JSONL.
 
-## Release preparation — 2026-09-06
+## Release — 2026-09-06
 
-Tau 0.5.0 and Pi `29b43c7` are built together as a release candidate. Ten client
+Tau 0.5.0 (release code `d8f7d1c`) and Pi `29b43c7` are deployed together. Ten client
 tests, eight daemon tests, strict Clippy, six Pi RPC tests and read-only Pi checks
 pass. Windows packaging and signed Android versionCode 17 builds pass. The new
 installed Pi and release daemon pass the isolated synthetic pipeline, including
@@ -13,11 +13,17 @@ queue prefix/Resume, context counts, existing JSONL, commands, forks and media.
 The session-table change is separate in `e2cfe8c` and includes migration and
 changed-row write checks.
 
-The user authorized release, then requested preparation while finishing a chat.
-Wait for the cutover signal and recheck production activity before restarting Tau.
-Telegram keeps its existing Pi installation. Independent review, physical-device
-acceptance and a new live-provider run remain uncompleted; synthetic tests do not
-claim those results. The checkpoints below record the earlier development state.
+The user gave the cutover signal after receiving both installers. All 28 chats
+were idle. A fresh backup preceded the switch. Post-cutover checks reopened all
+28 chats: 12,719 retained entries, 7,417 thinking blocks, an image thumbnail and a
+file download. All 27 existing JSONL files retain their original byte prefixes.
+Telegram's process and Pi installation are unchanged. Deployment evidence is in
+`/root/tau-release/0.5.0/`; backup is
+`/var/backups/tau/0.5.0-20260906T080437Z`.
+
+Independent review, physical-device acceptance and a new live-provider run remain
+uncompleted; synthetic and read-only production checks do not claim those results.
+The checkpoints below record the earlier development state.
 
 ## Development checkpoint — 2026-09-06
 
