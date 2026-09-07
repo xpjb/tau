@@ -307,6 +307,7 @@ impl Entry {
                 file_name: request.path.file_name()?.to_string_lossy().into_owned(),
                 caption: request.caption,
                 size: request.size,
+                source_path: Some(request.path),
             })
         });
         Ok(Self {
@@ -441,12 +442,16 @@ impl Transcript {
         })
     }
 
+    pub fn entry(&self, id: &str) -> Option<&Entry> {
+        self.by_id.get(id).map(|index| &self.entries[*index])
+    }
+
     pub fn page(&self, before: Option<&str>) -> Result<HistoryPage> {
         let mut cursor = before.or(self.head.as_deref());
         let mut saved = Vec::new();
         let mut bytes = 0;
         while let Some(id) = cursor {
-            let entry = &self.entries[*self.by_id.get(id).context("History cursor is unavailable; reopen this chat")?];
+            let entry = self.entry(id).context("History cursor is unavailable; reopen this chat")?;
             if entry.phase != EntryPhase::Saved { bail!("History cursor is provisional"); }
             let size = serde_json::to_vec(entry)?.len();
             if !saved.is_empty() && (saved.len() >= PAGE_ENTRIES || bytes + size > PAGE_BYTES) { break; }

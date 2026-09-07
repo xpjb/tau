@@ -71,6 +71,8 @@ for line in sys.stdin:
         response["data"] = {"sessionId": "mock", "generation": generation, "sequence": sequence,
                             "entries": entries, "leafId": head, "live": live, **queue_state()}
     elif kind == "get_entries":
+        with open(os.path.join(session_dir, "entry-reads"), "a") as marker:
+            marker.write("read\n")
         response["data"] = {"entries": entries, "leafId": head}
     elif kind == "get_commands":
         response["data"] = {"commands": [{"name": name, "source": source} for name, source in

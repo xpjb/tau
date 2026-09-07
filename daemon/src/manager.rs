@@ -846,14 +846,26 @@ impl AgentManager {
         entry_id: &str,
     ) -> Result<ResolvedAttachment> {
         let runtime = self.runtime(id).await?;
-        let _guard = runtime.operation.lock().await;
-        let process = runtime.content.lock().await.process.clone();
-        let (entries, _) = self.entries_for_read(id, process.as_ref()).await?;
-        let entry = entries
-            .iter()
-            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
-            .with_context(|| format!("attachment entry {entry_id} does not exist"))?;
-        let request = attachment_request(entry).context("entry has no Tau attachment")?;
+        let cached = {
+            let content = runtime.content.lock().await;
+            if let Some(transcript) = &content.transcript {
+                let attachment = transcript.entry(entry_id).and_then(|entry| entry.attachment.as_ref())
+                    .context("entry has no Tau attachment")?;
+                Some(crate::transcript::AttachmentRequest {
+                    kind: attachment.kind,
+                    path: attachment.source_path.clone().context("attachment source is unavailable")?,
+                    caption: attachment.caption.clone(),
+                    size: attachment.size,
+                })
+            } else { None }
+        };
+        let request = if let Some(request) = cached { request } else {
+            let process = runtime.content.lock().await.process.clone();
+            let (entries, _) = self.entries_for_read(id, process.as_ref()).await?;
+            let entry = entries.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
+                .with_context(|| format!("attachment entry {entry_id} does not exist"))?;
+            attachment_request(entry).context("entry has no Tau attachment")?
+        };
         let root = fs::canonicalize(&self.inner.config.attachment_root)
             .await
             .context("Tau attachment root is unavailable")?;

@@ -300,6 +300,8 @@ pub struct UploadedFile {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatAttachment {
+    #[serde(skip)]
+    pub source_path: Option<std::path::PathBuf>,
     pub kind: AttachmentKind,
     pub file_name: String,
     pub caption: Option<String>,

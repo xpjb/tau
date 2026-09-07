@@ -234,6 +234,7 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     let original = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
     fs::write(&path, &original).await.unwrap();
     manager.inner.state.set_session_file(&id, path.to_string_lossy().into_owned()).await.unwrap();
+    assert_eq!(manager.resolve_attachment(&id, "artifact").await.unwrap().size, 8);
     let mut events = Events::new(&manager);
     events.open(&manager, &id).await;
     let ServerMessage::TranscriptSnapshot { snapshot: TranscriptSnapshot { entries, head, .. }, .. } =
@@ -242,7 +243,18 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].attachment.as_ref().unwrap().size, Some(8));
     assert_eq!(entries[0].attachment.as_ref().unwrap().file_name, "result.zip");
+    assert!(serde_json::to_value(&entries).unwrap()[0]["attachment"].get("sourcePath").is_none());
+    let hidden = path.with_extension("held");
+    fs::rename(&path, &hidden).await.unwrap();
     assert_eq!(manager.resolve_attachment(&id, "artifact").await.unwrap().size, 8);
+    fs::rename(&hidden, &path).await.unwrap();
+    manager.commands(&id).await.unwrap();
+    let runtime = manager.runtime(&id).await.unwrap();
+    let operation = runtime.operation.lock().await;
+    let attachment = tokio::time::timeout(Duration::from_secs(1), manager.resolve_attachment(&id, "artifact")).await.unwrap().unwrap();
+    assert_eq!(attachment.size, 8);
+    assert!(!fs::try_exists(root.join("pi-sessions/entry-reads")).await.unwrap());
+    drop(operation);
     assert!(manager.resolve_attachment(&id, "link").await.is_err());
     assert!(manager.resolve_attachment(&id, "image").await.is_err());
     assert!(manager.resolve_attachment(&id, "missing").await.is_err());
