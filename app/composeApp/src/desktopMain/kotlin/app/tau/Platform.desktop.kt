@@ -119,9 +119,8 @@ actual object PlatformServices {
     actual val osVersion: String = (
         System.getProperty("os.name").orEmpty() + " " + System.getProperty("os.version").orEmpty()
     ).trim()
-    actual val thumbnailCacheDirectory: String by lazy {
-        dataDirectory.resolve("image-thumbnails").toString()
-    }
+    actual val attachmentDirectory: String
+        get() = dataDirectory.resolve("attachments").toString()
     actual val transcriptDatabasePath: String
         get() = dataDirectory.resolve("transcript.db").toString()
 

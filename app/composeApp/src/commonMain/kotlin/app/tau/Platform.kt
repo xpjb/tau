@@ -5,6 +5,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.ImageBitmap
 import io.ktor.client.engine.HttpClientEngine
 import kotlinx.serialization.Serializable
 
@@ -31,7 +32,7 @@ expect object PlatformServices {
     val platformName: String
     val appVersion: String
     val osVersion: String
-    val thumbnailCacheDirectory: String
+    val attachmentDirectory: String
     val transcriptDatabasePath: String
 
     fun loadConnection(): ConnectionSettings
@@ -87,3 +88,5 @@ expect fun TranscriptScrollbar(
 expect fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit)
 
 expect fun platformHttpEngine(): HttpClientEngine
+
+internal expect fun decodeLocalImage(path: String, maxSide: Int): ImageBitmap

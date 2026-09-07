@@ -98,9 +98,9 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -122,22 +122,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import coil3.ImageLoader
-import coil3.compose.AsyncImage
-import coil3.compose.LocalPlatformContext
-import coil3.compose.setSingletonImageLoaderFactory
-import coil3.disk.DiskCache
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
-import coil3.network.ktor3.KtorNetworkFetcherFactory
-import coil3.request.CachePolicy
-import coil3.request.ImageRequest
-import coil3.serviceLoaderEnabled
-import io.ktor.client.HttpClient
-import io.ktor.http.encodeURLPathPart
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import okio.Path.Companion.toPath
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
@@ -229,24 +215,6 @@ private val TauDarkColors = darkColorScheme(
 
 @Composable
 fun TauApp(controller: TauController) {
-    setSingletonImageLoaderFactory { context ->
-        ImageLoader.Builder(context)
-            .serviceLoaderEnabled(false)
-            .diskCache {
-                DiskCache.Builder()
-                    .directory(PlatformServices.thumbnailCacheDirectory.toPath())
-                    .maxSizeBytes(100L * 1_024 * 1_024)
-                    .build()
-            }
-            .components {
-                add(
-                    KtorNetworkFetcherFactory(
-                        httpClient = { HttpClient(platformHttpEngine()) },
-                    ),
-                )
-            }
-            .build()
-    }
     val state by controller.state.collectAsState()
     LaunchedEffect(controller) { controller.start() }
 
@@ -1300,151 +1268,34 @@ private fun ChatPanel(
                                                     Column(Modifier.fillMaxWidth()) {
                                                         Spacer(Modifier.height(AttachmentTopSpacing))
                                                         if (attachment.kind == AttachmentKind.Image) {
-                                                            val platformContext = LocalPlatformContext.current
-                                                            val imageUrl = remember(
-                                                                settings.serverUrl,
-                                                                sessionId,
-                                                                message.id,
-                                                            ) {
-                                                                val baseUrl = settings.serverUrl.trim().trimEnd('/')
-                                                                "$baseUrl/v1/sessions/" +
-                                                                    sessionId.encodeURLPathPart() +
-                                                                    "/attachments/" +
-                                                                    message.id.encodeURLPathPart()
+                                                            var imageVisible by remember(settings.identity, message.id) { mutableStateOf(false) }
+                                                            var imageExpanded by remember(settings.identity, message.id) { mutableStateOf(false) }
+                                                            LaunchedEffect(imageVisible, imageExpanded, settings.identity, message.id, state.connectionStatus) {
+                                                                if (imageVisible || imageExpanded) controller.downloadAttachment(sessionId, message, save = false, automatic = true)
                                                             }
-                                                            val thumbnailUrl = "$imageUrl/thumbnail"
-                                                            val authenticationHeaders = remember(settings.token) {
-                                                                NetworkHeaders.Builder()
-                                                                    .set(
-                                                                        "Authorization",
-                                                                        "Bearer ${settings.token}",
-                                                                    )
-                                                                    .set("Accept", "image/*")
-                                                                    .build()
-                                                            }
-                                                            val cacheScope = settings.identity
-                                                            val thumbnailCacheKey = "$thumbnailUrl#$cacheScope"
-                                                            val thumbnailRequest = remember(
-                                                                platformContext,
-                                                                thumbnailUrl,
-                                                                authenticationHeaders,
-                                                                thumbnailCacheKey,
-                                                            ) {
-                                                                ImageRequest.Builder(platformContext)
-                                                                    .data(thumbnailUrl)
-                                                                    .httpHeaders(authenticationHeaders)
-                                                                    .memoryCacheKey(thumbnailCacheKey)
-                                                                    .diskCacheKey(thumbnailCacheKey)
-                                                                    .diskCachePolicy(CachePolicy.ENABLED)
-                                                                    .build()
-                                                            }
-                                                            val originalImageRequest = remember(
-                                                                platformContext,
-                                                                imageUrl,
-                                                                authenticationHeaders,
-                                                                cacheScope,
-                                                                thumbnailCacheKey,
-                                                            ) {
-                                                                ImageRequest.Builder(platformContext)
-                                                                    .data(imageUrl)
-                                                                    .httpHeaders(authenticationHeaders)
-                                                                    .memoryCacheKey("$imageUrl#$cacheScope")
-                                                                    .placeholderMemoryCacheKey(thumbnailCacheKey)
-                                                                    .diskCachePolicy(CachePolicy.DISABLED)
-                                                                    .build()
-                                                            }
-                                                            var useOriginalPreview by remember(imageUrl, settings.token) {
-                                                                mutableStateOf(false)
-                                                            }
-                                                            var imageLoaded by remember(imageUrl, settings.token) {
-                                                                mutableStateOf<Boolean?>(null)
-                                                            }
-                                                            var imageExpanded by remember(imageUrl, settings.token) {
-                                                                mutableStateOf(false)
-                                                            }
-                                                            val previewRequest = if (useOriginalPreview) {
-                                                                originalImageRequest
-                                                            } else {
-                                                                thumbnailRequest
-                                                            }
-                                                            Box(
-                                                                Modifier
-                                                                    .widthIn(max = 520.dp)
-                                                                    .fillMaxWidth()
-                                                                    .height(InlineImagePreviewHeight)
+                                                            val label = attachment.caption ?: attachment.fileName
+                                                            LocalImage(
+                                                                attachmentDownload, label, imageVisible, 1024,
+                                                                Modifier.widthIn(max = 520.dp).fillMaxWidth().height(InlineImagePreviewHeight)
+                                                                    .onGloballyPositioned { imageVisible = !it.boundsInWindow().isEmpty }
                                                                     .clip(RoundedCornerShape(8.dp))
-                                                                    .background(
-                                                                        MaterialTheme.colorScheme.surface.copy(
-                                                                            alpha = 0.52f,
-                                                                        ),
-                                                                    )
+                                                                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.52f))
                                                                     .clickable { imageExpanded = true },
-                                                                contentAlignment = Alignment.Center,
-                                                            ) {
-                                                                when (imageLoaded) {
-                                                                    null -> CircularProgressIndicator(
-                                                                        Modifier.size(28.dp),
-                                                                        strokeWidth = 2.dp,
-                                                                    )
-                                                                    false -> Text(
-                                                                        "Image preview unavailable",
-                                                                        modifier = Modifier.padding(12.dp),
-                                                                        style = MaterialTheme.typography.labelMedium,
-                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                                    )
-                                                                    true -> Unit
-                                                                }
-                                                                AsyncImage(
-                                                                    model = previewRequest,
-                                                                    contentDescription = attachment.caption
-                                                                        ?: attachment.fileName,
-                                                                    modifier = Modifier.fillMaxSize(),
-                                                                    onLoading = { imageLoaded = null },
-                                                                    onSuccess = { imageLoaded = true },
-                                                                    onError = {
-                                                                        if (useOriginalPreview) {
-                                                                            imageLoaded = false
-                                                                        } else {
-                                                                            useOriginalPreview = true
-                                                                        }
-                                                                    },
-                                                                    contentScale = ContentScale.Fit,
-                                                                )
-                                                            }
+                                                                onRetry = { controller.downloadAttachment(sessionId, message, save = false, force = true) },
+                                                            )
                                                             if (imageExpanded) {
                                                                 Dialog(
                                                                     onDismissRequest = { imageExpanded = false },
-                                                                    properties = DialogProperties(
-                                                                        usePlatformDefaultWidth = false,
-                                                                    ),
+                                                                    properties = DialogProperties(usePlatformDefaultWidth = false),
                                                                 ) {
-                                                                    Box(
-                                                                        Modifier
-                                                                            .fillMaxSize()
-                                                                            .background(Color.Black.copy(alpha = 0.94f))
-                                                                            .clickable { imageExpanded = false }
-                                                                            .systemBarsPadding()
-                                                                            .displayCutoutPadding(),
-                                                                    ) {
-                                                                        AsyncImage(
-                                                                            model = originalImageRequest,
-                                                                            contentDescription = attachment.caption
-                                                                                ?: attachment.fileName,
-                                                                            modifier = Modifier
-                                                                                .fillMaxSize()
-                                                                                .padding(24.dp),
-                                                                            contentScale = ContentScale.Fit,
-                                                                        )
-                                                                        FilledTonalIconButton(
-                                                                            onClick = { imageExpanded = false },
-                                                                            modifier = Modifier
-                                                                                .align(Alignment.TopEnd)
-                                                                                .padding(8.dp),
-                                                                        ) {
-                                                                            Icon(
-                                                                                imageVector = CloseIcon,
-                                                                                contentDescription = "Close image",
-                                                                            )
+                                                                    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.94f))
+                                                                        .clickable { imageExpanded = false }.systemBarsPadding().displayCutoutPadding()) {
+                                                                        LocalImage(attachmentDownload, label, true, 4096,
+                                                                            Modifier.fillMaxSize().padding(24.dp),
+                                                                            onRetry = { controller.downloadAttachment(sessionId, message, save = false, force = true) })
+                                                                        FilledTonalIconButton(onClick = { imageExpanded = false },
+                                                                            modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
+                                                                            Icon(CloseIcon, "Close image")
                                                                         }
                                                                     }
                                                                 }
@@ -1472,8 +1323,8 @@ private fun ChatPanel(
                                                                     }
                                                             }
                                                             AttachmentDownloadStatus.Downloaded -> totalBytes
-                                                                ?.let { "${formatByteCount(it)} · Downloaded" }
-                                                                ?: "Downloaded"
+                                                                ?.let { "${formatByteCount(it)} · ${if (attachmentDownload.saved == null) "Saved in Tau" else "Downloaded"}" }
+                                                                ?: "Saved in Tau"
                                                             AttachmentDownloadStatus.Failed -> buildString {
                                                                 append(formatByteCount(attachmentDownload.transferredBytes))
                                                                 totalBytes?.let {
@@ -1542,7 +1393,9 @@ private fun ChatPanel(
                                                                                 controller.cancelAttachmentDownload(message)
                                                                             },
                                                                         ) { Text("Cancel") }
-                                                                        AttachmentDownloadStatus.Downloaded -> {
+                                                                        AttachmentDownloadStatus.Downloaded -> if (attachmentDownload.saved == null) {
+                                                                            TextButton(onClick = { controller.downloadAttachment(sessionId, message) }) { Text("Save") }
+                                                                        } else {
                                                                             TextButton(
                                                                                 onClick = {
                                                                                     controller.openAttachmentDownload(message)
@@ -1565,12 +1418,12 @@ private fun ChatPanel(
                                                                         }
                                                                         AttachmentDownloadStatus.Failed -> TextButton(
                                                                             onClick = {
-                                                                                controller.downloadAttachment(message)
+                                                                                controller.downloadAttachment(sessionId, message)
                                                                             },
                                                                         ) { Text("Retry") }
                                                                         null -> TextButton(
                                                                             onClick = {
-                                                                                controller.downloadAttachment(message)
+                                                                                controller.downloadAttachment(sessionId, message)
                                                                             },
                                                                         ) { Text("Download") }
                                                                     }

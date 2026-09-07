@@ -2,10 +2,9 @@ package app.tau
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
-import io.ktor.client.plugins.BodyProgress
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.HttpTimeoutConfig
-import io.ktor.client.plugins.onDownload
 import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
@@ -19,6 +18,8 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
+import io.ktor.http.encodeURLPathPart
+import io.ktor.utils.io.readAvailable
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
@@ -35,19 +36,26 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import okio.ByteString.Companion.encodeUtf8
+import okio.FileSystem
+import okio.Path.Companion.toPath
+import okio.buffer
 
 class TauConnectionException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
-class TauClient {
+class TauClient(private val attachmentDirectory: () -> String = { PlatformServices.attachmentDirectory }) {
     private val client = HttpClient(platformHttpEngine()) {
-        install(BodyProgress)
+        followRedirects = false
         install(HttpTimeout)
         install(WebSockets)
     }
     private val socketGate = Mutex()
+    private val attachmentGate = Semaphore(2)
     private var socket: DefaultClientWebSocketSession? = null
     private var socketId = 0L
 
@@ -138,25 +146,63 @@ class TauClient {
         settings: ConnectionSettings,
         sessionId: String,
         entryId: String,
-        fileName: String,
+        limit: Long,
+        force: Boolean = false,
+        allowNetwork: Boolean = true,
         onProgress: suspend (transferred: Long, total: Long?) -> Unit,
-    ): SavedDownload {
-        val baseUrl = settings.serverUrl.trim().trimEnd('/')
-        return client.prepareGet("$baseUrl/v1/sessions/$sessionId/attachments/$entryId") {
-            header(HttpHeaders.Authorization, "Bearer ${settings.token}")
-            timeout {
-                requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
-                connectTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
-                socketTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+    ): String = withContext(Dispatchers.IO) {
+        val files = FileSystem.SYSTEM
+        val directory = attachmentDirectory().toPath() / settings.identity / sessionId.encodeUtf8().sha256().hex()
+        val target = directory / entryId.encodeUtf8().sha256().hex()
+        val stored = files.metadataOrNull(target)
+        val storedBytes = stored?.size
+        if (!force && stored?.isRegularFile == true && storedBytes != null && storedBytes in 0..limit) {
+            onProgress(storedBytes, storedBytes)
+            return@withContext target.toString()
+        }
+        check(allowNetwork) { "Not saved on this device. Connect and retry." }
+        attachmentGate.withPermit {
+            files.createDirectories(directory)
+            val temporary = directory / ".${target.name}-${newRequestId()}.part"
+            val baseUrl = settings.serverUrl.trim().trimEnd('/')
+            try {
+                client.prepareGet("$baseUrl/v1/sessions/${sessionId.encodeURLPathPart()}/attachments/${entryId.encodeURLPathPart()}") {
+                    header(HttpHeaders.Authorization, "Bearer ${settings.token}")
+                    timeout {
+                        requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+                        connectTimeoutMillis = 30_000
+                        socketTimeoutMillis = 30_000
+                    }
+                }.execute { response ->
+                    check(response.status.isSuccess()) { "Attachment download failed with HTTP ${response.status.value}" }
+                    val expected = response.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+                    check(expected == null || expected in 0..limit) { "Attachment exceeds Tau's download limit" }
+                    val input = response.bodyAsChannel()
+                    val buffer = ByteArray(64 * 1024)
+                    var transferred = 0L
+                    files.openReadWrite(temporary, mustCreate = true).use { handle ->
+                        handle.sink().buffer().use { output ->
+                            while (true) {
+                                val count = input.readAvailable(buffer)
+                                if (count < 0) break
+                                transferred += count
+                                check(transferred <= limit) { "Attachment exceeds Tau's download limit" }
+                                output.write(buffer, 0, count)
+                                onProgress(transferred, expected)
+                            }
+                            check(expected == null || transferred == expected) { "Attachment download was incomplete" }
+                            output.flush()
+                            handle.flush()
+                        }
+                    }
+                    currentCoroutineContext().ensureActive()
+                    files.atomicMove(temporary, target)
+                    onProgress(transferred, transferred)
+                }
+                target.toString()
+            } finally {
+                files.delete(temporary, mustExist = false)
             }
-            onDownload(onProgress)
-        }.execute { response ->
-            if (!response.status.isSuccess()) {
-                error("Attachment download failed with HTTP ${response.status.value}")
-            }
-            val bytes = response.body<ByteArray>()
-            if (bytes.size > 50_000_000) error("Attachment exceeds Tau's download limit")
-            withContext(Dispatchers.IO) { PlatformServices.saveDownload(fileName, bytes) }
         }
     }
 

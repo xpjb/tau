@@ -20,6 +20,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.serialization.encodeToString
 import kotlin.time.TimeSource
+import okio.ByteString.Companion.encodeUtf8
+import okio.FileSystem
+import okio.Path.Companion.toPath
 
 private const val ReconnectDelayMillis = 2_000L
 private const val CommandLoadMillis = 10_000L
@@ -40,6 +43,8 @@ data class AttachmentDownload(
     val bytesPerSecond: Long? = null,
     val saved: SavedDownload? = null,
     val error: String? = null,
+    val localPath: String? = null,
+    val attempt: Int = 0,
 )
 
 data class TauUiState(
@@ -68,7 +73,7 @@ data class TauUiState(
 )
 
 class TauController(
-    dispatcher: CoroutineDispatcher,
+    private val dispatcher: CoroutineDispatcher,
     private val store: TranscriptStore = TranscriptStore({ PlatformServices.transcriptDatabasePath }),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
@@ -312,17 +317,26 @@ class TauController(
         send(RespondExtensionUi(newRequestId(), dialog.sessionId, dialog.request.id, value, confirmed, cancelled))
     }
 
-    fun downloadAttachment(message: TranscriptEntry) {
-        val sessionId = mutableState.value.selectedSessionId ?: return
+    fun downloadAttachment(sessionId: String, message: TranscriptEntry, save: Boolean = true, automatic: Boolean = false, force: Boolean = false) {
+        if (sessionId != state.value.selectedSessionId) return
         val attachment = message.attachment ?: return
         val key = AttachmentDownloadKey(sessionId, message.id)
         if (key in downloadJobs) return
+        val previous = state.value.attachmentDownloads[key]
+        if (automatic && previous != null && !(previous.error == "Not saved on this device. Connect and retry." &&
+            state.value.connectionStatus == ConnectionStatus.Connected)) return
+        val settings = state.value.settings
+        val allowNetwork = state.value.connectionStatus == ConnectionStatus.Connected
+        val attempt = (previous?.attempt ?: 0) + 1
         mutableState.update {
             it.copy(
                 attachmentDownloads = it.attachmentDownloads + (key to AttachmentDownload(
                     status = AttachmentDownloadStatus.Downloading,
                     transferredBytes = 0,
                     totalBytes = attachment.size,
+                    localPath = if (force) null else previous?.localPath,
+                    saved = previous?.saved,
+                    attempt = attempt,
                 )),
                 error = null,
             )
@@ -335,11 +349,10 @@ class TauController(
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val download = client.downloadAttachment(
-                    mutableState.value.settings,
-                    sessionId,
-                    message.id,
-                    attachment.fileName,
+                val path = client.downloadAttachment(
+                    settings, sessionId, message.id,
+                    if (attachment.kind == AttachmentKind.Image) 10_000_000L else 50_000_000L,
+                    force = force, allowNetwork = allowNetwork,
                 ) { transferred, total ->
                     transferredBytes = transferred
                     if (total != null) totalBytes = total
@@ -353,9 +366,9 @@ class TauController(
                             1_000 / intervalMillis
                         lastPublishedBytes = transferred
                         lastPublishedMillis = elapsedMillis
-                        mutableState.update { current ->
+                        withContext(dispatcher) { mutableState.update { current ->
                             val active = current.attachmentDownloads[key]
-                            if (active?.status != AttachmentDownloadStatus.Downloading) {
+                            if (downloadJobs[key] !== job || active?.status != AttachmentDownloadStatus.Downloading) {
                                 current
                             } else {
                                 current.copy(
@@ -367,9 +380,13 @@ class TauController(
                                         )),
                                 )
                             }
-                        }
+                        } }
                     }
                 }
+                val download = if (save) withContext(Dispatchers.IO) {
+                    val bytes = FileSystem.SYSTEM.read(path.toPath()) { readByteArray() }
+                    PlatformServices.saveDownload(attachment.fileName, bytes)
+                } else previous?.saved
                 mutableState.update { current ->
                     if (downloadJobs[key] !== job) {
                         current
@@ -381,8 +398,10 @@ class TauController(
                                     transferredBytes = transferredBytes,
                                     totalBytes = totalBytes ?: transferredBytes,
                                     saved = download,
+                                    localPath = path,
+                                    attempt = attempt,
                                 )),
-                            notice = "Saved to ${download.location}",
+                            notice = if (save && download != null) "Saved to ${download.location}" else current.notice,
                             error = null,
                         )
                     }
@@ -394,6 +413,8 @@ class TauController(
                 val detail = when {
                     rawError.contains("timeout", ignoreCase = true) -> "Timed out"
                     rawError.contains("HTTP ") -> rawError.substringAfter("Attachment download failed with ")
+                    rawError == "Not saved on this device. Connect and retry." -> rawError
+                    rawError == "Attachment exceeds Tau's download limit" -> rawError
                     else -> "Download interrupted"
                 }
                 mutableState.update { current ->
@@ -428,7 +449,9 @@ class TauController(
         val key = AttachmentDownloadKey(sessionId, message.id)
         downloadJobs.remove(key)?.cancel()
         mutableState.update {
-            it.copy(attachmentDownloads = it.attachmentDownloads - key)
+            val active = it.attachmentDownloads[key]
+            if (active == null) it else it.copy(attachmentDownloads = it.attachmentDownloads +
+                (key to active.copy(status = AttachmentDownloadStatus.Failed, bytesPerSecond = null, error = "Download cancelled")))
         }
     }
 
@@ -627,7 +650,14 @@ class TauController(
                         }
                     } else {
                         if (action is PendingAction.Delete) {
+                            for ((key, job) in downloadJobs.toMap()) if (key.sessionId == action.sessionId) {
+                                downloadJobs.remove(key); job.cancel(); job.join()
+                            }
                             store.removeChat(ChatKey(identity, action.sessionId))
+                            withContext(Dispatchers.IO) {
+                                FileSystem.SYSTEM.deleteRecursively(PlatformServices.attachmentDirectory.toPath() / identity /
+                                    action.sessionId.encodeUtf8().sha256().hex(), mustExist = false)
+                            }
                             mutableState.update { it.copy(transcripts = it.transcripts - action.sessionId, drafts = it.drafts - action.sessionId) }
                         }
                         if ((action == PendingAction.Create || action == PendingAction.Select) && message.sessionId != null) {
