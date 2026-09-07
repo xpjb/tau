@@ -2,6 +2,7 @@ package app.tau
 
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import java.nio.file.Files
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import kotlin.test.Test
@@ -10,6 +11,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 
 class TranscriptStoreTest {
     @Test
@@ -21,7 +24,7 @@ class TranscriptStoreTest {
         val sessions = listOf(first) + (1..200).map { first.copy(id = "other-$it", model = null, parentId = null, contextUsage = null) }
         val other = first.copy(title = "Other account", contextUsage = ContextUsage(null, 128000))
         val entry = TranscriptEntry("saved", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Retained history")))
-        var store = TranscriptStore({ path })
+        var store = TranscriptStore({ path }, liveFlushWindow = Duration.ZERO)
         try {
             BundledSQLiteDriver().open(path).use { db ->
                 for (sql in listOf(
@@ -107,7 +110,7 @@ class TranscriptStoreTest {
     fun retainsBranchesThinkingIdenticalPendingAndControlsAcrossRecreation() = runBlocking {
         val root = Files.createTempDirectory("tau-store-").toFile()
         val path = root.resolve("transcript.db").path
-        var store = TranscriptStore({ path })
+        var store = TranscriptStore({ path }, liveFlushWindow = Duration.ZERO)
         try {
             val key = ChatKey(ConnectionSettings("http://one", "token-a").identity, "chat")
             val other = ChatKey(ConnectionSettings("http://one", "token-b").identity, "chat")
@@ -143,7 +146,7 @@ class TranscriptStoreTest {
             assertEquals(43L, store.snapshot(key).sequence)
             assertEquals("received thinking", liveRow.entry.content[0].text)
             store.close()
-            store = TranscriptStore({ path })
+            store = TranscriptStore({ path }, liveFlushWindow = Duration.ZERO)
             store.disconnect(key.connection)
             val restored = store.chat(key)
             assertFalse(restored.synchronized)
@@ -263,10 +266,59 @@ class TranscriptStoreTest {
         } finally { store.close() }
     }
     @Test
+    fun defersLiveRewritesUntilTheWindowElapsesOrTheStreamFinalizes() = runBlocking {
+        val root = Files.createTempDirectory("tau-live-flush-").toFile()
+        val path = root.resolve("transcript.db").path
+        val key = ChatKey("flush", "chat")
+        var store = TranscriptStore({ path }, liveFlushWindow = Duration.INFINITE)
+        try {
+            val user = TranscriptEntry("user", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "history")))
+            val live = TranscriptEntry("live-stream", "user", phase = EntryPhase.Live, origin = EntryOrigin(streamId = "stream"), role = EntryRole.Assistant,
+                content = listOf(EntryContent(ContentKind.Thinking, "one")))
+            assertTrue(store.applySnapshot(key, TranscriptCut("g", 0, "user", listOf(user), QueueState())))
+            assertTrue(store.applyUpdates(key, listOf(TranscriptPatch("g", 1, TranscriptChange.Entry(live)))))
+            assertTrue(store.applyUpdates(key, listOf(TranscriptPatch("g", 2, TranscriptChange.Delta(live.id, 0, " two")))))
+            assertEquals("one two", store.chat(key).rows.last().entry.content.single().text)
+            BundledSQLiteDriver().open(path).use { db ->
+                db.prepare("SELECT value FROM records WHERE connection=? AND chat=? AND kind='entry' AND id=?").use { statement ->
+                    statement.bindText(1, key.connection); statement.bindText(2, key.session); statement.bindText(3, live.id)
+                    assertTrue(statement.step())
+                    assertEquals(live, TauJson.decodeFromString(statement.getText(0)))
+                    assertFalse(statement.step())
+                }
+            }
+            val saved = live.copy(id = "saved", phase = EntryPhase.Saved, content = listOf(EntryContent(ContentKind.Thinking, "one two")))
+            assertTrue(store.applyUpdates(key, listOf(TranscriptPatch("g", 3, TranscriptChange.Entry(saved)))))
+            BundledSQLiteDriver().open(path).use { db ->
+                db.prepare("SELECT count(*) FROM records WHERE connection=? AND chat=? AND kind='entry'").use { statement ->
+                    statement.bindText(1, key.connection); statement.bindText(2, key.session)
+                    statement.step(); assertEquals(2, statement.getInt(0))
+                }
+            }
+            store.close()
+            store = TranscriptStore({ path }, liveFlushWindow = 100.milliseconds)
+            assertTrue(store.applySnapshot(key, TranscriptCut("g", 3, "saved", listOf(user, saved), QueueState())))
+            val tail = TranscriptEntry("live-tail", "saved", phase = EntryPhase.Live, origin = EntryOrigin(streamId = "tail"), role = EntryRole.Assistant,
+                content = listOf(EntryContent(ContentKind.Text, "x")))
+            assertTrue(store.applyUpdates(key, listOf(TranscriptPatch("g", 4, TranscriptChange.Entry(tail)))))
+            assertTrue(store.applyUpdates(key, listOf(TranscriptPatch("g", 5, TranscriptChange.Delta(tail.id, 0, "y")))))
+            delay(300)
+            assertTrue(store.applyUpdates(key, listOf(TranscriptPatch("g", 6, TranscriptChange.Delta(tail.id, 0, "z")))))
+            BundledSQLiteDriver().open(path).use { db ->
+                db.prepare("SELECT value FROM records WHERE connection=? AND chat=? AND kind='entry' AND id=?").use { statement ->
+                    statement.bindText(1, key.connection); statement.bindText(2, key.session); statement.bindText(3, tail.id)
+                    assertTrue(statement.step())
+                    assertEquals("xyz", TauJson.decodeFromString<TranscriptEntry>(statement.getText(0)).content.single().text)
+                }
+            }
+        } finally { store.close(); root.deleteRecursively() }
+    }
+
+    @Test
     fun pagesHistoryWithoutAdvancingLiveStateAndRestoresOnlyRecentEntries() = runBlocking {
         val root = Files.createTempDirectory("tau-paged-store-").toFile()
         val path = root.resolve("transcript.db").path
-        var store = TranscriptStore({ path })
+        var store = TranscriptStore({ path }, liveFlushWindow = Duration.ZERO)
         val key = ChatKey("paged", "chat")
         val entries = (0 until 10_000).map { index -> TranscriptEntry("e$index", if (index == 0) null else "e${index - 1}",
             role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Message $index π🧠"))) }
@@ -315,7 +367,7 @@ class TranscriptStoreTest {
             assertEquals(51, chat.byId.size)
             assertEquals(2L, chat.position.sequence)
             assertEquals("π🧠", chat.rows.last().entry.content.single().text)
-            store.close(); store = TranscriptStore({ path })
+            store.close(); store = TranscriptStore({ path }, liveFlushWindow = Duration.ZERO)
             val restored = store.chat(key)
             assertEquals(51, restored.byId.size)
             assertEquals("e9949", restored.before)

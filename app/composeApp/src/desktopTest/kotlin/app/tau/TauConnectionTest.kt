@@ -19,6 +19,7 @@ import io.ktor.websocket.send
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -84,7 +85,7 @@ class TauConnectionTest {
         }.start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
         val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
-        var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }))
+        var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
             var socket = withTimeout(10_000) { sockets.receive() }
@@ -239,7 +240,7 @@ class TauConnectionTest {
                 controller.dispose()
             }.join()
             server.stop(0, 1_000)
-            controller = TauController(Dispatchers.Swing, TranscriptStore({ path }))
+            controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
             withContext(Dispatchers.Swing) { controller.start(settings) }
             val restored = controller.awaitState { !it.restoring && it.transcripts[chat.id]?.rows?.size == 3 }
             val reopened = restored.transcripts.getValue(chat.id)
@@ -288,7 +289,7 @@ class TauConnectionTest {
         }.start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
         val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
-        val controller = TauController(Dispatchers.Swing, TranscriptStore({ path }))
+        val controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
             val socket = withTimeout(10_000) { sockets.receive() }
@@ -387,7 +388,7 @@ class TauConnectionTest {
             }
         }.start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
-        val controller = TauController(Dispatchers.Swing, TranscriptStore({ directory.resolve("transcript.db").toString() }))
+        val controller = TauController(Dispatchers.Swing, TranscriptStore({ directory.resolve("transcript.db").toString() }, liveFlushWindow = Duration.ZERO))
         try {
             withContext(Dispatchers.Swing) { controller.start(ConnectionSettings("http://127.0.0.1:$port", "test-token")) }
             controller.awaitState { it.connectionStatus == ConnectionStatus.Connected }

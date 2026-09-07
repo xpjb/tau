@@ -13,6 +13,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonClassDiscriminator
 import okio.ByteString.Companion.encodeUtf8
+import kotlin.time.TimeMark
 import kotlin.uuid.Uuid
 
 val ConnectionSettings.identity: String
@@ -221,6 +222,7 @@ class EntryRow internal constructor(entry: TranscriptEntry) {
 @Stable
 class RetainedChat internal constructor(val key: ChatKey) {
     internal val byId = linkedMapOf<String, EntryRow>()
+    internal val liveFlushes = mutableMapOf<String, TimeMark>()
     internal val branch = mutableSetOf<String>()
     internal val visibleKeys = mutableSetOf<String>()
     internal var position: StoredPosition by mutableStateOf(StoredPosition())

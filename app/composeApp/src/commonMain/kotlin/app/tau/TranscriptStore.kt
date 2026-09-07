@@ -11,10 +11,14 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 class TranscriptStore(
     private val path: () -> String,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val liveFlushWindow: Duration = 1.seconds,
 ) {
     private val gate = Mutex()
     private var connection: SQLiteConnection? = null
@@ -365,10 +369,18 @@ class TranscriptStore(
         val controls = if (queueChanged) reconcileControls(chat.controls, position.queue, false) else chat.controls
         val pending = if (queueChanged || delivered.isNotEmpty()) reconcilePending(chat.pending, position.queue, delivered, controls, false) else chat.pending
         val preferences = chat.defaultExpansions(changed.values)
+        val entryWrites = changed.values.mapNotNull { entry ->
+            val due = entry.phase != EntryPhase.Live || chat.liveFlushes[entry.id]?.elapsedNow().let { it == null || it >= liveFlushWindow }
+            if (due) {
+                if (entry.phase == EntryPhase.Live) chat.liveFlushes[entry.id] = TimeSource.Monotonic.markNow()
+                else chat.liveFlushes.remove(entry.id)
+                entry.id to TauJson.encodeToString(entry)
+            } else null
+        }
         db.transaction {
             db.write(key, "preference", preferences)
-            for (id in removed) db.remove(key, "entry", id)
-            db.write(key, "entry", changed.values.map { it.id to TauJson.encodeToString(it) })
+            for (id in removed) { db.remove(key, "entry", id); chat.liveFlushes.remove(id) }
+            db.write(key, "entry", entryWrites)
             db.write(key, "position", listOf("current" to TauJson.encodeToString(position)))
             if (pending != chat.pending || controls != chat.controls) db.replacePending(key, pending, controls)
         }
