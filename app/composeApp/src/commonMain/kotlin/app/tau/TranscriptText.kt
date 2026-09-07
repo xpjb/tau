@@ -307,3 +307,50 @@ internal fun buildChatText(
 
     return TranscriptTextDocument(blocks)
 }
+
+internal data class ComposerSuggestion(
+    val value: String,
+    val label: String,
+    val description: String?,
+    val replaceStart: Int,
+    val replaceEnd: Int,
+)
+
+
+internal fun fuzzyCompletionScore(value: String, query: String): Int? {
+    val needle = query.lowercase().filterNot(Char::isWhitespace)
+    if (needle.isEmpty()) return 0
+    val haystack = value.lowercase().filterNot(Char::isWhitespace)
+    val substring = haystack.indexOf(needle)
+    if (substring >= 0) {
+        return substring * 4 + (haystack.length - needle.length).coerceAtMost(200)
+    }
+    var previous = -1
+    var gaps = 0
+    for (character in needle) {
+        val index = haystack.indexOf(character, previous + 1)
+        if (index < 0) return null
+        gaps += index - previous - 1
+        previous = index
+    }
+    return 1_000 + gaps * 4 + (haystack.length - needle.length).coerceAtMost(200)
+}
+
+
+internal fun formatByteCount(bytes: Long): String {
+    val amount = bytes.coerceAtLeast(0)
+    if (amount < 1_024) return "$amount B"
+    val units = listOf("KB", "MB", "GB")
+    var unit = 1_024L
+    var index = 0
+    while (index < units.lastIndex && amount >= unit * 1_024) {
+        unit *= 1_024
+        index++
+    }
+    val tenths = (amount * 10 + unit / 2) / unit
+    return if (tenths < 100) {
+        "${tenths / 10}.${tenths % 10} ${units[index]}"
+    } else {
+        "${(tenths + 5) / 10} ${units[index]}"
+    }
+}
