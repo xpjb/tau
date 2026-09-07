@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, MutexGuard, broadcast};
 use tracing::{debug, warn};
 
 use crate::config::Config;
@@ -79,12 +79,12 @@ struct ManagerInner {
 struct SessionRuntime {
     operation: Mutex<()>,
     content: Mutex<SessionContent>,
-    commands: StdRwLock<Option<Vec<SlashCommand>>>,
     state: StdRwLock<RuntimeState>,
 }
 
 struct SessionContent {
     process: Option<Arc<RpcProcess>>,
+    commands: Option<Vec<SlashCommand>>,
     transcript: Option<Transcript>,
     recovering: bool,
     events: broadcast::Sender<Arc<ServerMessage>>,
@@ -92,7 +92,14 @@ struct SessionContent {
 
 impl Default for SessionContent {
     fn default() -> Self {
-        Self { process: None, transcript: None, recovering: false, events: broadcast::channel(EVENT_BUFFER).0 }
+        Self { process: None, commands: None, transcript: None, recovering: false, events: broadcast::channel(EVENT_BUFFER).0 }
+    }
+}
+
+impl SessionContent {
+    fn take_process(&mut self) -> Option<Arc<RpcProcess>> {
+        self.commands = None;
+        self.process.take()
     }
 }
 
@@ -119,7 +126,6 @@ impl SessionRuntime {
         Self {
             operation: Mutex::new(()),
             content: Mutex::new(SessionContent::default()),
-            commands: StdRwLock::new(None),
             state: StdRwLock::new(RuntimeState::default()),
         }
     }
@@ -583,18 +589,28 @@ impl AgentManager {
         let process = runtime.content.lock().await.process.clone();
         if let Some(process) = process { self.cancel_extension_ui(&process).await; }
         let _guard = runtime.operation.lock().await;
-        let process = runtime.content.lock().await.process.take();
-        *runtime
-            .commands
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None, None);
+        self.retire_session(id, &runtime, runtime.content.lock().await, SessionStatus::Sleeping, None).await;
+        Ok(())
+    }
+
+    async fn retire_session(
+        &self,
+        id: &str,
+        runtime: &SessionRuntime,
+        mut content: MutexGuard<'_, SessionContent>,
+        status: SessionStatus,
+        detail: Option<String>,
+    ) {
+        let process = content.take_process();
+        self.set_runtime_state(id, runtime, status, detail, None);
+        self.interrupt_transcript(id, &mut content);
+        drop(content);
         if let Some(process) = process {
+            self.inner.pending_extension_ui.lock().await
+                .retain(|_, pending| !Arc::ptr_eq(&pending.process, &process));
             process.shutdown().await;
         }
-        self.interrupt_transcript(id, &mut *runtime.content.lock().await);
         self.broadcast_sessions().await;
-        Ok(())
     }
 
     async fn sleep_if_idle(&self, id: &str, expected_idle_since: Instant) {
@@ -619,26 +635,14 @@ impl AgentManager {
                 || data.get("pendingMessageCount").and_then(Value::as_u64).is_some_and(|count| count > 0)
             { return; }
         }
-        {
-            let mut content = runtime.content.lock().await;
-            let state = runtime.snapshot();
-            if state.status != SessionStatus::Idle || state.idle_since != Some(expected_idle_since) { return; }
-            if process.as_ref().is_some_and(|expected| !expected.is_alive()
-                || content.process.as_ref().is_none_or(|current| !Arc::ptr_eq(current, expected)))
-            { return; }
-            content.process.take();
-        }
-        *runtime
-            .commands
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None, None);
-        if let Some(process) = process {
-            process.shutdown().await;
-        }
-        self.interrupt_transcript(id, &mut *runtime.content.lock().await);
+        let content = runtime.content.lock().await;
+        let state = runtime.snapshot();
+        if state.status != SessionStatus::Idle || state.idle_since != Some(expected_idle_since) { return; }
+        if process.as_ref().is_some_and(|expected| !expected.is_alive()
+            || content.process.as_ref().is_none_or(|current| !Arc::ptr_eq(current, expected)))
+        { return; }
+        self.retire_session(id, &runtime, content, SessionStatus::Sleeping, None).await;
         debug!(session = id, "put idle Pi process to sleep");
-        self.broadcast_sessions().await;
     }
 
     pub async fn delete_session(&self, id: &str) -> Result<()> {
@@ -646,15 +650,7 @@ impl AgentManager {
         let process = runtime.content.lock().await.process.clone();
         if let Some(process) = process { self.cancel_extension_ui(&process).await; }
         let _guard = runtime.operation.lock().await;
-        let process = runtime.content.lock().await.process.take();
-        if let Some(process) = process {
-            *runtime
-                .commands
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-            self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None, None);
-            process.shutdown().await;
-        }
+        self.retire_session(id, &runtime, runtime.content.lock().await, SessionStatus::Sleeping, None).await;
 
         let stored = self
             .inner
@@ -719,28 +715,7 @@ impl AgentManager {
             bail!("unknown session {id}");
         }
 
-        let base_name = file_name
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or_default();
-        let safe_name = base_name
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .take(160)
-            .collect::<String>()
-            .trim_matches('.')
-            .to_owned();
-        let safe_name = if safe_name.is_empty() {
-            "attachment".to_owned()
-        } else {
-            safe_name
-        };
+        let safe_name = safe_file_name(file_name);
 
         fs::create_dir_all(&self.inner.config.upload_root).await?;
         let root = fs::canonicalize(&self.inner.config.upload_root).await?;
@@ -973,13 +948,7 @@ impl AgentManager {
             .context("Pi session file is not available")?
             .to_owned();
 
-        {
-            let mut content = runtime.content.lock().await;
-            content.process.take();
-            self.interrupt_transcript(id, &mut content);
-        }
-        self.set_runtime_state(id, &runtime, SessionStatus::Sleeping, None, None);
-        process.shutdown().await;
+        self.retire_session(id, &runtime, runtime.content.lock().await, SessionStatus::Sleeping, None).await;
 
         let temporary = RpcProcess::spawn(&self.inner.config, Some(&parent_file))?;
         let result = async {
@@ -1070,7 +1039,7 @@ impl AgentManager {
             let process = runtime.content.lock().await.process.clone();
             if let Some(process) = process { self.cancel_extension_ui(&process).await; }
             let _guard = runtime.operation.lock().await;
-            let process = runtime.content.lock().await.process.take();
+            let process = runtime.content.lock().await.take_process();
             if let Some(process) = process { process.shutdown().await; }
         }
     }
@@ -1195,16 +1164,12 @@ impl AgentManager {
         if let Some(process) = slot.process.as_ref().filter(|process| process.is_alive()) {
             return Ok(process.clone());
         }
-        if let Some(process) = slot.process.take() {
+        if let Some(process) = slot.take_process() {
             self.interrupt_transcript(id, &mut slot);
             drop(slot);
             process.shutdown().await;
             slot = runtime.content.lock().await;
         }
-        *runtime
-            .commands
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 
         let stored = self.inner.state.get(id).context("session disappeared")?;
         let session = stored.session_file.as_deref();
@@ -1280,16 +1245,10 @@ impl AgentManager {
     async fn load_slash_commands(
         &self,
         runtime: &SessionRuntime,
-        process: &RpcProcess,
+        process: &Arc<RpcProcess>,
         refresh: bool,
     ) -> Result<Vec<SlashCommand>> {
-        if !refresh
-            && let Some(commands) = runtime
-                .commands
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        {
+        if !refresh && let Some(commands) = runtime.content.lock().await.commands.clone() {
             return Ok(commands);
         }
 
@@ -1441,10 +1400,10 @@ impl AgentManager {
             }
         }
         commands.sort_by(|left, right| left.name.cmp(&right.name));
-        *runtime
-            .commands
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(commands.clone());
+        let mut content = runtime.content.lock().await;
+        if content.process.as_ref().is_some_and(|current| Arc::ptr_eq(current, process)) {
+            content.commands = Some(commands.clone());
+        }
         Ok(commands)
     }
 
@@ -1618,25 +1577,11 @@ impl AgentManager {
                     self.broadcast_sessions().await;
                 }
                 Some("rpc_closed") => {
-                    self.interrupt_transcript(&id, &mut content);
-                    content.process.take();
-                    *runtime
-                        .commands
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                    self.inner
-                        .pending_extension_ui
-                        .lock()
-                        .await
-                        .retain(|_, pending| !Arc::ptr_eq(&pending.process, &process));
                     let detail = event
                         .get("error")
                         .and_then(Value::as_str)
                         .map(|error| bounded(error, 240));
-                    self.set_runtime_state(&id, &runtime, SessionStatus::Error, detail, None);
-                    self.broadcast_sessions().await;
-                    drop(content);
-                    process.shutdown().await;
+                    self.retire_session(&id, &runtime, content, SessionStatus::Error, detail).await;
                     break;
                 }
                 _ => {}
@@ -1780,6 +1725,31 @@ impl AgentManager {
     async fn broadcast_sessions(&self) {
         let message = self.sessions_message().await;
         let _ = self.inner.events.send(message);
+    }
+}
+
+pub(crate) fn safe_file_name(file_name: &str) -> String {
+    let base_name = file_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    let safe_name = base_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(160)
+        .collect::<String>()
+        .trim_matches('.')
+        .to_owned();
+    if safe_name.is_empty() {
+        "attachment".to_owned()
+    } else {
+        safe_name
     }
 }
 

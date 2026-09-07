@@ -85,6 +85,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert_eq!(snapshot.entries[1].content[1].text, "Hello from Tau");
     assert!(snapshot.entries[1].origin.stream_id.is_some());
     let commands = manager.commands(&id).await.unwrap();
+    assert!(runtime.content.lock().await.commands.is_some());
     assert!(commands.iter().any(|command| command.name == "choose" && command.source == SlashCommandSource::Extension));
     assert!(commands.iter().any(|command| command.name == "review" && command.source == SlashCommandSource::Prompt));
     assert!(commands.iter().any(|command| command.name == "model" && command.arguments.iter().any(|argument| argument.value == "test/model")));
@@ -178,6 +179,9 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Interrupted, .. })).await;
     events.open(&manager, &id).await;
     let interrupted = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]);
+    assert!(runtime.content.lock().await.process.is_none());
+    assert!(runtime.content.lock().await.commands.is_none());
+    assert_eq!(runtime.snapshot().status, SessionStatus::Error);
     assert_eq!(interrupted.entries.last().unwrap().phase, EntryPhase::Interrupted);
     assert_eq!(interrupted.entries.last().unwrap().content[0].text.len(), 2109);
     assert!(!interrupted.queue.available);
@@ -188,7 +192,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert_eq!(restarted.entries.last().unwrap().phase, EntryPhase::Interrupted);
     assert!(restarted.queue.requests.is_empty());
     let (late, retired_events) = broadcast::channel(4);
-    late.send(json!({"type":"agent_start"})).unwrap();
+    late.send(json!({"type":"rpc_closed", "error":"retired process"})).unwrap();
     tokio::time::timeout(Duration::from_secs(1), manager.monitor_process(id.clone(), process, retired_events)).await.unwrap();
     assert_eq!(runtime.snapshot().status, SessionStatus::Idle);
     assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().generation, restarted.generation);
@@ -206,11 +210,80 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     manager.queue_control(&id, &restarted.generation, "resume", QueueOperation::Resume { run_id: None }).await.unwrap();
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if !queue.paused && queue.control.as_ref().is_some_and(|control| control.action == "resume"))).await;
     let child = manager.clone_session(&id).await.unwrap();
+    assert!(runtime.content.lock().await.process.is_none());
+    assert!(runtime.content.lock().await.commands.is_none());
     events.open(&manager, &child).await;
     let child_runtime = manager.runtime(&child).await.unwrap();
     assert_eq!(child_runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]).entries.len(), 3);
     events.open(&manager, &id).await;
     assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]).entries.last().unwrap().phase, EntryPhase::Interrupted);
+    manager.commands(&child).await.unwrap();
+    manager.shutdown().await;
+    assert!(child_runtime.content.lock().await.process.is_none());
+    assert!(child_runtime.content.lock().await.commands.is_none());
+    fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn closes_sleeps_and_deletes_processes_with_their_commands_and_transcripts() {
+    let (manager, root) = fixture().await;
+    let id = manager.create_session().await.unwrap();
+    let runtime = manager.runtime(&id).await.unwrap();
+    let mut events = Events::new(&manager);
+    events.open(&manager, &id).await;
+    manager.commands(&id).await.unwrap();
+    let process = runtime.content.lock().await.process.clone().unwrap();
+    let dialog_manager = manager.clone();
+    let dialog_id = id.clone();
+    let prompt = tokio::spawn(async move { dialog_manager.prompt(&dialog_id, "/choose", "dialog").await });
+    receive(&mut events, |event| matches!(event, ServerMessage::ExtensionUi { .. })).await;
+    tokio::time::timeout(Duration::from_secs(5), manager.close_session(&id)).await.unwrap().unwrap();
+    prompt.await.unwrap().unwrap();
+    assert_eq!(fs::read_to_string(root.join("pi-sessions/extension-response")).await.unwrap(), "cancelled");
+    assert!(manager.inner.pending_extension_ui.lock().await.is_empty());
+    assert!(!process.is_alive());
+    assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
+    {
+        let content = runtime.content.lock().await;
+        assert!(content.process.is_none());
+        assert!(content.commands.is_none());
+        assert!(!content.transcript.as_ref().unwrap().queue.available);
+    }
+    manager.close_session(&id).await.unwrap();
+    manager.commands(&id).await.unwrap();
+    let restarted = runtime.content.lock().await.process.clone().unwrap();
+    assert!(!Arc::ptr_eq(&process, &restarted));
+    let idle_since = runtime.snapshot().idle_since.unwrap();
+    manager.sleep_if_idle(&id, idle_since + Duration::from_secs(1)).await;
+    assert!(restarted.is_alive());
+    assert!(runtime.content.lock().await.commands.is_some());
+    manager.sleep_if_idle(&id, idle_since).await;
+    assert!(!restarted.is_alive());
+    assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
+    assert!(runtime.content.lock().await.process.is_none());
+    assert!(runtime.content.lock().await.commands.is_none());
+
+    manager.commands(&id).await.unwrap();
+    manager.prompt(&id, "hold", "live").await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Entry { entry }, .. } if entry.phase == EntryPhase::Live)).await;
+    manager.delete_session(&id).await.unwrap();
+    assert!(manager.inner.state.get(&id).is_none());
+    assert!(!manager.inner.runtimes.lock().await.contains_key(&id));
+    assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
+    {
+        let content = runtime.content.lock().await;
+        assert!(content.process.is_none());
+        assert!(content.commands.is_none());
+        let snapshot = content.transcript.as_ref().unwrap().snapshot(&[], &[]);
+        assert_eq!(snapshot.entries.last().unwrap().phase, EntryPhase::Interrupted);
+        assert!(!snapshot.queue.available);
+    }
+    let cold = manager.create_session().await.unwrap();
+    let runtime = manager.runtime(&cold).await.unwrap();
+    runtime.content.lock().await.commands = Some(Vec::new());
+    manager.delete_session(&cold).await.unwrap();
+    assert!(runtime.content.lock().await.commands.is_none());
+    assert!(manager.inner.state.get(&cold).is_none());
     manager.shutdown().await;
     fs::remove_dir_all(root).await.unwrap();
 }

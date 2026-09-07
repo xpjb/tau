@@ -23,7 +23,7 @@ use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::manager::AgentManager;
+use crate::manager::{AgentManager, safe_file_name};
 use crate::protocol::{
     ClientCommand, ClientRequest, CrashReport, MAX_CRASH_BYTES, MAX_PROMPT_CHARS,
     MAX_REQUEST_BYTES, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, ServerMessage,
@@ -458,11 +458,7 @@ async fn upload_file(
     if !authorized(&headers, &state.config.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if session_id.is_empty()
-        || session_id.len() > 128
-        || session_id
-            .chars()
-            .any(|character| !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_'))
+    if !valid_resource_key(&session_id)
         || query.file_name.trim().is_empty()
         || query.file_name.chars().count() > 256
         || body.is_empty()
@@ -572,21 +568,9 @@ async fn download_attachment(
             return StatusCode::NOT_FOUND.into_response();
         }
     };
-    let safe_name = attachment
-        .file_name
-        .chars()
-        .take(160)
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
     let disposition = match HeaderValue::from_str(&format!(
         "attachment; filename=\"{}\"",
-        if safe_name.is_empty() { "attachment" } else { &safe_name }
+        safe_file_name(&attachment.file_name)
     )) {
         Ok(value) => value,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -716,7 +700,27 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
     use image::{DynamicImage, GenericImageView, ImageFormat, Rgb, RgbImage};
 
-    use super::{THUMBNAIL_MAX_BYTES, authorized, thumbnail_bytes};
+    use super::{THUMBNAIL_MAX_BYTES, authorized, safe_file_name, thumbnail_bytes, valid_resource_key};
+
+    #[test]
+    fn bounds_file_names_and_resource_keys() {
+        for (name, expected) in [
+            ("../source file.rs", "source_file.rs"),
+            ("C:\\tmp\\.résumé_1-.txt.", "r_sum__1-.txt"),
+            ("bad\r\n\";name.zip", "bad____name.zip"),
+            ("...", "attachment"),
+            ("", "attachment"),
+        ] {
+            assert_eq!(safe_file_name(name), expected);
+        }
+        assert_eq!(safe_file_name(&"a".repeat(200)), "a".repeat(160));
+        assert_eq!(safe_file_name(&format!("{}a", ".".repeat(160))), "attachment");
+        assert!(valid_resource_key("Ab_01-xy"));
+        assert!(valid_resource_key(&"a".repeat(128)));
+        for key in ["", ".", "../chat", "a/b", "a\\b", "a b", "é", &"a".repeat(129)] {
+            assert!(!valid_resource_key(key));
+        }
+    }
 
     #[test]
     fn creates_a_bounded_thumbnail() {
