@@ -260,7 +260,7 @@ actual object PlatformServices {
         }
     }
 
-    actual fun saveDownload(fileName: String, bytes: ByteArray): SavedDownload {
+    actual fun saveDownload(fileName: String, source: String): SavedDownload {
         val safeName = fileName
             .substringAfterLast('/')
             .substringAfterLast('\\')
@@ -282,7 +282,7 @@ actual object PlatformServices {
             suffix += 1
         }
         val temporary = directory.resolve(".${target.fileName}.tmp-${UUID.randomUUID()}")
-        Files.write(temporary, bytes)
+        Files.copy(Path.of(source), temporary, StandardCopyOption.REPLACE_EXISTING)
         try {
             Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE)
         } catch (_: Throwable) {

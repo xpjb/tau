@@ -371,8 +371,7 @@ class TauController(
                     }
                 }
                 val download = if (action == AttachmentDownloadAction.Save) withContext(Dispatchers.IO) {
-                    val bytes = FileSystem.SYSTEM.read(path.toPath()) { readByteArray() }
-                    PlatformServices.saveDownload(attachment.fileName, bytes)
+                    PlatformServices.saveDownload(attachment.fileName, path)
                 } else previous?.saved
                 mutableState.update { ui ->
                     if (downloadJobs[key] !== job) ui

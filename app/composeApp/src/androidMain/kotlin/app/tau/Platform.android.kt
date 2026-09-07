@@ -222,7 +222,7 @@ actual object PlatformServices {
 
     actual suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile> = emptyList()
 
-    actual fun saveDownload(fileName: String, bytes: ByteArray): SavedDownload {
+    actual fun saveDownload(fileName: String, source: String): SavedDownload {
         val safeName = fileName
             .substringAfterLast('/')
             .substringAfterLast('\\')
@@ -249,7 +249,9 @@ actual object PlatformServices {
                 resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values),
             ) { "Android could not create the download" }
             try {
-                checkNotNull(resolver.openOutputStream(uri)).use { it.write(bytes) }
+                checkNotNull(resolver.openOutputStream(uri)).use { output ->
+                    File(source).inputStream().use { input -> input.copyTo(output) }
+                }
                 values.clear()
                 values.put(MediaStore.Downloads.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
@@ -269,7 +271,7 @@ actual object PlatformServices {
         )
         directory.mkdirs()
         val target = File(directory, safeName)
-        target.writeBytes(bytes)
+        File(source).copyTo(target, overwrite = true)
         val uri = FileProvider.getUriForFile(
             context,
             "${context.packageName}.files",

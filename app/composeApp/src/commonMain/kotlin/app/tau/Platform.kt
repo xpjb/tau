@@ -44,7 +44,7 @@ expect object PlatformServices {
     fun formatMessageTime(timestampMs: Long): String
     suspend fun pickFiles(): List<PickedFile>
     suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile>
-    fun saveDownload(fileName: String, bytes: ByteArray): SavedDownload
+    fun saveDownload(fileName: String, source: String): SavedDownload
     fun openDownload(download: SavedDownload)
     fun showDownload(download: SavedDownload)
     fun extractAndOpenDownload(download: SavedDownload)
