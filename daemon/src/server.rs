@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::body::{Body, Bytes};
@@ -29,6 +30,7 @@ use crate::protocol::{
     MAX_REQUEST_BYTES, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, ServerMessage,
 };
 
+const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
 const THUMBNAIL_MAX_SOURCE_DIMENSION: u32 = 12_000;
 const THUMBNAIL_MAX_ALLOCATED_BYTES: u64 = 256 * 1024 * 1024;
 const THUMBNAIL_MAX_BYTES: usize = 300_000;
@@ -192,7 +194,21 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
     });
 
     let mut subscriptions = HashMap::<String, tokio::task::JoinHandle<()>>::new();
-    while let Some(incoming) = socket_rx.next().await {
+    let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + WS_PING_INTERVAL, WS_PING_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut pending_ping = None;
+    loop {
+        let incoming = tokio::select! {
+            incoming = socket_rx.next() => incoming,
+            _ = heartbeat.tick() => {
+                if pending_ping.is_some() { break; }
+                let payload = Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                if outbound_tx.try_send(Message::Ping(payload.clone())).is_err() { break; }
+                pending_ping = Some(payload);
+                continue;
+            }
+        };
+        let Some(incoming) = incoming else { break; };
         let message = match incoming {
             Ok(message) => message,
             Err(error) => {
@@ -206,21 +222,15 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                     break;
                 }
                 let request = match serde_json::from_str::<ClientRequest>(&text) {
-                    Ok(request) if !request.id.is_empty() && request.id.len() <= 128 => request,
-                    Ok(request) => {
-                        queue_server(
-                            &outbound_tx,
-                            &ServerMessage::failure(request.id, "invalid request id"),
-                        )
-                        .await;
-                        continue;
-                    }
-                    Err(error) => {
-                        queue_server(
-                            &outbound_tx,
-                            &ServerMessage::failure("invalid".to_owned(), format!("invalid request: {error}")),
-                        )
-                        .await;
+                    Ok(request) if !request.id.is_empty() && request.id.len() <= 128 => Ok(request),
+                    Ok(request) => Err(ServerMessage::failure(request.id, "invalid request id")),
+                    Err(error) => Err(ServerMessage::failure("invalid".to_owned(), format!("invalid request: {error}"))),
+                };
+                let request = match request {
+                    Ok(request) => request,
+                    Err(response) => {
+                        let Ok(encoded) = serde_json::to_string(&response) else { break; };
+                        if outbound_tx.try_send(Message::Text(encoded.into())).is_err() { break; }
                         continue;
                     }
                 };
@@ -426,19 +436,19 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                     queue_server(&response_outbound, &response).await;
                 });
             }
-            Message::Ping(bytes) => {
-                if outbound_tx.send(Message::Pong(bytes)).await.is_err() {
-                    break;
-                }
+            Message::Pong(bytes) => {
+                if pending_ping.as_ref() == Some(&bytes) { pending_ping = None; }
             }
             Message::Close(_) => break,
-            Message::Binary(_) | Message::Pong(_) => {}
+            Message::Binary(_) | Message::Ping(_) => {}
         }
     }
 
     event_forwarder.abort();
-    for (_, task) in subscriptions { task.abort(); }
+    writer.abort();
+    for (_, task) in subscriptions { task.abort(); let _ = task.await; }
     drop(outbound_tx);
+    let _ = event_forwarder.await;
     let _ = writer.await;
 }
 
@@ -701,6 +711,129 @@ mod tests {
     use image::{DynamicImage, GenericImageView, ImageFormat, Rgb, RgbImage};
 
     use super::{THUMBNAIL_MAX_BYTES, authorized, safe_file_name, thumbnail_bytes, valid_resource_key};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pings_clients_and_reaps_missing_pongs_without_waiting_for_commands() {
+        use std::os::unix::fs::PermissionsExt;
+        use super::*;
+        use crate::state::StateStore;
+        use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+
+        let root = std::env::temp_dir().join(format!("tau-ws-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).await.unwrap();
+        let mock = root.join("pi.py");
+        fs::write(&mock, include_str!("../tests/fixtures/pi.py")).await.unwrap();
+        fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700)).await.unwrap();
+        let config = Config {
+            bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
+            pi_command: mock, default_thinking_level: "high".to_owned(),
+            cwd: root.clone(), state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
+            telemetry_path: root.join("crashes.jsonl"), pi_extension_path: root.join("extension.ts"),
+            attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
+        };
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
+        let id = manager.create_session().await.unwrap();
+        let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())), thumbnail_gate: Arc::new(Semaphore::new(1)) };
+        let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
+        let app = Router::new().route("/", get(move |upgrade: WebSocketUpgrade| {
+            let state = state.clone();
+            let closed = closed_tx.clone();
+            async move { upgrade.on_upgrade(move |socket| async move {
+                serve_socket(socket, state).await;
+                let _ = closed.send(());
+            }) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (mut healthy, _) = connect_async(&url).await.unwrap();
+        let (mut quiet, _) = connect_async(&url).await.unwrap();
+        let (mut wrong, _) = connect_async(&url).await.unwrap();
+        for socket in [&mut healthy, &mut quiet, &mut wrong] {
+            socket.send(ClientMessage::Text(json!({"id":"open", "type":"open_session", "sessionId":id}).to_string().into())).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut hello = false;
+                let mut snapshot = false;
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    match message["type"].as_str().unwrap() {
+                        "hello" => { assert_eq!(message["protocolVersion"], PROTOCOL_VERSION); hello = true; }
+                        "transcript_snapshot" => snapshot = true,
+                        "response" => { assert_eq!(message["ok"], true); break; }
+                        _ => {}
+                    }
+                }
+                assert!(hello && snapshot);
+            }).await.unwrap();
+        }
+        healthy.send(ClientMessage::Ping(Bytes::from_static(b"client-ping"))).await.unwrap();
+        assert_eq!(tokio::time::timeout(Duration::from_secs(5), healthy.next()).await.unwrap().unwrap().unwrap(),
+            ClientMessage::Pong(Bytes::from_static(b"client-ping")));
+        for (text, request_id) in [("{", "invalid"), ("{\"id\":\"\",\"type\":\"list_sessions\"}", "")] {
+            healthy.send(ClientMessage::Text(text.into())).await.unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(5), healthy.next()).await.unwrap().unwrap().unwrap();
+            let response: serde_json::Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+            assert_eq!(response["type"], "response");
+            assert_eq!(response["requestId"], request_id);
+            assert_eq!(response["ok"], false);
+        }
+        wrong.send(ClientMessage::Text(json!({"id":"dialog", "type":"prompt", "sessionId":id, "text":"/choose"}).to_string().into())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = wrong.next().await.unwrap().unwrap();
+                let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if message["type"] == "extension_ui" { break; }
+            }
+        }).await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(WS_PING_INTERVAL).await;
+        tokio::time::resume();
+        let mut pings = Vec::new();
+        for socket in [&mut healthy, &mut quiet, &mut wrong] {
+            pings.push(tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match socket.next().await.unwrap().unwrap() {
+                        ClientMessage::Ping(payload) => break payload,
+                        ClientMessage::Text(_) => {}
+                        message => panic!("unexpected WebSocket frame: {message:?}"),
+                    }
+                }
+            }).await.unwrap());
+        }
+        assert_ne!(pings[0], pings[2]);
+        healthy.flush().await.unwrap();
+        wrong.send(ClientMessage::Pong(pings[0].clone())).await.unwrap();
+        for socket in [&mut healthy, &mut wrong] {
+            socket.send(ClientMessage::Text(json!({"id":"traffic", "type":"list_sessions"}).to_string().into())).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    if message["requestId"] == "traffic" { assert_eq!(message["ok"], true); break; }
+                }
+            }).await.unwrap();
+        }
+        tokio::time::pause();
+        tokio::time::advance(WS_PING_INTERVAL).await;
+        tokio::time::resume();
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), closed_rx.recv()).await.unwrap().unwrap();
+        }
+        let ping = tokio::time::timeout(Duration::from_secs(5), healthy.next()).await.unwrap().unwrap().unwrap();
+        let ClientMessage::Ping(payload) = ping else { panic!("expected next ping, got {ping:?}"); };
+        assert_ne!(pings[0], payload);
+        healthy.flush().await.unwrap();
+        healthy.close(None).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closed_rx.recv()).await.unwrap().unwrap();
+        manager.extension_ui_response(&id, "dialog-1", None, None, true).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), manager.commands(&id)).await.unwrap().unwrap();
+        manager.shutdown().await;
+        server.abort();
+        let _ = server.await;
+        fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[test]
     fn bounds_file_names_and_resource_keys() {

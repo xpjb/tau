@@ -160,13 +160,15 @@ class AttachmentFileTest {
         val cancelStarted = CompletableDeferred<Unit>()
         val cancelRelease = CompletableDeferred<Unit>()
         val reads = AtomicInteger()
+        val connections = AtomicInteger()
         val chat = SessionSummary("image-chat", "Images", SessionStatus.Idle, createdAtMs = 1, updatedAtMs = 1)
         val other = chat.copy(id = "other-chat")
         val image = TranscriptEntry("image", role = EntryRole.Tool, attachment = ChatAttachment(AttachmentKind.Image, "image.png", size = png.size.toLong()))
         val module: Application.() -> Unit = {
-            install(WebSockets)
+            install(WebSockets) { pingPeriodMillis = 1_000; timeoutMillis = 5_000 }
             routing {
                 webSocket("/v1/ws") {
+                    connections.incrementAndGet()
                     send(TauJson.encodeToString<ServerMessage>(Hello(TauProtocolVersion, "test")))
                     send(TauJson.encodeToString<ServerMessage>(Sessions(listOf(chat, other))))
                     for (frame in incoming) if (frame is Frame.Text) {
@@ -210,6 +212,8 @@ class AttachmentFileTest {
             withTimeout(10_000) { started.await() }
             withContext(Dispatchers.Swing) { controller.selectSession(other.id) }
             delay(16_000)
+            assertEquals(1, connections.get())
+            assertEquals(ConnectionStatus.Connected, controller.state.value.connectionStatus)
             assertEquals(1, reads.get())
             val key = AttachmentDownloadKey(chat.id, image.id)
             assertEquals(AttachmentDownloadStatus.Downloading, controller.state.value.attachmentDownloads[key]?.status)
