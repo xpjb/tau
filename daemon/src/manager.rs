@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, MutexGuard, broadcast};
 use tracing::{debug, warn};
 
@@ -14,15 +14,15 @@ use crate::config::Config;
 use crate::pi::RpcProcess;
 use crate::protocol::{
     ContextUsage, ExtensionUiRequest, PromptDisposition, QueueOperation, ServerMessage,
-    SessionStatus, SessionSummary, SlashCommand, SlashCommandArgument, SlashCommandSource,
-    UploadedFile, MAX_PROMPT_CHARS, MAX_TITLE_CHARS, MAX_UPLOAD_BYTES,
+    SessionStatus, SessionSummary, SlashCommand, SlashCommandSource, MAX_PROMPT_CHARS,
+    MAX_TITLE_CHARS,
 };
-use crate::transcript::{AttachmentKind, Entry, PiPosition, QueueState, Transcript, TranscriptChange, attachment_request, IMAGE_LIMIT, FILE_LIMIT};
+use crate::transcript::{Entry, PiPosition, QueueState, Transcript, TranscriptChange};
 use crate::state::{SessionModel, StateStore};
 
 const EVENT_BUFFER: usize = 2048;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-const INTERNAL_FORK_COMMAND: &str = "tau-fork-at";
+pub(crate) const INTERNAL_FORK_COMMAND: &str = "tau-fork-at";
 const TUI_ONLY_COMMANDS: &[&str] = &[
     "settings",
     "tree",
@@ -45,47 +45,41 @@ const TUI_ONLY_COMMANDS: &[&str] = &[
     "quit",
 ];
 
-pub struct ResolvedAttachment {
-    pub file: fs::File,
-    pub file_name: String,
-    pub mime_type: &'static str,
-    pub size: u64,
-}
 
 pub struct PromptOutcome {
     pub disposition: PromptDisposition,
     pub notice: Option<String>,
 }
 
-struct PendingExtensionUi {
+pub(crate) struct PendingExtensionUi {
     process: Arc<RpcProcess>,
     request: ExtensionUiRequest,
 }
 
 #[derive(Clone)]
 pub struct AgentManager {
-    inner: Arc<ManagerInner>,
+    pub(crate) inner: Arc<ManagerInner>,
 }
 
-struct ManagerInner {
-    config: Config,
-    state: StateStore,
-    runtimes: Mutex<HashMap<String, Arc<SessionRuntime>>>,
-    pending_extension_ui: Mutex<HashMap<(String, String), PendingExtensionUi>>,
-    events: broadcast::Sender<ServerMessage>,
-    shutting_down: AtomicBool,
+pub(crate) struct ManagerInner {
+    pub(crate) config: Config,
+    pub(crate) state: StateStore,
+    pub(crate) runtimes: Mutex<HashMap<String, Arc<SessionRuntime>>>,
+    pub(crate) pending_extension_ui: Mutex<HashMap<(String, String), PendingExtensionUi>>,
+    pub(crate) events: broadcast::Sender<ServerMessage>,
+    pub(crate) shutting_down: AtomicBool,
 }
 
-struct SessionRuntime {
-    operation: Mutex<()>,
-    content: Mutex<SessionContent>,
-    state: StdRwLock<RuntimeState>,
+pub(crate) struct SessionRuntime {
+    pub(crate) operation: Mutex<()>,
+    pub(crate) content: Mutex<SessionContent>,
+    pub(crate) state: StdRwLock<RuntimeState>,
 }
 
-struct SessionContent {
-    process: Option<Arc<RpcProcess>>,
-    commands: Option<Vec<SlashCommand>>,
-    transcript: Option<Transcript>,
+pub(crate) struct SessionContent {
+    pub(crate) process: Option<Arc<RpcProcess>>,
+    pub(crate) commands: Option<Vec<SlashCommand>>,
+    pub(crate) transcript: Option<Transcript>,
     recovering: bool,
     events: broadcast::Sender<Arc<ServerMessage>>,
 }
@@ -109,7 +103,7 @@ pub struct SessionFeed {
 }
 
 #[derive(Clone, Default)]
-struct RuntimeState {
+pub(crate) struct RuntimeState {
     status: SessionStatus,
     detail: Option<String>,
     idle_since: Option<Instant>,
@@ -122,7 +116,7 @@ enum BranchOperation<'a> {
 }
 
 impl SessionRuntime {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             operation: Mutex::new(()),
             content: Mutex::new(SessionContent::default()),
@@ -130,7 +124,7 @@ impl SessionRuntime {
         }
     }
 
-    fn snapshot(&self) -> RuntimeState {
+    pub(crate) fn snapshot(&self) -> RuntimeState {
         self.state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -288,125 +282,21 @@ impl AgentManager {
         };
 
         if let Some((name, arguments)) = slash
-            && slash_command.as_ref().is_some_and(|command| {
-                command.source == SlashCommandSource::Builtin
-            })
+            && slash_command
+                .as_ref()
+                .is_some_and(|command| command.source == SlashCommandSource::Builtin)
         {
-            let previous_status = runtime.snapshot().status;
-            self.set_runtime_state(id, &runtime, SessionStatus::Running, None, None);
-            let mut accepted = false;
-            let result: Result<String> = async {
-                match name {
-                    "compact" => {
-                        let mut command = json!({ "type": "compact" });
-                        if !arguments.is_empty() {
-                            command.as_object_mut().expect("command is an object").insert(
-                                "customInstructions".to_owned(),
-                                Value::String(arguments.to_owned()),
-                            );
-                        }
-                        process.request_unbounded(command).await?;
-                        accepted = true;
-                        self.inner.state.touch(id).await?;
-                        Ok("Context compacted.".to_owned())
-                    }
-                    "model" => {
-                        let (provider, model_id) = arguments.split_once('/').filter(
-                            |(provider, model_id)| !provider.is_empty() && !model_id.is_empty(),
-                        ).context("Usage: /model <provider/model>")?;
-                        let response = process.request(json!({
-                            "type": "set_model",
-                            "provider": provider,
-                            "modelId": model_id,
-                            "persist": true,
-                        })).await?;
-                        accepted = true;
-                        let model = response
-                            .get("data")
-                            .and_then(session_model_from_pi_model)
-                            .unwrap_or_else(|| SessionModel {
-                                provider: provider.to_owned(),
-                                model_id: model_id.to_owned(),
-                            });
-                        self.inner.state.set_model(id, model).await?;
-                        self.inner.state.touch(id).await?;
-                        Ok(format!("Model set to {provider}/{model_id}. New chats will use it too."))
-                    }
-                    "thinking" => {
-                        if arguments.is_empty() || arguments.chars().any(char::is_whitespace) {
-                            bail!("Usage: /thinking <level>");
-                        }
-                        process.request(json!({
-                            "type": "set_thinking_level",
-                            "level": arguments,
-                        })).await?;
-                        accepted = true;
-                        self.inner.state.touch(id).await?;
-                        Ok(format!("Thinking level set to {arguments}."))
-                    }
-                    "name" => {
-                        let title = arguments.trim();
-                        if title.is_empty() {
-                            bail!("Usage: /name <title>");
-                        }
-                        if title.contains('\n') || title.contains('\r') {
-                            bail!("session title must be one line");
-                        }
-                        if title.chars().count() > MAX_TITLE_CHARS {
-                            bail!("session title is too long");
-                        }
-                        process.request(json!({
-                            "type": "set_session_name",
-                            "name": title,
-                        })).await?;
-                        accepted = true;
-                        self.inner.state.rename(id, title.to_owned()).await?;
-                        Ok(format!("Chat renamed to {title}."))
-                    }
-                    _ => bail!("unsupported Tau command /{name}"),
-                }
-            }
-            .await;
-            let notice = match result {
-                Ok(notice) => notice,
-                Err(error) if accepted => {
-                    warn!(session = id, %error, "command accepted; session metadata refresh was delayed");
-                    format!("/{name} accepted; metadata refresh is delayed.")
-                }
-                Err(error) => {
-                    let status = if process.is_alive() {
-                        if previous_status == SessionStatus::Running {
-                            SessionStatus::Running
-                        } else {
-                            SessionStatus::Idle
-                        }
-                    } else {
-                        SessionStatus::Error
-                    };
-                    self.set_runtime_state(
-                        id,
-                        &runtime,
-                        status,
-                        (status == SessionStatus::Error)
-                            .then(|| bounded(&error.to_string(), 240)),
-                        None,
-                    );
-                    return Err(error);
-                }
-            };
-            if let Err(error) = self.persist_session_file(id, &process).await {
-                warn!(session = id, %error, "command accepted; session path refresh was delayed");
-            }
-            if let Err(error) = self.refresh_runtime_status(id, &runtime, &process).await {
-                warn!(session = id, %error, "command accepted; status refresh was delayed");
-            }
-            self.broadcast_sessions().await;
-            return Ok(PromptOutcome {
-                disposition: PromptDisposition::Handled,
-                notice: Some(notice),
-            });
+            return self
+                .run_builtin_command(
+                    id,
+                    &runtime,
+                    &process,
+                    name,
+                    arguments,
+                    runtime.snapshot().status,
+                )
+                .await;
         }
-
         if let Some((name, _)) = slash
             && slash_command.is_none()
             && TUI_ONLY_COMMANDS.contains(&name)
@@ -700,50 +590,6 @@ impl AgentManager {
         session_removal.and(upload_removal)
     }
 
-    pub async fn store_upload(
-        &self,
-        id: &str,
-        file_name: &str,
-        bytes: &[u8],
-    ) -> Result<UploadedFile> {
-        if bytes.is_empty() {
-            bail!("attached file is empty");
-        }
-        if bytes.len() > MAX_UPLOAD_BYTES {
-            bail!("attached file exceeds Tau's upload limit");
-        }
-        let runtime = self.runtime(id).await?;
-        let _guard = runtime.operation.lock().await;
-        if self.inner.state.get(id).is_none() {
-            bail!("unknown session {id}");
-        }
-
-        let safe_name = safe_file_name(file_name);
-
-        fs::create_dir_all(&self.inner.config.upload_root).await?;
-        let root = fs::canonicalize(&self.inner.config.upload_root).await?;
-        let directory = root.join(id);
-        fs::create_dir_all(&directory).await?;
-        let directory = fs::canonicalize(directory).await?;
-        if !directory.starts_with(&root) || directory == root {
-            bail!("unsafe Tau upload directory");
-        }
-        let path = directory.join(format!("{}-{safe_name}", uuid::Uuid::new_v4()));
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .await?;
-        file.write_all(bytes).await?;
-        file.flush().await?;
-        file.sync_all().await?;
-        Ok(UploadedFile {
-            name: safe_name,
-            path: path.to_string_lossy().into_owned(),
-            size: bytes.len().try_into().unwrap_or(u64::MAX),
-        })
-    }
-
     pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
         let title = title.trim();
         if title.is_empty() {
@@ -777,126 +623,6 @@ impl AgentManager {
         self.branch_session(id, BranchOperation::Clone)
             .await
             .map(|(child, _)| child)
-    }
-
-    async fn populate_attachment_sizes(&self, entries: &[Value], messages: &mut [Entry]) {
-        let Ok(root) = fs::canonicalize(&self.inner.config.attachment_root).await else {
-            return;
-        };
-        let by_id = entries
-            .iter()
-            .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
-            .collect::<HashMap<_, _>>();
-        for message in messages {
-            let Some(attachment) = message.attachment.as_mut() else {
-                continue;
-            };
-            if attachment.size.is_some() {
-                continue;
-            }
-            let Some(request) = by_id.get(message.id.as_str()).and_then(|entry| {
-                attachment_request(entry)
-            }) else {
-                continue;
-            };
-            let Ok(path) = fs::canonicalize(&request.path).await else {
-                continue;
-            };
-            if !path.starts_with(&root) {
-                continue;
-            }
-            let Ok(metadata) = fs::metadata(path).await else {
-                continue;
-            };
-            let limit = match request.kind {
-                AttachmentKind::Image => IMAGE_LIMIT,
-                AttachmentKind::File => FILE_LIMIT,
-            };
-            if metadata.is_file() && metadata.len() <= limit {
-                attachment.size = Some(metadata.len());
-                message.measure_saved_bytes();
-            }
-        }
-    }
-
-    pub async fn resolve_attachment(
-        &self,
-        id: &str,
-        entry_id: &str,
-    ) -> Result<ResolvedAttachment> {
-        let runtime = self.runtime(id).await?;
-        let cached = {
-            let content = runtime.content.lock().await;
-            if let Some(transcript) = &content.transcript {
-                let attachment = transcript.entry(entry_id).and_then(|entry| entry.attachment.as_ref())
-                    .context("entry has no Tau attachment")?;
-                Some(crate::transcript::AttachmentRequest {
-                    kind: attachment.kind,
-                    path: attachment.source_path.clone().context("attachment source is unavailable")?,
-                    caption: attachment.caption.clone(),
-                    size: attachment.size,
-                })
-            } else { None }
-        };
-        let request = if let Some(request) = cached { request } else {
-            let process = runtime.content.lock().await.process.clone();
-            let (entries, _) = self.entries_for_read(id, process.as_ref()).await?;
-            let entry = entries.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
-                .with_context(|| format!("attachment entry {entry_id} does not exist"))?;
-            attachment_request(entry).context("entry has no Tau attachment")?
-        };
-        let root = fs::canonicalize(&self.inner.config.attachment_root)
-            .await
-            .context("Tau attachment root is unavailable")?;
-        let path = fs::canonicalize(&request.path)
-            .await
-            .with_context(|| format!("attachment {} is unavailable", request.path.display()))?;
-        if !path.starts_with(&root) {
-            bail!("attachment is outside the Tau outbox");
-        }
-        let mut file = fs::File::open(&path).await?;
-        let metadata = file.metadata().await?;
-        if !metadata.is_file() {
-            bail!("attachment is not a regular file");
-        }
-        let limit = match request.kind {
-            AttachmentKind::Image => IMAGE_LIMIT,
-            AttachmentKind::File => FILE_LIMIT,
-        };
-        if metadata.len() > limit {
-            bail!("attachment exceeds the {} byte limit", limit);
-        }
-        let mime_type = match request.kind {
-            AttachmentKind::File => "application/octet-stream",
-            AttachmentKind::Image => {
-                let mut header = [0_u8; 12];
-                let length = file.read(&mut header).await?;
-                file.seek(std::io::SeekFrom::Start(0)).await?;
-                if length >= 8 && header[..8] == [137, 80, 78, 71, 13, 10, 26, 10] {
-                    "image/png"
-                } else if length >= 3 && header[..3] == [0xff, 0xd8, 0xff] {
-                    "image/jpeg"
-                } else if length >= 12
-                    && &header[..4] == b"RIFF"
-                    && &header[8..12] == b"WEBP"
-                {
-                    "image/webp"
-                } else {
-                    bail!("attachment is not a supported image");
-                }
-            }
-        };
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .context("attachment has no file name")?;
-        Ok(ResolvedAttachment {
-            file,
-            file_name,
-            mime_type,
-            size: metadata.len(),
-        })
     }
 
     async fn branch_session(
@@ -1075,7 +801,7 @@ impl AgentManager {
         }
     }
 
-    async fn runtime(&self, id: &str) -> Result<Arc<SessionRuntime>> {
+    pub(crate) async fn runtime(&self, id: &str) -> Result<Arc<SessionRuntime>> {
         self.ensure_running()?;
         if self.inner.state.get(id).is_none() {
             bail!("unknown session {id}");
@@ -1095,7 +821,7 @@ impl AgentManager {
         Ok(())
     }
 
-    async fn entries_for_read(
+    pub(crate) async fn entries_for_read(
         &self,
         id: &str,
         process: Option<&Arc<RpcProcess>>,
@@ -1244,171 +970,6 @@ impl AgentManager {
             manager.monitor_process(session_id, monitored, events).await;
         });
         Ok(process)
-    }
-
-    async fn load_slash_commands(
-        &self,
-        runtime: &SessionRuntime,
-        process: &Arc<RpcProcess>,
-        refresh: bool,
-    ) -> Result<Vec<SlashCommand>> {
-        if !refresh && let Some(commands) = runtime.content.lock().await.commands.clone() {
-            return Ok(commands);
-        }
-
-        let response = process
-            .request(json!({ "type": "get_commands" }))
-            .await
-            .context("Pi could not list slash commands")?;
-        let records = response
-            .get("data")
-            .and_then(|data| data.get("commands"))
-            .and_then(Value::as_array)
-            .context("Pi command response had no commands")?;
-        let mut commands = records
-            .iter()
-            .filter_map(|record| {
-                let name = record.get("name")?.as_str()?.trim();
-                if name.is_empty()
-                    || name == INTERNAL_FORK_COMMAND
-                    || name.chars().count() > 128
-                    || name.chars().any(char::is_whitespace)
-                {
-                    return None;
-                }
-                let source = match record.get("source")?.as_str()? {
-                    "extension" => SlashCommandSource::Extension,
-                    "prompt" => SlashCommandSource::Prompt,
-                    "skill" => SlashCommandSource::Skill,
-                    _ => return None,
-                };
-                Some(SlashCommand {
-                    name: name.to_owned(),
-                    description: record
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|description| !description.is_empty())
-                        .map(|description| bounded(description, 240)),
-                    source,
-                    argument_hint: None,
-                    arguments: Vec::new(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let names = commands
-            .iter()
-            .map(|command| command.name.as_str())
-            .collect::<HashSet<_>>();
-
-        let model_arguments = if names.contains("model") {
-            Vec::new()
-        } else {
-            match process
-                .request(json!({ "type": "get_available_models" }))
-                .await
-            {
-                Ok(response) => {
-                    let mut arguments = response
-                        .get("data")
-                        .and_then(|data| data.get("models"))
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|model| {
-                            let provider = model.get("provider")?.as_str()?;
-                            let model_id = model.get("id")?.as_str()?;
-                            if provider.is_empty() || model_id.is_empty() {
-                                return None;
-                            }
-                            Some(SlashCommandArgument {
-                                value: bounded(&format!("{provider}/{model_id}"), 240),
-                                description: model
-                                    .get("name")
-                                    .and_then(Value::as_str)
-                                    .filter(|name| !name.is_empty())
-                                    .map(|name| bounded(name, 160)),
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    arguments.sort_by(|left, right| left.value.cmp(&right.value));
-                    arguments.dedup_by(|left, right| left.value == right.value);
-                    arguments
-                }
-                Err(error) => {
-                    debug!(%error, "Pi model completion is unavailable");
-                    Vec::new()
-                }
-            }
-        };
-        let thinking_arguments = if names.contains("thinking") {
-            Vec::new()
-        } else {
-            match process
-                .request(json!({ "type": "get_available_thinking_levels" }))
-                .await
-            {
-                Ok(response) => response
-                    .get("data")
-                    .and_then(|data| data.get("levels"))
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .filter(|level| !level.is_empty() && !level.chars().any(char::is_whitespace))
-                    .map(|level| SlashCommandArgument {
-                        value: level.to_owned(),
-                        description: None,
-                    })
-                    .collect(),
-                Err(error) => {
-                    debug!(%error, "Pi thinking-level completion is unavailable");
-                    Vec::new()
-                }
-            }
-        };
-        drop(names);
-
-        for command in [
-            SlashCommand {
-                name: "compact".to_owned(),
-                description: Some("Manually compact the session context".to_owned()),
-                source: SlashCommandSource::Builtin,
-                argument_hint: Some("[instructions]".to_owned()),
-                arguments: Vec::new(),
-            },
-            SlashCommand {
-                name: "model".to_owned(),
-                description: Some("Select the Pi model".to_owned()),
-                source: SlashCommandSource::Builtin,
-                argument_hint: Some("<provider/model>".to_owned()),
-                arguments: model_arguments,
-            },
-            SlashCommand {
-                name: "thinking".to_owned(),
-                description: Some("Set the Pi thinking level".to_owned()),
-                source: SlashCommandSource::Builtin,
-                argument_hint: Some("<level>".to_owned()),
-                arguments: thinking_arguments,
-            },
-            SlashCommand {
-                name: "name".to_owned(),
-                description: Some("Set the Tau and Pi session name".to_owned()),
-                source: SlashCommandSource::Builtin,
-                argument_hint: Some("<title>".to_owned()),
-                arguments: Vec::new(),
-            },
-        ] {
-            if commands.iter().all(|existing| existing.name != command.name) {
-                commands.push(command);
-            }
-        }
-        commands.sort_by(|left, right| left.name.cmp(&right.name));
-        let mut content = runtime.content.lock().await;
-        if content.process.as_ref().is_some_and(|current| Arc::ptr_eq(current, process)) {
-            content.commands = Some(commands.clone());
-        }
-        Ok(commands)
     }
 
     async fn monitor_process(
@@ -1593,7 +1154,7 @@ impl AgentManager {
         }
     }
 
-    async fn refresh_runtime_status(
+    pub(crate) async fn refresh_runtime_status(
         &self,
         id: &str,
         runtime: &SessionRuntime,
@@ -1623,7 +1184,7 @@ impl AgentManager {
         Ok(())
     }
 
-    async fn persist_session_file(&self, id: &str, process: &RpcProcess) -> Result<()> {
+    pub(crate) async fn persist_session_file(&self, id: &str, process: &RpcProcess) -> Result<()> {
         let state = process.request(json!({ "type": "get_state" })).await?;
         let session_file = state
             .get("data")
@@ -1676,7 +1237,7 @@ impl AgentManager {
         Ok(())
     }
 
-    fn set_runtime_state(
+    pub(crate) fn set_runtime_state(
         &self,
         id: &str,
         runtime: &SessionRuntime,
@@ -1726,7 +1287,7 @@ impl AgentManager {
         }
     }
 
-    async fn broadcast_sessions(&self) {
+    pub(crate) async fn broadcast_sessions(&self) {
         let message = self.sessions_message().await;
         let _ = self.inner.events.send(message);
     }
@@ -1757,7 +1318,7 @@ pub(crate) fn safe_file_name(file_name: &str) -> String {
     }
 }
 
-fn session_model_from_pi_model(model: &Value) -> Option<SessionModel> {
+pub(crate) fn session_model_from_pi_model(model: &Value) -> Option<SessionModel> {
     let provider = model.get("provider")?.as_str()?.trim();
     let model_id = model.get("id")?.as_str()?.trim();
     if provider.is_empty() || model_id.is_empty() {
@@ -1774,7 +1335,7 @@ fn title_from_prompt(prompt: &str) -> String {
     bounded(first_line.trim(), MAX_TITLE_CHARS)
 }
 
-fn bounded(value: &str, max_chars: usize) -> String {
+pub(crate) fn bounded(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 

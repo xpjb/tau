@@ -1,3 +1,5 @@
+mod attachments;
+mod commands;
 mod config;
 mod manager;
 mod pi;
