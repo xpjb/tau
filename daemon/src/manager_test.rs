@@ -18,7 +18,7 @@ async fn fixture() -> (AgentManager, PathBuf) {
     let config = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Arc::from("test-token-with-at-least-thirty-two-characters"),
-        pi_command: mock, default_model: "test/model".to_owned(), default_thinking_level: "high".to_owned(),
+        pi_command: mock, default_thinking_level: "high".to_owned(),
         cwd: root.clone(), state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
         telemetry_path: root.join("crashes.jsonl"), pi_extension_path: root.join("extension.ts"),
         attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
@@ -69,6 +69,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     let (manager, root) = fixture().await;
     let mut events = Events::new(&manager);
     let id = manager.create_session().await.unwrap();
+    assert!(manager.inner.state.get(&id).unwrap().model.is_none());
     events.open(&manager, &id).await;
     let runtime = manager.runtime(&id).await.unwrap();
     assert!(runtime.content.lock().await.process.is_none());
@@ -90,7 +91,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert!(commands.iter().all(|command| command.name != INTERNAL_FORK_COMMAND));
     let args = fs::read_to_string(root.join("pi-sessions/spawn-args")).await.unwrap();
     let args = serde_json::from_str::<Vec<String>>(args.lines().next().unwrap()).unwrap();
-    assert!(args.windows(2).any(|pair| pair == ["--model", "test/model"]));
+    assert!(!args.iter().any(|arg| arg == "--model" || arg == "--provider"));
     assert!(args.windows(2).any(|pair| pair == ["--thinking", "high"]));
     let dialog_manager = manager.clone();
     let dialog_id = id.clone();

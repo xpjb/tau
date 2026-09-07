@@ -1,6 +1,6 @@
 # Tau
 
-Tau is a private, Tailnet-native client for independent Pi coding-agent sessions. It runs beside the existing Telegram gateway without sharing processes, sessions, or state.
+Tau is a private, Tailnet-native client for independent Pi coding-agent sessions. It runs beside the existing Telegram gateway without sharing processes or chat history. Both use Pi's global settings. A model chosen in Tau becomes Pi's default for new chats; existing chats keep their saved model. Tau does not override Pi with a separate model default.
 
 ## Components
 
@@ -8,9 +8,9 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 - `app/`: one Compose Multiplatform client for Android and desktop JVM targets.
 - `windows/`: the portable launcher and version-aware self-extracting Windows setup.
 
-Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects identified entries; clients keep a SQLite disk cache and a shared in-memory view for display. Drafts, pending sends and interrupted content survive client restarts. Cold chats can be read without starting Pi. Reconnect currently synchronizes with a full snapshot while keeping cached content visible. New chats use `/root` as their working directory.
+Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects identified entries; clients keep a SQLite disk cache and a shared in-memory view for display. Drafts, pending sends and interrupted content survive client restarts. Cold chats can be read without starting Pi. Reconnect synchronizes the recent history page while keeping cached content visible. Older pages load on demand. New chats use `/root` as their working directory.
 
-Tau 0.5.0 uses protocol 3 and requires matching daemon and client versions. Existing 0.4.8 clients must be upgraded together with the daemon. The daemon also requires the identified-transcript Pi fork; this release uses commit `29b43c7` from `xpjb/pi`. Existing JSONL files are preserved without migration.
+Tau daemon 0.5.4 uses protocol 4 and works with the existing 0.5.3 Android and Windows clients. It requires the identified-transcript Pi fork with RPC model-default persistence from `xpjb/pi`. Existing JSONL files are preserved without migration.
 
 ## Current client operations
 

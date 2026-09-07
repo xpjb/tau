@@ -67,8 +67,6 @@ impl RpcProcess {
             command.arg("--session").arg(session);
         } else {
             command
-                .arg("--model")
-                .arg(&config.default_model)
                 .arg("--thinking")
                 .arg(&config.default_thinking_level);
         }

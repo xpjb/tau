@@ -80,6 +80,7 @@ for line in sys.stdin:
     elif kind == "get_available_thinking_levels":
         response["data"] = {"levels": ["low", "high"]}
     elif kind == "set_model":
+        assert command.get("persist") is True
         provider, model_id = command["provider"], command["modelId"]
         response["data"] = {"provider": provider, "id": model_id}
         context_usage["contextWindow"] = 128000

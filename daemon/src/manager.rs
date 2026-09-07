@@ -181,12 +181,6 @@ impl AgentManager {
 
     pub async fn create_session(&self) -> Result<String> {
         self.ensure_running()?;
-        let (provider, model_id) = self
-            .inner
-            .config
-            .default_model
-            .split_once('/')
-            .expect("validated Tau default model");
         let id = self
             .inner
             .state
@@ -194,10 +188,7 @@ impl AgentManager {
                 "New chat".to_owned(),
                 None,
                 None,
-                Some(SessionModel {
-                    provider: provider.to_owned(),
-                    model_id: model_id.to_owned(),
-                }),
+                None,
             )
             .await?;
         self.broadcast_sessions().await;
@@ -321,6 +312,7 @@ impl AgentManager {
                             "type": "set_model",
                             "provider": provider,
                             "modelId": model_id,
+                            "persist": true,
                         })).await?;
                         accepted = true;
                         let model = response
@@ -332,7 +324,7 @@ impl AgentManager {
                             });
                         self.inner.state.set_model(id, model).await?;
                         self.inner.state.touch(id).await?;
-                        Ok(format!("Model set to {provider}/{model_id}."))
+                        Ok(format!("Model set to {provider}/{model_id}. New chats will use it too."))
                     }
                     "thinking" => {
                         if arguments.is_empty() || arguments.chars().any(char::is_whitespace) {
