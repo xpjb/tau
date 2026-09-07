@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State, WebSocketUpgrade};
@@ -12,14 +11,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use image::codecs::jpeg::JpegEncoder;
-use image::metadata::Orientation;
-use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageReader, Limits};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
@@ -31,47 +27,12 @@ use crate::protocol::{
 };
 
 const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
-const THUMBNAIL_MAX_SOURCE_DIMENSION: u32 = 12_000;
-const THUMBNAIL_MAX_ALLOCATED_BYTES: u64 = 256 * 1024 * 1024;
-const THUMBNAIL_MAX_BYTES: usize = 300_000;
 
 #[derive(Clone)]
 struct AppState {
     config: Config,
     manager: AgentManager,
     telemetry_gate: Arc<Mutex<()>>,
-    thumbnail_gate: Arc<Semaphore>,
-}
-
-fn thumbnail_bytes(source: &[u8]) -> Result<Vec<u8>> {
-    let mut reader = ImageReader::new(Cursor::new(source))
-        .with_guessed_format()
-        .context("image format was not recognized")?;
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(THUMBNAIL_MAX_SOURCE_DIMENSION);
-    limits.max_image_height = Some(THUMBNAIL_MAX_SOURCE_DIMENSION);
-    limits.max_alloc = Some(THUMBNAIL_MAX_ALLOCATED_BYTES);
-    reader.limits(limits);
-    let mut decoder = reader.into_decoder().context("image decoder was unavailable")?;
-    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-    let mut image = DynamicImage::from_decoder(decoder).context("image could not be decoded")?;
-    image.apply_orientation(orientation);
-
-    let mut encoded = Vec::new();
-    for (dimension, quality) in [(1_024, 76), (768, 68), (512, 60)] {
-        let thumbnail = image.thumbnail(dimension, dimension).to_rgb8();
-        encoded.clear();
-        JpegEncoder::new_with_quality(&mut encoded, quality).encode(
-            thumbnail.as_raw(),
-            thumbnail.width(),
-            thumbnail.height(),
-            ExtendedColorType::Rgb8,
-        )?;
-        if encoded.len() <= THUMBNAIL_MAX_BYTES {
-            return Ok(encoded);
-        }
-    }
-    bail!("generated thumbnail exceeds the byte limit")
 }
 
 pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
@@ -79,7 +40,6 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
         config: config.clone(),
         manager: manager.clone(),
         telemetry_gate: Arc::new(Mutex::new(())),
-        thumbnail_gate: Arc::new(Semaphore::new(1)),
     };
     let app = Router::new()
         .route("/v1/health", get(|| async { Json(json!({
@@ -88,10 +48,6 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
             "protocolVersion": PROTOCOL_VERSION
         })) }))
         .route("/v1/ws", get(websocket))
-        .route(
-            "/v1/sessions/{session_id}/attachments/{entry_id}/thumbnail",
-            get(download_attachment_thumbnail),
-        )
         .route(
             "/v1/sessions/{session_id}/attachments/{entry_id}",
             get(download_attachment),
@@ -496,66 +452,6 @@ fn valid_resource_key(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
-async fn download_attachment_thumbnail(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath((session_id, entry_id)): AxumPath<(String, String)>,
-) -> Response {
-    if !authorized(&headers, &state.config.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    if !valid_resource_key(&session_id) || !valid_resource_key(&entry_id) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let mut attachment = match state
-        .manager
-        .resolve_attachment(&session_id, &entry_id)
-        .await
-    {
-        Ok(attachment) if attachment.mime_type.starts_with("image/") => attachment,
-        Ok(_) => return StatusCode::NOT_FOUND.into_response(),
-        Err(error) => {
-            warn!(session = %session_id, entry = %entry_id, %error, "Tau thumbnail source was not available");
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    };
-    let _permit = match state.thumbnail_gate.acquire().await {
-        Ok(permit) => permit,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    let mut source = Vec::with_capacity(attachment.size as usize);
-    if let Err(error) = attachment.file.read_to_end(&mut source).await {
-        warn!(session = %session_id, entry = %entry_id, %error, "Tau thumbnail source could not be read");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    let thumbnail = match tokio::task::spawn_blocking(move || thumbnail_bytes(&source)).await {
-        Ok(Ok(thumbnail)) => thumbnail,
-        Ok(Err(error)) => {
-            warn!(session = %session_id, entry = %entry_id, %error, "Tau thumbnail could not be generated");
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        Err(error) => {
-            warn!(session = %session_id, entry = %entry_id, %error, "Tau thumbnail task failed");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let length = thumbnail.len();
-    let mut response = Response::new(Body::from(thumbnail));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("image/jpeg"),
-    );
-    response.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&length.to_string()).expect("thumbnail length is a valid header"),
-    );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, max-age=31536000, immutable"),
-    );
-    response
-}
-
 async fn download_attachment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -705,12 +601,9 @@ fn authorized(headers: &HeaderMap, expected: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
-    use image::{DynamicImage, GenericImageView, ImageFormat, Rgb, RgbImage};
 
-    use super::{THUMBNAIL_MAX_BYTES, authorized, safe_file_name, thumbnail_bytes, valid_resource_key};
+    use super::{authorized, safe_file_name, valid_resource_key};
 
     #[cfg(unix)]
     #[tokio::test]
@@ -734,7 +627,7 @@ mod tests {
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
         let id = manager.create_session().await.unwrap();
-        let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())), thumbnail_gate: Arc::new(Semaphore::new(1)) };
+        let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
         let app = Router::new().route("/", get(move |upgrade: WebSocketUpgrade| {
             let state = state.clone();
@@ -855,27 +748,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn creates_a_bounded_thumbnail() {
-        let image = RgbImage::from_fn(2_048, 1_024, |x, y| {
-            Rgb([
-                (x.wrapping_mul(31) ^ y.wrapping_mul(17)) as u8,
-                (x.wrapping_mul(13) ^ y.wrapping_mul(29)) as u8,
-                (x.wrapping_mul(7) ^ y.wrapping_mul(37)) as u8,
-            ])
-        });
-        let mut source = Cursor::new(Vec::new());
-        DynamicImage::ImageRgb8(image)
-            .write_to(&mut source, ImageFormat::Png)
-            .unwrap();
-
-        let thumbnail = thumbnail_bytes(source.get_ref()).unwrap();
-        assert!(thumbnail.starts_with(&[0xff, 0xd8, 0xff]));
-        assert!(thumbnail.len() <= THUMBNAIL_MAX_BYTES);
-        let (width, height) = image::load_from_memory(&thumbnail).unwrap().dimensions();
-        assert!(width <= 1_024 && height <= 1_024);
-        assert_eq!(width, height * 2);
-    }
 
     #[test]
     fn accepts_only_the_complete_bearer_token() {
