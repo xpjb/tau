@@ -2,6 +2,9 @@ package app.tau
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.network.sockets.ConnectTimeoutException
+import io.ktor.client.network.sockets.SocketTimeoutException
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.HttpTimeoutConfig
@@ -47,6 +50,17 @@ import okio.Path.Companion.toPath
 import okio.buffer
 
 class TauConnectionException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+sealed class AttachmentFailure(val message: String) {
+    data object NotLocal : AttachmentFailure("Not saved on this device. Connect and retry.")
+    data object TooLarge : AttachmentFailure("Attachment exceeds Tau's download limit")
+    data object TimedOut : AttachmentFailure("Timed out")
+    data object Interrupted : AttachmentFailure("Download interrupted")
+    data object Cancelled : AttachmentFailure("Download cancelled")
+    data class Http(val status: Int) : AttachmentFailure("HTTP $status")
+}
+
+class AttachmentDownloadException(val failure: AttachmentFailure, cause: Throwable? = null) : Exception(failure.message, cause)
 
 class TauClient(private val attachmentDirectory: () -> String = { PlatformServices.attachmentDirectory }) {
     private val client = HttpClient(platformHttpEngine()) {
@@ -160,7 +174,7 @@ class TauClient(private val attachmentDirectory: () -> String = { PlatformServic
             onProgress(storedBytes, storedBytes)
             return@withContext target.toString()
         }
-        check(allowNetwork) { "Not saved on this device. Connect and retry." }
+        if (!allowNetwork) throw AttachmentDownloadException(AttachmentFailure.NotLocal)
         attachmentGate.withPermit {
             files.createDirectories(directory)
             val temporary = directory / ".${target.name}-${newRequestId()}.part"
@@ -174,9 +188,9 @@ class TauClient(private val attachmentDirectory: () -> String = { PlatformServic
                         socketTimeoutMillis = 30_000
                     }
                 }.execute { response ->
-                    check(response.status.isSuccess()) { "Attachment download failed with HTTP ${response.status.value}" }
+                    if (!response.status.isSuccess()) throw AttachmentDownloadException(AttachmentFailure.Http(response.status.value))
                     val expected = response.headers[HttpHeaders.ContentLength]?.toLongOrNull()
-                    check(expected == null || expected in 0..limit) { "Attachment exceeds Tau's download limit" }
+                    if (expected != null && expected !in 0..limit) throw AttachmentDownloadException(AttachmentFailure.TooLarge)
                     val input = response.bodyAsChannel()
                     val buffer = ByteArray(64 * 1024)
                     var transferred = 0L
@@ -186,11 +200,11 @@ class TauClient(private val attachmentDirectory: () -> String = { PlatformServic
                                 val count = input.readAvailable(buffer)
                                 if (count < 0) break
                                 transferred += count
-                                check(transferred <= limit) { "Attachment exceeds Tau's download limit" }
+                                if (transferred > limit) throw AttachmentDownloadException(AttachmentFailure.TooLarge)
                                 output.write(buffer, 0, count)
                                 onProgress(transferred, expected)
                             }
-                            check(expected == null || transferred == expected) { "Attachment download was incomplete" }
+                            if (expected != null && transferred != expected) throw AttachmentDownloadException(AttachmentFailure.Interrupted)
                             output.flush()
                             handle.flush()
                         }
@@ -200,6 +214,18 @@ class TauClient(private val attachmentDirectory: () -> String = { PlatformServic
                     onProgress(transferred, transferred)
                 }
                 target.toString()
+            } catch (error: Throwable) {
+                currentCoroutineContext().ensureActive()
+                var cause: Throwable? = error
+                while (cause != null) {
+                    when (cause) {
+                        is AttachmentDownloadException -> throw cause
+                        is HttpRequestTimeoutException, is ConnectTimeoutException, is SocketTimeoutException ->
+                            throw AttachmentDownloadException(AttachmentFailure.TimedOut, error)
+                    }
+                    cause = cause.cause
+                }
+                throw AttachmentDownloadException(AttachmentFailure.Interrupted, error)
             } finally {
                 files.delete(temporary, mustExist = false)
             }

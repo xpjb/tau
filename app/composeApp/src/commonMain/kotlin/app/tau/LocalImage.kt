@@ -48,7 +48,7 @@ internal fun LocalImage(
     }
     Box(modifier, contentAlignment = Alignment.Center) {
         val bitmap = decoded?.getOrNull()
-        val error = if (path == null) download?.error else decoded?.exceptionOrNull()?.message
+        val error = if (path == null) download?.failure?.message else decoded?.exceptionOrNull()?.message
         when {
             bitmap != null -> Image(bitmap, label, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
             error != null -> Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally,

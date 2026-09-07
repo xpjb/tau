@@ -34,6 +34,7 @@ data class SessionExtensionUi(val sessionId: String, val request: ExtensionUiReq
 data class ExtensionWidget(val lines: List<String>, val placement: String?)
 data class AttachmentDownloadKey(val sessionId: String, val entryId: String)
 
+enum class AttachmentDownloadAction { Preview, Reload, Save }
 enum class AttachmentDownloadStatus { Downloading, Downloaded, Failed }
 
 data class AttachmentDownload(
@@ -42,7 +43,7 @@ data class AttachmentDownload(
     val totalBytes: Long?,
     val bytesPerSecond: Long? = null,
     val saved: SavedDownload? = null,
-    val error: String? = null,
+    val failure: AttachmentFailure? = null,
     val localPath: String? = null,
     val attempt: Int = 0,
 )
@@ -317,124 +318,87 @@ class TauController(
         send(RespondExtensionUi(newRequestId(), dialog.sessionId, dialog.request.id, value, confirmed, cancelled))
     }
 
-    fun downloadAttachment(sessionId: String, message: TranscriptEntry, save: Boolean = true, automatic: Boolean = false, force: Boolean = false) {
-        if (sessionId != state.value.selectedSessionId) return
+    fun downloadAttachment(sessionId: String, message: TranscriptEntry, action: AttachmentDownloadAction) {
+        val current = state.value
+        if (sessionId != current.selectedSessionId) return
         val attachment = message.attachment ?: return
         val key = AttachmentDownloadKey(sessionId, message.id)
         if (key in downloadJobs) return
-        val previous = state.value.attachmentDownloads[key]
-        if (automatic && previous != null && !(previous.error == "Not saved on this device. Connect and retry." &&
-            state.value.connectionStatus == ConnectionStatus.Connected)) return
-        val settings = state.value.settings
-        val allowNetwork = state.value.connectionStatus == ConnectionStatus.Connected
+        val previous = current.attachmentDownloads[key]
+        val settings = current.settings
+        val allowNetwork = current.connectionStatus == ConnectionStatus.Connected
+        if (action == AttachmentDownloadAction.Preview && previous != null &&
+            !(previous.failure == AttachmentFailure.NotLocal && allowNetwork)) return
         val attempt = (previous?.attempt ?: 0) + 1
         mutableState.update {
-            it.copy(
-                attachmentDownloads = it.attachmentDownloads + (key to AttachmentDownload(
-                    status = AttachmentDownloadStatus.Downloading,
-                    transferredBytes = 0,
-                    totalBytes = attachment.size,
-                    localPath = if (force) null else previous?.localPath,
-                    saved = previous?.saved,
-                    attempt = attempt,
-                )),
-                error = null,
-            )
+            it.copy(attachmentDownloads = it.attachmentDownloads + (key to AttachmentDownload(
+                status = AttachmentDownloadStatus.Downloading,
+                transferredBytes = 0,
+                totalBytes = attachment.size,
+                localPath = if (action == AttachmentDownloadAction.Reload) null else previous?.localPath,
+                saved = previous?.saved,
+                attempt = attempt,
+            )), error = null)
         }
-        val started = TimeSource.Monotonic.markNow()
-        var transferredBytes = 0L
-        var totalBytes = attachment.size
-        var lastPublishedBytes = 0L
-        var lastPublishedMillis = 0L
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
+            val started = TimeSource.Monotonic.markNow()
+            var transferredBytes = 0L
+            var totalBytes = attachment.size
+            var lastPublishedBytes = 0L
+            var lastPublishedMillis = 0L
             try {
                 val path = client.downloadAttachment(
                     settings, sessionId, message.id,
                     if (attachment.kind == AttachmentKind.Image) 10_000_000L else 50_000_000L,
-                    force = force, allowNetwork = allowNetwork,
+                    force = action == AttachmentDownloadAction.Reload, allowNetwork = allowNetwork,
                 ) { transferred, total ->
                     transferredBytes = transferred
                     if (total != null) totalBytes = total
                     val elapsedMillis = started.elapsedNow().inWholeMilliseconds.coerceAtLeast(1)
-                    if (
-                        elapsedMillis - lastPublishedMillis >= DownloadProgressIntervalMillis ||
-                        totalBytes?.let { transferred >= it } == true
-                    ) {
+                    if (elapsedMillis - lastPublishedMillis >= DownloadProgressIntervalMillis || totalBytes?.let { transferred >= it } == true) {
                         val intervalMillis = (elapsedMillis - lastPublishedMillis).coerceAtLeast(1)
-                        val bytesPerSecond = (transferred - lastPublishedBytes).coerceAtLeast(0) *
-                            1_000 / intervalMillis
+                        val bytesPerSecond = (transferred - lastPublishedBytes).coerceAtLeast(0) * 1_000 / intervalMillis
                         lastPublishedBytes = transferred
                         lastPublishedMillis = elapsedMillis
-                        withContext(dispatcher) { mutableState.update { current ->
-                            val active = current.attachmentDownloads[key]
-                            if (downloadJobs[key] !== job || active?.status != AttachmentDownloadStatus.Downloading) {
-                                current
-                            } else {
-                                current.copy(
-                                    attachmentDownloads = current.attachmentDownloads +
-                                        (key to active.copy(
-                                            transferredBytes = transferred,
-                                            totalBytes = totalBytes,
-                                            bytesPerSecond = bytesPerSecond,
-                                        )),
-                                )
-                            }
+                        withContext(dispatcher) { mutableState.update { ui ->
+                            val active = ui.attachmentDownloads[key]
+                            if (downloadJobs[key] !== job || active?.status != AttachmentDownloadStatus.Downloading) ui
+                            else ui.copy(attachmentDownloads = ui.attachmentDownloads + (key to active.copy(
+                                transferredBytes = transferred, totalBytes = totalBytes, bytesPerSecond = bytesPerSecond,
+                            )))
                         } }
                     }
                 }
-                val download = if (save) withContext(Dispatchers.IO) {
+                val download = if (action == AttachmentDownloadAction.Save) withContext(Dispatchers.IO) {
                     val bytes = FileSystem.SYSTEM.read(path.toPath()) { readByteArray() }
                     PlatformServices.saveDownload(attachment.fileName, bytes)
                 } else previous?.saved
-                mutableState.update { current ->
-                    if (downloadJobs[key] !== job) {
-                        current
-                    } else {
-                        current.copy(
-                            attachmentDownloads = current.attachmentDownloads +
-                                (key to AttachmentDownload(
-                                    status = AttachmentDownloadStatus.Downloaded,
-                                    transferredBytes = transferredBytes,
-                                    totalBytes = totalBytes ?: transferredBytes,
-                                    saved = download,
-                                    localPath = path,
-                                    attempt = attempt,
-                                )),
-                            notice = if (save && download != null) "Saved to ${download.location}" else current.notice,
-                            error = null,
-                        )
-                    }
+                mutableState.update { ui ->
+                    if (downloadJobs[key] !== job) ui
+                    else ui.copy(
+                        attachmentDownloads = ui.attachmentDownloads + (key to AttachmentDownload(
+                            status = AttachmentDownloadStatus.Downloaded,
+                            transferredBytes = transferredBytes,
+                            totalBytes = totalBytes ?: transferredBytes,
+                            saved = download,
+                            localPath = path,
+                            attempt = attempt,
+                        )),
+                        notice = if (action == AttachmentDownloadAction.Save && download != null) "Saved to ${download.location}" else ui.notice,
+                        error = null,
+                    )
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                val rawError = error.message.orEmpty()
-                val detail = when {
-                    rawError.contains("timeout", ignoreCase = true) -> "Timed out"
-                    rawError.contains("HTTP ") -> rawError.substringAfter("Attachment download failed with ")
-                    rawError == "Not saved on this device. Connect and retry." -> rawError
-                    rawError == "Attachment exceeds Tau's download limit" -> rawError
-                    else -> "Download interrupted"
-                }
-                mutableState.update { current ->
-                    if (downloadJobs[key] !== job) {
-                        current
-                    } else {
-                        val active = current.attachmentDownloads[key] ?: AttachmentDownload(
-                            status = AttachmentDownloadStatus.Downloading,
-                            transferredBytes = transferredBytes,
-                            totalBytes = totalBytes,
-                        )
-                        current.copy(
-                            attachmentDownloads = current.attachmentDownloads +
-                                (key to active.copy(
-                                    status = AttachmentDownloadStatus.Failed,
-                                    bytesPerSecond = null,
-                                    error = detail,
-                                )),
-                        )
-                    }
+                val failure = (error as? AttachmentDownloadException)?.failure ?: AttachmentFailure.Interrupted
+                mutableState.update { ui ->
+                    val active = ui.attachmentDownloads[key]
+                    if (downloadJobs[key] !== job || active == null) ui
+                    else ui.copy(attachmentDownloads = ui.attachmentDownloads + (key to active.copy(
+                        status = AttachmentDownloadStatus.Failed, bytesPerSecond = null, failure = failure,
+                    )))
                 }
             } finally {
                 if (downloadJobs[key] === job) downloadJobs.remove(key)
@@ -451,7 +415,7 @@ class TauController(
         mutableState.update {
             val active = it.attachmentDownloads[key]
             if (active == null) it else it.copy(attachmentDownloads = it.attachmentDownloads +
-                (key to active.copy(status = AttachmentDownloadStatus.Failed, bytesPerSecond = null, error = "Download cancelled")))
+                (key to active.copy(status = AttachmentDownloadStatus.Failed, bytesPerSecond = null, failure = AttachmentFailure.Cancelled)))
         }
     }
 

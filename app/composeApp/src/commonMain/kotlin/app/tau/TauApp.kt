@@ -1271,7 +1271,7 @@ private fun ChatPanel(
                                                             var imageVisible by remember(settings.identity, message.id) { mutableStateOf(false) }
                                                             var imageExpanded by remember(settings.identity, message.id) { mutableStateOf(false) }
                                                             LaunchedEffect(imageVisible, imageExpanded, settings.identity, message.id, state.connectionStatus) {
-                                                                if (imageVisible || imageExpanded) controller.downloadAttachment(sessionId, message, save = false, automatic = true)
+                                                                if (imageVisible || imageExpanded) controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Preview)
                                                             }
                                                             val label = attachment.caption ?: attachment.fileName
                                                             LocalImage(
@@ -1281,7 +1281,7 @@ private fun ChatPanel(
                                                                     .clip(RoundedCornerShape(8.dp))
                                                                     .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.52f))
                                                                     .clickable { imageExpanded = true },
-                                                                onRetry = { controller.downloadAttachment(sessionId, message, save = false, force = true) },
+                                                                onRetry = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Reload) },
                                                             )
                                                             if (imageExpanded) {
                                                                 Dialog(
@@ -1292,7 +1292,7 @@ private fun ChatPanel(
                                                                         .clickable { imageExpanded = false }.systemBarsPadding().displayCutoutPadding()) {
                                                                         LocalImage(attachmentDownload, label, true, 4096,
                                                                             Modifier.fillMaxSize().padding(24.dp),
-                                                                            onRetry = { controller.downloadAttachment(sessionId, message, save = false, force = true) })
+                                                                            onRetry = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Reload) })
                                                                         FilledTonalIconButton(onClick = { imageExpanded = false },
                                                                             modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
                                                                             Icon(CloseIcon, "Close image")
@@ -1331,7 +1331,7 @@ private fun ChatPanel(
                                                                     append(" / ").append(formatByteCount(it))
                                                                 }
                                                                 append(" · ")
-                                                                append(attachmentDownload.error ?: "Download failed")
+                                                                append(attachmentDownload.failure?.message ?: "Download failed")
                                                             }
                                                             null -> totalBytes?.let(::formatByteCount) ?: "Ready to download"
                                                         }
@@ -1394,7 +1394,7 @@ private fun ChatPanel(
                                                                             },
                                                                         ) { Text("Cancel") }
                                                                         AttachmentDownloadStatus.Downloaded -> if (attachmentDownload.saved == null) {
-                                                                            TextButton(onClick = { controller.downloadAttachment(sessionId, message) }) { Text("Save") }
+                                                                            TextButton(onClick = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Save) }) { Text("Save") }
                                                                         } else {
                                                                             TextButton(
                                                                                 onClick = {
@@ -1418,12 +1418,12 @@ private fun ChatPanel(
                                                                         }
                                                                         AttachmentDownloadStatus.Failed -> TextButton(
                                                                             onClick = {
-                                                                                controller.downloadAttachment(sessionId, message)
+                                                                                controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Save)
                                                                             },
                                                                         ) { Text("Retry") }
                                                                         null -> TextButton(
                                                                             onClick = {
-                                                                                controller.downloadAttachment(sessionId, message)
+                                                                                controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Save)
                                                                             },
                                                                         ) { Text("Download") }
                                                                     }
