@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 
 package app.tau
 
@@ -1080,7 +1080,9 @@ private fun ChatPanel(
             awaitPointerEventScope {
                 while (true) {
                     val event = awaitPointerEvent(PointerEventPass.Initial)
-                    if (event.type == PointerEventType.Press || event.type == PointerEventType.Scroll) expansionPin.key = null
+                    if (event.type == PointerEventType.Press || event.type == PointerEventType.Scroll ||
+                        event.type == PointerEventType.PanStart || event.type == PointerEventType.PanMove ||
+                        event.type == PointerEventType.PanEnd) expansionPin.key = null
                 }
             }
         }) {
