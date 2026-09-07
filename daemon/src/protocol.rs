@@ -297,25 +297,6 @@ pub struct UploadedFile {
     pub size: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatAttachment {
-    #[serde(skip)]
-    pub source_path: Option<std::path::PathBuf>,
-    pub kind: AttachmentKind,
-    pub file_name: String,
-    pub caption: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttachmentKind {
-    Image,
-    File,
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CrashReport {

@@ -13,11 +13,11 @@ use tracing::{debug, warn};
 use crate::config::Config;
 use crate::pi::RpcProcess;
 use crate::protocol::{
-    AttachmentKind, ContextUsage, ExtensionUiRequest, PromptDisposition, QueueOperation, ServerMessage,
+    ContextUsage, ExtensionUiRequest, PromptDisposition, QueueOperation, ServerMessage,
     SessionStatus, SessionSummary, SlashCommand, SlashCommandArgument, SlashCommandSource,
     UploadedFile, MAX_PROMPT_CHARS, MAX_TITLE_CHARS, MAX_UPLOAD_BYTES,
 };
-use crate::transcript::{Entry, PiPosition, QueueState, Transcript, TranscriptChange, attachment_request, IMAGE_LIMIT, FILE_LIMIT};
+use crate::transcript::{AttachmentKind, Entry, PiPosition, QueueState, Transcript, TranscriptChange, attachment_request, IMAGE_LIMIT, FILE_LIMIT};
 use crate::state::{SessionModel, StateStore};
 
 const EVENT_BUFFER: usize = 2048;

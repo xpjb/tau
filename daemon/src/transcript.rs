@@ -6,13 +6,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::protocol::{AttachmentKind, ChatAttachment};
-
 pub const PAGE_ENTRIES: usize = 50;
 pub const PAGE_BYTES: usize = 256 * 1024;
 
 pub const IMAGE_LIMIT: u64 = 10_000_000;
 pub const FILE_LIMIT: u64 = 50_000_000;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAttachment {
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
+    pub kind: AttachmentKind,
+    pub file_name: String,
+    pub caption: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+    File,
+}
 
 pub struct AttachmentRequest {
     pub kind: AttachmentKind,
