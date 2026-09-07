@@ -642,6 +642,9 @@ impl AgentManager {
             || content.process.as_ref().is_none_or(|current| !Arc::ptr_eq(current, expected)))
         { return; }
         self.retire_session(id, &runtime, content, SessionStatus::Sleeping, None).await;
+        let mut content = runtime.content.lock().await;
+        content.transcript = None;
+        content.recovering = false;
         debug!(session = id, "put idle Pi process to sleep");
     }
 

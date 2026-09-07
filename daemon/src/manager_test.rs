@@ -254,14 +254,19 @@ async fn closes_sleeps_and_deletes_processes_with_their_commands_and_transcripts
     let restarted = runtime.content.lock().await.process.clone().unwrap();
     assert!(!Arc::ptr_eq(&process, &restarted));
     let idle_since = runtime.snapshot().idle_since.unwrap();
+    runtime.content.lock().await.recovering = true;
     manager.sleep_if_idle(&id, idle_since + Duration::from_secs(1)).await;
     assert!(restarted.is_alive());
     assert!(runtime.content.lock().await.commands.is_some());
+    assert!(runtime.content.lock().await.transcript.is_some());
+    assert!(runtime.content.lock().await.recovering);
     manager.sleep_if_idle(&id, idle_since).await;
     assert!(!restarted.is_alive());
     assert_eq!(runtime.snapshot().status, SessionStatus::Sleeping);
     assert!(runtime.content.lock().await.process.is_none());
     assert!(runtime.content.lock().await.commands.is_none());
+    assert!(runtime.content.lock().await.transcript.is_none());
+    assert!(!runtime.content.lock().await.recovering);
 
     manager.commands(&id).await.unwrap();
     manager.prompt(&id, "hold", "live").await.unwrap();
@@ -328,6 +333,14 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     assert_eq!(attachment.size, 8);
     assert!(!fs::try_exists(root.join("pi-sessions/entry-reads")).await.unwrap());
     drop(operation);
+    manager.sleep_if_idle(&id, runtime.snapshot().idle_since.unwrap()).await;
+    assert!(runtime.content.lock().await.transcript.is_none());
+    assert_eq!(manager.resolve_attachment(&id, "artifact").await.unwrap().size, 8);
+    events.open(&manager, &id).await;
+    let reloaded = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]);
+    assert_eq!(serde_json::to_value(&reloaded.entries).unwrap(), serde_json::to_value(&entries).unwrap());
+    assert_eq!(reloaded.head, head);
+    assert!(runtime.content.lock().await.process.is_none());
     assert!(manager.resolve_attachment(&id, "link").await.is_err());
     assert!(manager.resolve_attachment(&id, "image").await.is_err());
     assert!(manager.resolve_attachment(&id, "missing").await.is_err());
