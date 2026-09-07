@@ -101,6 +101,10 @@ fn pages_whole_entries_by_ancestry_and_resolves_work_outside_the_window() {
         entries.push(Entry::from_pi(&raw, false).unwrap());
         parent = Some(id);
     }
+    for entry in &entries {
+        assert_eq!(entry.saved_wire_bytes, serde_json::to_vec(entry).unwrap().len());
+        assert!(serde_json::to_value(entry).unwrap().get("savedWireBytes").is_none());
+    }
     let expected = entries.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>();
     entries.push(Entry::from_pi(&json!({"id":"other-branch","parentId":expected[0],"type":"message","message":{"role":"user","content":"Other branch"}}), false).unwrap());
     let mut transcript = Transcript::new(entries, parent.clone(), None, QueueState::default()).unwrap();
@@ -133,4 +137,23 @@ fn pages_whole_entries_by_ancestry_and_resolves_work_outside_the_window() {
     assert_eq!(first.sequence, 1);
     assert_eq!(first.entries.last().unwrap().content[0].text, "π");
     assert_eq!(transcript.snapshot(&[], &[]).entries.last().unwrap().content[0].text, "π🧠");
+    assert_eq!(transcript.entry("live-current").unwrap().saved_wire_bytes, 0);
+
+    let mut raw = json!({"id":"large", "parentId":null, "type":"message", "message":{"role":"user", "content":""}});
+    let large = Entry::from_pi(&raw, false).unwrap();
+    let attachment = Entry::from_pi(&json!({"id":"file", "parentId":"large", "type":"message", "message":{"role":"toolResult",
+        "details":{"tauAttachment":{"version":1, "kind":"file", "path":"/outbox/result.zip"}}}}), false).unwrap();
+    assert_eq!(serde_json::to_value(&attachment.attachment).unwrap(), json!({"kind":"file", "fileName":"result.zip", "caption":null}));
+    raw["message"]["content"] = Value::String("x".repeat(PAGE_BYTES - large.saved_wire_bytes - attachment.saved_wire_bytes));
+    let large = Entry::from_pi(&raw, false).unwrap();
+    let mut transcript = Transcript::new(vec![large, attachment], Some("file".into()), None, QueueState::default()).unwrap();
+    assert_eq!(transcript.snapshot(&[], &[]).entries.len(), 2);
+    let attachment = &mut transcript.entries[1];
+    attachment.attachment.as_mut().unwrap().size = Some(FILE_LIMIT);
+    attachment.measure_saved_bytes();
+    assert_eq!(attachment.saved_wire_bytes, serde_json::to_vec(attachment).unwrap().len());
+    let page = transcript.page(None).unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.before.as_deref(), Some("large"));
+    assert_eq!(transcript.page(page.before.as_deref()).unwrap().entries.len(), 1);
 }

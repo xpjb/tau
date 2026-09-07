@@ -77,9 +77,11 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
     })
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
+    #[serde(skip)]
+    saved_wire_bytes: usize,
     pub id: String,
     pub parent_id: Option<String>,
     pub entry_type: String,
@@ -327,7 +329,8 @@ impl Entry {
                 source_path: Some(request.path),
             })
         });
-        Ok(Self {
+        let mut entry = Self {
+            saved_wire_bytes: 0,
             id,
             parent_id: raw.get("parentId").and_then(Value::as_str).map(str::to_owned),
             entry_type: entry_type.to_owned(),
@@ -347,7 +350,15 @@ impl Entry {
             error_message: message.get("errorMessage").and_then(Value::as_str).map(str::to_owned),
             is_error: message.get("isError").and_then(Value::as_bool).unwrap_or(false),
             attachment,
-        })
+        };
+        entry.measure_saved_bytes();
+        Ok(entry)
+    }
+
+    pub fn measure_saved_bytes(&mut self) {
+        if self.phase == EntryPhase::Saved {
+            self.saved_wire_bytes = serde_json::to_vec(self).expect("entry serialization is infallible").len();
+        }
     }
 }
 
@@ -470,9 +481,8 @@ impl Transcript {
         while let Some(id) = cursor {
             let entry = self.entry(id).context("History cursor is unavailable; reopen this chat")?;
             if entry.phase != EntryPhase::Saved { bail!("History cursor is provisional"); }
-            let size = serde_json::to_vec(entry)?.len();
-            if !saved.is_empty() && (saved.len() >= PAGE_ENTRIES || bytes + size > PAGE_BYTES) { break; }
-            bytes += size;
+            if !saved.is_empty() && (saved.len() >= PAGE_ENTRIES || bytes + entry.saved_wire_bytes > PAGE_BYTES) { break; }
+            bytes += entry.saved_wire_bytes;
             saved.push(entry);
             cursor = entry.parent_id.as_deref();
         }

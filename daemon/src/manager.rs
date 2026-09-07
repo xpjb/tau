@@ -814,6 +814,7 @@ impl AgentManager {
             };
             if metadata.is_file() && metadata.len() <= limit {
                 attachment.size = Some(metadata.len());
+                message.measure_saved_bytes();
             }
         }
     }
