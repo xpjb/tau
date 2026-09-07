@@ -399,3 +399,35 @@ Tau 0.5.3/protocol 4 was deployed on 2026-09-06 after all chats became idle and
 the user explicitly approved the restart. All 30 prior chat IDs and 29 JSONL
 byte prefixes were verified. The live daemon returned a bounded recent page
 from the largest saved chat. Pi, configuration and Telegram remain unchanged.
+
+## Tau 0.5.5: local image files
+
+Tau owns attachment downloads and saves complete originals in credential/chat/entry
+scoped private directories. Visible images request a file once; controller-owned
+jobs survive scrolling, dialog closure and chat selection. Inline images,
+full-screen images and explicit exports reuse the same file. Files remain until
+chat deletion or app-data removal. No history-wide download sweep, extra database
+or cache worker was added. Failed/cancelled reads have explicit retry.
+
+Downloads stream through the existing authenticated client with two transfer
+slots, a 64 KiB buffer, byte limits, finite connection/socket timeouts, and a
+flushed temporary file followed by atomic publication. Coil is removed. Desktop
+uses bundled Skia; Android uses platform decoders. Decoding runs off the UI thread
+with bounded dimensions/output size and one active decode. Off-screen decoded
+state is released. Saved originals remain available offline.
+
+Opened-chat attachment reads use the existing retained ID index. Source paths
+stay server-only. Every read still checks canonical roots, regular files, size
+and image signatures. Cold-history fallback remains. Pi and protocol 4 are
+unchanged. Touchpad Pan events now release Details/tool expansion pins; the
+reported broader scroll loop is not yet verified fixed.
+
+Checks: 16 client tests, nine daemon tests, Clippy, Android release and Windows
+release libraries. Local HTTP/controller tests cover coalescing, offline reuse,
+credential isolation, cancellation, partial/oversized data and a response beyond
+16 seconds. Decoder tests cover PNG/JPEG/WebP, alpha and all JPEG orientations.
+The Windows release rendered inline/full-screen PNG and reopened it offline under
+Wine with OpenGL. Wine's software graphics path retained a stale frame; no product
+renderer workaround was added. These checks are not physical-device acceptance.
+No Android UI test, provider prompt or live service restart was performed.
+Codex quota in the context tooltip remains a separate unfinished request.

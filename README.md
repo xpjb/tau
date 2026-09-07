@@ -10,7 +10,7 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 
 Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects identified entries; clients keep a SQLite disk cache and a shared in-memory view for display. Drafts, pending sends and interrupted content survive client restarts. Cold chats can be read without starting Pi. Reconnect synchronizes the recent history page while keeping cached content visible. Older pages load on demand. New chats use `/root` as their working directory.
 
-Tau daemon 0.5.4 uses protocol 4 and works with the existing 0.5.3 Android and Windows clients. It requires the identified-transcript Pi fork with RPC model-default persistence from `xpjb/pi`. Existing JSONL files are preserved without migration.
+Tau 0.5.5 uses protocol 4. The clients also work with daemon 0.5.3, and the daemon still accepts 0.5.3 clients. It requires the identified-transcript Pi fork with RPC model-default persistence from `xpjb/pi`. Existing JSONL files are preserved without migration.
 
 ## Current client operations
 
@@ -26,6 +26,7 @@ Tau daemon 0.5.4 uses protocol 4 and works with the existing 0.5.3 Android and W
 - Detect failed connections and reload the selected chat and live Pi state automatically.
 - Fork from any visible user message.
 - Attach local files for Pi to inspect, view images from Pi inline, and download files produced through Pi's `send_image` and `send_file` tools.
+- Save viewed images privately for offline inline/full-screen viewing. Export a saved original without downloading it again.
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
 - Use the same chats from Android and Windows.
 
