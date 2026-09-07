@@ -1,10 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::fs;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use uuid::Uuid;
+
+use crate::state::SessionModel;
 
 pub const PAGE_ENTRIES: usize = 50;
 pub const PAGE_BYTES: usize = 256 * 1024;
@@ -616,6 +620,74 @@ impl Transcript {
         self.sequence += 1;
         Ok(())
     }
+}
+
+pub(crate) async fn session_model_from_file(path: &Path) -> Result<Option<SessionModel>> {
+    let file = fs::File::open(path).await?;
+    let mut lines = BufReader::new(file).lines();
+    let mut parents = HashMap::<String, Option<String>>::new();
+    let mut models = HashMap::<String, SessionModel>::new();
+    let mut leaf_id = None;
+    while let Some(line) = lines.next_line().await? {
+        let entry = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let parent_id = entry
+            .get("parentId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        parents.insert(id.to_owned(), parent_id);
+        leaf_id = Some(id.to_owned());
+
+        let model = if entry.get("type").and_then(serde_json::Value::as_str)
+            == Some("model_change")
+        {
+            entry
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                .zip(entry.get("modelId").and_then(serde_json::Value::as_str))
+        } else {
+            entry
+                .get("message")
+                .filter(|message| {
+                    message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                })
+                .and_then(|message| {
+                    message
+                        .get("provider")
+                        .and_then(serde_json::Value::as_str)
+                        .zip(message.get("model").and_then(serde_json::Value::as_str))
+                })
+        };
+        if let Some((provider, model_id)) = model
+            && !provider.is_empty()
+            && !model_id.is_empty()
+        {
+            models.insert(
+                id.to_owned(),
+                SessionModel {
+                    provider: provider.to_owned(),
+                    model_id: model_id.to_owned(),
+                },
+            );
+        }
+    }
+
+    let mut current = leaf_id;
+    for _ in 0..=parents.len() {
+        let Some(id) = current else {
+            break;
+        };
+        if let Some(model) = models.get(&id) {
+            return Ok(Some(model.clone()));
+        }
+        current = parents.get(&id).cloned().flatten();
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
