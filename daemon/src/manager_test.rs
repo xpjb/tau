@@ -21,7 +21,7 @@ async fn fixture() -> (AgentManager, PathBuf) {
         pi_command: mock, default_thinking_level: "high".to_owned(),
         cwd: root.clone(), state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
         telemetry_path: root.join("crashes.jsonl"), pi_extension_path: root.join("extension.ts"),
-        attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
+        attachment_root: root.join("outbox"), upload_root: root.join("uploads"), title_command: None,
     };
     let state = StateStore::load(config.state_path.clone()).await.unwrap();
     (AgentManager::new(config, state), root)

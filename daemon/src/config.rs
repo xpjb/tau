@@ -17,6 +17,7 @@ pub struct Config {
     pub pi_extension_path: PathBuf,
     pub attachment_root: PathBuf,
     pub upload_root: PathBuf,
+    pub title_command: Option<String>,
 }
 
 impl Config {
@@ -67,6 +68,7 @@ impl Config {
         let upload_root = std::env::var_os("TAU_UPLOAD_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root/.local/share/tau/uploads".into());
+        let title_command = std::env::var("TAU_TITLE_COMMAND").ok().filter(|c| !c.is_empty());
 
         if !cwd.is_absolute()
             || !state_path.is_absolute()
@@ -91,6 +93,7 @@ impl Config {
             pi_extension_path,
             attachment_root,
             upload_root,
+            title_command,
         })
     }
 }
