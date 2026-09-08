@@ -30,6 +30,7 @@ data class SavedDownload(
 
 expect object PlatformServices {
     val platformName: String
+    fun epochMillis(): Long
     val appVersion: String
     val osVersion: String
     val attachmentDirectory: String

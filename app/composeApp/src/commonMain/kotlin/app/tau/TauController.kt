@@ -19,6 +19,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 import okio.ByteString.Companion.encodeUtf8
 import okio.FileSystem
@@ -31,6 +41,59 @@ internal const val DownloadProgressIntervalMillis = 200L
 enum class ConnectionStatus { NotConfigured, Connecting, Connected, Offline }
 
 data class SessionExtensionUi(val sessionId: String, val request: ExtensionUiRequest)
+
+internal const val UsageNoticePrefix = "VIBE_BRIDGE_CODEX_USAGE:"
+private val UsageRequestTimeout = 30.seconds
+private val UsageStaleAfter = 5.minutes
+
+data class CodexUsageWindow(
+    val id: String,
+    val label: String,
+    val durationSeconds: Long? = null,
+    val remainingPercent: Double? = null,
+    val resetsAtMs: Long? = null,
+)
+
+data class CodexUsage(
+    val provider: String,
+    val fetchedAtMs: Long,
+    val plan: String? = null,
+    val limitReached: Boolean = false,
+    val windows: List<CodexUsageWindow> = emptyList(),
+) {
+    internal val received = TimeSource.Monotonic.markNow()
+}
+
+internal data class UsageNoticeResult(val usage: CodexUsage?, val failure: String?)
+
+internal fun parseUsageNotice(notice: String, expectedRequestId: Long): UsageNoticeResult {
+    val root = try { Json.parseToJsonElement(notice.removePrefix(UsageNoticePrefix)).jsonObject }
+        catch (_: Exception) { return UsageNoticeResult(null, null) }
+    if (root["version"]?.jsonPrimitive?.longOrNull != 2L) return UsageNoticeResult(null, null)
+    if (root["requestId"]?.jsonPrimitive?.longOrNull != expectedRequestId) return UsageNoticeResult(null, null)
+    val text = root["text"]?.jsonPrimitive?.contentOrNull
+    val report = root["report"]?.jsonObject ?: return UsageNoticeResult(null, text)
+    val windows = report["windows"]?.jsonArray?.mapNotNull { window ->
+        val entry = window.jsonObject
+        val id = entry["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+        CodexUsageWindow(
+            id = id,
+            label = entry["label"]?.jsonPrimitive?.contentOrNull ?: id,
+            durationSeconds = entry["durationSeconds"]?.jsonPrimitive?.longOrNull,
+            remainingPercent = entry["remainingPercent"]?.jsonPrimitive?.doubleOrNull,
+            resetsAtMs = entry["resetsAtMs"]?.jsonPrimitive?.longOrNull,
+        )
+    }.orEmpty()
+    val fetchedAtMs = report["fetchedAtMs"]?.jsonPrimitive?.longOrNull ?: return UsageNoticeResult(null, text)
+    val usage = CodexUsage(
+        provider = report["provider"]?.jsonPrimitive?.contentOrNull ?: "openai-codex",
+        fetchedAtMs = fetchedAtMs,
+        plan = report["plan"]?.jsonPrimitive?.contentOrNull,
+        limitReached = report["limitReached"]?.jsonPrimitive?.booleanOrNull ?: false,
+        windows = windows,
+    )
+    return UsageNoticeResult(usage, null)
+}
 data class ExtensionWidget(val lines: List<String>, val placement: String?)
 data class AttachmentDownloadKey(val sessionId: String, val entryId: String)
 
@@ -65,6 +128,7 @@ data class TauUiState(
     val extensionDialogs: List<SessionExtensionUi> = emptyList(),
     val extensionStatuses: Map<String, Map<String, String>> = emptyMap(),
     val extensionWidgets: Map<String, Map<String, ExtensionWidget>> = emptyMap(),
+    val codexUsage: CodexUsage? = null,
     val attachmentDownloads: Map<AttachmentDownloadKey, AttachmentDownload> = emptyMap(),
     val pickingFiles: Boolean = false,
     val uploadingSessions: Set<String> = emptySet(),
@@ -83,6 +147,7 @@ class TauController(
     private val pending = mutableMapOf<String, PendingAction>()
     private val syncing = mutableSetOf<String>()
     internal val downloadJobs = mutableMapOf<AttachmentDownloadKey, Job>()
+    private var usageRequest: Pair<Long, TimeSource.Monotonic.ValueTimeMark>? = null
     private var connectionJob: Job? = null
     private var closeJob: Job? = null
     private var connectionVersion = 0L
@@ -319,6 +384,30 @@ class TauController(
     }
 
 
+    fun refreshUsage(sessionId: String, force: Boolean = false) {
+        val current = mutableState.value
+        if (current.selectedSessionId != sessionId || current.connectionStatus != ConnectionStatus.Connected) return
+        val inFlight = usageRequest
+        if (inFlight != null && inFlight.second.elapsedNow() < UsageRequestTimeout) return
+        val usage = current.codexUsage
+        if (!force && usage != null && usage.received.elapsedNow() < UsageStaleAfter) return
+        val requestId = PlatformServices.epochMillis()
+        usageRequest = requestId to TimeSource.Monotonic.markNow()
+        send(Prompt(newRequestId(), sessionId, "/vibe-bridge-usage $requestId"))
+    }
+
+    private fun onUsageNotice(notice: String) {
+        val inFlight = usageRequest ?: return
+        if (inFlight.second.elapsedNow() > UsageRequestTimeout) { usageRequest = null; return }
+        val result = parseUsageNotice(notice, inFlight.first)
+        usageRequest = null
+        when {
+            result == null -> return
+            result.usage != null -> mutableState.update { it.copy(codexUsage = result.usage) }
+            result.failure != null -> mutableState.update { it.copy(notice = result.failure) }
+        }
+    }
+
     fun dispose(): Job {
         closeJob?.let { return it }
         val current = state.value
@@ -529,6 +618,8 @@ class TauController(
                 is ExtensionUi -> {
                     if (message.request.method == "set_editor_text") {
                         setDraft(message.sessionId, message.request.text.orEmpty())
+                    } else if (message.request.method == "notify" && message.request.message?.startsWith(UsageNoticePrefix) == true) {
+                        onUsageNotice(message.request.message)
                     } else {
                         mutableState.update { current ->
                             val request = message.request

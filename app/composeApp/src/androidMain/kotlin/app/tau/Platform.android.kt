@@ -86,6 +86,7 @@ internal object TauAndroidContext {
 }
 
 actual object PlatformServices {
+    actual fun epochMillis(): Long = System.currentTimeMillis()
     private val installed = AtomicBoolean(false)
     private val fileLock = Any()
 

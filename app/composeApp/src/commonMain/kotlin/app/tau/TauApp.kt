@@ -1603,9 +1603,46 @@ private fun ChatPanel(
                                 }
                                 val ringColor = MaterialTheme.colorScheme.primary
                                 val trackColor = MaterialTheme.colorScheme.outlineVariant
+                                val codexChat = session.model?.provider == "openai-codex"
+                                val codexUsage = state.codexUsage
+                                LaunchedEffect(tooltip.isVisible, codexChat, codexUsage, sessionId) {
+                                    if (tooltip.isVisible && codexChat) controller.refreshUsage(sessionId)
+                                }
                                 TooltipBox(
                                     positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
-                                    tooltip = { PlainTooltip { Text(details) } },
+                                    tooltip = {
+                                        PlainTooltip {
+                                            Column {
+                                                Text(details)
+                                                if (codexChat) {
+                                                    Spacer(Modifier.height(6.dp))
+                                                    when {
+                                                        codexUsage == null -> Text(
+                                                            if (state.connectionStatus == ConnectionStatus.Connected) "Codex quota: reading…" else "Codex quota unavailable",
+                                                            style = MaterialTheme.typography.labelSmall)
+                                                        else -> {
+                                                            for (window in codexUsage.windows) {
+                                                                val reset = window.resetsAtMs?.let { formatResetIn(codexUsage.fetchedAtMs, codexUsage.received, it) }
+                                                                Text(
+                                                                    buildString {
+                                                                        append(window.label + ": ")
+                                                                        append(window.remainingPercent?.let { "${formatUsagePercent(it)} remaining" } ?: "usage unavailable")
+                                                                        if (reset != null) append(" · resets in $reset")
+                                                                    },
+                                                                    style = MaterialTheme.typography.labelSmall)
+                                                            }
+                                                            if (codexUsage.limitReached) Text("Codex limit reached", style = MaterialTheme.typography.labelSmall)
+                                                            Text(
+                                                                "Refresh",
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = MaterialTheme.colorScheme.primary,
+                                                                modifier = Modifier.clickable { controller.refreshUsage(sessionId, force = true) })
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
                                     state = tooltip,
                                     onDismissRequest = tooltip::dismiss,
                                     focusable = false,

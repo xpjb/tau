@@ -32,6 +32,7 @@ import kotlinx.serialization.encodeToString
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertNotEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -59,6 +60,68 @@ class TauConnectionTest {
     }
 
     private suspend fun Channel<ClientRequest>.nextRequest(): ClientRequest = withTimeout(10_000) { receive() }
+
+
+    @Test
+    fun surfaces_codex_usage_notices_as_quota_without_dialog() = runBlocking {
+        val directory = Files.createTempDirectory("tau-usage")
+        val path = directory.resolve("transcript.db").toString()
+        val codexChat = chat.copy(model = SessionModel("openai-codex", "gpt-5.6-sol"))
+        val sockets = Channel<DefaultWebSocketServerSession>(Channel.UNLIMITED)
+        val requests = Channel<ClientRequest>(Channel.UNLIMITED)
+        val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
+            install(WebSockets)
+            routing {
+                webSocket("/v1/ws") {
+                    sendMessage(Hello(TauProtocolVersion, "test"))
+                    sendMessage(Sessions(listOf(codexChat)))
+                    sockets.send(this)
+                    for (frame in incoming) if (frame is Frame.Text) {
+                        val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
+                        when (request) {
+                            is ListSessions -> if (request.id.startsWith("heartbeat-")) sendMessage(Response(request.id, true)) else requests.send(request)
+                            is Prompt -> if (request.text.startsWith("/vibe-bridge-usage ")) {
+                                val digits = request.text.substringAfterLast(' ')
+                                sendMessage(Response(request.id, true, chat.id))
+                                sendMessage(ExtensionUi(chat.id, ExtensionUiRequest(id = "usage-notice", method = "notify",
+                                    message = "VIBE_BRIDGE_CODEX_USAGE:" + """{"version":2,"requestId":$digits,""" +
+                                        """"text":"Codex quota (pro)","report":{"provider":"openai-codex","fetchedAtMs":1788856497357,""" +
+                                        """"plan":"pro","limitReached":false,"windows":[{"id":"primary_window","label":"Weekly",""" +
+                                        """"durationSeconds":604800,"remainingPercent":96.0,"resetsAtMs":${System.currentTimeMillis() + 600_000}}]}}""")))
+                            }
+                            else -> requests.send(request)
+                        }
+                    }
+                }
+            }
+        }.start(wait = false)
+        val port = server.engine.resolvedConnectors().single().port
+        val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
+        var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
+        try {
+            withContext(Dispatchers.Swing) { controller.start(settings) }
+            val socket = withTimeout(10_000) { sockets.receive() }
+            val open = assertIs<OpenSession>(requests.nextRequest())
+            val user = TranscriptEntry("u0", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Start")))
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
+            socket.sendMessage(Response(open.id, true, chat.id))
+            controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
+            controller.refreshUsage(chat.id, force = true)
+            controller.awaitState { it.codexUsage != null }
+            val usage = controller.state.value.codexUsage!!
+            assertEquals("openai-codex", usage.provider)
+            assertEquals("pro", usage.plan)
+            assertEquals("Weekly", usage.windows.single().label)
+            assertEquals(96.0, usage.windows.single().remainingPercent)
+            assertTrue(usage.windows.single().resetsAtMs!! > System.currentTimeMillis())
+            assertTrue(controller.state.value.extensionDialogs.isEmpty())
+            assertNull(controller.state.value.notice)
+        } finally {
+            controller.dispose()
+            server.stop(1_000, 1_000)
+            directory.toFile().deleteRecursively()
+        }
+    }
 
     @Test
     fun retains_ordered_content_queue_intents_and_local_work_across_socket_and_process_loss() = runBlocking {

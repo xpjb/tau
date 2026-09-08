@@ -76,6 +76,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 
 actual object PlatformServices {
+    actual fun epochMillis(): Long = System.currentTimeMillis()
     private val installed = AtomicBoolean(false)
     private val fileLock = Any()
     private val dataDirectory: Path by lazy {

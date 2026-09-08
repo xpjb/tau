@@ -18,6 +18,8 @@ import org.intellij.markdown.MarkdownElementTypes
 import org.intellij.markdown.MarkdownTokenTypes
 import org.intellij.markdown.ast.ASTNode
 import org.intellij.markdown.ast.findChildOfType
+import kotlin.math.roundToLong
+import kotlin.time.TimeMark
 import org.intellij.markdown.ast.getTextInNode
 import org.intellij.markdown.flavours.gfm.GFMElementTypes
 import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
@@ -352,5 +354,21 @@ internal fun formatByteCount(bytes: Long): String {
         "${tenths / 10}.${tenths % 10} ${units[index]}"
     } else {
         "${(tenths + 5) / 10} ${units[index]}"
+    }
+}
+
+internal fun formatUsagePercent(remainingPercent: Double): String {
+    val rounded = (remainingPercent * 10).roundToLong() / 10.0
+    return if (rounded % 1.0 == 0.0) "${rounded.toLong()}%" else "$rounded%"
+}
+
+internal fun formatResetIn(fetchedAtMs: Long, received: TimeMark, resetsAtMs: Long): String? {
+    val remainingMs = resetsAtMs - (fetchedAtMs + received.elapsedNow().inWholeMilliseconds)
+    if (remainingMs <= 0) return null
+    val minutes = (remainingMs + 59_999) / 60_000
+    return when {
+        minutes >= 1_440 -> "${minutes / 1_440}d ${minutes % 1_440 / 60}h"
+        minutes >= 60 -> "${minutes / 60}h ${minutes % 60}m"
+        else -> "${minutes}m"
     }
 }
