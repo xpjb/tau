@@ -989,6 +989,19 @@ private fun ChatPanel(
             }
         }.filterNotNull().distinctUntilChanged().collect { controller.saveScroll(sessionId, it) }
     }
+    LaunchedEffect(chat, listState) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            if (chat.before == null || last == null) null
+            else info.totalItemsCount - (last.index + last.size / 2) <= 12
+        }.filterNotNull().distinctUntilChanged().collect { nearEnd ->
+            if (nearEnd) controller.loadOlder(sessionId)
+        }
+    }
+    LaunchedEffect(chat.synchronized, chat.before) {
+        if (chat.synchronized && chat.before != null && chat.rows.size <= 1) controller.loadOlder(sessionId)
+    }
     SideEffect {
         if (draft == controller.state.value.drafts[sessionId].orEmpty() && editorValue.text != draft) {
             editorValue = TextFieldValue(draft, TextRange(draft.length))
@@ -1432,10 +1445,13 @@ private fun ChatPanel(
                         }
                         if (chat.before != null) item(key = "older") {
                             DisableSelection {
-                                TextButton(onClick = { controller.loadOlder(sessionId) }, enabled = sessionId !in state.loadingHistory,
-                                    modifier = Modifier.fillMaxWidth()) {
-                                    if (sessionId in state.loadingHistory) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                                    else Text("Load older")
+                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                    if (sessionId in state.loadingHistory) {
+                                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Text("Older messages", style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                 }
                             }
                         }

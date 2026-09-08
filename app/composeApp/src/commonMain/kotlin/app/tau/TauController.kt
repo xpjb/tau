@@ -232,7 +232,7 @@ class TauController(
         val current = state.value
         val chat = current.transcripts[sessionId] ?: return
         val cursor = chat.before ?: return
-        if (current.selectedSessionId != sessionId || sessionId in current.loadingHistory) return
+        if (sessionId in current.loadingHistory) return
         val request = GetHistory(newRequestId(), sessionId, chat.position.generation, cursor)
         val action = PendingAction.History(sessionId, request.generation, cursor)
         pending[request.id] = action
