@@ -11,6 +11,7 @@ import android.os.Environment
 import android.os.Process
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.format.DateFormat
 import android.webkit.MimeTypeMap
 import androidx.activity.compose.BackHandler
@@ -285,11 +286,21 @@ actual object PlatformServices {
     }
 
     actual fun openDownload(download: SavedDownload) {
+        val context = TauAndroidContext.require()
+        val isPackage = download.mimeType == "application/vnd.android.package-archive"
+            || download.location.endsWith(".apk", ignoreCase = true)
+        if (isPackage && !context.packageManager.canRequestPackageInstalls()) {
+            context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                data = Uri.parse("package:${context.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            return
+        }
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(Uri.parse(download.reference), download.mimeType)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        TauAndroidContext.require().startActivity(intent)
+        context.startActivity(intent)
     }
 
     actual fun showDownload(download: SavedDownload) {
