@@ -474,6 +474,10 @@ impl Transcript {
         })
     }
 
+    pub(crate) fn head(&self) -> Option<String> {
+        self.head.clone()
+    }
+
     pub fn entry(&self, id: &str) -> Option<&Entry> {
         self.by_id.get(id).map(|index| &self.entries[*index])
     }

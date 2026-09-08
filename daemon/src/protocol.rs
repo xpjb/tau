@@ -279,6 +279,8 @@ pub struct SessionSummary {
     pub parent_id: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_entry_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]

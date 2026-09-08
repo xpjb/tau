@@ -206,12 +206,9 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if queue.paused && queue.requests.is_empty())).await;
     manager.sleep_if_idle(&id, runtime.snapshot().idle_since.unwrap()).await;
     assert!(runtime.content.lock().await.process.is_some());
-    assert!(manager.clone_session(&id).await.is_err());
-    manager.queue_control(&id, &restarted.generation, "resume", QueueOperation::Resume { run_id: None }).await.unwrap();
-    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { queue }, .. } if !queue.paused && queue.control.as_ref().is_some_and(|control| control.action == "resume"))).await;
     let child = manager.clone_session(&id).await.unwrap();
-    assert!(runtime.content.lock().await.process.is_none());
-    assert!(runtime.content.lock().await.commands.is_none());
+    assert!(runtime.content.lock().await.process.is_some());
+    assert!(runtime.content.lock().await.commands.is_some());
     events.open(&manager, &child).await;
     let child_runtime = manager.runtime(&child).await.unwrap();
     assert_eq!(child_runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[], &[]).entries.len(), 3);
@@ -223,6 +220,41 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert!(child_runtime.content.lock().await.commands.is_none());
     fs::remove_dir_all(root).await.unwrap();
 }
+
+
+    #[tokio::test]
+    async fn forks_from_the_last_saved_entry_while_the_parent_keeps_running() {
+        let (manager, root) = fixture().await;
+        let mut events = Events::new(&manager);
+        let id = manager.create_session().await.unwrap();
+        events.open(&manager, &id).await;
+        let runtime = manager.runtime(&id).await.unwrap();
+        receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.entries.is_empty())).await;
+        manager.prompt(&id, "Say hello", "request-1").await.unwrap();
+        receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, .. })).await;
+        let saved_entry_id = runtime.content.lock().await.transcript.as_ref().unwrap().head().unwrap();
+        manager.prompt(&id, "hold", "request-2").await.unwrap();
+        receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Entry { entry }, .. } if entry.phase == EntryPhase::Live)).await;
+        receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Running, .. })).await;
+
+        let (child, _draft) = manager.fork_session(&id, &saved_entry_id).await.unwrap();
+        assert_ne!(child, id);
+        let parent_process = runtime.content.lock().await.process.clone().unwrap();
+        assert!(parent_process.is_alive());
+        assert_eq!(runtime.snapshot().status, SessionStatus::Running);
+        let parent_file = manager.inner.state.get(&id).unwrap().session_file.clone().unwrap();
+        let stored = manager.inner.state.get(&child).unwrap();
+        assert_eq!(stored.parent_id.as_deref(), Some(id.as_str()));
+        assert_ne!(stored.session_file.as_deref(), Some(parent_file.as_str()));
+
+        let mut child_events = Events::new(&manager);
+        child_events.open(&manager, &child).await;
+        receive(&mut child_events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. }
+            if snapshot.entries.iter().any(|entry| entry.role == Some(EntryRole::Assistant) && entry.phase == EntryPhase::Saved))).await;
+
+        manager.prompt(&id, "Second", "request-3").await.unwrap();
+        receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change: TranscriptChange::Queue { .. }, .. })).await;
+    }
 
 #[tokio::test]
 async fn closes_sleeps_and_deletes_processes_with_their_commands_and_transcripts() {

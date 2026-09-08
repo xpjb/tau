@@ -129,6 +129,8 @@ data class TauUiState(
     val extensionStatuses: Map<String, Map<String, String>> = emptyMap(),
     val extensionWidgets: Map<String, Map<String, ExtensionWidget>> = emptyMap(),
     val codexUsage: CodexUsage? = null,
+    val seenHeads: Map<String, String> = emptyMap(),
+    val unread: Set<String> = emptySet(),
     val attachmentDownloads: Map<AttachmentDownloadKey, AttachmentDownload> = emptyMap(),
     val pickingFiles: Boolean = false,
     val uploadingSessions: Set<String> = emptySet(),
@@ -188,6 +190,7 @@ class TauController(
     fun fork(entryId: String) { state.value.selectedSessionId?.let { send(ForkSession(newRequestId(), it, entryId), PendingAction.Select) } }
 
     fun selectSession(sessionId: String) {
+        mutableState.update { it.copy(unread = it.unread - sessionId) }
         val previous = state.value.selectedSessionId
         mutableState.update { it.copy(selectedSessionId = sessionId, mobileChatVisible = true, error = null, loadingHistory = emptySet()) }
         syncing.retainAll(setOf(sessionId))
@@ -594,7 +597,25 @@ class TauController(
                     store.saveSessions(identity, message.sessions)
                     val ids = message.sessions.mapTo(mutableSetOf()) { it.id }
                     val selected = state.value.selectedSessionId?.takeIf { it in ids } ?: message.sessions.firstOrNull()?.id
-                    mutableState.update { it.copy(sessions = message.sessions, selectedSessionId = selected, mobileChatVisible = it.mobileChatVisible && selected != null) }
+                    mutableState.update { current ->
+                        var seenHeads = current.seenHeads
+                        val unread = current.unread.toMutableSet()
+                        unread.retainAll(ids)
+                        for (session in message.sessions) {
+                            val head = session.lastEntryId ?: continue
+                            val known = current.seenHeads[session.id]
+                            when {
+                                known == null -> seenHeads = seenHeads + (session.id to head)
+                                known != head -> {
+                                    seenHeads = seenHeads + (session.id to head)
+                                    if (session.id != selected) unread += session.id
+                                }
+                            }
+                        }
+                        current.copy(sessions = message.sessions, selectedSessionId = selected,
+                            mobileChatVisible = current.mobileChatVisible && selected != null,
+                            seenHeads = seenHeads, unread = unread)
+                    }
                     if (selected != null) {
                         val key = ChatKey(identity, selected)
                         val chat = loadChat(key)

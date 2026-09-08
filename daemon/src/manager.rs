@@ -153,6 +153,15 @@ impl AgentManager {
 
     pub async fn sessions_message(&self) -> ServerMessage {
         let runtimes = self.inner.runtimes.lock().await;
+        let mut heads = HashMap::new();
+        for (id, runtime) in runtimes.iter() {
+            let content = runtime.content.lock().await;
+            if let Some(transcript) = content.transcript.as_ref()
+                && let Some(head) = transcript.head()
+            {
+                heads.insert(id.clone(), head);
+            }
+        }
         let sessions = self
             .inner
             .state
@@ -163,6 +172,7 @@ impl AgentManager {
                     .get(&id)
                     .map(|runtime| runtime.snapshot())
                     .unwrap_or_default();
+                let last_entry_id = heads.get(&id).cloned();
                 SessionSummary {
                     id,
                     title: stored.title,
@@ -173,6 +183,7 @@ impl AgentManager {
                     parent_id: stored.parent_id,
                     created_at_ms: stored.created_at_ms,
                     updated_at_ms: stored.updated_at_ms,
+                    last_entry_id,
                 }
             })
             .collect();
@@ -633,15 +644,6 @@ impl AgentManager {
         let runtime = self.runtime(id).await?;
         let _guard = runtime.operation.lock().await;
         let process = self.ensure_process(id, &runtime).await?;
-        let state = process.request(json!({ "type": "get_state" })).await?;
-        if state
-            .get("data")
-            .and_then(|data| data.get("isStreaming"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            bail!("wait for Pi to become idle before forking");
-        }
         let fork_at_entry = if let BranchOperation::Fork(entry_id) = &operation {
             let response = process.request(json!({ "type": "get_entries" })).await?;
             let entries = response
@@ -661,11 +663,6 @@ impl AgentManager {
         } else {
             false
         };
-        if state.pointer("/data/paused").and_then(Value::as_bool) == Some(true)
-            || state.pointer("/data/pendingMessageCount").and_then(Value::as_u64).is_some_and(|count| count > 0)
-        {
-            bail!("Resume or clear the pending queue before forking");
-        }
         self.persist_session_file(id, &process).await?;
         let parent = self
             .inner
@@ -677,8 +674,6 @@ impl AgentManager {
             .as_deref()
             .context("Pi session file is not available")?
             .to_owned();
-
-        self.retire_session(id, &runtime, runtime.content.lock().await, SessionStatus::Sleeping, None).await;
 
         let temporary = RpcProcess::spawn(&self.inner.config, Some(&parent_file))?;
         let result = async {
@@ -1133,6 +1128,7 @@ impl AgentManager {
                     }
                 }
                 Some("agent_settled") => {
+                    drop(content);
                     if let Err(error) = self.refresh_runtime_status(&id, &runtime, &process).await {
                         warn!(session = %id, %error, "failed to refresh settled Pi state");
                     }

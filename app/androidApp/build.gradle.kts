@@ -27,7 +27,7 @@ android {
         applicationId = "app.tau"
         minSdk = 26
         targetSdk = 37
-        versionCode = 24
+        versionCode = 25
         versionName = "0.5.7"
     }
 

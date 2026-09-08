@@ -674,11 +674,12 @@ private fun SessionList(
                                 ),
                         ) {
                             Column(Modifier.padding(12.dp)) {
+                                val unread = session.id in state.unread
                                 Text(
                                     session.title,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
-                                    fontWeight = if (selected) {
+                                    fontWeight = if (selected || unread) {
                                         FontWeight.SemiBold
                                     } else {
                                         FontWeight.Normal
@@ -699,10 +700,13 @@ private fun SessionList(
                                 val responseFailed by remember(retained) { derivedStateOf { retained.latestResponseFailed() } }
                                 val failed = session.detail == null && responseFailed
                                 Text(
-                                    session.detail ?: if (failed) "Failed" else session.status.label,
+                                    if (unread && !failed && session.detail == null) "Unread"
+                                    else session.detail ?: if (failed) "Failed" else session.status.label,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (failed) {
                                         MaterialTheme.colorScheme.error
+                                    } else if (unread && session.detail == null) {
+                                        MaterialTheme.colorScheme.primary
                                     } else {
                                         session.status.color
                                     },

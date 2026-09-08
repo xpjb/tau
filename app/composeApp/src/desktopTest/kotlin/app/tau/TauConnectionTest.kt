@@ -123,6 +123,55 @@ class TauConnectionTest {
         }
     }
 
+
+    @Test
+    fun marks_unseen_chats_unread_until_selected() = runBlocking {
+        val directory = Files.createTempDirectory("tau-unread")
+        val path = directory.resolve("transcript.db").toString()
+        val quiet = chat.copy(id = "quiet", title = "Quiet")
+        val sockets = Channel<DefaultWebSocketServerSession>(Channel.UNLIMITED)
+        val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
+            install(WebSockets)
+            routing {
+                webSocket("/v1/ws") {
+                    sendMessage(Hello(TauProtocolVersion, "test"))
+                    sendMessage(Sessions(listOf(chat, quiet.copy(lastEntryId = "h1"))))
+                    sockets.send(this)
+                    for (frame in incoming) if (frame is Frame.Text) {
+                        val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
+                        when (request) {
+                            is ListSessions -> if (request.id.startsWith("heartbeat-")) sendMessage(Response(request.id, true))
+                            is OpenSession -> {
+                                sendMessage(TranscriptSnapshot(request.sessionId, TranscriptCut("g", 0, null, emptyList(), queue)))
+                                sendMessage(Response(request.id, true, request.sessionId))
+                            }
+                            else -> {}
+                        }
+                    }
+                }
+            }
+        }.start(wait = false)
+        val port = server.engine.resolvedConnectors().single().port
+        val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
+        var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
+        try {
+            withContext(Dispatchers.Swing) { controller.start(settings) }
+            val socket = withTimeout(10_000) { sockets.receive() }
+            controller.awaitState { !it.restoring }
+            assertTrue(controller.state.value.unread.isEmpty())
+            socket.sendMessage(Sessions(listOf(chat, quiet.copy(lastEntryId = "h2"))))
+            controller.awaitState { "quiet" in it.unread }
+            withContext(Dispatchers.Swing) { controller.selectSession("quiet") }
+            assertTrue(controller.state.value.unread.isEmpty())
+            socket.sendMessage(Sessions(listOf(chat.copy(lastEntryId = "z1"), quiet.copy(lastEntryId = "h2"))))
+            assertTrue(controller.state.value.unread.isEmpty())
+        } finally {
+            controller.dispose()
+            server.stop(1_000, 1_000)
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun retains_ordered_content_queue_intents_and_local_work_across_socket_and_process_loss() = runBlocking {
         val directory = Files.createTempDirectory("tau-controller")

@@ -81,6 +81,16 @@ for line in sys.stdin:
         response["data"] = {"models": [{"provider": "test", "id": "model", "name": "Test Model"}]}
     elif kind == "get_available_thinking_levels":
         response["data"] = {"levels": ["low", "high"]}
+    elif kind in ("fork", "clone"):
+        child = os.path.join(session_dir, "forked-" + os.path.basename(session_file))
+        with open(child, "w") as target:
+            for entry in entries:
+                target.write(json.dumps(entry) + "\n")
+        session_file = child
+        with open(session_file) as file:
+            entries = [entry for line in file if (entry := json.loads(line)).get("type") != "session"]
+        head = entries[-1]["id"] if entries else None
+        response["data"] = {"cancelled": False, "text": None}
     elif kind == "set_model":
         assert command.get("persist") is True
         provider, model_id = command["provider"], command["modelId"]
@@ -95,6 +105,17 @@ for line in sys.stdin:
     elif kind == "prompt":
         assert command.get("streamingBehavior") == "steer"
         request_id = command.get("requestId")
+        if command["message"].startswith("/tau-fork-at"):
+            child = os.path.join(session_dir, "fork-at-" + os.path.basename(session_file))
+            with open(child, "w") as target:
+                for entry in entries:
+                    target.write(json.dumps(entry) + "\n")
+            session_file = child
+            with open(session_file) as file:
+                entries = [entry for line in file if (entry := json.loads(line)).get("type") != "session"]
+            output({"id": command["id"], "type": "response", "command": "prompt", "success": True,
+                    "data": {"disposition": "handled", "cancelled": False, "text": None}})
+            continue
         if command["message"] == "/choose":
             pending_prompt = ident
             output({"type": "extension_ui_request", "id": "dialog-1", "method": "select", "options": ["One", "Two"]})
