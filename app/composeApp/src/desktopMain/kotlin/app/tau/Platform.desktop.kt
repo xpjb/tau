@@ -296,6 +296,11 @@ actual object PlatformServices {
         )
     }
 
+    actual fun downloadExists(download: SavedDownload): Boolean = runCatching {
+        val path = Path.of(download.reference)
+        Files.isRegularFile(path) && Files.isReadable(path)
+    }.getOrDefault(false)
+
     actual fun openDownload(download: SavedDownload) {
         val path = Path.of(download.reference)
         check(Files.isRegularFile(path)) { "The downloaded file no longer exists." }

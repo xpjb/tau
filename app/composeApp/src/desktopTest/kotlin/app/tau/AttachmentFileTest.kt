@@ -282,18 +282,65 @@ class AttachmentFileTest {
             assertEquals(1, controller.state.value.attachmentDownloads[cancelledKey]?.attempt)
             assertEquals(5, reads.get())
 
+            System.setProperty("user.home", root.path)
+            val file = image.copy(id = "entry:document:0", entryId = "document", attachment = image.attachment!!.copy(kind = AttachmentKind.File))
+            val fileKey = AttachmentDownloadKey(chat.id, file.entryId)
+            withContext(Dispatchers.Swing) { controller.downloadAttachment(chat.id, file, AttachmentDownloadAction.Save) }
+            withTimeout(10_000) { while (controller.state.value.attachmentDownloads[fileKey]?.saved == null) delay(10) }
+            val exportedFile = checkNotNull(controller.state.value.attachmentDownloads[fileKey]?.saved)
+            assertEquals(6, reads.get())
             server.stop(0, 1000)
             withTimeout(10_000) { while (controller.state.value.connectionStatus == ConnectionStatus.Connected) delay(10) }
-            System.setProperty("user.home", root.path)
             withContext(Dispatchers.Swing) { controller.downloadAttachment(chat.id, image, AttachmentDownloadAction.Save) }
             withTimeout(10_000) { while (controller.state.value.attachmentDownloads[key]?.saved == null) delay(10) }
             val exported = checkNotNull(controller.state.value.attachmentDownloads[key]?.saved)
             assertTrue(java.io.File(exported.reference).toPath().startsWith(root.toPath()))
             assertContentEquals(png, java.io.File(exported.reference).readBytes())
+            assertNotEquals(exportedFile.reference, exported.reference)
             assertEquals("Saved to ${exported.location}", controller.state.value.notice)
             assertEquals(saved, controller.state.value.attachmentDownloads[key]?.localPath)
-            assertEquals(5, reads.get())
+            assertEquals(6, reads.get())
+            val records = LocalStore({ path })
+            try {
+                assertTrue(records.loadConnection(settings.copy(token = "other-account").identity).downloads.isEmpty())
+                assertTrue(records.loadConnection(settings.identity).downloads.keys.all { it.sessionId == chat.id })
+                records.recordDownload(ChatKey(settings.identity, chat.id), image.entryId, exportedFile, available = false)
+                assertEquals(exported, records.loadConnection(settings.identity).downloads[key])
+            } finally { records.close() }
+            withContext(Dispatchers.Swing) { controller.dispose() }.join()
+            controller = TauController(Dispatchers.Swing, LocalStore({ path }))
+            withContext(Dispatchers.Swing) { controller.start(settings) }
+            withTimeout(10_000) { while (controller.state.value.restoring) delay(10) }
+            assertEquals(exported, controller.state.value.attachmentDownloads[key]?.saved)
+            assertEquals(exportedFile, controller.state.value.attachmentDownloads[fileKey]?.saved)
+            assertEquals(AttachmentDownloadStatus.Downloaded, controller.state.value.attachmentDownloads[key]?.status)
+            assertTrue(controller.state.value.attachmentDownloads[failedKey] == null)
+            assertTrue(controller.state.value.attachmentDownloads[cancelledKey] == null)
+            withContext(Dispatchers.Swing) { controller.downloadAttachment(chat.id, image, AttachmentDownloadAction.Preview) }
+            withTimeout(10_000) { while (controller.state.value.attachmentDownloads[key]?.localPath == null) delay(10) }
+            assertEquals(saved, controller.state.value.attachmentDownloads[key]?.localPath)
+            val opened = CompletableDeferred<SavedDownload>()
+            withContext(Dispatchers.Swing) { controller.useAttachmentDownload(file) { opened.complete(it) } }
+            assertEquals(exportedFile, withTimeout(10_000) { opened.await() })
             java.io.File(saved).parentFile.deleteRecursively()
+            withContext(Dispatchers.Swing) { controller.downloadAttachment(chat.id, image, AttachmentDownloadAction.Reload) }
+            withTimeout(10_000) { while (controller.state.value.attachmentDownloads[key]?.failure == null) delay(10) }
+            assertEquals(AttachmentFailure.NotLocal, controller.state.value.attachmentDownloads[key]?.failure)
+            assertEquals(exported, controller.state.value.attachmentDownloads[key]?.saved)
+            val openImage = CompletableDeferred<SavedDownload>()
+            withContext(Dispatchers.Swing) { controller.useAttachmentDownload(image) { openImage.complete(it) } }
+            assertEquals(exported, withTimeout(10_000) { openImage.await() })
+            assertTrue(java.io.File(exported.reference).delete())
+            withContext(Dispatchers.Swing) { controller.useAttachmentDownload(image) { error("Opened a deleted file") } }
+            withTimeout(10_000) { while (controller.state.value.attachmentDownloads[key]?.saved != null) delay(10) }
+            assertTrue(controller.state.value.error?.contains("no longer available") == true)
+            assertTrue(java.io.File(exportedFile.reference).delete())
+            withContext(Dispatchers.Swing) { controller.dispose() }.join()
+            controller = TauController(Dispatchers.Swing, LocalStore({ path }))
+            withContext(Dispatchers.Swing) { controller.start(settings) }
+            withTimeout(10_000) { while (controller.state.value.restoring) delay(10) }
+            assertTrue(controller.state.value.attachmentDownloads.isEmpty())
+            assertEquals(6, reads.get())
         } finally {
             cancelRelease.complete(Unit); release.complete(Unit)
             withContext(Dispatchers.Swing) { controller.dispose() }.join()

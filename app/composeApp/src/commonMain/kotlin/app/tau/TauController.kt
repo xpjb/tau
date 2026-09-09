@@ -99,7 +99,6 @@ internal fun parseUsageNotice(notice: String, expectedRequestId: Long): UsageNot
     return UsageNoticeResult(usage, null)
 }
 data class ExtensionWidget(val lines: List<String>, val placement: String?)
-data class AttachmentDownloadKey(val sessionId: String, val entryId: String)
 
 enum class AttachmentDownloadAction { Preview, Reload, Save }
 enum class AttachmentDownloadStatus { Downloading, Downloaded, Failed }
@@ -145,7 +144,7 @@ data class TauUiState(
 
 class TauController(
     internal val dispatcher: CoroutineDispatcher,
-    private val store: LocalStore = LocalStore({ PlatformServices.transcriptDatabasePath }),
+    internal val store: LocalStore = LocalStore({ PlatformServices.transcriptDatabasePath }),
 ) {
     internal val scope = CoroutineScope(SupervisorJob() + dispatcher)
     internal val client = TauClient()
@@ -442,7 +441,8 @@ class TauController(
         socketId = null
         pending.clear()
         failedReads.clear()
-        downloadJobs.values.forEach { it.cancel() }
+        val transfers = downloadJobs.values.toList()
+        transfers.forEach { it.cancel() }
         downloadJobs.clear()
         val same = state.value.settings.identity == settings.identity
         mutableState.update { previous ->
@@ -452,7 +452,10 @@ class TauController(
         }
         connectionJob = scope.launch {
             try {
-                prior?.join()
+                withContext(NonCancellable) {
+                    prior?.join()
+                    transfers.forEach { it.join() }
+                }
                 store.disconnect(settings.identity)
                 val retained = store.loadConnection(settings.identity)
                 val selected = retained.selected?.takeIf { id -> retained.sessions.any { it.id == id } } ?: retained.sessions.firstOrNull()?.id
@@ -461,6 +464,9 @@ class TauController(
                 if (selected != null) loadChat(ChatKey(settings.identity, selected))
                 mutableState.update { it.copy(sessions = retained.sessions, selectedSessionId = selected, restoring = false, readAt = readAt,
                     unread = retained.sessions.filter { it.id != selected && it.updatedAtMs > readAt.getValue(it.id) }.mapTo(mutableSetOf()) { it.id },
+                    attachmentDownloads = retained.downloads.mapValues { (_, saved) ->
+                        AttachmentDownload(AttachmentDownloadStatus.Downloaded, 0, null, saved = saved)
+                    },
                     mobileChatVisible = selected != null, connectionStatus = if (settings.token.isBlank()) ConnectionStatus.NotConfigured else ConnectionStatus.Connecting) }
                 if (settings.token.isBlank()) return@launch
                 var crashUploaded = false

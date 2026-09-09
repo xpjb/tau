@@ -272,8 +272,13 @@ actual object PlatformServices {
             "Tau",
         )
         directory.mkdirs()
-        val target = File(directory, safeName)
-        File(source).copyTo(target, overwrite = true)
+        val extensionIndex = safeName.lastIndexOf('.').takeIf { it > 0 } ?: safeName.length
+        val stem = safeName.substring(0, extensionIndex)
+        val suffix = safeName.substring(extensionIndex)
+        var target = File(directory, safeName)
+        var number = 2
+        while (target.exists()) target = File(directory, "$stem (${number++})$suffix")
+        File(source).copyTo(target)
         val uri = FileProvider.getUriForFile(
             context,
             "${context.packageName}.files",
@@ -285,6 +290,10 @@ actual object PlatformServices {
             mimeType = mimeType,
         )
     }
+
+    actual fun downloadExists(download: SavedDownload): Boolean = runCatching {
+        TauAndroidContext.require().contentResolver.openAssetFileDescriptor(Uri.parse(download.reference), "r")?.use { true } ?: false
+    }.getOrDefault(false)
 
     actual fun openDownload(download: SavedDownload) {
         val context = TauAndroidContext.require()

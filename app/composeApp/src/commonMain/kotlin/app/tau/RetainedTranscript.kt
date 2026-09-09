@@ -190,7 +190,13 @@ internal const val HistoryPageBytes = 256 * 1024
 internal val TranscriptEvent.pageBytes: Long get() = 512L + text.length * 3L
 
 data class ChatKey(val connection: String, val session: String)
-data class StoredConnection(val sessions: List<SessionSummary>, val selected: String?, val readAt: Map<String, Long> = emptyMap())
+data class AttachmentDownloadKey(val sessionId: String, val entryId: String)
+data class StoredConnection(
+    val sessions: List<SessionSummary>,
+    val selected: String?,
+    val readAt: Map<String, Long> = emptyMap(),
+    val downloads: Map<AttachmentDownloadKey, SavedDownload> = emptyMap(),
+)
 
 @Stable
 class EventRow internal constructor(event: TranscriptEvent) {

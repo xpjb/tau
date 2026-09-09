@@ -3,6 +3,7 @@ package app.tau
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -19,6 +20,7 @@ internal fun TauController.downloadAttachment(sessionId: String, message: Transc
     val settings = current.settings
     val allowNetwork = current.connectionStatus == ConnectionStatus.Connected
     if (action == AttachmentDownloadAction.Preview && previous != null &&
+        !(previous.status == AttachmentDownloadStatus.Downloaded && previous.localPath == null) &&
         !(previous.failure == AttachmentFailure.NotLocal && allowNetwork)) return
     val attempt = (previous?.attempt ?: 0) + 1
     mutableState.update {
@@ -61,8 +63,12 @@ internal fun TauController.downloadAttachment(sessionId: String, message: Transc
                     } }
                 }
             }
-            val download = if (action == AttachmentDownloadAction.Save) withContext(Dispatchers.IO) {
-                PlatformServices.saveDownload(attachment.fileName, path)
+            val download = if (action == AttachmentDownloadAction.Save) withContext(NonCancellable) {
+                val saved = withContext(Dispatchers.IO) {
+                    previous?.saved?.takeIf(PlatformServices::downloadExists) ?: PlatformServices.saveDownload(attachment.fileName, path)
+                }
+                store.recordDownload(ChatKey(settings.identity, sessionId), message.entryId, saved)
+                saved
             } else previous?.saved
             mutableState.update { ui ->
                 if (downloadJobs[key] !== job) ui
@@ -109,41 +115,31 @@ internal fun TauController.cancelAttachmentDownload(message: TranscriptEvent) {
     }
 }
 
-internal fun TauController.openAttachmentDownload(message: TranscriptEvent) {
-    val sessionId = mutableState.value.selectedSessionId ?: return
+internal fun TauController.useAttachmentDownload(message: TranscriptEvent, action: (SavedDownload) -> Unit) {
+    val current = state.value
+    val sessionId = current.selectedSessionId ?: return
     val key = AttachmentDownloadKey(sessionId, message.entryId)
-    val download = mutableState.value.attachmentDownloads[key]?.saved ?: return
-    try {
-        PlatformServices.openDownload(download)
-    } catch (error: Throwable) {
-        mutableState.update {
-            it.copy(error = error.message ?: "The downloaded file could not be opened.")
-        }
-    }
-}
-
-internal fun TauController.showAttachmentDownload(message: TranscriptEvent) {
-    val sessionId = mutableState.value.selectedSessionId ?: return
-    val key = AttachmentDownloadKey(sessionId, message.entryId)
-    val download = mutableState.value.attachmentDownloads[key]?.saved ?: return
-    try {
-        PlatformServices.showDownload(download)
-    } catch (error: Throwable) {
-        mutableState.update {
-            it.copy(error = error.message ?: "The downloaded file could not be shown.")
-        }
-    }
-}
-
-internal fun TauController.extractAndOpenAttachmentDownload(message: TranscriptEvent) {
-    val sessionId = mutableState.value.selectedSessionId ?: return
-    val key = AttachmentDownloadKey(sessionId, message.entryId)
-    val download = mutableState.value.attachmentDownloads[key]?.saved ?: return
-    try {
-        PlatformServices.extractAndOpenDownload(download)
-    } catch (error: Throwable) {
-        mutableState.update {
-            it.copy(error = error.message ?: "The downloaded ZIP could not be extracted.")
+    val download = current.attachmentDownloads[key]?.saved ?: return
+    scope.launch {
+        try {
+            val exists = withContext(Dispatchers.IO) { PlatformServices.downloadExists(download) }
+            if (!exists) store.recordDownload(ChatKey(current.settings.identity, sessionId), message.entryId, download, available = false)
+            if (state.value.settings.identity != current.settings.identity) return@launch
+            if (!exists) {
+                mutableState.update { ui ->
+                    val stored = ui.attachmentDownloads[key]
+                    if (stored?.saved != download) ui
+                    else ui.copy(attachmentDownloads = ui.attachmentDownloads + (key to stored.copy(saved = null)))
+                }
+                error("The downloaded file is no longer available. Save it again.")
+            }
+            action(download)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (state.value.settings.identity == current.settings.identity) mutableState.update {
+                it.copy(error = error.message ?: "The downloaded file could not be opened.")
+            }
         }
     }
 }

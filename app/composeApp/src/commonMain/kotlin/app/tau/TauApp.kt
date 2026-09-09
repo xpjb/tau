@@ -1287,7 +1287,7 @@ private fun ChatPanel(
                                                             }
                                                             AttachmentDownloadStatus.Downloaded -> totalBytes
                                                                 ?.let { "${formatByteCount(it)} · ${if (attachmentDownload.saved == null) "Saved in Tau" else "Downloaded"}" }
-                                                                ?: "Saved in Tau"
+                                                                ?: if (attachmentDownload.saved == null) "Saved in Tau" else "Downloaded"
                                                             AttachmentDownloadStatus.Failed -> buildString {
                                                                 append(formatByteCount(attachmentDownload.transferredBytes))
                                                                 totalBytes?.let {
@@ -1350,41 +1350,42 @@ private fun ChatPanel(
                                                                             },
                                                                         )
                                                                     }
-                                                                    when (attachmentDownload?.status) {
-                                                                        AttachmentDownloadStatus.Downloading -> TextButton(
+                                                                    when {
+                                                                        attachmentDownload?.status == AttachmentDownloadStatus.Downloading -> TextButton(
                                                                             onClick = {
                                                                                 controller.cancelAttachmentDownload(message)
                                                                             },
                                                                         ) { Text("Cancel") }
-                                                                        AttachmentDownloadStatus.Downloaded -> if (attachmentDownload.saved == null) {
-                                                                            TextButton(onClick = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Save) }) { Text("Save") }
-                                                                        } else {
+                                                                        attachmentDownload?.saved != null -> {
                                                                             TextButton(
                                                                                 onClick = {
-                                                                                    controller.openAttachmentDownload(message)
+                                                                                    controller.useAttachmentDownload(message, PlatformServices::openDownload)
                                                                                 },
                                                                             ) { Text("Open") }
                                                                             if (PlatformServices.platformName == "windows") {
                                                                                 TextButton(
                                                                                     onClick = {
-                                                                                        controller.showAttachmentDownload(message)
+                                                                                        controller.useAttachmentDownload(message, PlatformServices::showDownload)
                                                                                     },
                                                                                 ) { Text("Show") }
                                                                                 if (attachment.fileName.endsWith(".zip", ignoreCase = true)) {
                                                                                     TextButton(
                                                                                         onClick = {
-                                                                                            controller.extractAndOpenAttachmentDownload(message)
+                                                                                            controller.useAttachmentDownload(message, PlatformServices::extractAndOpenDownload)
                                                                                         },
                                                                                     ) { Text("Extract") }
                                                                                 }
                                                                             }
                                                                         }
-                                                                        AttachmentDownloadStatus.Failed -> TextButton(
+                                                                        attachmentDownload?.status == AttachmentDownloadStatus.Downloaded -> TextButton(
+                                                                            onClick = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Save) },
+                                                                        ) { Text("Save") }
+                                                                        attachmentDownload?.status == AttachmentDownloadStatus.Failed -> TextButton(
                                                                             onClick = {
                                                                                 controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Save)
                                                                             },
                                                                         ) { Text("Retry") }
-                                                                        null -> TextButton(
+                                                                        else -> TextButton(
                                                                             onClick = {
                                                                                 controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Save)
                                                                             },

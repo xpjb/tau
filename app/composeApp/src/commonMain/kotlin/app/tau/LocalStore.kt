@@ -83,7 +83,27 @@ class LocalStore(
             }
         }
         val preferences = db.records(ChatKey(identity, ""), "connection").toMap()
-        StoredConnection(sessions, preferences["selected"], preferences["readAt"]?.let { TauJson.decodeFromString<Map<String, Long>>(it) }.orEmpty())
+        val missing = mutableListOf<Pair<AttachmentDownloadKey, String>>()
+        val downloads = db.prepare("SELECT chat,id,value FROM records WHERE connection=? AND kind='download'").use { statement ->
+            statement.bindText(1, identity)
+            buildMap {
+                while (statement.step()) {
+                    val key = AttachmentDownloadKey(statement.getText(0), statement.getText(1))
+                    val download = TauJson.decodeFromString<SavedDownload>(statement.getText(2))
+                    if (PlatformServices.downloadExists(download)) put(key, download) else missing.add(key to statement.getText(2))
+                }
+            }
+        }
+        if (missing.isNotEmpty()) db.transaction {
+            for ((key, value) in missing) db.remove(ChatKey(identity, key.sessionId), "download", key.entryId, value)
+        }
+        StoredConnection(sessions, preferences["selected"], preferences["readAt"]?.let { TauJson.decodeFromString<Map<String, Long>>(it) }.orEmpty(), downloads)
+    }
+
+    suspend fun recordDownload(key: ChatKey, entryId: String, download: SavedDownload, available: Boolean = true) = access { db ->
+        val value = TauJson.encodeToString(download)
+        if (available) db.write(key, "download", listOf(entryId to value))
+        else db.remove(key, "download", entryId, value)
     }
 
     suspend fun saveSessions(identity: String, sessions: List<SessionSummary>, readAt: Map<String, Long>? = null) = access { db ->
@@ -504,10 +524,12 @@ private fun SQLiteConnection.write(key: ChatKey, kind: String, values: List<Pair
     }
 }
 
-private fun SQLiteConnection.remove(key: ChatKey, kind: String, id: String? = null) {
-    prepare("DELETE FROM records WHERE connection=? AND chat=? AND kind=?" + if (id == null) "" else " AND id=?").use { statement ->
+private fun SQLiteConnection.remove(key: ChatKey, kind: String, id: String? = null, value: String? = null) {
+    prepare("DELETE FROM records WHERE connection=? AND chat=? AND kind=?" + (if (id == null) "" else " AND id=?") +
+        (if (value == null) "" else " AND value=?")).use { statement ->
         statement.bindText(1, key.connection); statement.bindText(2, key.session); statement.bindText(3, kind)
         if (id != null) statement.bindText(4, id)
+        if (value != null) statement.bindText(if (id == null) 4 else 5, value)
         statement.step()
     }
 }

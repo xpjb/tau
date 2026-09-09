@@ -22,6 +22,7 @@ data class ConnectionSettings(
 
 data class PickedFile(val name: String, val bytes: ByteArray)
 
+@Serializable
 data class SavedDownload(
     val location: String,
     val reference: String,
@@ -46,6 +47,7 @@ expect object PlatformServices {
     suspend fun pickFiles(): List<PickedFile>
     suspend fun readDroppedFiles(fileUris: List<String>): List<PickedFile>
     fun saveDownload(fileName: String, source: String): SavedDownload
+    fun downloadExists(download: SavedDownload): Boolean
     fun openDownload(download: SavedDownload)
     fun showDownload(download: SavedDownload)
     fun extractAndOpenDownload(download: SavedDownload)
