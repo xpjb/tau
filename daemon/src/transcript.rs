@@ -455,9 +455,11 @@ impl Transcript {
             while let Some(id) = cursor {
                 if checked.contains(id) { break; }
                 if !path.insert(id) { bail!("transcript branch contains a cycle"); }
-                let entry = &entries[*by_id.get(id).context("transcript branch has a missing parent")?];
+                let Some(index) = by_id.get(id) else { break; };
+                let entry = &entries[*index];
                 if let Some(parent) = entry.parent_id.as_ref() {
-                    let parent = &entries[*by_id.get(parent).context("transcript branch has a missing parent")?];
+                    let Some(parent_index) = by_id.get(parent) else { break; };
+                    let parent = &entries[*parent_index];
                     if parent.phase != EntryPhase::Saved { bail!("transcript parent is provisional"); }
                 }
                 cursor = entry.parent_id.as_ref();

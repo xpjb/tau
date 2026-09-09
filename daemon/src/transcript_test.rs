@@ -46,8 +46,9 @@ fn retains_identified_content_across_updates_recovery_and_branches() {
     assert_eq!(next.snapshot(&[], &[]).entries.len(), 1);
     assert!(next.apply(&TranscriptChange::Head { head: Some("missing".to_owned()) }, None).is_err());
     assert_eq!(next.snapshot(&[], &[]).head.as_deref(), Some("a"));
+    let orphan = vec![json!({"type":"message","id":"a","parentId":"missing"})];
+    assert!(Transcript::new(orphan.iter().map(|entry| Entry::from_pi(entry, false).unwrap()).collect(), None, None, QueueState::default()).is_ok());
     for entries in [
-        vec![json!({"type":"message","id":"a","parentId":"missing"})],
         vec![json!({"type":"message","id":"a","parentId":"b"}), json!({"type":"message","id":"b","parentId":"a"})],
         vec![json!({"type":"message","id":"a","parentId":null}), json!({"type":"message","id":"a","parentId":null})],
     ] {
