@@ -1,10 +1,10 @@
 # Tau open work
 
-## Current: flatten the transcript for code health
+## Implemented: flatten the transcript for code health
 
 User authorized execution and permits dropping the transcript store/cache. The goal is simpler, correct code that is easier to change. Performance is not the justification or acceptance gate for this rewrite.
 
-Baseline: b5d1478. Initial estimate: 400–650 fewer production lines, excluding tests, notes and formatting. Report the actual net change after review; do not compress code to meet the estimate.
+Baseline: b5d1478. Initial estimate: 400–650 fewer production lines. Reviewed result: 431 fewer production source lines (523 added, 954 removed), excluding tests, notes and build metadata. No automated formatting was run.
 
 Implementation:
 1. Replace Tau's retained message/content tree with ordered, independently identified content events. Reuse Pi entry/stream IDs and block indices.
@@ -13,6 +13,8 @@ Implementation:
 4. Remove remote transcript persistence, cached parent walks, recent-page membership, live flush tracking, and client-side interrupted-tail reconstruction. Keep SQLite for local drafts, pending sends/controls, attached files, preferences and session metadata. History reloads after an app restart. Existing remote cache rows can be discarded.
 5. Keep thinking and tools in collapsible UI groups formed across loaded events. Fetch pages are transport batches, not UI containers.
 6. Update focused existing pipeline coverage, build matched daemon/clients, review the diff, commit and merge. No automatic code formatting. No live deployment as part of this task.
+
+Acceptance: all 12 daemon tests and all 15 shared/desktop client tests pass, as does strict Clippy. Release daemon, signed Android 0.5.8/versionCode 28, and minified Windows 0.5.8 packaging pass. Checks cover event order/lifecycle, paging, stable presentation keys, queue identities, local-work migration/rollback/restart, connection recovery and attachments. No native UI test, provider prompt or live restart was part of this rewrite.
 
 The reported out-of-order thinking/tool events, stranded interrupted events and new content streaming above them are expected to be covered by this cleanup. The user will report any remainder; do not open a separate investigation or add a special acceptance process for that symptom.
 
@@ -32,7 +34,7 @@ The relative contribution to the user's delay has not been measured. Separate ac
 
 The existing eager fetch only loads older history in the selected chat. It does not preload other chats before selection. Implement real recent/unread-chat prefetch, bounded in concurrency, without replacing the selected chat's live subscription or starting Pi merely to read history.
 
-The current scroll trigger mixes item indices and pixel sizes. Replace it when replacing page-based UI items. Broader networking, client update cost, cold full-JSONL loading and UI rendering work remain separate performance topics; flatness alone is not a measured speedup.
+The rewrite replaces the old scroll trigger's mixed pixel/item arithmetic with an item-count threshold. Broader networking, client update cost, cold full-JSONL loading and UI rendering work remain separate performance topics; flatness alone is not a measured speedup.
 
 ## Parked: new-chat responsiveness
 

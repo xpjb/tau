@@ -8,9 +8,9 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 - `app/`: one Compose Multiplatform client for Android and desktop JVM targets.
 - `windows/`: the portable launcher and version-aware self-extracting Windows setup.
 
-Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects identified entries; clients keep a SQLite disk cache and a shared in-memory view for display. Drafts, pending sends and interrupted content survive client restarts. Cold chats can be read without starting Pi. Reconnect synchronizes the recent history page while keeping cached content visible. Older pages load on demand. New chats use `/root` as their working directory.
+Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects ordered content events; clients keep remote history in memory only. SQLite preserves drafts, pending sends/controls, attached files, preferences and session metadata across client restarts. Cold chats can be read without starting Pi. Reconnect synchronizes the recent event window, and older events load on demand. Thinking and tools remain collapsible across fetch boundaries. New chats use `/root` as their working directory.
 
-Tau 0.5.7 uses protocol 4. Clients require a daemon of the same protocol generation; the deployed 0.5.7 daemon serves 0.5.5-and-later protocol-4 clients. It requires the identified-transcript Pi fork with RPC model-default persistence from `xpjb/pi`. Existing JSONL files are preserved without migration.
+Tau 0.5.8 uses protocol 5 and requires matched daemon/client updates. This rewrite is not deployed. Client schema 4 discards only the old remote transcript cache; local work stays intact. It requires the identified-transcript Pi fork with RPC model-default persistence from `xpjb/pi`. Existing JSONL files are preserved without migration.
 
 ## Current client operations
 

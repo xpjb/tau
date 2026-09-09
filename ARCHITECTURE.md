@@ -18,8 +18,8 @@ One-sentence responsibility per module. Read this before opening files.
 - `pi.rs` — one Pi subprocess and its RPC pipe: request correlation,
   event broadcast, shutdown.
 - `transcript.rs` — Pi data formats and the transcript state machine:
-  entry parsing, positional updates, paging, queue state, model backfill
-  walks.
+  branch projection into flat events, ordered updates, recovery, paging,
+  queue state and model backfill walks.
 - `protocol.rs` — the client↔daemon wire contract. Pure data.
 
 Dependencies point one way: `server → manager → {pi, transcript, state}`,
@@ -33,9 +33,12 @@ with `transcript` owning Pi formats and `state.rs` owning only Tau's own
 - `AttachmentDownloads.kt` — attachment transfer lifecycle (extensions on
   `TauController`).
 - `TauClient.kt` — WebSocket/HTTP transport to the daemon.
-- `TranscriptStore.kt` — SQLite persistence and projection of transcripts.
-- `RetainedTranscript.kt` — in-memory transcript model shared by store
-  and UI, plus chat-key and position types.
+- `LocalStore.kt` — durable local work and session metadata in SQLite;
+  snapshot, page and update application to memory-only transcripts.
+- `RetainedTranscript.kt` — flat event types, stable rows and their ordered
+  in-memory collection, plus pending-work and chat-position types.
+- `TranscriptPresentation.kt` — collapsible groups across loaded events,
+  tool-call/result matching and presentation-key reuse.
 - `Protocol.kt` — mirrors `daemon/src/protocol.rs` wire types.
 - `TranscriptText.kt` — text utilities: markdown rendering, suggestion
   scoring, byte formatting.
@@ -48,5 +51,7 @@ with `transcript` owning Pi formats and `state.rs` owning only Tau's own
   handlers, or platform-interface implementations.
 - Wire changes are versioned: `PROTOCOL_VERSION` in `protocol.rs` and
   `Protocol.kt` move together with matched client releases.
-- Live transcript entries persist to the client store on first appearance
-  and at most once per flush window; finalization always persists.
+- Pi JSONL owns saved history. Remote transcript events stay in client
+  memory only; SQLite preserves local work, files and preferences.
+- The daemon owns branch selection, event order and stream lifecycle.
+  Transport pages do not define presentation groups.

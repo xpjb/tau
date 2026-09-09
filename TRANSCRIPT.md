@@ -1,5 +1,68 @@
 # Retained transcript contract
 
+## Current — Tau 0.5.8 / protocol 5
+
+This section supersedes the earlier protocol/store descriptions below. The rewrite
+is for code health and correctness. It is not a measured latency improvement.
+Pi and its existing JSONL format are unchanged. No live deployment is included.
+
+### Authority and order
+
+The daemon selects Pi's branch and translates each content block into an event.
+Events have an ID, numeric order, Pi entry ID, role, kind, text, lifecycle and origin
+metadata. Tool-call IDs link inputs and results. Images omit inline binary data;
+files keep the existing authenticated endpoints and server-only source paths.
+
+Identity uses the existing stream/request/entry identity plus block index. The
+separate entryId identifies the saved Pi entry for forks and attachments. Live
+updates and snapshots use the same projection. Finalization preserves event IDs
+and order. The daemon retains abandoned streams as interrupted at their existing
+positions; the client has no provisional tail or parent-chain reconstruction.
+
+### Wire and recovery
+
+Snapshots and pages contain ordered events. A page targets 50 events and 256 KiB;
+an oversized event stays whole. before is the first order in the page when older
+content exists. History reads return orders strictly below that cursor. Snapshots
+also include current live events outside the recent window and resolve requested
+pending-send IDs against saved history.
+
+Each atomic update carries event replacements, removed IDs, an optional text
+delta, queue state and delivered request IDs. Generation and sequence checks reject
+duplicates, gaps and stale replies. Recovery replaces the generation at the daemon.
+A same-generation client refresh retains older loaded history only when its range
+overlaps the new window. Otherwise it reloads the recent window and exposes its
+older cursor, rather than presenting disconnected ranges as complete history.
+
+### Local work and presentation
+
+LocalStore keeps remote events only in memory, indexed by ID and ordered for the UI.
+SQLite schema 4 removes old entry/position/page records. It preserves sessions,
+drafts, pending sends and controls, attached file bodies and preferences. The next
+app process reloads history from the daemon. Already downloaded originals keep
+using their existing credential/chat/Pi-entry paths. Sends and controls retain the
+existing confirmed/queued/unconfirmed states and no automatic replay rule.
+
+Presentation groups span loaded events, not fetch pages. Tool calls match all
+loaded result blocks by tool-call ID. Existing group, Details and tool keys are
+reused when earlier history arrives or a live event becomes saved. These view
+records reference event rows; they are not a second writable transcript model.
+
+The confirmation-delay, cross-chat prefetch and new-chat/title threads remain in
+[OPEN-WORK.md](OPEN-WORK.md). Their timing work is separate from this rewrite.
+
+### Acceptance
+
+Twelve daemon tests, strict Clippy and fifteen shared/desktop client tests pass.
+Release daemon, signed Android 0.5.8/versionCode 28 and minified Windows packaging
+pass. Android uses the existing release certificate. No native UI test or live
+provider prompt was run. No service or installed Pi was changed.
+
+## Historical contracts and acceptance
+
+The remaining sections record earlier releases, their designs and their checks.
+Their disk-transcript and page-local presentation rules do not apply to protocol 5.
+
 ## Client hotfix — 0.5.1
 
 Windows and Android 0.5.1 use the existing 0.5.0 daemon and protocol 3. No daemon or Pi change is required.
