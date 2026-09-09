@@ -81,7 +81,7 @@ Older exports have no recorded identity. Do not guess a match from filename alon
 
 The restart regression failed before the fix and now passes. Completed references restore into the existing transfer state; missing-file checks use conditional removal so an old check cannot erase a newer save. Preview failures keep Open available for the exported file. Android 8/9 exports now avoid overwriting same-name files, matching newer Android and Windows. All sixteen client tests, signed Android versionCode 31 and minified Windows packaging pass. An isolated desktop-JVM/Xvfb check visibly restored Open after restarting, with one download and one exported file. Client 0.5.11 is ready; daemon 0.5.10/protocol 6 and services are unchanged.
 
-## Fixed, unreleased: scrolling gets trapped while loading older history
+## Released in 0.5.11 rebuild 2: scrolling gets trapped while loading older history
 
 The user wants scrolling to keep making progress in either direction while history
 loads. They explicitly request a code fix, not packaging, shipping or a version
@@ -106,3 +106,5 @@ Both separate replies and one expanded thinking group pass. All seventeen client
 tests pass under Xvfb, with no skips; Android compilation also passes. The UI test
 skips without a display. Evidence: /root/tau-checks/scroll/acceptance.json. Versions,
 installers, daemon, Pi and production services remain unchanged.
+
+The user subsequently requested builds and authorized daemon deployment if needed. The combined 0.5.11 rebuild 2 retains the public version, raises Android versionCode to 32, and uses r2 filenames without replacing the archived first build. Signed Android and minified Windows packaging passed against the accepted scrolling code. No daemon code is pending; the installed and running 0.5.10 binary matches its accepted SHA-256, so no restart is needed.

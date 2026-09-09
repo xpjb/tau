@@ -1,6 +1,6 @@
 # Retained transcript contract
 
-## Unreleased QA fix — scrolling
+## Client 0.5.11 rebuild 2 — scrolling
 
 Saved Markdown uses its parsed layout on the first measurement. It no longer
 switches from a raw-text placeholder to a different height whenever a lazy item
@@ -11,7 +11,11 @@ The real-window regression drives up/down wheel input and delayed history pages
 for separate replies and a large expanded thinking group. It fails on the old
 renderer and passes on the fix. All 17 client tests pass under Xvfb, plus Android
 compilation. Run desktop tests with a display to include this regression. This is
-a code fix only: client 0.5.11, daemon 0.5.10, protocol 6 and installers are unchanged.
+now in the user-requested 0.5.11 rebuild 2 installers. The public version is reused;
+Android versionCode 32 and Windows' payload hash distinguish the new build. Signed
+Android and minified Windows packaging pass. The older release files remain
+archived. There are no pending daemon changes: live 0.5.10/protocol 6 matches the
+accepted binary and stays running. Receipts: `/root/tau-release/0.5.11-r2/`.
 
 
 ## Client 0.5.11 — saved downloads
