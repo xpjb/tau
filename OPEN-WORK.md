@@ -63,7 +63,7 @@ Creation and first-message title generation are separate from regular reply conf
 
 The existing malformed-JSONL-line edit was reviewed, committed and pushed to master as b5d1478. All 12 daemon tests passed. Production services and Pi were untouched.
 
-## Active: remember saved downloads after reopening
+## Completed: remember saved downloads after reopening
 
 The saved path/Android URI lives only in AttachmentDownload UI state. The byte cache survives, but the export link does not. Reopening clears that link and hides Open/Show/Extract; pressing Download can create another exported copy even when no network transfer is needed.
 
@@ -75,4 +75,8 @@ Plan:
 
 Older exports have no recorded identity. Do not guess a match from filename alone. This fix preserves downloads saved by the updated client; it does not invent links for previously untracked files.
 
-The restart regression failed before the fix and now passes. Completed references restore into the existing transfer state; missing-file checks use conditional removal so an old check cannot erase a newer save. Preview failures keep Open available for the exported file. Android 8/9 exports now avoid overwriting same-name files, matching newer Android and Windows. Focused attachment/store checks pass; final builds and full acceptance follow.
+The restart regression failed before the fix and now passes. Completed references restore into the existing transfer state; missing-file checks use conditional removal so an old check cannot erase a newer save. Preview failures keep Open available for the exported file. Android 8/9 exports now avoid overwriting same-name files, matching newer Android and Windows. All sixteen client tests, signed Android versionCode 31 and minified Windows packaging pass. An isolated desktop-JVM/Xvfb check visibly restored Open after restarting, with one download and one exported file. Client 0.5.11 is ready; daemon 0.5.10/protocol 6 and services are unchanged.
+
+## Queued next: scrolling gets trapped while loading older history
+
+The user reports that after scrolling back, scrolling down can loop or get pulled back as history loads. They want a stable transcript position so scrolling in either direction keeps making progress. They explicitly require finishing the download fix first. Only scroll-code references have been inspected; no scrolling implementation has changed. Reproduce with a long transcript and delayed page loads, then review stable anchors and group growth before choosing a fix. Preserve collapsible thinking/tools and daemon-owned event order.

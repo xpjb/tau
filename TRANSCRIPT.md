@@ -1,5 +1,28 @@
 # Retained transcript contract
 
+## Client 0.5.11 — saved downloads
+
+Completed download references now persist in the existing SQLite records, scoped
+by connection, chat and Pi entry ID. Connection restore checks the file or Android
+URI and restores the existing download state, including Open/Show/Extract. Missing
+files lose their stale link. Checks cannot delete a newer saved reference. A failed
+image preview leaves the exported file available to open. Save and receipt writing
+finish together during orderly shutdown or a connection change. Android 8/9 now
+keeps distinct same-name exports, as newer Android and Windows already do.
+
+This adds no transcript cache, database table or protocol change. Only downloads
+saved with 0.5.11 have durable references; older untracked exports are not matched
+by filename. The daemon remains deployed 0.5.10/protocol 6; no restart is needed.
+
+The restart regression failed before the fix. All sixteen client tests pass,
+including offline restart/open, deleted files, same-name exports, account isolation,
+stale removal and failure/cancellation. Signed Android versionCode 31 and minified
+Windows builds pass. An isolated desktop-JVM/Xvfb check downloaded a file, restarted
+the app and visibly restored Open, with one HTTP download and no extra exported
+copy. This is not physical Windows/Android acceptance. Receipts and installers:
+`/root/tau-release/0.5.11/`. The scrolling-loop request remains queued separately.
+
+
 ## Current — Tau 0.5.10 / protocol 6
 
 This matched client/daemon update is deployed. The user explicitly authorized
