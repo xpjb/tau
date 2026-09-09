@@ -4,7 +4,7 @@
 
 This section supersedes the earlier protocol/store descriptions below. The rewrite
 is for code health and correctness. It is not a measured latency improvement.
-Pi and its existing JSONL format are unchanged. No live deployment is included.
+Pi and its existing JSONL format are unchanged.
 
 ### Authority and order
 
@@ -56,7 +56,14 @@ The confirmation-delay, cross-chat prefetch and new-chat/title threads remain in
 Twelve daemon tests, strict Clippy and fifteen shared/desktop client tests pass.
 Release daemon, signed Android 0.5.8/versionCode 28 and minified Windows packaging
 pass. Android uses the existing release certificate. No native UI test or live
-provider prompt was run. No service or installed Pi was changed.
+provider prompt was run during development.
+
+The user authorized the restart on 2026-09-09. Tau 0.5.8/protocol 5 is deployed;
+all 69 prior chat IDs and 66 JSONL byte prefixes passed verification, along with
+an authenticated 50-event flat snapshot. Telegram, Pi and configuration stayed
+unchanged. Both matching client installers were sent. Backup and deployment
+receipt are under `/var/backups/tau/0.5.8-20260909T122745Z` and
+`/root/tau-release/0.5.8/deployment.json`.
 
 ## Historical contracts and acceptance
 
