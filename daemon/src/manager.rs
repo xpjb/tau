@@ -866,9 +866,13 @@ impl AgentManager {
             if line.trim().is_empty() {
                 continue;
             }
-            let entry = serde_json::from_str::<Value>(&line).with_context(|| {
-                format!("failed to parse {} at line {line_number}", path.display())
-            })?;
+            let entry = match serde_json::from_str::<Value>(&line) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    warn!(session = id, %error, line = line_number, "skipping malformed JSONL line");
+                    continue;
+                }
+            };
             if entry.get("type").and_then(Value::as_str) == Some("session") {
                 continue;
             }
