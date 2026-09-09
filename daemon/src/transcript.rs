@@ -370,29 +370,51 @@ impl Transcript {
             cursor = entry.get("parentId").and_then(Value::as_str);
         }
         if head.as_ref().is_some_and(|id| !by_entry.contains_key(id.as_str())) { bail!("Pi head is missing"); }
-        let mut incoming = Vec::new();
-        for raw in branch.into_iter().rev() { incoming.extend(Event::from_pi(raw, false)?); }
-        for raw in live { incoming.extend(Event::from_pi(raw, true)?); }
         let continuing = previous.filter(|old| old.head.as_deref().is_none_or(|id| seen.contains(id)));
+        let mut live_at = HashMap::<Option<&str>, Vec<Event>>::new();
+        for raw in live {
+            let parent = raw.get("parentId").and_then(Value::as_str);
+            if parent.is_some_and(|id| !seen.contains(id)) { bail!("Pi live entry is outside the selected branch"); }
+            live_at.entry(parent).or_default().extend(Event::from_pi(raw, true)?);
+        }
+        let mut incoming = live_at.remove(&None).unwrap_or_default();
+        if cursor.is_some() { incoming.extend(live_at.remove(&cursor).unwrap_or_default()); }
+        let mut old_head_end = 0;
+        for raw in branch.into_iter().rev() {
+            let id = raw.get("id").and_then(Value::as_str);
+            incoming.extend(Event::from_pi(raw, false)?);
+            if continuing.is_some_and(|old| old.head.as_deref() == id) { old_head_end = incoming.len(); }
+            incoming.extend(live_at.remove(&id).unwrap_or_default());
+        }
+        let mut ids = HashMap::new();
+        for (index, event) in incoming.iter().enumerate() {
+            if ids.insert(event.id.as_str(), index).is_some() { bail!("Pi has duplicate event identities"); }
+        }
+        let mut interrupted = HashMap::<usize, Vec<Event>>::new();
+        if let Some(old) = continuing {
+            let mut next = None;
+            let mut tail = Vec::new();
+            for event in old.events.values().rev() {
+                if let Some(&index) = ids.get(event.id.as_str()) {
+                    if next.is_none() && !tail.is_empty() { interrupted.entry(index + 1).or_default().append(&mut tail); }
+                    next = Some(index);
+                } else if event.phase != EventPhase::Saved && !ids.contains_key(format!("{}:0", event.source_key()).as_str()) {
+                    let mut event = event.clone(); event.phase = EventPhase::Interrupted;
+                    if let Some(index) = next { interrupted.entry(index).or_default().push(event); }
+                    else { tail.push(event); }
+                }
+            }
+            if !tail.is_empty() { interrupted.entry(old_head_end).or_default().append(&mut tail); }
+        }
         let mut transcript = Self {
             generation: Uuid::new_v4().to_string(), sequence: 0, source,
             events: BTreeMap::new(), by_id: BTreeMap::new(), attachments: HashMap::new(),
-            next_order: continuing.map_or(0, |old| old.next_order), head, queue,
+            next_order: 0, head, queue,
         };
-        let mut ids = HashSet::new();
-        for mut event in incoming {
-            if !ids.insert(event.id.clone()) { bail!("Pi has duplicate event identities"); }
-            event.order = match continuing.and_then(|old| old.by_id.get(&event.id)) {
-                Some(order) => *order,
-                None => { let order = transcript.next_order; transcript.next_order += 1; order }
-            };
-            if event.attachment.is_some() { transcript.attachments.insert(event.entry_id.clone(), event.order); }
-            transcript.by_id.insert(event.id.clone(), event.order);
-            transcript.events.insert(event.order, event);
-        }
-        if let Some(old) = continuing {
-            for event in old.events.values().filter(|event| event.phase != EventPhase::Saved && !ids.contains(&format!("{}:0", event.source_key()))) {
-                let mut event = event.clone(); event.phase = EventPhase::Interrupted;
+        for (index, event) in incoming.into_iter().map(Some).chain(std::iter::once(None)).enumerate() {
+            for mut event in interrupted.remove(&index).unwrap_or_default().into_iter().rev().chain(event) {
+                event.order = transcript.next_order; transcript.next_order += 1;
+                if event.attachment.is_some() { transcript.attachments.insert(event.entry_id.clone(), event.order); }
                 transcript.by_id.insert(event.id.clone(), event.order);
                 transcript.events.insert(event.order, event);
             }
@@ -469,6 +491,9 @@ impl Transcript {
                 let delta = raw.pointer("/event/assistantMessageEvent").context("Pi delta has no content event")?;
                 let index = delta.get("contentIndex").and_then(Value::as_u64).context("Pi delta has no content index")?;
                 let id = format!("stream:{stream}:{index}");
+                if index > 0 && self.event(&id).is_none() && self.event(&format!("stream:{stream}:{}", index - 1)).is_none() {
+                    bail!("Pi skipped a content block; read its current snapshot");
+                }
                 let kind = delta.get("type").and_then(Value::as_str).context("Pi delta has no kind")?;
                 if matches!(kind, "text_delta" | "thinking_delta" | "toolcall_delta") {
                     change.delta = Some(TextDelta { event_id: id, text: delta.get("delta").and_then(Value::as_str).context("Pi delta has no text")?.to_owned() });
@@ -499,6 +524,9 @@ impl Transcript {
         let mut next = self.next_order;
         for event in &mut change.events {
             event.order = self.by_id.get(&event.id).copied().unwrap_or_else(|| { let order = next; next += 1; order });
+        }
+        if change.events.windows(2).any(|pair| pair[0].order >= pair[1].order) {
+            bail!("Pi content order changed; read its current snapshot");
         }
         Ok(change)
     }

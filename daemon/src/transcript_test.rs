@@ -27,6 +27,7 @@ fn projects_flat_events_through_streaming_finalization_and_recovery() {
         let change = transcript.project(&raw).unwrap();
         transcript.apply(&change, source.clone()).unwrap();
     }
+    assert!(transcript.project(&json!({"type":"delta","streamId":"s","event":{"assistantMessageEvent":{"type":"text_start","contentIndex":3}}})).is_err());
     let cut = transcript.snapshot(&[]);
     assert_eq!(cut.events.iter().map(|event| event.id.as_str()).collect::<Vec<_>>(), ["request:prompt:0", "stream:s:0", "stream:s:1"]);
     assert_eq!(cut.events[1].text, "Thinking π🧠");
@@ -108,4 +109,51 @@ fn preserves_identified_queue_controls_and_hides_binary_content() {
     let mut duplicate = raw.clone();
     duplicate["queuedRequests"].as_array_mut().unwrap().push(raw["queuedRequests"][0].clone());
     assert!(QueueState::from_pi(&duplicate).is_err());
+}
+
+#[test]
+fn recovery_restores_source_order_and_keeps_interrupted_work_between_its_neighbors() {
+    let user = json!({"id":"u","type":"message","parentId":null,"message":{"role":"user","content":"Start"}});
+    let thinking = json!({"id":"thinking","type":"message","parentId":"u","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Earlier thinking"}]}});
+    let closing = json!({"id":"closing","type":"message","parentId":"thinking","message":{"role":"assistant","content":"Closing answer"}});
+    let mut old = Transcript::new(&[user.clone(), closing.clone()], &[], Some("closing".into()), None, QueueState::default(), None).unwrap();
+    let abandoned = json!({"streamId":"lost","parentId":"closing","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Interrupted thinking"}]}});
+    let position = PiPosition { session_id: "pi".into(), generation: "g".into(), sequence: 1 };
+    old.apply(&old.project(&json!({"type":"live","entry":abandoned})).unwrap(), position).unwrap();
+    old.interrupt();
+    let next_user = json!({"id":"next","type":"message","parentId":"closing","message":{"role":"user","content":"Continue"}});
+    let current = json!({"streamId":"current","parentId":"next","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Current thinking"}]}});
+    let raw = [closing, thinking, user.clone(), next_user];
+    let mut restored = Transcript::new(&raw, std::slice::from_ref(&current), Some("next".into()), None, QueueState::default(), Some(&old)).unwrap();
+    for _ in 0..3 {
+        let cut = restored.snapshot(&[]);
+        assert_eq!(cut.events.iter().map(|event| event.text.as_str()).collect::<Vec<_>>(),
+            ["Start", "Earlier thinking", "Closing answer", "Interrupted thinking", "Continue", "Current thinking"]);
+        assert!(cut.events.windows(2).all(|pair| pair[0].order < pair[1].order));
+        assert_eq!(restored.event("stream:lost:0").unwrap().phase, EventPhase::Interrupted);
+        assert_eq!(restored.event("entry:closing:0").unwrap().id, old.event("entry:closing:0").unwrap().id);
+        assert_ne!(restored.generation, old.generation);
+        restored = Transcript::new(&raw, std::slice::from_ref(&current), Some("next".into()), None, QueueState::default(), Some(&restored)).unwrap();
+    }
+    let alternate = json!({"id":"alternate","type":"message","parentId":"u","message":{"role":"user","content":"Other branch"}});
+    let switched = Transcript::new(&[user, alternate], &[], Some("alternate".into()), None, QueueState::default(), Some(&restored)).unwrap();
+    assert!(switched.event("stream:lost:0").is_none());
+    assert_eq!(switched.snapshot(&[]).events.len(), 2);
+}
+
+#[test]
+fn snapshot_places_live_content_after_its_parent_and_before_later_saved_messages() {
+    let user = json!({"id":"u","type":"message","parentId":null,"message":{"role":"user","content":"Start"}});
+    let notice = json!({"id":"notice","type":"custom_message","parentId":"u","display":true,"content":"Later notice"});
+    let live = json!({"streamId":"s","parentId":"u","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Earlier thinking"}]}});
+    let transcript = Transcript::new(&[user, notice], &[live], Some("notice".into()), None, QueueState::default(), None).unwrap();
+    assert_eq!(transcript.snapshot(&[]).events.iter().map(|event| event.text.as_str()).collect::<Vec<_>>(), ["Start", "Earlier thinking", "Later notice"]);
+
+    let model = json!({"id":"model","parentId":"missing","type":"model_change"});
+    let lost = json!({"streamId":"lost","parentId":"model","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Interrupted"}]}});
+    let old = Transcript::new(std::slice::from_ref(&model), &[lost], Some("model".into()), None, QueueState::default(), None).unwrap();
+    let missing = json!({"id":"missing","type":"message","parentId":null,"message":{"role":"user","content":"Recovered prefix"}});
+    let next = json!({"id":"next","type":"message","parentId":"model","message":{"role":"user","content":"Next prompt"}});
+    let restored = Transcript::new(&[missing, model, next], &[], Some("next".into()), None, QueueState::default(), Some(&old)).unwrap();
+    assert_eq!(restored.snapshot(&[]).events.iter().map(|event| event.text.as_str()).collect::<Vec<_>>(), ["Recovered prefix", "Interrupted", "Next prompt"]);
 }

@@ -16,7 +16,7 @@ Implementation:
 
 Acceptance: all 12 daemon tests and all 15 shared/desktop client tests pass, as does strict Clippy. Release daemon, signed Android 0.5.8/versionCode 28, and minified Windows 0.5.8 packaging pass. Checks cover event order/lifecycle, paging, stable presentation keys, queue identities, local-work migration/rollback/restart, connection recovery and attachments. No native UI test, provider prompt or live restart was part of this rewrite.
 
-The user has reported some thinking appearing after a closing message in 0.5.8. Inspection found a possible recovery-order issue, but the affected sequence is not yet identified. This remains open; the 0.5.9 client hotfix does not claim to fix it.
+The recovery-order defect is reproduced and fixed on fix/recovery-order, not deployed. Recovery now assigns order from the selected source branch and block order, inserts live content at its source parent, and keeps abandoned work between known neighbors. Stable event IDs survive a new generation; numeric positions are rebuilt. Skipped blocks and conflicting order trigger a snapshot rather than an out-of-order update. Fourteen daemon tests, strict Clippy and the client store tests pass. The exact earlier user incident was not captured; the tests reproduce the faulty ordering paths. The 0.5.9 client hotfix did not include this daemon fix.
 
 ## Client hotfix: send crash, older-history loading and version labels
 
@@ -36,9 +36,18 @@ Confirmed code paths:
 
 The relative contribution to the user's delay has not been measured. Separate acceptance from post-send maintenance while preserving truthful pending/queued/unconfirmed states and the existing no-replay behavior.
 
-## Parked: eager fetching and performance
+## Active: keep history, warm chats and bump on activity
 
-The existing eager fetch only loads older history in the selected chat. It does not preload other chats before selection. Implement real recent/unread-chat prefetch, bounded in concurrency, without replacing the selected chat's live subscription or starting Pi merely to read history.
+The user also requests loaded history retention, background warming for running/unread/recent chats, and chat-list bumps for assistant replies and stops. These are separate from the ordered-flat-events requirement.
+
+Facts: selectSession explicitly trims the old chat and invalidates both chats. The server replaces the previous subscription on every OpenSession. The client ignores off-screen transcript updates. Session order only changes on the existing metadata touch paths, not assistant replies/stops.
+
+Plan:
+1. Finish and commit the daemon order fix with failed-before/passed-after checks.
+2. Keep loaded rows and per-chat feeds across selection. OpenSession replaces only that chat's feed. Version the matched feed semantics so a warming client cannot silently use a one-feed daemon.
+3. Use those same feeds for bounded read-only warming: selected first, then running/starting, unread and recent chats. Keep two background reads in flight and target a recent history window. Retain local work and the no-replay rule. A failed background read must not loop or block other chats.
+4. Put reply and stop bump rules at the daemon event boundary. Publish the resulting session order to every client. Warming, paging, thinking/tool deltas and idle sleep do not bump a chat.
+5. Check multiple feeds, off-screen updates, switching without refetch, unread warming, reconnect and bump/no-bump cases. Build matched clients and daemon. Hold the production restart for approval.
 
 The rewrite replaces the old scroll trigger's mixed pixel/item arithmetic with an item-count threshold. Broader networking, client update cost, cold full-JSONL loading and UI rendering work remain separate performance topics; flatness alone is not a measured speedup.
 
