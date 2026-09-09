@@ -141,7 +141,7 @@ data class TauUiState(
 
 class TauController(
     internal val dispatcher: CoroutineDispatcher,
-    private val store: TranscriptStore = TranscriptStore({ PlatformServices.transcriptDatabasePath }),
+    private val store: LocalStore = LocalStore({ PlatformServices.transcriptDatabasePath }),
 ) {
     internal val scope = CoroutineScope(SupervisorJob() + dispatcher)
     internal val client = TauClient()
@@ -233,31 +233,13 @@ class TauController(
         val chat = current.transcripts[sessionId] ?: return
         val cursor = chat.before ?: return
         if (sessionId in current.loadingHistory) return
-        val request = GetHistory(newRequestId(), sessionId, chat.position.generation, cursor)
-        val action = PendingAction.History(sessionId, request.generation, cursor)
-        pending[request.id] = action
-        mutableState.update { it.copy(loadingHistory = it.loadingHistory + sessionId, error = null) }
-        launch {
-            var sent = false
-            try {
-                val cached = store.cachedHistory(chat.key, request.generation, cursor)
-                if (pending[request.id] != action) return@launch
-                if (cached != null) {
-                    store.applyHistory(chat.key, request.generation, cursor, cached)
-                } else if (socketId != null && chat.synchronized) {
-                    send(request, action)
-                    sent = true
-                    return@launch
-                } else {
-                    error("This older history is not cached")
-                }
-            } finally {
-                if (!sent && pending[request.id] == action) {
-                    pending.remove(request.id)
-                    mutableState.update { it.copy(loadingHistory = it.loadingHistory - sessionId) }
-                }
-            }
+        if (socketId == null || !chat.synchronized) {
+            mutableState.update { it.copy(error = "Connect to load older history") }
+            return
         }
+        val request = GetHistory(newRequestId(), sessionId, chat.position.generation, cursor)
+        mutableState.update { it.copy(loadingHistory = it.loadingHistory + sessionId, error = null) }
+        send(request, PendingAction.History(sessionId, request.generation, cursor))
     }
 
     fun setExpanded(sessionId: String, key: String, expanded: Boolean) {
@@ -681,8 +663,7 @@ class TauController(
         pending.entries.removeAll { (_, action) -> action is PendingAction.History && action.sessionId == sessionId }
         mutableState.update { it.copy(loadingHistory = it.loadingHistory - sessionId) }
         val chat = state.value.transcripts[sessionId]
-        send(OpenSession(newRequestId(), sessionId, chat?.pending?.map { it.requestId }.orEmpty(),
-            chat?.byId?.values?.filter { it.entry.phase != EntryPhase.Saved }?.mapNotNull { it.entry.origin.streamId }.orEmpty()), PendingAction.Open(sessionId))
+        send(OpenSession(newRequestId(), sessionId, chat?.pending?.map { it.requestId }.orEmpty()), PendingAction.Open(sessionId))
     }
 
     private fun send(request: ClientRequest, action: PendingAction = PendingAction.Normal) {
@@ -724,6 +705,6 @@ class TauController(
         data class Delete(val sessionId: String) : PendingAction
         data class Open(val sessionId: String) : PendingAction
         data class Commands(val sessionId: String) : PendingAction
-        data class History(val sessionId: String, val generation: String, val cursor: String) : PendingAction
+        data class History(val sessionId: String, val generation: String, val cursor: Long) : PendingAction
     }
 }

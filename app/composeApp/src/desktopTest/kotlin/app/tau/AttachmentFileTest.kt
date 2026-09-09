@@ -163,7 +163,7 @@ class AttachmentFileTest {
         val connections = AtomicInteger()
         val chat = SessionSummary("image-chat", "Images", SessionStatus.Idle, createdAtMs = 1, updatedAtMs = 1)
         val other = chat.copy(id = "other-chat")
-        val image = TranscriptEntry("image", role = EntryRole.Tool, attachment = ChatAttachment(AttachmentKind.Image, "image.png", size = png.size.toLong()))
+        val image = TranscriptEvent("entry:image:0", 0, "image", role = EventRole.Tool, kind = EventKind.Hidden, attachment = ChatAttachment(AttachmentKind.Image, "image.png", size = png.size.toLong()))
         val module: Application.() -> Unit = {
             install(WebSockets) { pingPeriodMillis = 1_000; timeoutMillis = 5_000 }
             routing {
@@ -176,7 +176,7 @@ class AttachmentFileTest {
                         if (request is OpenSession) {
                             val entries = if (request.sessionId == chat.id) listOf(image) else emptyList()
                             send(TauJson.encodeToString<ServerMessage>(TranscriptSnapshot(request.sessionId,
-                                TranscriptCut("g", 0, entries.lastOrNull()?.id, entries, QueueState()))))
+                                TranscriptCut("g", 0, entries, QueueState()))))
                         }
                         assertTrue(request is OpenSession || request is ListSessions)
                         send(TauJson.encodeToString<ServerMessage>(Response(request.id, true)))
@@ -198,7 +198,7 @@ class AttachmentFileTest {
         var server = embeddedServer(CIO, host = "127.0.0.1", port = 0, module = module).start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
         val settings = ConnectionSettings("http://127.0.0.1:$port", "local-test")
-        var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }))
+        var controller = TauController(Dispatchers.Swing, LocalStore({ path }))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
             withTimeout(10_000) {
@@ -215,7 +215,7 @@ class AttachmentFileTest {
             assertEquals(1, connections.get())
             assertEquals(ConnectionStatus.Connected, controller.state.value.connectionStatus)
             assertEquals(1, reads.get())
-            val key = AttachmentDownloadKey(chat.id, image.id)
+            val key = AttachmentDownloadKey(chat.id, image.entryId)
             assertEquals(AttachmentDownloadStatus.Downloading, controller.state.value.attachmentDownloads[key]?.status)
             release.complete(Unit)
             val saved = withTimeout(10_000) {
@@ -225,7 +225,7 @@ class AttachmentFileTest {
             assertContentEquals(png, java.io.File(saved).readBytes())
             withContext(Dispatchers.Swing) { controller.dispose() }.join()
             server.stop(0, 1000)
-            controller = TauController(Dispatchers.Swing, TranscriptStore({ path }))
+            controller = TauController(Dispatchers.Swing, LocalStore({ path }))
             withContext(Dispatchers.Swing) { controller.start(settings) }
             withTimeout(10_000) { while (controller.state.value.restoring) delay(10) }
             withContext(Dispatchers.Swing) {
@@ -235,8 +235,8 @@ class AttachmentFileTest {
             withTimeout(10_000) { while (controller.state.value.attachmentDownloads[key]?.localPath == null) delay(10) }
             assertEquals(1, reads.get())
             assertEquals(saved, controller.state.value.attachmentDownloads[key]?.localPath)
-            val missing = image.copy(id = "not-local")
-            val missingKey = AttachmentDownloadKey(chat.id, missing.id)
+            val missing = image.copy(id = "entry:not-local:0", entryId = "not-local")
+            val missingKey = AttachmentDownloadKey(chat.id, missing.entryId)
             withContext(Dispatchers.Swing) { controller.downloadAttachment(chat.id, missing, AttachmentDownloadAction.Preview) }
             withTimeout(10_000) { while (controller.state.value.attachmentDownloads[missingKey]?.failure == null) delay(10) }
             assertEquals(AttachmentFailure.NotLocal, controller.state.value.attachmentDownloads[missingKey]?.failure)
@@ -260,8 +260,8 @@ class AttachmentFileTest {
             assertEquals(3, reads.get())
             assertEquals(2, controller.state.value.attachmentDownloads[key]?.attempt)
 
-            val failed = image.copy(id = "failed")
-            val failedKey = AttachmentDownloadKey(chat.id, failed.id)
+            val failed = image.copy(id = "entry:failed:0", entryId = "failed")
+            val failedKey = AttachmentDownloadKey(chat.id, failed.entryId)
             withContext(Dispatchers.Swing) { controller.downloadAttachment(chat.id, failed, AttachmentDownloadAction.Preview) }
             withTimeout(10_000) { while (controller.state.value.attachmentDownloads[failedKey]?.failure == null) delay(10) }
             assertEquals(AttachmentFailure.Http(404), controller.state.value.attachmentDownloads[failedKey]?.failure)
@@ -269,8 +269,8 @@ class AttachmentFileTest {
             assertEquals(1, controller.state.value.attachmentDownloads[failedKey]?.attempt)
             assertEquals(4, reads.get())
 
-            val cancelled = image.copy(id = "cancel")
-            val cancelledKey = AttachmentDownloadKey(chat.id, cancelled.id)
+            val cancelled = image.copy(id = "entry:cancel:0", entryId = "cancel")
+            val cancelledKey = AttachmentDownloadKey(chat.id, cancelled.entryId)
             withContext(Dispatchers.Swing) { controller.downloadAttachment(chat.id, cancelled, AttachmentDownloadAction.Preview) }
             withTimeout(10_000) { cancelStarted.await() }
             withContext(Dispatchers.Swing) {

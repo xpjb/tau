@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonClassDiscriminator
 
-const val TauProtocolVersion = 4
+const val TauProtocolVersion = 5
 
 val TauJson = Json {
     classDiscriminator = "type"
@@ -32,11 +32,11 @@ data class CreateSession(override val id: String) : ClientRequest
 
 @Serializable
 @SerialName("open_session")
-data class OpenSession(override val id: String, val sessionId: String, val requests: List<String> = emptyList(), val streams: List<String> = emptyList()) : ClientRequest
+data class OpenSession(override val id: String, val sessionId: String, val requests: List<String> = emptyList()) : ClientRequest
 
 @Serializable
 @SerialName("get_history")
-data class GetHistory(override val id: String, val sessionId: String, val generation: String, val before: String) : ClientRequest
+data class GetHistory(override val id: String, val sessionId: String, val generation: String, val before: Long) : ClientRequest
 
 @Serializable
 @SerialName("get_commands")
@@ -140,7 +140,7 @@ data class TranscriptSnapshot(val sessionId: String, val snapshot: TranscriptCut
 
 @Serializable
 @SerialName("transcript_page")
-data class TranscriptPage(val requestId: String, val sessionId: String, val generation: String, val cursor: String, val page: HistoryPage) : ServerMessage
+data class TranscriptPage(val requestId: String, val sessionId: String, val generation: String, val cursor: Long, val page: HistoryPage) : ServerMessage
 
 @Serializable
 @SerialName("transcript_update")

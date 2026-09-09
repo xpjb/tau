@@ -9,11 +9,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.update
 import kotlin.time.TimeSource
 
-internal fun TauController.downloadAttachment(sessionId: String, message: TranscriptEntry, action: AttachmentDownloadAction) {
+internal fun TauController.downloadAttachment(sessionId: String, message: TranscriptEvent, action: AttachmentDownloadAction) {
     val current = state.value
     if (sessionId != current.selectedSessionId) return
     val attachment = message.attachment ?: return
-    val key = AttachmentDownloadKey(sessionId, message.id)
+    val key = AttachmentDownloadKey(sessionId, message.entryId)
     if (key in downloadJobs) return
     val previous = current.attachmentDownloads[key]
     val settings = current.settings
@@ -40,7 +40,7 @@ internal fun TauController.downloadAttachment(sessionId: String, message: Transc
         var lastPublishedMillis = 0L
         try {
             val path = client.downloadAttachment(
-                settings, sessionId, message.id,
+                settings, sessionId, message.entryId,
                 if (attachment.kind == AttachmentKind.Image) 10_000_000L else 50_000_000L,
                 force = action == AttachmentDownloadAction.Reload, allowNetwork = allowNetwork,
             ) { transferred, total ->
@@ -98,9 +98,9 @@ internal fun TauController.downloadAttachment(sessionId: String, message: Transc
     job.start()
 }
 
-internal fun TauController.cancelAttachmentDownload(message: TranscriptEntry) {
+internal fun TauController.cancelAttachmentDownload(message: TranscriptEvent) {
     val sessionId = mutableState.value.selectedSessionId ?: return
-    val key = AttachmentDownloadKey(sessionId, message.id)
+    val key = AttachmentDownloadKey(sessionId, message.entryId)
     downloadJobs.remove(key)?.cancel()
     mutableState.update {
         val active = it.attachmentDownloads[key]
@@ -109,9 +109,9 @@ internal fun TauController.cancelAttachmentDownload(message: TranscriptEntry) {
     }
 }
 
-internal fun TauController.openAttachmentDownload(message: TranscriptEntry) {
+internal fun TauController.openAttachmentDownload(message: TranscriptEvent) {
     val sessionId = mutableState.value.selectedSessionId ?: return
-    val key = AttachmentDownloadKey(sessionId, message.id)
+    val key = AttachmentDownloadKey(sessionId, message.entryId)
     val download = mutableState.value.attachmentDownloads[key]?.saved ?: return
     try {
         PlatformServices.openDownload(download)
@@ -122,9 +122,9 @@ internal fun TauController.openAttachmentDownload(message: TranscriptEntry) {
     }
 }
 
-internal fun TauController.showAttachmentDownload(message: TranscriptEntry) {
+internal fun TauController.showAttachmentDownload(message: TranscriptEvent) {
     val sessionId = mutableState.value.selectedSessionId ?: return
-    val key = AttachmentDownloadKey(sessionId, message.id)
+    val key = AttachmentDownloadKey(sessionId, message.entryId)
     val download = mutableState.value.attachmentDownloads[key]?.saved ?: return
     try {
         PlatformServices.showDownload(download)
@@ -135,9 +135,9 @@ internal fun TauController.showAttachmentDownload(message: TranscriptEntry) {
     }
 }
 
-internal fun TauController.extractAndOpenAttachmentDownload(message: TranscriptEntry) {
+internal fun TauController.extractAndOpenAttachmentDownload(message: TranscriptEvent) {
     val sessionId = mutableState.value.selectedSessionId ?: return
-    val key = AttachmentDownloadKey(sessionId, message.id)
+    val key = AttachmentDownloadKey(sessionId, message.entryId)
     val download = mutableState.value.attachmentDownloads[key]?.saved ?: return
     try {
         PlatformServices.extractAndOpenDownload(download)

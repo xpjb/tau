@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::protocol::QueueOperation;
-use crate::transcript::{EntryPhase, EntryRole, QueueRef, TranscriptSnapshot};
+use crate::transcript::{EventPhase, EventRole, QueueRef, TranscriptSnapshot};
 
 async fn fixture() -> (AgentManager, PathBuf) {
     let root = std::env::temp_dir().join(format!("tau-manager-{}", uuid::Uuid::new_v4()));
@@ -75,7 +75,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert!(runtime.content.lock().await.process.is_none());
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.events.is_empty())).await;
     assert!(matches!(manager.prompt(&id, "Say hello", "request-1").await.unwrap().disposition, PromptDisposition::Submitted));
-    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.role == EntryRole::Assistant && event.phase == EntryPhase::Saved))).await;
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.role == EventRole::Assistant && event.phase == EventPhase::Saved))).await;
     receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, .. })).await;
     let snapshot = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]);
     assert_eq!(snapshot.events.len(), 3);
@@ -124,7 +124,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert!(manager.prompt(&id, "/settings", "settings").await.is_err());
 
     manager.prompt(&id, "hold", "request-2").await.unwrap();
-    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EntryPhase::Live))).await;
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EventPhase::Live))).await;
     let process = runtime.content.lock().await.process.clone().unwrap();
     manager.prompt(&id, "same", "q1").await.unwrap();
     manager.prompt(&id, "same", "q2").await.unwrap();
@@ -176,20 +176,20 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     assert!(runtime.content.lock().await.process.is_some());
     let error = process.request(json!({"type":"mock_exit"})).await.unwrap_err();
     assert!(error.is::<crate::pi::UnconfirmedCommand>());
-    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EntryPhase::Interrupted))).await;
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EventPhase::Interrupted))).await;
     events.open(&manager, &id).await;
     let interrupted = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]);
     assert!(runtime.content.lock().await.process.is_none());
     assert!(runtime.content.lock().await.commands.is_none());
     assert_eq!(runtime.snapshot().status, SessionStatus::Error);
-    assert_eq!(interrupted.events.last().unwrap().phase, EntryPhase::Interrupted);
+    assert_eq!(interrupted.events.last().unwrap().phase, EventPhase::Interrupted);
     assert_eq!(interrupted.events.last().unwrap().text.len(), 2109);
     assert!(!interrupted.queue.available);
     manager.commands(&id).await.unwrap();
     let restarted = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]);
     assert_ne!(interrupted.generation, restarted.generation);
     assert_eq!(restarted.events.last().unwrap().text.len(), 2109);
-    assert_eq!(restarted.events.last().unwrap().phase, EntryPhase::Interrupted);
+    assert_eq!(restarted.events.last().unwrap().phase, EventPhase::Interrupted);
     assert!(restarted.queue.requests.is_empty());
     let (late, retired_events) = broadcast::channel(4);
     late.send(json!({"type":"rpc_closed", "error":"retired process"})).unwrap();
@@ -213,7 +213,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     let child_runtime = manager.runtime(&child).await.unwrap();
     assert_eq!(child_runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]).events.len(), 4);
     events.open(&manager, &id).await;
-    assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]).events.last().unwrap().phase, EntryPhase::Interrupted);
+    assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]).events.last().unwrap().phase, EventPhase::Interrupted);
     manager.commands(&child).await.unwrap();
     manager.shutdown().await;
     assert!(child_runtime.content.lock().await.process.is_none());
@@ -234,7 +234,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
         receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, .. })).await;
         let saved_entry_id = runtime.content.lock().await.transcript.as_ref().unwrap().head().unwrap();
         manager.prompt(&id, "hold", "request-2").await.unwrap();
-        receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EntryPhase::Live))).await;
+        receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EventPhase::Live))).await;
         receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Running, .. })).await;
 
         let (child, _draft) = manager.fork_session(&id, &saved_entry_id).await.unwrap();
@@ -250,7 +250,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
         let mut child_events = Events::new(&manager);
         child_events.open(&manager, &child).await;
         receive(&mut child_events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. }
-            if snapshot.events.iter().any(|entry| entry.role == EntryRole::Assistant && entry.phase == EntryPhase::Saved))).await;
+            if snapshot.events.iter().any(|entry| entry.role == EventRole::Assistant && entry.phase == EventPhase::Saved))).await;
 
         manager.prompt(&id, "Second", "request-3").await.unwrap();
         receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.queue.is_some())).await;
@@ -304,7 +304,7 @@ async fn closes_sleeps_and_deletes_processes_with_their_commands_and_transcripts
 
     manager.commands(&id).await.unwrap();
     manager.prompt(&id, "hold", "live").await.unwrap();
-    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EntryPhase::Live))).await;
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EventPhase::Live))).await;
     manager.delete_session(&id).await.unwrap();
     assert!(manager.inner.state.get(&id).is_none());
     assert!(!manager.inner.runtimes.lock().await.contains_key(&id));
@@ -314,7 +314,7 @@ async fn closes_sleeps_and_deletes_processes_with_their_commands_and_transcripts
         assert!(content.process.is_none());
         assert!(content.commands.is_none());
         let snapshot = content.transcript.as_ref().unwrap().snapshot(&[]);
-        assert_eq!(snapshot.events.last().unwrap().phase, EntryPhase::Interrupted);
+        assert_eq!(snapshot.events.last().unwrap().phase, EventPhase::Interrupted);
         assert!(!snapshot.queue.available);
     }
     let cold = manager.create_session().await.unwrap();

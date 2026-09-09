@@ -54,15 +54,15 @@ class ProtocolTest {
         assertEquals("gpt-5.6-sol", sessions.sessions.single().model?.modelId)
 
         val snapshot = assertIs<TranscriptSnapshot>(TauJson.decodeFromString<ServerMessage>(
-            """{"type":"transcript_snapshot","sessionId":"chat","snapshot":{"generation":"process","sequence":4,"head":"tool","entries":[{"id":"tool","entryType":"message","phase":"saved","role":"tool","content":[{"kind":"text","text":"Build"}],"attachment":{"kind":"file","fileName":"tau.zip","caption":"Build","size":12345}}],"queue":{"available":true,"requests":[],"runId":null,"paused":false,"capabilities":["queue_run_prefix"],"boundaries":["turn"]}}}""",
+            """{"type":"transcript_snapshot","sessionId":"chat","snapshot":{"generation":"process","sequence":4,"events":[{"id":"stream:t:0","order":4,"entryId":"tool","phase":"saved","role":"tool","kind":"text","text":"Build","attachment":{"kind":"file","fileName":"tau.zip","caption":"Build","size":12345}}],"queue":{"available":true,"requests":[],"runId":null,"paused":false,"capabilities":["queue_run_prefix"],"boundaries":["turn"]}}}""",
         ))
-        assertEquals(AttachmentKind.File, snapshot.snapshot.entries.single().attachment?.kind)
-        assertEquals("tau.zip", snapshot.snapshot.entries.single().attachment?.fileName)
-        assertEquals(12345L, snapshot.snapshot.entries.single().attachment?.size)
+        assertEquals(AttachmentKind.File, snapshot.snapshot.events.single().attachment?.kind)
+        assertEquals("tau.zip", snapshot.snapshot.events.single().attachment?.fileName)
+        assertEquals(12345L, snapshot.snapshot.events.single().attachment?.size)
         val delta = assertIs<TranscriptUpdate>(TauJson.decodeFromString<ServerMessage>(
-            """{"type":"transcript_update","sessionId":"chat","generation":"process","sequence":5,"change":{"type":"delta","entryId":"live-a","index":1,"delta":"Planning"}}""",
+            """{"type":"transcript_update","sessionId":"chat","generation":"process","sequence":5,"change":{"delta":{"eventId":"stream:a:1","text":"Planning"}}}""",
         ))
-        assertEquals(TranscriptChange.Delta("live-a", 1, "Planning"), delta.change)
+        assertEquals(TranscriptChange(delta = TextDelta("stream:a:1", "Planning")), delta.change)
         val prefix = ControlQueue("control", "chat", "process", QueueOperation.Prefix(null, listOf(QueueRef("prompt", 3)), "turn"))
         assertEquals(prefix, TauJson.decodeFromString<ClientRequest>(TauJson.encodeToString<ClientRequest>(prefix)))
 

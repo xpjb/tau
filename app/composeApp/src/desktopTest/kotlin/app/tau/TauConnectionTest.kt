@@ -97,13 +97,13 @@ class TauConnectionTest {
         }.start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
         val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
-        var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
+        var controller = TauController(Dispatchers.Swing, LocalStore({ path }))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
             val socket = withTimeout(10_000) { sockets.receive() }
             val open = assertIs<OpenSession>(requests.nextRequest())
-            val user = TranscriptEntry("u0", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Start")))
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
+            val user = TranscriptEvent("entry:u0:0", 0, "u0", role = EventRole.User, kind = EventKind.Text, text = "Start")
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, listOf(user), queue)))
             socket.sendMessage(Response(open.id, true, chat.id))
             controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
             controller.refreshUsage(chat.id, force = true)
@@ -142,7 +142,7 @@ class TauConnectionTest {
                         when (request) {
                             is ListSessions -> if (request.id.startsWith("heartbeat-")) sendMessage(Response(request.id, true))
                             is OpenSession -> {
-                                sendMessage(TranscriptSnapshot(request.sessionId, TranscriptCut("g", 0, null, emptyList(), queue)))
+                                sendMessage(TranscriptSnapshot(request.sessionId, TranscriptCut("g", 0, emptyList(), queue)))
                                 sendMessage(Response(request.id, true, request.sessionId))
                             }
                             else -> {}
@@ -153,7 +153,7 @@ class TauConnectionTest {
         }.start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
         val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
-        var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
+        var controller = TauController(Dispatchers.Swing, LocalStore({ path }))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
             val socket = withTimeout(10_000) { sockets.receive() }
@@ -197,13 +197,13 @@ class TauConnectionTest {
         }.start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
         val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
-        var controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
+        var controller = TauController(Dispatchers.Swing, LocalStore({ path }))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
             var socket = withTimeout(10_000) { sockets.receive() }
             val open = assertIs<OpenSession>(requests.nextRequest())
-            val user = TranscriptEntry("u0", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Start")))
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
+            val user = TranscriptEvent("entry:u0:0", 0, "u0", role = EventRole.User, kind = EventKind.Text, text = "Start")
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, listOf(user), queue)))
             socket.sendMessage(Response(open.id, true, chat.id))
             controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
             assertEquals(chat.contextUsage, controller.state.value.sessions.first { it.id == chat.id }.contextUsage)
@@ -216,17 +216,17 @@ class TauConnectionTest {
 
             withContext(Dispatchers.Swing) { controller.selectSession(other.id) }
             val openOther = assertIs<OpenSession>(requests.nextRequest())
-            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 0, entries = emptyList(), queue = queue)))
+            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 0, events = emptyList(), queue = queue)))
             socket.sendMessage(Response(openOther.id, true, other.id))
             controller.awaitState { it.transcripts[other.id]?.synchronized == true }
             withContext(Dispatchers.Swing) { controller.selectSession(chat.id) }
             val returnOpen = assertIs<OpenSession>(requests.nextRequest())
             assertEquals(chat.id, returnOpen.sessionId)
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, listOf(user), queue)))
             socket.sendMessage(Response(returnOpen.id, true, chat.id))
             controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
-            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 1, user.id, listOf(user), queue)))
-            socket.sendMessage(TranscriptUpdate(other.id, "other", 99, TranscriptChange.Head(user.id)))
+            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 1, listOf(user), queue)))
+            socket.sendMessage(TranscriptUpdate(other.id, "other", 99, TranscriptChange(removed = listOf(user.id))))
             socket.sendMessage(ResyncRequired(other.id))
             socket.sendMessage(ResyncRequired())
             val refreshList = assertIs<ListSessions>(requests.nextRequest())
@@ -238,7 +238,7 @@ class TauConnectionTest {
             controller.awaitState { it.sessions.any { session -> session.detail == "Scope barrier" } }
             assertTrue(controller.state.value.transcripts.getValue(other.id).rows.isEmpty())
             assertTrue(requests.tryReceive().isFailure, "Recovery opens only the selected chat once")
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue)))
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, listOf(user), queue)))
             socket.sendMessage(Response(scopedOpen.id, true, chat.id))
             controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
 
@@ -253,7 +253,7 @@ class TauConnectionTest {
                 QueuedRequest(second.id, 0, "steer", "Prepared repeat"),
                 QueuedRequest(first.id, 0, "followUp", "Prepared repeat"),
             ))
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 1, TranscriptChange.Queue(queued)))
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 1, TranscriptChange(queue = queued)))
             socket.sendMessage(Response(first.id, true, chat.id, disposition = "queued"))
             socket.sendMessage(Response(second.id, false, chat.id, uncertain = true))
             val accepted = controller.awaitState { it.transcripts[chat.id]?.pending?.all { send -> send.status == SendStatus.Queued } == true }
@@ -266,44 +266,44 @@ class TauConnectionTest {
             assertEquals(selection, prefix.operation)
             val waiting = QueueControl(prefix.id, "run", "prefix", "reasoning_checkpoint", selection.requests, "waiting")
             var currentQueue = queued.copy(control = waiting)
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 2, TranscriptChange.Queue(currentQueue)))
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 2, TranscriptChange(queue = currentQueue)))
             socket.sendMessage(Response(prefix.id, true, chat.id, outcome = "accepted"))
             currentQueue = currentQueue.copy(requests = currentQueue.requests + QueuedRequest("later", 0, "followUp", "Later arrival"))
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 3, TranscriptChange.Queue(currentQueue)))
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 3, TranscriptChange(queue = currentQueue)))
             controller.awaitState { it.transcripts[chat.id]?.pending?.size == 3 }
             assertEquals(selection.requests, retained.queue.control?.requests)
 
-            var live = TranscriptEntry("live-a", user.id, phase = EntryPhase.Live, role = EntryRole.Assistant,
-                origin = EntryOrigin(streamId = "a"), content = listOf(EntryContent(ContentKind.Thinking, "Retained")))
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 4, TranscriptChange.Entry(live)))
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 5, TranscriptChange.Delta(live.id, 0, " thinking")))
-            controller.awaitState { it.transcripts[chat.id]?.rows?.lastOrNull()?.entry?.content?.firstOrNull()?.text == "Retained thinking" }
+            var live = TranscriptEvent("stream:a:0", 1, "live-a", phase = EventPhase.Live, role = EventRole.Assistant,
+                origin = EventOrigin(streamId = "a"), kind = EventKind.Thinking, text = "Retained")
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 4, TranscriptChange(events = listOf(live))))
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 5, TranscriptChange(delta = TextDelta(live.id, " thinking"))))
+            controller.awaitState { it.transcripts[chat.id]?.rows?.lastOrNull()?.event?.text == "Retained thinking" }
             val row = retained.rows.last()
             withContext(Dispatchers.Swing) { controller.setExpanded(chat.id, "details:${row.key}", true) }
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 7, TranscriptChange.Delta(live.id, 0, "MUST NOT APPLY")))
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 7, TranscriptChange(delta = TextDelta(live.id, "MUST NOT APPLY"))))
             val recovery = assertIs<OpenSession>(requests.nextRequest())
-            assertEquals("Retained thinking", row.entry.content.single().text)
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 4, user.id, listOf(user, live), currentQueue)))
+            assertEquals("Retained thinking", row.event.text)
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 4, listOf(user, live), currentQueue)))
             val fresh = assertIs<OpenSession>(requests.nextRequest())
-            assertEquals("Retained thinking", row.entry.content.single().text)
-            live = live.copy(content = listOf(EntryContent(ContentKind.Thinking, "Retained thinking through the gap")))
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 7, user.id, listOf(user, live), currentQueue)))
+            assertEquals("Retained thinking", row.event.text)
+            live = live.copy(text = "Retained thinking through the gap")
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 7, listOf(user, live), currentQueue)))
             socket.sendMessage(Response(recovery.id, true, chat.id))
             socket.sendMessage(Response(fresh.id, true, chat.id))
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 7, TranscriptChange.Delta(live.id, 0, "DUPLICATE")))
-            val saved = live.copy(id = "a1", phase = EntryPhase.Saved, stopReason = "error", errorMessage = "Recovery attempt")
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 8, TranscriptChange.Entry(saved)))
-            controller.awaitState { it.transcripts[chat.id]?.rows?.lastOrNull()?.entry?.id == saved.id }
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 7, TranscriptChange(delta = TextDelta(live.id, "DUPLICATE"))))
+            val saved = live.copy(entryId = "a1", phase = EventPhase.Saved, stopReason = "error", errorMessage = "Recovery attempt")
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 8, TranscriptChange(events = listOf(saved))))
+            controller.awaitState { it.transcripts[chat.id]?.rows?.lastOrNull()?.event?.phase == EventPhase.Saved }
             assertSame(row, retained.rows.last())
-            assertEquals("Retained thinking through the gap", row.entry.content.single().text)
+            assertEquals("Retained thinking through the gap", row.event.text)
             assertEquals("true", retained.preferences["expanded:details:${row.key}"])
 
-            val interrupted = TranscriptEntry("live-b", saved.id, phase = EntryPhase.Live, role = EntryRole.Assistant,
-                origin = EntryOrigin(streamId = "b"), content = listOf(EntryContent(ContentKind.Thinking, "Unfinished work")))
-            socket.sendMessage(TranscriptUpdate(chat.id, "g", 9, TranscriptChange.Entry(interrupted)))
+            val interrupted = TranscriptEvent("stream:b:0", 2, "live-b", phase = EventPhase.Live, role = EventRole.Assistant,
+                origin = EventOrigin(streamId = "b"), kind = EventKind.Thinking, text = "Unfinished work")
+            socket.sendMessage(TranscriptUpdate(chat.id, "g", 9, TranscriptChange(events = listOf(interrupted))))
             controller.awaitState { it.transcripts[chat.id]?.rows?.size == 3 }
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("replacement", 0, saved.id, listOf(user, saved), queue.copy(runId = null))))
-            controller.awaitState { it.transcripts[chat.id]?.rows?.lastOrNull()?.entry?.phase == EntryPhase.Interrupted }
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("replacement", 0, listOf(user, saved, interrupted.copy(phase = EventPhase.Interrupted)), queue.copy(runId = null))))
+            controller.awaitState { it.transcripts[chat.id]?.rows?.lastOrNull()?.event?.phase == EventPhase.Interrupted }
             assertEquals("unconfirmed", retained.controls.single().status)
             assertTrue(retained.pending.all { it.status == SendStatus.Unconfirmed })
 
@@ -315,7 +315,7 @@ class TauConnectionTest {
             val commandRecovery = assertIs<OpenSession>(requests.nextRequest())
             val retriedCommands = assertIs<GetCommands>(requests.nextRequest())
             assertNotEquals(abandonedCommands.id, retriedCommands.id)
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("replacement", 0, saved.id, listOf(user, saved), queue.copy(runId = null))))
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("replacement", 0, listOf(user, saved, interrupted.copy(phase = EventPhase.Interrupted)), queue.copy(runId = null))))
             socket.sendMessage(Response(commandRecovery.id, true, chat.id))
             socket.sendMessage(SessionState(chat.id, SessionStatus.Idle, contextUsage = ContextUsage(96000, 128000)))
             val modelCommands = listOf(SlashCommand("model", source = SlashCommandSource.Builtin,
@@ -352,17 +352,14 @@ class TauConnectionTest {
                 controller.dispose()
             }.join()
             server.stop(0, 1_000)
-            controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
+            controller = TauController(Dispatchers.Swing, LocalStore({ path }))
             withContext(Dispatchers.Swing) { controller.start(settings) }
-            val restored = controller.awaitState { !it.restoring && it.transcripts[chat.id]?.rows?.size == 3 }
+            val restored = controller.awaitState { !it.restoring && it.transcripts[chat.id] != null }
             val reopened = restored.transcripts.getValue(chat.id)
             assertEquals("Final edit before closing", restored.drafts[chat.id])
             assertEquals(ContextUsage(96000, 128000), restored.sessions.first { it.id == chat.id }.contextUsage)
             assertEquals("retained.png", reopened.files.single().name)
-            assertEquals("Retained thinking through the gap", reopened.rows[1].entry.content.single().text)
-            assertEquals("Unfinished work", reopened.rows.last().entry.content.single().text)
-            assertEquals(EntryPhase.Interrupted, reopened.rows.last().entry.phase)
-            assertEquals("true", reopened.preferences["expanded:details:stream:b"])
+            assertTrue(reopened.rows.isEmpty())
             assertEquals("true", reopened.preferences["expanded:details:${row.key}"])
             assertEquals(ScrollPosition(row.key, 27, false), TauJson.decodeFromString<ScrollPosition>(reopened.preferences.getValue("scroll")))
             assertEquals(selection, reopened.controls.single().operation)
@@ -377,7 +374,7 @@ class TauConnectionTest {
     }
 
     @Test
-    fun pages_history_with_live_updates_stale_replies_and_local_cache(): Unit = runBlocking {
+    fun pages_flat_history_with_live_updates_and_stale_replies(): Unit = runBlocking {
         val directory = Files.createTempDirectory("tau-controller")
         val path = directory.resolve("transcript.db").toString()
         val other = chat.copy(id = "other", title = "Other chat")
@@ -401,55 +398,55 @@ class TauConnectionTest {
         }.start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
         val settings = ConnectionSettings("http://127.0.0.1:$port", "test-token")
-        val controller = TauController(Dispatchers.Swing, TranscriptStore({ path }, liveFlushWindow = Duration.ZERO))
+        val controller = TauController(Dispatchers.Swing, LocalStore({ path }))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
             val socket = withTimeout(10_000) { sockets.receive() }
             val initial = assertIs<OpenSession>(requests.nextRequest())
-            val user = TranscriptEntry("u0", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Start")))
-            val old = TranscriptEntry("history", role = EntryRole.User, content = listOf(EntryContent(ContentKind.Text, "Older history")))
-            val recent = user.copy(id = "recent", parentId = old.id)
-            val paged = TranscriptCut("pages", 0, recent.id, listOf(recent), queue, old.id)
+            val user = TranscriptEvent("entry:u0:0", 0, "u0", role = EventRole.User, kind = EventKind.Text, text = "Start")
+            val old = TranscriptEvent("entry:history:0", 0, "history", role = EventRole.User, kind = EventKind.Text, text = "Older history")
+            val recent = user.copy(id = "entry:recent:0", entryId = "recent", order = 1)
+            val paged = TranscriptCut("pages", 0, listOf(recent), queue, recent.order)
             socket.sendMessage(TranscriptSnapshot(chat.id, paged))
             socket.sendMessage(Response(initial.id, true, chat.id))
-            controller.awaitState { it.transcripts[chat.id]?.before == old.id }
+            controller.awaitState { it.transcripts[chat.id]?.before == recent.order }
             withContext(Dispatchers.Swing) { controller.loadOlder(chat.id); controller.loadOlder(chat.id) }
             val stalePage = assertIs<GetHistory>(requests.nextRequest())
-            assertEquals(old.id, stalePage.before)
+            assertEquals(recent.order, stalePage.before)
             assertTrue(requests.tryReceive().isFailure, "One history request at a time")
             socket.sendMessage(ResyncRequired(chat.id))
             val refreshPage = assertIs<OpenSession>(requests.nextRequest())
             socket.sendMessage(TranscriptSnapshot(chat.id, paged))
             socket.sendMessage(Response(refreshPage.id, true, chat.id))
-            socket.sendMessage(TranscriptPage(stalePage.id, chat.id, "pages", old.id, HistoryPage(listOf(old))))
+            socket.sendMessage(TranscriptPage(stalePage.id, chat.id, "pages", recent.order, HistoryPage(listOf(old))))
             socket.sendMessage(SessionState(other.id, SessionStatus.Idle, detail = "Stale page barrier"))
             controller.awaitState { it.sessions.any { session -> session.detail == "Stale page barrier" } }
             assertEquals(1, controller.state.value.transcripts.getValue(chat.id).rows.size)
             withContext(Dispatchers.Swing) { controller.loadOlder(chat.id) }
             val historyRequest = assertIs<GetHistory>(requests.nextRequest())
-            val pagingLive = TranscriptEntry("live-paging", recent.id, phase = EntryPhase.Live, origin = EntryOrigin(streamId = "paging"),
-                role = EntryRole.Assistant, content = listOf(EntryContent(ContentKind.Thinking, "π")))
-            socket.sendMessage(TranscriptUpdate(chat.id, "pages", 1, TranscriptChange.Entry(pagingLive)))
-            socket.sendMessage(TranscriptUpdate(chat.id, "pages", 2, TranscriptChange.Delta(pagingLive.id, 0, "🧠")))
-            socket.sendMessage(TranscriptPage(historyRequest.id, chat.id, "pages", old.id, HistoryPage(listOf(old))))
+            val pagingLive = TranscriptEvent("stream:paging:0", 2, "live-paging", phase = EventPhase.Live, origin = EventOrigin(streamId = "paging"),
+                role = EventRole.Assistant, kind = EventKind.Thinking, text = "π")
+            socket.sendMessage(TranscriptUpdate(chat.id, "pages", 1, TranscriptChange(events = listOf(pagingLive))))
+            socket.sendMessage(TranscriptUpdate(chat.id, "pages", 2, TranscriptChange(delta = TextDelta(pagingLive.id, "🧠"))))
+            socket.sendMessage(TranscriptPage(historyRequest.id, chat.id, "pages", recent.order, HistoryPage(listOf(old))))
             socket.sendMessage(Response(historyRequest.id, true, chat.id))
             controller.awaitState { it.transcripts[chat.id]?.before == null && it.transcripts[chat.id]?.position?.sequence == 2L }
-            assertEquals("π🧠", controller.state.value.transcripts.getValue(chat.id).rows.last().entry.content.single().text)
+            assertEquals("π🧠", controller.state.value.transcripts.getValue(chat.id).rows.last().event.text)
             withContext(Dispatchers.Swing) { controller.selectSession(other.id) }
             val away = assertIs<OpenSession>(requests.nextRequest())
-            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 0, entries = emptyList(), queue = queue)))
+            socket.sendMessage(TranscriptSnapshot(other.id, TranscriptCut("other", 0, events = emptyList(), queue = queue)))
             socket.sendMessage(Response(away.id, true, other.id))
             controller.awaitState { it.transcripts[other.id]?.synchronized == true }
             withContext(Dispatchers.Swing) { controller.selectSession(chat.id) }
             val back = assertIs<OpenSession>(requests.nextRequest())
-            assertEquals(listOf("paging"), back.streams)
-            socket.sendMessage(TranscriptSnapshot(chat.id, paged.copy(sequence = 2, entries = listOf(recent, pagingLive.copy(content = listOf(EntryContent(ContentKind.Thinking, "π🧠")))))))
+            assertEquals(chat.id, back.sessionId)
+            socket.sendMessage(TranscriptSnapshot(chat.id, paged.copy(sequence = 2, events = listOf(recent, pagingLive.copy(text = "π🧠")))))
             socket.sendMessage(Response(back.id, true, chat.id))
             controller.awaitState { it.transcripts[chat.id]?.synchronized == true }
             withContext(Dispatchers.Swing) { controller.loadOlder(chat.id) }
             controller.awaitState { it.transcripts[chat.id]?.before == null && chat.id !in it.loadingHistory }
-            assertTrue(requests.tryReceive().isFailure, "Cached history stays local")
-            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, user.id, listOf(user), queue, savedStreams = listOf("paging"))))
+            assertTrue(requests.tryReceive().isFailure, "Loaded history remains available while retained in memory")
+            socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, listOf(user), queue)))
             controller.awaitState { it.transcripts[chat.id]?.position?.generation == "g" }
 
         } finally {
@@ -488,7 +485,7 @@ class TauConnectionTest {
                             when (request) {
                                 is CreateSession -> applied.set(true)
                                 is OpenSession -> {
-                                    sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, entries = emptyList(), queue = queue)))
+                                    sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, events = emptyList(), queue = queue)))
                                     sendMessage(Response(request.id, true, chat.id))
                                 }
                                 else -> Unit
@@ -500,7 +497,7 @@ class TauConnectionTest {
             }
         }.start(wait = false)
         val port = server.engine.resolvedConnectors().single().port
-        val controller = TauController(Dispatchers.Swing, TranscriptStore({ directory.resolve("transcript.db").toString() }, liveFlushWindow = Duration.ZERO))
+        val controller = TauController(Dispatchers.Swing, LocalStore({ directory.resolve("transcript.db").toString() }))
         try {
             withContext(Dispatchers.Swing) { controller.start(ConnectionSettings("http://127.0.0.1:$port", "test-token")) }
             controller.awaitState { it.connectionStatus == ConnectionStatus.Connected }

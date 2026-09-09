@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::state::SessionModel;
 
-pub const PAGE_ENTRIES: usize = 50;
+pub const PAGE_EVENTS: usize = 50;
 pub const PAGE_BYTES: usize = 256 * 1024;
 
 pub const IMAGE_LIMIT: u64 = 10_000_000;
@@ -87,10 +87,10 @@ pub struct Event {
     pub id: String,
     pub order: u64,
     pub entry_id: String,
-    pub phase: EntryPhase,
+    pub phase: EventPhase,
     pub origin: Origin,
-    pub role: EntryRole,
-    pub kind: ContentKind,
+    pub role: EventRole,
+    pub kind: EventKind,
     pub text: String,
     pub timestamp: Option<String>,
     pub timestamp_ms: Option<u64>,
@@ -104,11 +104,11 @@ pub struct Event {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EntryPhase { Saved, Live, Interrupted }
+pub enum EventPhase { Saved, Live, Interrupted }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EntryRole { User, Assistant, Tool, System }
+pub enum EventRole { User, Assistant, Tool, System }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,7 +120,7 @@ pub struct Origin {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ContentKind { Text, Thinking, Tool, Image, Hidden }
+pub enum EventKind { Text, Thinking, Tool, Image, Hidden }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -271,7 +271,7 @@ pub struct Transcript {
 impl Event {
     pub fn source_key(&self) -> String {
         if let Some(id) = &self.origin.stream_id { format!("stream:{id}") }
-        else if let Some(id) = &self.origin.request_id && self.role == EntryRole::User { format!("request:{id}") }
+        else if let Some(id) = &self.origin.request_id && self.role == EventRole::User { format!("request:{id}") }
         else { format!("entry:{}", self.entry_id) }
     }
 
@@ -279,12 +279,12 @@ impl Event {
         let message = raw.get("message").unwrap_or(&Value::Null);
         let entry_type = raw.get("type").and_then(Value::as_str).unwrap_or("message");
         let role = match message.get("role").and_then(Value::as_str) {
-            Some("user") => EntryRole::User,
-            Some("assistant") => EntryRole::Assistant,
-            Some("toolResult") => EntryRole::Tool,
-            Some("bashExecution") => EntryRole::System,
-            _ if matches!(entry_type, "compaction" | "branch_summary") => EntryRole::System,
-            _ if entry_type == "custom_message" && raw.get("display").and_then(Value::as_bool) == Some(true) => EntryRole::System,
+            Some("user") => EventRole::User,
+            Some("assistant") => EventRole::Assistant,
+            Some("toolResult") => EventRole::Tool,
+            Some("bashExecution") => EventRole::System,
+            _ if matches!(entry_type, "compaction" | "branch_summary") => EventRole::System,
+            _ if entry_type == "custom_message" && raw.get("display").and_then(Value::as_bool) == Some(true) => EventRole::System,
             _ => return Ok(Vec::new()),
         };
         let stream_id = if live {
@@ -297,12 +297,12 @@ impl Event {
             else if message.get("role").and_then(Value::as_str) == Some("bashExecution") { message.get("output") }
             else { message.get("content") };
         let template = Self {
-            id: String::new(), order: 0, entry_id, phase: if live { EntryPhase::Live } else { EntryPhase::Saved },
+            id: String::new(), order: 0, entry_id, phase: if live { EventPhase::Live } else { EventPhase::Saved },
             origin: Origin {
                 request_id: raw.pointer("/origin/requestId").and_then(Value::as_str).map(str::to_owned),
                 request_revision: raw.pointer("/origin/requestRevision").and_then(Value::as_u64), stream_id,
             },
-            role, kind: ContentKind::Hidden, text: String::new(),
+            role, kind: EventKind::Hidden, text: String::new(),
             timestamp: raw.get("timestamp").and_then(Value::as_str).map(str::to_owned),
             timestamp_ms: message.get("timestamp").and_then(Value::as_u64),
             tool_call_id: message.get("toolCallId").and_then(Value::as_str).map(str::to_owned),
@@ -316,7 +316,7 @@ impl Event {
         match body {
             Some(Value::String(text)) => {
                 let mut event = template.clone();
-                event.kind = ContentKind::Text; event.text = text.clone(); events.push(event);
+                event.kind = EventKind::Text; event.text = text.clone(); events.push(event);
             }
             Some(Value::Array(blocks)) => for block in blocks {
                 let mut event = template.clone(); event.set_content(block); events.push(event);
@@ -337,18 +337,18 @@ impl Event {
     fn set_content(&mut self, block: &Value) {
         self.text.clear();
         self.kind = match block.get("type").and_then(Value::as_str) {
-            Some("text") => { self.text = block.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(); ContentKind::Text }
-            Some("thinking") => { self.text = block.get("thinking").and_then(Value::as_str).unwrap_or_default().to_owned(); ContentKind::Thinking }
+            Some("text") => { self.text = block.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(); EventKind::Text }
+            Some("thinking") => { self.text = block.get("thinking").and_then(Value::as_str).unwrap_or_default().to_owned(); EventKind::Thinking }
             Some("toolCall") => {
                 self.text = block.get("partialArguments").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| match block.get("arguments") {
                     Some(Value::String(text)) => text.clone(), Some(value) => serde_json::to_string_pretty(value).unwrap_or_default(), None => String::new(),
                 });
                 self.tool_call_id = block.get("id").and_then(Value::as_str).map(str::to_owned);
                 self.tool_name = block.get("name").and_then(Value::as_str).map(str::to_owned);
-                ContentKind::Tool
+                EventKind::Tool
             }
-            Some("image") => { self.text = block.get("mimeType").and_then(Value::as_str).unwrap_or_default().to_owned(); ContentKind::Image }
-            _ => ContentKind::Hidden,
+            Some("image") => { self.text = block.get("mimeType").and_then(Value::as_str).unwrap_or_default().to_owned(); EventKind::Image }
+            _ => EventKind::Hidden,
         };
     }
 }
@@ -391,8 +391,8 @@ impl Transcript {
             transcript.events.insert(event.order, event);
         }
         if let Some(old) = continuing {
-            for event in old.events.values().filter(|event| event.phase != EntryPhase::Saved && !ids.contains(&event.id)) {
-                let mut event = event.clone(); event.phase = EntryPhase::Interrupted;
+            for event in old.events.values().filter(|event| event.phase != EventPhase::Saved && !ids.contains(&format!("{}:0", event.source_key()))) {
+                let mut event = event.clone(); event.phase = EventPhase::Interrupted;
                 transcript.by_id.insert(event.id.clone(), event.order);
                 transcript.events.insert(event.order, event);
             }
@@ -413,7 +413,7 @@ impl Transcript {
         let mut more = false;
         for event in self.events.range(..before.unwrap_or(self.next_order)).rev().map(|(_, event)| event) {
             let size = serde_json::to_vec(event).expect("event serialization").len();
-            if !events.is_empty() && (events.len() >= PAGE_ENTRIES || bytes + size > PAGE_BYTES) { more = true; break; }
+            if !events.is_empty() && (events.len() >= PAGE_EVENTS || bytes + size > PAGE_BYTES) { more = true; break; }
             bytes += size; events.push(event.clone());
         }
         events.reverse();
@@ -422,12 +422,12 @@ impl Transcript {
 
     pub fn snapshot(&self, requests: &[String]) -> TranscriptSnapshot {
         let mut page = self.page(None);
-        for event in self.events.values().filter(|event| event.phase == EntryPhase::Live) {
+        for event in self.events.values().filter(|event| event.phase == EventPhase::Live) {
             if page.before.is_some_and(|before| event.order < before) { page.events.push(event.clone()); }
         }
         page.events.sort_by_key(|event| event.order);
         let requests = requests.iter().collect::<HashSet<_>>();
-        let delivered = self.events.values().filter(|event| event.phase == EntryPhase::Saved)
+        let delivered = self.events.values().filter(|event| event.phase == EventPhase::Saved)
             .filter_map(|event| event.origin.request_id.as_ref()).filter(|id| requests.contains(id)).cloned().collect::<HashSet<_>>();
         TranscriptSnapshot { generation: self.generation.clone(), sequence: self.sequence, events: page.events,
             queue: self.queue.clone(), before: page.before, delivered: delivered.into_iter().collect() }
@@ -474,16 +474,16 @@ impl Transcript {
                     change.delta = Some(TextDelta { event_id: id, text: delta.get("delta").and_then(Value::as_str).context("Pi delta has no text")?.to_owned() });
                 } else {
                     let template = self.event(&format!("stream:{stream}:0")).context("Pi stream has no start")?;
-                    if template.phase != EntryPhase::Live { bail!("Pi updated a finished stream"); }
+                    if template.phase != EventPhase::Live { bail!("Pi updated a finished stream"); }
                     let mut event = template.clone(); event.id = id; event.attachment = None;
                     match kind {
                         "text_start" | "text_end" | "thinking_start" | "thinking_end" => {
-                            event.kind = if kind.starts_with("thinking") { ContentKind::Thinking } else { ContentKind::Text };
+                            event.kind = if kind.starts_with("thinking") { EventKind::Thinking } else { EventKind::Text };
                             event.text = delta.get("content").and_then(Value::as_str).unwrap_or_default().to_owned();
                             event.tool_call_id = None; event.tool_name = None;
                         }
                         "toolcall_start" => {
-                            event.kind = ContentKind::Tool; event.text.clear();
+                            event.kind = EventKind::Tool; event.text.clear();
                             event.tool_call_id = delta.get("id").and_then(Value::as_str).map(str::to_owned);
                             event.tool_name = delta.get("toolName").and_then(Value::as_str).map(str::to_owned);
                         }
@@ -506,8 +506,8 @@ impl Transcript {
     pub fn interrupt(&mut self) -> TranscriptChange {
         self.queue.available = false; self.source = None;
         let mut change = TranscriptChange { queue: Some(self.queue.clone()), ..Default::default() };
-        for event in self.events.values_mut().filter(|event| event.phase == EntryPhase::Live) {
-            event.phase = EntryPhase::Interrupted; change.events.push(event.clone());
+        for event in self.events.values_mut().filter(|event| event.phase == EventPhase::Live) {
+            event.phase = EventPhase::Interrupted; change.events.push(event.clone());
         }
         self.sequence += 1;
         change
@@ -517,13 +517,12 @@ impl Transcript {
         if let Some(delta) = &change.delta {
             let order = self.by_id.get(&delta.event_id).context("Pi delta references a missing event")?;
             let event = self.events.get_mut(order).unwrap();
-            if event.phase != EntryPhase::Live { bail!("Pi delta references a finished event"); }
+            if event.phase != EventPhase::Live { bail!("Pi delta references a finished event"); }
             event.text.push_str(&delta.text);
         }
         for id in &change.removed {
-            if let Some(order) = self.by_id.remove(id) && let Some(event) = self.events.remove(&order) {
-                if event.attachment.is_some() { self.attachments.remove(&event.entry_id); }
-            }
+            if let Some(order) = self.by_id.remove(id) && let Some(event) = self.events.remove(&order)
+                && event.attachment.is_some() { self.attachments.remove(&event.entry_id); }
         }
         for event in &change.events {
             self.next_order = self.next_order.max(event.order + 1);

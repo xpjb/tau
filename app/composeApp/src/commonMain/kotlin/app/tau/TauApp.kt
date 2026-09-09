@@ -954,10 +954,9 @@ private fun ChatPanel(
             false
         }
     }
-    val pages by remember(chat) {
-        derivedStateOf {
-            chat.pages.map { page -> page.key to Snapshot.withoutReadObservation { presentTranscript(page.rows) } }
-        }
+    val presentation by remember(chat) {
+        var previous = emptyList<TranscriptGroup>()
+        derivedStateOf { presentTranscript(chat.rows, previous).also { previous = it } }
     }
     val expansionPin = remember(chat) { ExpansionPin() }
     val savedScroll = remember(chat) {
@@ -966,10 +965,10 @@ private fun ChatPanel(
     val initialIndex = remember(chat) {
         if (savedScroll.follow || savedScroll.key == null) 0 else {
             val pendingIndex = chat.pending.indexOfFirst { "request:${it.requestId}" == savedScroll.key }
-            val entryIndex = pages.indexOfFirst { (key, page) -> key == savedScroll.key || page.groups.any { group -> group.rows.any { it.key == savedScroll.key } } }
+            val entryIndex = presentation.indexOfFirst { group -> group.key == savedScroll.key || group.rows.any { it.key == savedScroll.key } }
             when {
                 pendingIndex >= 0 -> 1 + chat.pending.lastIndex - pendingIndex
-                entryIndex >= 0 -> 1 + chat.pending.size + pages.lastIndex - entryIndex
+                entryIndex >= 0 -> 1 + chat.pending.size + presentation.lastIndex - entryIndex
                 else -> 0
             }
         }
@@ -994,7 +993,7 @@ private fun ChatPanel(
             val info = listState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull()
             if (chat.before == null || last == null) null
-            else info.totalItemsCount - (last.index + last.size / 2) <= 12
+            else info.totalItemsCount - last.index <= 3
         }.filterNotNull().distinctUntilChanged().collect { nearEnd ->
             if (nearEnd) controller.loadOlder(sessionId)
         }
@@ -1103,7 +1102,7 @@ private fun ChatPanel(
                         item(key = "bottom-anchor") { Spacer(Modifier.height(1.dp)) }
                         items(count = chat.pending.size, key = { index -> "request:${chat.pending[chat.pending.lastIndex - index].requestId}" }) { index ->
                             val outgoing = chat.pending[chat.pending.lastIndex - index]
-                            var menu by remember(outgoing.requestId) { mutableStateOf<StoredPosition?>(null) }
+                            var menu by remember(outgoing.requestId) { mutableStateOf<ChatPosition?>(null) }
                             var menuPointer by remember(outgoing.requestId) { mutableStateOf<Offset?>(null) }
                             val pendingBubble: @Composable () -> Unit = {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -1156,21 +1155,19 @@ private fun ChatPanel(
                             }
                             if (PlatformServices.platformName == "android") DisableSelection { pendingBubble() } else pendingBubble()
                         }
-                        items(count = pages.size, key = { index -> pages[pages.lastIndex - index].first }) { index ->
-                            val presentation = pages[pages.lastIndex - index].second
-                            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            presentation.groups.forEach { group -> key(group.key) {
+                        items(count = presentation.size, key = { index -> presentation[presentation.lastIndex - index].key }) { index ->
+                            val group = presentation[presentation.lastIndex - index]
                             val row = group.rows.first()
-                            val message = group.rows.last().entry
-                            val parts = transcriptParts(group, presentation)
+                            val message = group.rows.last().event
+                            val parts = group.parts
                             var menuExpanded by remember(row.key) { mutableStateOf(false) }
                             var menuPointer by remember(row.key) { mutableStateOf<Offset?>(null) }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = if (message.role == EntryRole.User) Arrangement.End else Arrangement.Start) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = if (message.role == EventRole.User) Arrangement.End else Arrangement.Start) {
                                 Box(Modifier.fillMaxWidth(0.9f)) {
                                     Card(
                                         colors = CardDefaults.cardColors(containerColor = when (message.role) {
-                                            EntryRole.User -> MaterialTheme.colorScheme.primaryContainer
-                                            EntryRole.System -> MaterialTheme.colorScheme.tertiaryContainer
+                                            EventRole.User -> MaterialTheme.colorScheme.primaryContainer
+                                            EventRole.System -> MaterialTheme.colorScheme.tertiaryContainer
                                             else -> MaterialTheme.colorScheme.surfaceVariant
                                         }),
                                         modifier = Modifier.fillMaxWidth()
@@ -1181,23 +1178,23 @@ private fun ChatPanel(
                                             parts.forEach { part ->
                                                 when (part) {
                                                     is TranscriptPart.Text -> {
-                                                        val source = part.row.entry
-                                                        val content = source.content[part.index]
-                                                        RetainedText(if (content.kind == ContentKind.Image) "[Image]" else content.text,
-                                                            markdown = source.phase == EntryPhase.Saved && source.role != EntryRole.User)
+                                                        val event = part.row.event
+                                                        RetainedText(if (event.kind == EventKind.Image) "[Image]" else event.text,
+                                                            markdown = event.phase == EventPhase.Saved && event.role != EventRole.User)
                                                     }
                                                     is TranscriptPart.Details -> key(part.key) {
                                                         val expanded = (chat.preferences["expanded:${part.key}"]
-                                                            ?: chat.preferences["expanded:details:${part.blocks.first().row.key}"]) == "true"
+                                                            ?: chat.preferences["detailsDefault"]) == "true"
                                                         ExpansionLabel("Details", expanded, part.key, sessionId, controller, listState, expansionPin)
                                                         if (expanded) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                                             part.blocks.forEach { detail -> key(detail.key) {
-                                                                val source = detail.row.entry
-                                                                val content = source.content.getOrNull(detail.index)
-                                                                if (content?.kind == ContentKind.Thinking) {
-                                                                    RetainedText(content.text, markdown = source.phase == EntryPhase.Saved, small = true)
+                                                                val source = detail.row.event
+                                                                val content = source.takeUnless { it.role == EventRole.Tool }
+                                                                if (content?.kind == EventKind.Thinking) {
+                                                                    RetainedText(content.text, markdown = source.phase == EventPhase.Saved, small = true)
                                                                 } else {
-                                                                    val result = detail.result?.entry
+                                                                    val results = detail.results.map { it.event }
+                                                                    val result = results.lastOrNull()
                                                                     val toolExpanded = chat.preferences["expanded:${detail.key}"] == "true"
                                                                     Surface(color = MaterialTheme.colorScheme.background.copy(alpha = 0.52f), shape = MaterialTheme.shapes.small) {
                                                                         Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
@@ -1205,7 +1202,7 @@ private fun ChatPanel(
                                                                                 sessionId, controller, listState, expansionPin, error = result?.isError == true)
                                                                             if (toolExpanded) {
                                                                                 val sections = listOf("Input" to content?.text,
-                                                                                    (if (result?.isError == true) "Error" else "Output") to result?.content?.filter { it.kind == ContentKind.Text }?.joinToString("\n\n") { it.text })
+                                                                                    (if (result?.isError == true) "Error" else "Output") to results.filter { it.kind == EventKind.Text }.joinToString("\n\n") { it.text })
                                                                                 sections.forEach { (label, text) ->
                                                                                     if (!text.isNullOrEmpty()) {
                                                                                         val sectionKey = "${detail.key}:$label"
@@ -1226,16 +1223,16 @@ private fun ChatPanel(
                                                         }
                                                     }
                                                     is TranscriptPart.Failure -> {
-                                                        val source = part.row.entry
+                                                        val source = part.row.event
                                                         Text(when {
-                                                            source.phase == EntryPhase.Interrupted -> "Interrupted"
+                                                            source.phase == EventPhase.Interrupted -> "Interrupted"
                                                             source.stopReason == "aborted" -> "Stopped"
                                                             else -> source.errorMessage ?: "Response failed"
                                                         }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                                                     }
                                                     is TranscriptPart.Attachment -> key(part.row.key) {
-                                                        val message = part.row.entry
-                                                        val attachmentDownload = state.attachmentDownloads[AttachmentDownloadKey(sessionId, message.id)]
+                                                        val message = part.row.event
+                                                        val attachmentDownload = state.attachmentDownloads[AttachmentDownloadKey(sessionId, message.entryId)]
                                             message.attachment?.let { attachment ->
                                                 DisableSelection {
                                                     Column(Modifier.fillMaxWidth()) {
@@ -1424,7 +1421,7 @@ private fun ChatPanel(
                                                     }
                                                 }
                                             }
-                                            if (parts.isEmpty() && message.phase == EntryPhase.Live) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                            if (parts.isEmpty() && message.phase == EventPhase.Live) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                                             val timestamp = message.timestampMs ?: message.timestamp?.let { runCatching { Instant.parse(it).toEpochMilliseconds() }.getOrNull() }
                                             timestamp?.let { Text(PlatformServices.formatMessageTime(it), Modifier.align(Alignment.End), style = MaterialTheme.typography.labelSmall, color = LocalContentColor.current.copy(alpha = 0.62f)) }
                                         }
@@ -1432,16 +1429,14 @@ private fun ChatPanel(
                                     PositionedDropdownMenu(menuExpanded, menuPointer, { menuExpanded = false; menuPointer = null }) {
                                         val selectedText = transcriptSelectionState.selectedTexts.joinToString("\n") { it.text }
                                         DropdownMenuItem(text = { Text(if (selectedText.isEmpty()) "Copy message" else "Copy selection") }, onClick = {
-                                            PlatformServices.copyText(selectedText.ifEmpty { group.rows.flatMap { it.entry.content }.filter { it.kind == ContentKind.Text }.joinToString("\n\n") { it.text } })
+                                            PlatformServices.copyText(selectedText.ifEmpty { group.rows.map { it.event }.filter { it.kind == EventKind.Text }.joinToString("\n\n") { it.text } })
                                             menuExpanded = false
                                         })
-                                        if (message.phase == EntryPhase.Saved) DropdownMenuItem(text = { Text("Fork here") }, enabled = state.connectionStatus == ConnectionStatus.Connected,
-                                            onClick = { menuExpanded = false; controller.fork(message.id) })
+                                        if (message.phase == EventPhase.Saved) DropdownMenuItem(text = { Text("Fork here") }, enabled = state.connectionStatus == ConnectionStatus.Connected,
+                                            onClick = { menuExpanded = false; controller.fork(message.entryId) })
                                     }
                                 }
                             }
-                        }
-                            } }
                         }
                         if (chat.before != null) item(key = "older") {
                             DisableSelection {
@@ -1983,7 +1978,7 @@ private val StopIcon = ImageVector.Builder(
 }.build()
 
 private fun RetainedChat?.latestResponseFailed(): Boolean {
-    val latest = this?.rows?.asReversed()?.firstOrNull { it.entry.role != EntryRole.System }?.entry ?: return false
+    val latest = this?.rows?.asReversed()?.firstOrNull { it.event.role != EventRole.System }?.event ?: return false
     return latest.stopReason == "error" || latest.isError
 }
 

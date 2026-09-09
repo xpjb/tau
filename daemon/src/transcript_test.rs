@@ -30,7 +30,7 @@ fn projects_flat_events_through_streaming_finalization_and_recovery() {
     let cut = transcript.snapshot(&[]);
     assert_eq!(cut.events.iter().map(|event| event.id.as_str()).collect::<Vec<_>>(), ["request:prompt:0", "stream:s:0", "stream:s:1"]);
     assert_eq!(cut.events[1].text, "Thinking π🧠");
-    assert_eq!(cut.events[2].kind, ContentKind::Tool);
+    assert_eq!(cut.events[2].kind, EventKind::Tool);
     assert_eq!(cut.events[2].tool_call_id.as_deref(), Some("call"));
     let saved = json!({"id":"a","parentId":"model","type":"message","origin":{"streamId":"s"},"message":{"role":"assistant","content":[
         {"type":"thinking","thinking":"Thinking π🧠","thinkingSignature":"private"},
@@ -41,25 +41,28 @@ fn projects_flat_events_through_streaming_finalization_and_recovery() {
     source.sequence += 1; transcript.apply(&change, source.clone()).unwrap();
     assert_eq!(transcript.event("stream:s:0").unwrap().order, cut.events[1].order);
     assert_eq!(transcript.event("stream:s:0").unwrap().entry_id, "a");
-    assert_eq!(transcript.event("stream:s:0").unwrap().phase, EntryPhase::Saved);
-    assert_eq!(cut.events[1].phase, EntryPhase::Live);
+    assert_eq!(transcript.event("stream:s:0").unwrap().phase, EventPhase::Saved);
+    assert_eq!(cut.events[1].phase, EventPhase::Live);
     let encoded = serde_json::to_string(&transcript.snapshot(&[])).unwrap();
     assert!(!encoded.contains("private"));
-    let tool = json!({"streamId":"tool","parentId":"a","message":{"role":"toolResult","toolCallId":"call","toolName":"bash","content":[{"type":"text","text":"Working"}]}});
+    let tool = json!({"streamId":"tool","parentId":"a","message":{"role":"toolResult","toolCallId":"call","toolName":"bash","content":[{"type":"text","text":"Working"},{"type":"text","text":"Temporary"}]}});
     source.sequence += 1;
     transcript.apply(&transcript.project(&json!({"type":"live","entry":tool})).unwrap(), source.clone()).unwrap();
     let tool_order = transcript.event("stream:tool:0").unwrap().order;
     let interrupted = transcript.interrupt();
     assert!(!interrupted.queue.unwrap().available);
-    assert_eq!(transcript.event("stream:tool:0").unwrap().phase, EntryPhase::Interrupted);
-    let mut recovered = Transcript::new(&[user, model, saved], &[], Some("a".into()), Some(source.clone()), QueueState::default(), Some(&transcript)).unwrap();
+    assert_eq!(transcript.event("stream:tool:0").unwrap().phase, EventPhase::Interrupted);
+    let mut recovered = Transcript::new(&[user.clone(), model.clone(), saved.clone()], &[], Some("a".into()), Some(source.clone()), QueueState::default(), Some(&transcript)).unwrap();
     assert_eq!(recovered.event("stream:tool:0").unwrap().order, tool_order);
     let final_tool = json!({"id":"result","parentId":"a","type":"message","origin":{"streamId":"tool"},"message":{"role":"toolResult","toolCallId":"call","toolName":"bash","content":[{"type":"text","text":"Done"}]}});
+    let finalized = Transcript::new(&[user, model, saved, final_tool.clone()], &[], Some("result".into()), Some(source.clone()), QueueState::default(), Some(&recovered)).unwrap();
+    assert!(finalized.event("stream:tool:1").is_none());
     let change = recovered.project(&json!({"type":"append","entry":final_tool,"leafId":"result"})).unwrap();
     source.sequence += 1; recovered.apply(&change, source).unwrap();
     assert_eq!(recovered.event("stream:tool:0").unwrap().order, tool_order);
     assert_eq!(recovered.event("stream:tool:0").unwrap().text, "Done");
-    assert_eq!(recovered.event("stream:tool:0").unwrap().phase, EntryPhase::Saved);
+    assert_eq!(recovered.event("stream:tool:0").unwrap().phase, EventPhase::Saved);
+    assert!(recovered.event("stream:tool:1").is_none());
     assert_eq!(recovered.snapshot(&[]).events.len(), 5);
 }
 
@@ -70,7 +73,7 @@ fn pages_inside_messages_and_resolves_requests_outside_the_window() {
     let assistant = json!({"id":"a","parentId":"u","type":"message","origin":{"streamId":"s"},"message":{"role":"assistant","content":blocks}});
     let transcript = Transcript::new(&[user, assistant], &[], Some("a".into()), None, QueueState::default(), None).unwrap();
     let snapshot = transcript.snapshot(&["request".into()]);
-    assert_eq!(snapshot.events.len(), PAGE_ENTRIES);
+    assert_eq!(snapshot.events.len(), PAGE_EVENTS);
     assert_eq!(snapshot.delivered, ["request"]);
     let mut events = snapshot.events;
     let mut before = snapshot.before;

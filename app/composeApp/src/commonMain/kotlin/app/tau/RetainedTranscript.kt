@@ -13,7 +13,6 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonClassDiscriminator
 import okio.ByteString.Companion.encodeUtf8
-import kotlin.time.TimeMark
 import kotlin.uuid.Uuid
 
 val ConnectionSettings.identity: String
@@ -22,21 +21,21 @@ val ConnectionSettings.identity: String
 fun newRequestId(): String = Uuid.random().toString()
 
 @Serializable
-data class EntryOrigin(
+data class EventOrigin(
     val requestId: String? = null,
     val requestRevision: Long? = null,
     val streamId: String? = null,
 )
 
 @Serializable
-enum class EntryPhase {
+enum class EventPhase {
     @SerialName("saved") Saved,
     @SerialName("live") Live,
     @SerialName("interrupted") Interrupted,
 }
 
 @Serializable
-enum class EntryRole {
+enum class EventRole {
     @SerialName("user") User,
     @SerialName("assistant") Assistant,
     @SerialName("tool") Tool,
@@ -44,7 +43,7 @@ enum class EntryRole {
 }
 
 @Serializable
-enum class ContentKind {
+enum class EventKind {
     @SerialName("text") Text,
     @SerialName("thinking") Thinking,
     @SerialName("tool") Tool,
@@ -54,35 +53,24 @@ enum class ContentKind {
 
 @Immutable
 @Serializable
-data class EntryContent(
-    val kind: ContentKind,
-    val text: String = "",
-    val toolCallId: String? = null,
-    val toolName: String? = null,
-)
-
-@Immutable
-@Serializable
-data class TranscriptEntry(
+data class TranscriptEvent(
     val id: String,
-    val parentId: String? = null,
-    val entryType: String = "message",
-    val phase: EntryPhase = EntryPhase.Saved,
-    val origin: EntryOrigin = EntryOrigin(),
-    val role: EntryRole? = null,
+    val order: Long,
+    val entryId: String,
+    val phase: EventPhase = EventPhase.Saved,
+    val origin: EventOrigin = EventOrigin(),
+    val role: EventRole,
+    val kind: EventKind,
+    val text: String = "",
     val timestamp: String? = null,
     val timestampMs: Long? = null,
-    val content: List<EntryContent> = emptyList(),
     val toolCallId: String? = null,
     val toolName: String? = null,
     val stopReason: String? = null,
     val errorMessage: String? = null,
     val isError: Boolean = false,
     val attachment: ChatAttachment? = null,
-) {
-    val displayKey: String get() = origin.streamId?.let { "stream:$it" }
-        ?: origin.requestId?.takeIf { role == EntryRole.User }?.let { "request:$it" } ?: "entry:$id"
-}
+)
 
 @Serializable
 data class QueueRef(val requestId: String, val revision: Long)
@@ -123,31 +111,29 @@ data class QueueState(
 data class TranscriptCut(
     val generation: String,
     val sequence: Long,
-    val head: String? = null,
-    val entries: List<TranscriptEntry>,
+    val events: List<TranscriptEvent>,
     val queue: QueueState,
-    val before: String? = null,
+    val before: Long? = null,
     val delivered: List<String> = emptyList(),
-    val savedStreams: List<String> = emptyList(),
 )
 
 @Serializable
-data class HistoryPage(val entries: List<TranscriptEntry>, val before: String? = null)
+data class HistoryPage(val events: List<TranscriptEvent>, val before: Long? = null)
 
 @Serializable
 data class TranscriptPatch(val generation: String, val sequence: Long, val change: TranscriptChange)
 
-@OptIn(ExperimentalSerializationApi::class)
 @Serializable
-@JsonClassDiscriminator("type")
-sealed interface TranscriptChange {
-    @Serializable @SerialName("entry") data class Entry(val entry: TranscriptEntry) : TranscriptChange
-    @Serializable @SerialName("block") data class Block(val entryId: String, val index: Int, val content: EntryContent) : TranscriptChange
-    @Serializable @SerialName("delta") data class Delta(val entryId: String, val index: Int, val delta: String) : TranscriptChange
-    @Serializable @SerialName("head") data class Head(val head: String? = null) : TranscriptChange
-    @Serializable @SerialName("queue") data class Queue(val queue: QueueState) : TranscriptChange
-    @Serializable @SerialName("interrupted") data object Interrupted : TranscriptChange
-}
+data class TextDelta(val eventId: String, val text: String)
+
+@Serializable
+data class TranscriptChange(
+    val events: List<TranscriptEvent> = emptyList(),
+    val removed: List<String> = emptyList(),
+    val delta: TextDelta? = null,
+    val queue: QueueState? = null,
+    val delivered: List<String> = emptyList(),
+)
 
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
@@ -193,49 +179,38 @@ data class PendingControl(
 @Serializable
 data class ScrollPosition(val key: String? = null, val offset: Int = 0, val follow: Boolean = true)
 
-@Serializable
-internal data class StoredPosition(
+internal data class ChatPosition(
     val generation: String = "",
     val sequence: Long = 0,
-    val head: String? = null,
     val queue: QueueState = QueueState(),
-    val before: String? = null,
-    val recent: List<String> = emptyList(),
 )
 
-internal const val HistoryPageEntries = 50
+internal const val HistoryPageEvents = 50
 internal const val HistoryPageBytes = 256 * 1024
-internal val TranscriptEntry.pageBytes: Long get() = 512L + content.sumOf { it.text.length * 3L }
-internal data class RetainedPage(val key: String, val rows: List<EntryRow>)
+internal val TranscriptEvent.pageBytes: Long get() = 512L + text.length * 3L
 
 data class ChatKey(val connection: String, val session: String)
-
 data class StoredConnection(val sessions: List<SessionSummary>, val selected: String?)
 
 @Stable
-class EntryRow internal constructor(entry: TranscriptEntry) {
-    val key: String = entry.displayKey
-    var entry: TranscriptEntry by mutableStateOf(entry)
+class EventRow internal constructor(event: TranscriptEvent) {
+    val key: String = event.id
+    var event: TranscriptEvent by mutableStateOf(event)
         internal set
 }
 
 @Stable
 class RetainedChat internal constructor(val key: ChatKey) {
-    internal val byId = linkedMapOf<String, EntryRow>()
-    internal val liveFlushes = mutableMapOf<String, TimeMark>()
-    internal val branch = mutableSetOf<String>()
-    internal val visibleKeys = mutableSetOf<String>()
-    internal var position: StoredPosition by mutableStateOf(StoredPosition())
-    internal val mutableRows = mutableStateListOf<EntryRow>()
-    internal val pageStarts = mutableSetOf<String>()
-    internal val pages = mutableStateListOf<RetainedPage>()
-    var before: String? by mutableStateOf(null)
+    internal val byId = linkedMapOf<String, EventRow>()
+    internal var position: ChatPosition by mutableStateOf(ChatPosition())
+    internal val mutableRows = mutableStateListOf<EventRow>()
+    var before: Long? by mutableStateOf(null)
         internal set
     internal val mutablePending = mutableStateListOf<PendingSend>()
     internal val mutableControls = mutableStateListOf<PendingControl>()
     internal val mutableFiles = mutableStateListOf<DraftFile>()
     internal val mutablePreferences = mutableStateMapOf<String, String>()
-    val rows: List<EntryRow> get() = mutableRows
+    val rows: List<EventRow> get() = mutableRows
     val pending: List<PendingSend> get() = mutablePending
     val controls: List<PendingControl> get() = mutableControls
     val files: List<DraftFile> get() = mutableFiles
@@ -244,41 +219,21 @@ class RetainedChat internal constructor(val key: ChatKey) {
         internal set
     val queue: QueueState by derivedStateOf { position.queue }
 
-    internal fun rebuildRows() {
-        branch.clear()
-        val path = mutableListOf<EntryRow>()
-        var cursor = position.head
-        while (cursor != null && cursor != before) {
-            check(branch.add(cursor)) { "Cyclic transcript branch" }
-            val row = checkNotNull(byId[cursor]) { "Missing transcript parent" }
-            path.add(row)
-            cursor = row.entry.parentId
+    internal fun merge(events: Collection<TranscriptEvent>, removed: Collection<String> = emptyList(), replace: Boolean = false) {
+        var membershipChanged = false
+        for (id in removed) if (byId.remove(id) != null) membershipChanged = true
+        if (replace) {
+            val ids = events.mapTo(mutableSetOf()) { it.id }
+            membershipChanged = byId.keys.retainAll(ids) || membershipChanged
         }
-        val provisional = byId.values.filter { it.entry.phase != EntryPhase.Saved }.groupBy { it.entry.parentId }
-        mutableRows.clear()
-        visibleKeys.clear()
-        for (row in path.asReversed()) {
-            if (row.entry.role != null) { mutableRows.add(row); visibleKeys.add(row.key) }
-            for (tail in provisional[row.entry.id].orEmpty()) {
-                if (tail.entry.role != null) { mutableRows.add(tail); visibleKeys.add(tail.key) }
-            }
+        for (event in events) {
+            val row = byId[event.id]
+            if (row == null) { byId[event.id] = EventRow(event); membershipChanged = true }
+            else { membershipChanged = membershipChanged || row.event.order != event.order; row.event = event }
         }
-        for (row in provisional[null].orEmpty()) {
-            if (row.entry.role != null) { mutableRows.add(row); visibleKeys.add(row.key) }
+        if (membershipChanged) {
+            val ordered = byId.values.sortedBy { it.event.order }
+            mutableRows.clear(); mutableRows.addAll(ordered)
         }
-        rebuildPages()
-    }
-
-    internal fun rebuildPages() {
-        val next = mutableListOf<RetainedPage>()
-        var rows = mutableListOf<EntryRow>()
-        for (row in mutableRows) {
-            if (row.key in pageStarts && rows.isNotEmpty()) {
-                next.add(RetainedPage(rows.first().key, rows)); rows = mutableListOf()
-            }
-            rows.add(row)
-        }
-        if (rows.isNotEmpty()) next.add(RetainedPage(rows.first().key, rows))
-        if (pages != next) { pages.clear(); pages.addAll(next) }
     }
 }

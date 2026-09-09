@@ -1,76 +1,75 @@
 package app.tau
 
-internal data class TranscriptGroup(val rows: List<EntryRow>) {
-    val key: String get() = rows.first().key
-}
-
-internal data class TranscriptPresentation(
-    val groups: List<TranscriptGroup>,
-    val results: Map<String, EntryRow>,
-    val calls: Set<String>,
-)
+internal data class TranscriptGroup(val key: String, val rows: List<EventRow>, val parts: List<TranscriptPart>)
 
 internal sealed interface TranscriptPart {
-    data class Text(val row: EntryRow, val index: Int) : TranscriptPart
-    data class Details(val blocks: List<TranscriptDetail>) : TranscriptPart {
-        val key: String get() = "details:${blocks.first().row.key}:${blocks.first().index}"
-    }
-    data class Attachment(val row: EntryRow) : TranscriptPart
-    data class Failure(val row: EntryRow) : TranscriptPart
+    data class Text(val row: EventRow) : TranscriptPart
+    data class Details(val key: String, val blocks: List<TranscriptDetail>) : TranscriptPart
+    data class Attachment(val row: EventRow) : TranscriptPart
+    data class Failure(val row: EventRow) : TranscriptPart
 }
 
-internal data class TranscriptDetail(val row: EntryRow, val index: Int, val result: EntryRow? = null) {
-    val key: String get() = "tool:${row.key}:$index"
-}
+internal data class TranscriptDetail(val row: EventRow, val results: List<EventRow> = emptyList(), val key: String = "tool:${row.key}")
 
-internal fun presentTranscript(rows: List<EntryRow>): TranscriptPresentation {
-    val groups = mutableListOf<TranscriptGroup>()
-    val results = mutableMapOf<String, EntryRow>()
+internal fun presentTranscript(rows: List<EventRow>, previous: List<TranscriptGroup> = emptyList()): List<TranscriptGroup> {
+    val priorGroups = previous.flatMap { group -> group.rows.map { it.key to group } }.toMap()
+    val groups = mutableListOf<List<EventRow>>()
+    val results = mutableMapOf<String, MutableList<EventRow>>()
     val calls = mutableSetOf<String>()
-    var response = mutableListOf<EntryRow>()
+    var group = mutableListOf<EventRow>()
     for (row in rows) {
-        val entry = row.entry
-        if (entry.role == EntryRole.Tool) entry.toolCallId?.let { results[it] = row }
-        for (content in entry.content) if (content.kind == ContentKind.Tool) content.toolCallId?.let(calls::add)
-        if (entry.role == EntryRole.Assistant || entry.role == EntryRole.Tool) response.add(row)
-        else {
-            if (response.isNotEmpty()) { groups.add(TranscriptGroup(response)); response = mutableListOf() }
-            groups.add(TranscriptGroup(listOf(row)))
+        val event = row.event
+        if (event.role == EventRole.Tool) event.toolCallId?.let { results.getOrPut(it) { mutableListOf() }.add(row) }
+        if (event.kind == EventKind.Tool) event.toolCallId?.let(calls::add)
+        val prior = group.lastOrNull()?.event
+        val response = event.role == EventRole.Assistant || event.role == EventRole.Tool
+        val priorResponse = prior?.role == EventRole.Assistant || prior?.role == EventRole.Tool
+        if (group.isNotEmpty() && !(response && priorResponse || event.role == prior?.role && event.entryId == prior.entryId)) {
+            groups.add(group); group = mutableListOf()
         }
+        group.add(row)
     }
-    if (response.isNotEmpty()) groups.add(TranscriptGroup(response))
-    return TranscriptPresentation(groups, results, calls)
-}
-
-internal fun transcriptParts(group: TranscriptGroup, presentation: TranscriptPresentation): List<TranscriptPart> = buildList {
-    var details = mutableListOf<TranscriptDetail>()
-    fun flushDetails() {
-        if (details.isNotEmpty()) { add(TranscriptPart.Details(details)); details = mutableListOf() }
-    }
-    for (row in group.rows) {
-        val entry = row.entry
-        if (entry.role == EntryRole.Tool) {
-            if (entry.toolCallId !in presentation.calls) details.add(TranscriptDetail(row, -1, row))
-        } else for ((index, content) in entry.content.withIndex()) {
-            when (content.kind) {
-                ContentKind.Text, ContentKind.Image -> {
-                    if (content.kind == ContentKind.Image && entry.attachment != null || content.kind == ContentKind.Text && content.text.isEmpty()) continue
-                    flushDetails()
-                    add(TranscriptPart.Text(row, index))
+    if (group.isNotEmpty()) groups.add(group)
+    return groups.map { members ->
+        val prior = members.firstNotNullOfOrNull { priorGroups[it.key] }
+        val priorBlocks = mutableMapOf<String, String>()
+        val priorDetails = mutableMapOf<String, String>()
+        for (part in prior?.parts.orEmpty()) if (part is TranscriptPart.Details) {
+            priorDetails[part.blocks.first().key] = part.key
+            for (block in part.blocks) for (row in listOf(block.row) + block.results) priorBlocks[row.key] = block.key
+        }
+        val parts = buildList {
+            var details = mutableListOf<TranscriptDetail>()
+            fun flushDetails() {
+                if (details.isEmpty()) return
+                val blocks = details.map { block ->
+                    val key = (listOf(block.row) + block.results).firstNotNullOfOrNull { priorBlocks[it.key] }
+                    if (key == null) block else block.copy(key = key)
                 }
-                ContentKind.Thinking -> if (content.text.isNotEmpty()) details.add(TranscriptDetail(row, index))
-                ContentKind.Tool -> details.add(TranscriptDetail(row, index, presentation.results[content.toolCallId]))
-                ContentKind.Hidden -> Unit
+                val key = blocks.firstNotNullOfOrNull { priorDetails[it.key] } ?: "details:${blocks.first().row.key}"
+                add(TranscriptPart.Details(key, blocks)); details = mutableListOf()
             }
-        }
-        if (entry.phase == EntryPhase.Interrupted || entry.stopReason == "aborted" || entry.stopReason == "error" || entry.isError && entry.role != EntryRole.Tool) {
+            for (row in members) {
+                val event = row.event
+                if (event.role == EventRole.Tool) {
+                    val output = results[event.toolCallId].orEmpty().ifEmpty { listOf(row) }
+                    if (event.toolCallId !in calls && output.first() === row) details.add(TranscriptDetail(row, output))
+                } else when (event.kind) {
+                    EventKind.Text, EventKind.Image -> if (!(event.kind == EventKind.Image && event.attachment != null || event.kind == EventKind.Text && event.text.isEmpty())) {
+                        flushDetails(); add(TranscriptPart.Text(row))
+                    }
+                    EventKind.Thinking -> if (event.text.isNotEmpty()) details.add(TranscriptDetail(row))
+                    EventKind.Tool -> details.add(TranscriptDetail(row, results[event.toolCallId].orEmpty()))
+                    EventKind.Hidden -> Unit
+                }
+                if ((event.phase == EventPhase.Interrupted || event.stopReason == "aborted" || event.stopReason == "error" || event.isError && event.role != EventRole.Tool) &&
+                    members.lastOrNull { it.event.entryId == event.entryId } === row) {
+                    flushDetails(); add(TranscriptPart.Failure(row))
+                }
+                if (event.attachment != null) { flushDetails(); add(TranscriptPart.Attachment(row)) }
+            }
             flushDetails()
-            add(TranscriptPart.Failure(row))
         }
-        if (entry.attachment != null) {
-            flushDetails()
-            add(TranscriptPart.Attachment(row))
-        }
+        TranscriptGroup(prior?.key ?: members.first().key, members, parts)
     }
-    flushDetails()
 }
