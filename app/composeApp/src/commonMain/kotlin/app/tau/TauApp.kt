@@ -1100,8 +1100,7 @@ private fun ChatPanel(
                         flingBehavior = scrollMotion.flingBehavior,
                     ) {
                         item(key = "bottom-anchor") { Spacer(Modifier.height(1.dp)) }
-                        items(count = chat.pending.size, key = { index -> "request:${chat.pending[chat.pending.lastIndex - index].requestId}" }) { index ->
-                            val outgoing = chat.pending[chat.pending.lastIndex - index]
+                        items(items = chat.pending.toList().asReversed(), key = { "request:${it.requestId}" }) { outgoing ->
                             var menu by remember(outgoing.requestId) { mutableStateOf<ChatPosition?>(null) }
                             var menuPointer by remember(outgoing.requestId) { mutableStateOf<Offset?>(null) }
                             val pendingBubble: @Composable () -> Unit = {
@@ -1155,8 +1154,7 @@ private fun ChatPanel(
                             }
                             if (PlatformServices.platformName == "android") DisableSelection { pendingBubble() } else pendingBubble()
                         }
-                        items(count = presentation.size, key = { index -> presentation[presentation.lastIndex - index].key }) { index ->
-                            val group = presentation[presentation.lastIndex - index]
+                        items(items = presentation.asReversed(), key = { it.key }) { group ->
                             val row = group.rows.first()
                             val message = group.rows.last().event
                             val parts = group.parts
