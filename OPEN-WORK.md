@@ -1,5 +1,9 @@
 # Tau open work
 
+## Release policy
+
+Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
+
 ## Implemented: flatten the transcript for code health
 
 User authorized execution and permits dropping the transcript store/cache. The goal is simpler, correct code that is easier to change. Performance is not the justification or acceptance gate for this rewrite.
