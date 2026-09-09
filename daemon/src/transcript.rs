@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -83,18 +83,17 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Entry {
-    #[serde(skip)]
-    saved_wire_bytes: usize,
+pub struct Event {
     pub id: String,
-    pub parent_id: Option<String>,
-    pub entry_type: String,
+    pub order: u64,
+    pub entry_id: String,
     pub phase: EntryPhase,
     pub origin: Origin,
-    pub role: Option<EntryRole>,
+    pub role: EntryRole,
+    pub kind: ContentKind,
+    pub text: String,
     pub timestamp: Option<String>,
     pub timestamp_ms: Option<u64>,
-    pub content: Vec<Content>,
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
     pub stop_reason: Option<String>,
@@ -105,20 +104,11 @@ pub struct Entry {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EntryPhase {
-    Saved,
-    Live,
-    Interrupted,
-}
+pub enum EntryPhase { Saved, Live, Interrupted }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EntryRole {
-    User,
-    Assistant,
-    Tool,
-    System,
-}
+pub enum EntryRole { User, Assistant, Tool, System }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,24 +118,9 @@ pub struct Origin {
     pub stream_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Content {
-    pub kind: ContentKind,
-    pub text: String,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ContentKind {
-    Text,
-    Thinking,
-    Tool,
-    Image,
-    Hidden,
-}
+pub enum ContentKind { Text, Thinking, Tool, Image, Hidden }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -229,31 +204,39 @@ impl QueueState {
 pub struct TranscriptSnapshot {
     pub generation: String,
     pub sequence: u64,
-    pub head: Option<String>,
-    pub entries: Vec<Entry>,
+    pub events: Vec<Event>,
     pub queue: QueueState,
-    pub before: Option<String>,
+    pub before: Option<u64>,
     pub delivered: Vec<String>,
-    pub saved_streams: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPage {
-    pub entries: Vec<Entry>,
-    pub before: Option<String>,
+    pub events: Vec<Event>,
+    pub before: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptChange {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<Event>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<TextDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueState>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delivered: Vec<String>,
+    #[serde(skip)]
+    head: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
-pub enum TranscriptChange {
-    Entry { entry: Box<Entry> },
-    Block { entry_id: String, index: usize, content: Content },
-    Delta { entry_id: String, index: usize, delta: String },
-    Head { head: Option<String> },
-    Queue { queue: QueueState },
-    Interrupted,
-}
+#[serde(rename_all = "camelCase")]
+pub struct TextDelta { pub event_id: String, pub text: String }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -277,353 +260,280 @@ pub struct Transcript {
     pub generation: String,
     pub sequence: u64,
     pub source: Option<PiPosition>,
-    entries: Vec<Entry>,
-    by_id: HashMap<String, usize>,
+    events: BTreeMap<u64, Event>,
+    by_id: BTreeMap<String, u64>,
+    attachments: HashMap<String, u64>,
+    next_order: u64,
     head: Option<String>,
     pub queue: QueueState,
 }
 
-impl Entry {
-    pub fn from_pi(raw: &Value, live: bool) -> Result<Self> {
-        let stream_id = if live {
-            Some(raw.get("streamId").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi live entry has no streamId")?.to_owned())
-        } else {
-            raw.pointer("/origin/streamId").and_then(Value::as_str).map(str::to_owned)
-        };
-        let id = if live {
-            format!("live-{}", stream_id.as_deref().expect("live stream ID was checked"))
-        } else {
-            raw.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi entry has no ID")?.to_owned()
-        };
-        let entry_type = if live {
-            "message"
-        } else {
-            raw.get("type").and_then(Value::as_str).context("Pi entry has no type")?
-        };
+impl Event {
+    pub fn source_key(&self) -> String {
+        if let Some(id) = &self.origin.stream_id { format!("stream:{id}") }
+        else if let Some(id) = &self.origin.request_id && self.role == EntryRole::User { format!("request:{id}") }
+        else { format!("entry:{}", self.entry_id) }
+    }
+
+    pub fn from_pi(raw: &Value, live: bool) -> Result<Vec<Self>> {
         let message = raw.get("message").unwrap_or(&Value::Null);
+        let entry_type = raw.get("type").and_then(Value::as_str).unwrap_or("message");
         let role = match message.get("role").and_then(Value::as_str) {
-            Some("user") => Some(EntryRole::User),
-            Some("assistant") => Some(EntryRole::Assistant),
-            Some("toolResult") => Some(EntryRole::Tool),
-            Some("bashExecution") => Some(EntryRole::System),
-            _ if matches!(entry_type, "compaction" | "branch_summary") => Some(EntryRole::System),
-            _ if entry_type == "custom_message" && raw.get("display").and_then(Value::as_bool) == Some(true) => Some(EntryRole::System),
-            _ => None,
+            Some("user") => EntryRole::User,
+            Some("assistant") => EntryRole::Assistant,
+            Some("toolResult") => EntryRole::Tool,
+            Some("bashExecution") => EntryRole::System,
+            _ if matches!(entry_type, "compaction" | "branch_summary") => EntryRole::System,
+            _ if entry_type == "custom_message" && raw.get("display").and_then(Value::as_bool) == Some(true) => EntryRole::System,
+            _ => return Ok(Vec::new()),
         };
-        let body = if entry_type == "custom_message" {
-            raw.get("content")
-        } else if matches!(entry_type, "compaction" | "branch_summary") {
-            raw.get("summary")
-        } else if message.get("role").and_then(Value::as_str) == Some("bashExecution") {
-            message.get("output")
-        } else {
-            message.get("content")
-        };
-        let content = match body.filter(|_| role.is_some()) {
-            Some(Value::String(text)) => vec![Content::text(ContentKind::Text, text.clone())],
-            Some(Value::Array(blocks)) => blocks.iter().map(Content::from_pi).collect(),
-            _ => Vec::new(),
-        };
-        let attachment = if live { None } else { attachment_request(raw) }.and_then(|request| {
-            Some(ChatAttachment {
-                kind: request.kind,
-                file_name: request.path.file_name()?.to_string_lossy().into_owned(),
-                caption: request.caption,
-                size: request.size,
-                source_path: Some(request.path),
-            })
-        });
-        let mut entry = Self {
-            saved_wire_bytes: 0,
-            id,
-            parent_id: raw.get("parentId").and_then(Value::as_str).map(str::to_owned),
-            entry_type: entry_type.to_owned(),
-            phase: if live { EntryPhase::Live } else { EntryPhase::Saved },
+        let stream_id = if live {
+            Some(raw.get("streamId").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi live entry has no stream ID")?.to_owned())
+        } else { raw.pointer("/origin/streamId").and_then(Value::as_str).map(str::to_owned) };
+        let entry_id = if live { format!("live-{}", stream_id.as_deref().unwrap()) }
+            else { raw.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi entry has no ID")?.to_owned() };
+        let body = if entry_type == "custom_message" { raw.get("content") }
+            else if matches!(entry_type, "compaction" | "branch_summary") { raw.get("summary") }
+            else if message.get("role").and_then(Value::as_str) == Some("bashExecution") { message.get("output") }
+            else { message.get("content") };
+        let template = Self {
+            id: String::new(), order: 0, entry_id, phase: if live { EntryPhase::Live } else { EntryPhase::Saved },
             origin: Origin {
                 request_id: raw.pointer("/origin/requestId").and_then(Value::as_str).map(str::to_owned),
-                request_revision: raw.pointer("/origin/requestRevision").and_then(Value::as_u64),
-                stream_id,
+                request_revision: raw.pointer("/origin/requestRevision").and_then(Value::as_u64), stream_id,
             },
-            role,
+            role, kind: ContentKind::Hidden, text: String::new(),
             timestamp: raw.get("timestamp").and_then(Value::as_str).map(str::to_owned),
             timestamp_ms: message.get("timestamp").and_then(Value::as_u64),
-            content,
             tool_call_id: message.get("toolCallId").and_then(Value::as_str).map(str::to_owned),
             tool_name: message.get("toolName").and_then(Value::as_str).map(str::to_owned),
             stop_reason: message.get("stopReason").and_then(Value::as_str).map(str::to_owned),
             error_message: message.get("errorMessage").and_then(Value::as_str).map(str::to_owned),
-            is_error: message.get("isError").and_then(Value::as_bool).unwrap_or(false),
-            attachment,
+            is_error: message.get("isError").and_then(Value::as_bool).unwrap_or(false), attachment: None,
         };
-        entry.measure_saved_bytes();
-        Ok(entry)
-    }
-
-    pub fn measure_saved_bytes(&mut self) {
-        if self.phase == EntryPhase::Saved {
-            self.saved_wire_bytes = serde_json::to_vec(self).expect("entry serialization is infallible").len();
-        }
-    }
-}
-
-impl Content {
-    pub fn text(kind: ContentKind, text: String) -> Self {
-        Self { kind, text, tool_call_id: None, tool_name: None }
-    }
-
-    pub fn from_pi(block: &Value) -> Self {
-        match block.get("type").and_then(Value::as_str) {
-            Some("text") => Self::text(ContentKind::Text, block.get("text").and_then(Value::as_str).unwrap_or_default().to_owned()),
-            Some("thinking") => Self::text(ContentKind::Thinking, block.get("thinking").and_then(Value::as_str).unwrap_or_default().to_owned()),
-            Some("toolCall") => Self {
-                kind: ContentKind::Tool,
-                text: block.get("partialArguments").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| {
-                    match block.get("arguments") {
-                        Some(Value::String(text)) => text.clone(),
-                        Some(arguments) => serde_json::to_string_pretty(arguments).unwrap_or_default(),
-                        None => String::new(),
-                    }
-                }),
-                tool_call_id: block.get("id").and_then(Value::as_str).map(str::to_owned),
-                tool_name: block.get("name").and_then(Value::as_str).map(str::to_owned),
+        let base = template.source_key();
+        let mut events = Vec::new();
+        match body {
+            Some(Value::String(text)) => {
+                let mut event = template.clone();
+                event.kind = ContentKind::Text; event.text = text.clone(); events.push(event);
+            }
+            Some(Value::Array(blocks)) => for block in blocks {
+                let mut event = template.clone(); event.set_content(block); events.push(event);
             },
-            Some("image") => Self::text(ContentKind::Image, block.get("mimeType").and_then(Value::as_str).unwrap_or_default().to_owned()),
-            _ => Self::text(ContentKind::Hidden, String::new()),
+            _ => {}
         }
+        if events.is_empty() { events.push(template); }
+        for (index, event) in events.iter_mut().enumerate() { event.id = format!("{base}:{index}"); }
+        if !live && let Some(request) = attachment_request(raw) {
+            events[0].attachment = request.path.file_name().map(|name| ChatAttachment {
+                file_name: name.to_string_lossy().into_owned(), source_path: Some(request.path.clone()),
+                kind: request.kind, caption: request.caption, size: request.size,
+            });
+        }
+        Ok(events)
     }
-}
 
-impl TranscriptChange {
-    pub fn from_pi(raw: &Value) -> Result<Self> {
-        match raw.get("type").and_then(Value::as_str) {
-            Some("append" | "live") => {
-                let live = raw.get("type").and_then(Value::as_str) == Some("live");
-                let entry = Entry::from_pi(raw.get("entry").context("Pi change has no entry")?, live)?;
-                if !live && raw.get("leafId").and_then(Value::as_str) != Some(entry.id.as_str()) {
-                    bail!("Pi append selected an unexpected head");
-                }
-                Ok(Self::Entry { entry: Box::new(entry) })
+    fn set_content(&mut self, block: &Value) {
+        self.text.clear();
+        self.kind = match block.get("type").and_then(Value::as_str) {
+            Some("text") => { self.text = block.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(); ContentKind::Text }
+            Some("thinking") => { self.text = block.get("thinking").and_then(Value::as_str).unwrap_or_default().to_owned(); ContentKind::Thinking }
+            Some("toolCall") => {
+                self.text = block.get("partialArguments").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| match block.get("arguments") {
+                    Some(Value::String(text)) => text.clone(), Some(value) => serde_json::to_string_pretty(value).unwrap_or_default(), None => String::new(),
+                });
+                self.tool_call_id = block.get("id").and_then(Value::as_str).map(str::to_owned);
+                self.tool_name = block.get("name").and_then(Value::as_str).map(str::to_owned);
+                ContentKind::Tool
             }
-            Some("head") => Ok(Self::Head { head: raw.get("leafId").and_then(Value::as_str).map(str::to_owned) }),
-            Some("queue") => Ok(Self::Queue { queue: QueueState::from_pi(raw)? }),
-            Some("delta") => {
-                let stream_id = raw.get("streamId").and_then(Value::as_str).context("Pi delta has no streamId")?;
-                let entry_id = format!("live-{stream_id}");
-                let delta = raw.pointer("/event/assistantMessageEvent").context("Pi delta has no content event")?;
-                let index = delta.get("contentIndex").and_then(Value::as_u64)
-                    .and_then(|index| usize::try_from(index).ok()).context("Pi delta has no content index")?;
-                match delta.get("type").and_then(Value::as_str) {
-                    Some("text_delta" | "thinking_delta" | "toolcall_delta") => Ok(Self::Delta {
-                        entry_id, index,
-                        delta: delta.get("delta").and_then(Value::as_str).context("Pi delta has no text")?.to_owned(),
-                    }),
-                    Some("text_start" | "thinking_start" | "text_end" | "thinking_end") => Ok(Self::Block {
-                        entry_id, index,
-                        content: Content::text(
-                            if delta.get("type").and_then(Value::as_str).is_some_and(|kind| kind.starts_with("thinking")) {
-                                ContentKind::Thinking
-                            } else { ContentKind::Text },
-                            delta.get("content").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                        ),
-                    }),
-                    Some("toolcall_start") => Ok(Self::Block { entry_id, index, content: Content {
-                        kind: ContentKind::Tool,
-                        text: String::new(),
-                        tool_call_id: delta.get("id").and_then(Value::as_str).map(str::to_owned),
-                        tool_name: delta.get("toolName").and_then(Value::as_str).map(str::to_owned),
-                    } }),
-                    Some("toolcall_end") => Ok(Self::Block { entry_id, index, content: Content::from_pi(
-                        delta.get("toolCall").context("Pi tool completion has no tool call")?,
-                    ) }),
-                    _ => bail!("unsupported Pi content delta"),
-                }
-            }
-            _ => bail!("unsupported Pi transcript change"),
-        }
+            Some("image") => { self.text = block.get("mimeType").and_then(Value::as_str).unwrap_or_default().to_owned(); ContentKind::Image }
+            _ => ContentKind::Hidden,
+        };
     }
 }
 
 impl Transcript {
-    pub fn new(entries: Vec<Entry>, head: Option<String>, source: Option<PiPosition>, queue: QueueState) -> Result<Self> {
-        let by_id = entries.iter().enumerate().map(|(index, entry)| (entry.id.clone(), index)).collect::<HashMap<_, _>>();
-        if by_id.len() != entries.len() { bail!("transcript contains duplicate entry IDs"); }
-        let mut checked = HashSet::new();
-        for entry in &entries {
-            if entry.id.is_empty() { bail!("transcript contains an empty entry ID"); }
-            let mut path = HashSet::new();
-            let mut cursor = Some(&entry.id);
-            while let Some(id) = cursor {
-                if checked.contains(id) { break; }
-                if !path.insert(id) { bail!("transcript branch contains a cycle"); }
-                let Some(index) = by_id.get(id) else { break; };
-                let entry = &entries[*index];
-                if let Some(parent) = entry.parent_id.as_ref() {
-                    let Some(parent_index) = by_id.get(parent) else { break; };
-                    let parent = &entries[*parent_index];
-                    if parent.phase != EntryPhase::Saved { bail!("transcript parent is provisional"); }
-                }
-                cursor = entry.parent_id.as_ref();
-            }
-            checked.extend(path);
+    pub fn new(raw: &[Value], live: &[Value], head: Option<String>, source: Option<PiPosition>, queue: QueueState, previous: Option<&Self>) -> Result<Self> {
+        let mut by_entry = HashMap::new();
+        for entry in raw {
+            let id = entry.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi entry has no ID")?;
+            if by_entry.insert(id, entry).is_some() { bail!("Pi has duplicate entry IDs"); }
         }
-        if let Some(head) = &head {
-            let entry = &entries[*by_id.get(head).context("transcript head references a missing entry")?];
-            if entry.phase != EntryPhase::Saved { bail!("transcript head selects a provisional entry"); }
-        }
-        Ok(Self {
-            generation: Uuid::new_v4().to_string(), sequence: 0, source,
-            entries, by_id, head, queue,
-        })
-    }
-
-    pub(crate) fn head(&self) -> Option<String> {
-        self.head.clone()
-    }
-
-    pub fn entry(&self, id: &str) -> Option<&Entry> {
-        self.by_id.get(id).map(|index| &self.entries[*index])
-    }
-
-    pub fn page(&self, before: Option<&str>) -> Result<HistoryPage> {
-        let mut cursor = before.or(self.head.as_deref());
-        let mut saved = Vec::new();
-        let mut bytes = 0;
+        let mut branch = Vec::new();
+        let mut seen = HashSet::new();
+        let mut cursor = head.as_deref();
         while let Some(id) = cursor {
-            let entry = self.entry(id).context("History cursor is unavailable; reopen this chat")?;
-            if entry.phase != EntryPhase::Saved { bail!("History cursor is provisional"); }
-            if !saved.is_empty() && (saved.len() >= PAGE_ENTRIES || bytes + entry.saved_wire_bytes > PAGE_BYTES) { break; }
-            bytes += entry.saved_wire_bytes;
-            saved.push(entry);
-            cursor = entry.parent_id.as_deref();
+            if !seen.insert(id) { bail!("Pi branch contains a cycle"); }
+            let Some(entry) = by_entry.get(id) else { break; };
+            branch.push(*entry);
+            cursor = entry.get("parentId").and_then(Value::as_str);
         }
-        let provisional = self.entries.iter().filter(|entry| entry.phase != EntryPhase::Saved &&
-            (before.is_none() || entry.phase == EntryPhase::Interrupted)).collect::<Vec<_>>();
-        let mut entries = Vec::new();
-        for entry in saved.into_iter().rev() {
-            entries.push(entry.clone());
-            entries.extend(provisional.iter().filter(|tail| tail.parent_id.as_deref() == Some(&entry.id)).map(|tail| (*tail).clone()));
+        if head.as_ref().is_some_and(|id| !by_entry.contains_key(id.as_str())) { bail!("Pi head is missing"); }
+        let mut incoming = Vec::new();
+        for raw in branch.into_iter().rev() { incoming.extend(Event::from_pi(raw, false)?); }
+        for raw in live { incoming.extend(Event::from_pi(raw, true)?); }
+        let continuing = previous.filter(|old| old.head.as_deref().is_none_or(|id| seen.contains(id)));
+        let mut transcript = Self {
+            generation: Uuid::new_v4().to_string(), sequence: 0, source,
+            events: BTreeMap::new(), by_id: BTreeMap::new(), attachments: HashMap::new(),
+            next_order: continuing.map_or(0, |old| old.next_order), head, queue,
+        };
+        let mut ids = HashSet::new();
+        for mut event in incoming {
+            if !ids.insert(event.id.clone()) { bail!("Pi has duplicate event identities"); }
+            event.order = match continuing.and_then(|old| old.by_id.get(&event.id)) {
+                Some(order) => *order,
+                None => { let order = transcript.next_order; transcript.next_order += 1; order }
+            };
+            if event.attachment.is_some() { transcript.attachments.insert(event.entry_id.clone(), event.order); }
+            transcript.by_id.insert(event.id.clone(), event.order);
+            transcript.events.insert(event.order, event);
         }
-        if before.is_none() {
-            entries.extend(provisional.into_iter().filter(|entry| entry.parent_id.is_none()).cloned());
-        }
-        Ok(HistoryPage { entries, before: cursor.map(str::to_owned) })
-    }
-
-    pub fn snapshot(&self, requests: &[String], streams: &[String]) -> TranscriptSnapshot {
-        let page = self.page(None).expect("retained ancestry was validated");
-        let requests = requests.iter().collect::<HashSet<_>>();
-        let streams = streams.iter().collect::<HashSet<_>>();
-        let mut delivered = Vec::new();
-        let mut saved_streams = Vec::new();
-        for entry in &self.entries {
-            if entry.phase != EntryPhase::Saved { continue; }
-            if let Some(id) = &entry.origin.request_id && requests.contains(id) { delivered.push(id.clone()); }
-            if let Some(id) = &entry.origin.stream_id && streams.contains(id) { saved_streams.push(id.clone()); }
-        }
-        TranscriptSnapshot {
-            generation: self.generation.clone(), sequence: self.sequence, head: self.head.clone(),
-            entries: page.entries, queue: self.queue.clone(), before: page.before, delivered, saved_streams,
-        }
-    }
-
-    pub fn retain_interrupted(&mut self, previous: &Self) {
-        let saved_streams = self.entries.iter()
-            .filter(|entry| entry.phase == EntryPhase::Saved)
-            .filter_map(|entry| entry.origin.stream_id.clone())
-            .collect::<HashSet<_>>();
-        for entry in &previous.entries {
-            if entry.phase == EntryPhase::Saved || self.by_id.contains_key(&entry.id)
-                || entry.origin.stream_id.as_ref().is_some_and(|id| saved_streams.contains(id))
-            { continue; }
-            let mut entry = entry.clone();
-            entry.phase = EntryPhase::Interrupted;
-            if entry.parent_id.as_ref().is_some_and(|id| !self.by_id.contains_key(id)) {
-                entry.parent_id = None;
+        if let Some(old) = continuing {
+            for event in old.events.values().filter(|event| event.phase != EntryPhase::Saved && !ids.contains(&event.id)) {
+                let mut event = event.clone(); event.phase = EntryPhase::Interrupted;
+                transcript.by_id.insert(event.id.clone(), event.order);
+                transcript.events.insert(event.order, event);
             }
-            self.by_id.insert(entry.id.clone(), self.entries.len());
-            self.entries.push(entry);
         }
+        Ok(transcript)
+    }
+
+    pub(crate) fn head(&self) -> Option<String> { self.head.clone() }
+    pub fn event(&self, id: &str) -> Option<&Event> { self.by_id.get(id).and_then(|order| self.events.get(order)) }
+    pub fn attachment(&self, entry_id: &str) -> Option<&ChatAttachment> {
+        self.attachments.get(entry_id).and_then(|order| self.events.get(order)).and_then(|event| event.attachment.as_ref())
+    }
+    pub fn events_mut(&mut self) -> impl Iterator<Item = &mut Event> { self.events.values_mut() }
+
+    pub fn page(&self, before: Option<u64>) -> HistoryPage {
+        let mut events = Vec::new();
+        let mut bytes = 0;
+        let mut more = false;
+        for event in self.events.range(..before.unwrap_or(self.next_order)).rev().map(|(_, event)| event) {
+            let size = serde_json::to_vec(event).expect("event serialization").len();
+            if !events.is_empty() && (events.len() >= PAGE_ENTRIES || bytes + size > PAGE_BYTES) { more = true; break; }
+            bytes += size; events.push(event.clone());
+        }
+        events.reverse();
+        HistoryPage { before: if more { events.first().map(|event| event.order) } else { None }, events }
+    }
+
+    pub fn snapshot(&self, requests: &[String]) -> TranscriptSnapshot {
+        let mut page = self.page(None);
+        for event in self.events.values().filter(|event| event.phase == EntryPhase::Live) {
+            if page.before.is_some_and(|before| event.order < before) { page.events.push(event.clone()); }
+        }
+        page.events.sort_by_key(|event| event.order);
+        let requests = requests.iter().collect::<HashSet<_>>();
+        let delivered = self.events.values().filter(|event| event.phase == EntryPhase::Saved)
+            .filter_map(|event| event.origin.request_id.as_ref()).filter(|id| requests.contains(id)).cloned().collect::<HashSet<_>>();
+        TranscriptSnapshot { generation: self.generation.clone(), sequence: self.sequence, events: page.events,
+            queue: self.queue.clone(), before: page.before, delivered: delivered.into_iter().collect() }
     }
 
     pub fn check_position(&self, position: &PiPosition) -> Result<bool> {
         let source = self.source.as_ref().context("Pi transcript needs its initial snapshot")?;
-        if position.session_id != source.session_id || position.generation != source.generation {
-            bail!("Pi transcript generation changed");
-        }
+        if position.session_id != source.session_id || position.generation != source.generation { bail!("Pi transcript generation changed"); }
         if position.sequence <= source.sequence { return Ok(false); }
         if position.sequence != source.sequence + 1 { bail!("Pi transcript has an update gap"); }
         Ok(true)
     }
 
-    pub fn apply(&mut self, change: &TranscriptChange, position: Option<PiPosition>) -> Result<()> {
-        match change {
-            TranscriptChange::Entry { entry } => {
-                if entry.id.is_empty() || entry.parent_id.as_ref() == Some(&entry.id) {
-                    bail!("Pi entry has an invalid identity or parent");
-                }
-                if let Some(parent) = entry.parent_id.as_ref() {
-                    let parent = &self.entries[*self.by_id.get(parent).context("Pi entry references a missing parent")?];
-                    if parent.phase != EntryPhase::Saved { bail!("Pi entry references a provisional parent"); }
-                }
-                if let Some(index) = self.by_id.get(&entry.id)
-                    && self.entries[*index].phase != EntryPhase::Live
-                { bail!("Pi cannot replace a retained non-live entry"); }
-                if entry.phase == EntryPhase::Saved {
-                    if self.by_id.contains_key(&entry.id) { bail!("Pi appended an existing saved entry ID"); }
-                    if let Some(stream_id) = &entry.origin.stream_id {
-                        let provisional = format!("live-{stream_id}");
-                        if let Some(index) = self.by_id.remove(&provisional) {
-                            self.entries.remove(index);
-                            for index in index..self.entries.len() {
-                                self.by_id.insert(self.entries[index].id.clone(), index);
-                            }
-                        }
+    pub fn project(&self, raw: &Value) -> Result<TranscriptChange> {
+        let mut change = TranscriptChange::default();
+        match raw.get("type").and_then(Value::as_str) {
+            Some("append" | "live") => {
+                let live = raw.get("type").and_then(Value::as_str) == Some("live");
+                let entry = raw.get("entry").context("Pi change has no entry")?;
+                if !live {
+                    let id = entry.get("id").and_then(Value::as_str).context("Pi append has no ID")?;
+                    if raw.get("leafId").and_then(Value::as_str) != Some(id) || entry.get("parentId").and_then(Value::as_str) != self.head.as_deref() {
+                        bail!("Pi branch changed; read its current snapshot");
                     }
-                    self.head = Some(entry.id.clone());
+                    change.head = Some(id.to_owned());
+                    if let Some(id) = entry.pointer("/origin/requestId").and_then(Value::as_str) { change.delivered.push(id.to_owned()); }
                 }
-                if let Some(index) = self.by_id.get(&entry.id) {
-                    self.entries[*index] = (**entry).clone();
+                change.events = Event::from_pi(entry, live)?;
+                if let Some(first) = change.events.first() {
+                    let base = first.source_key();
+                    let prefix = format!("{base}:");
+                    let ids = change.events.iter().map(|event| &event.id).collect::<HashSet<_>>();
+                    change.removed = self.by_id.range(prefix.clone()..).take_while(|(id, _)| id.starts_with(&prefix))
+                        .filter(|(id, order)| !ids.contains(id) && self.events[order].source_key() == base).map(|(id, _)| id.clone()).collect();
+                }
+            }
+            Some("delta") => {
+                let stream = raw.get("streamId").and_then(Value::as_str).context("Pi delta has no stream ID")?;
+                let delta = raw.pointer("/event/assistantMessageEvent").context("Pi delta has no content event")?;
+                let index = delta.get("contentIndex").and_then(Value::as_u64).context("Pi delta has no content index")?;
+                let id = format!("stream:{stream}:{index}");
+                let kind = delta.get("type").and_then(Value::as_str).context("Pi delta has no kind")?;
+                if matches!(kind, "text_delta" | "thinking_delta" | "toolcall_delta") {
+                    change.delta = Some(TextDelta { event_id: id, text: delta.get("delta").and_then(Value::as_str).context("Pi delta has no text")?.to_owned() });
                 } else {
-                    self.by_id.insert(entry.id.clone(), self.entries.len());
-                    self.entries.push((**entry).clone());
+                    let template = self.event(&format!("stream:{stream}:0")).context("Pi stream has no start")?;
+                    if template.phase != EntryPhase::Live { bail!("Pi updated a finished stream"); }
+                    let mut event = template.clone(); event.id = id; event.attachment = None;
+                    match kind {
+                        "text_start" | "text_end" | "thinking_start" | "thinking_end" => {
+                            event.kind = if kind.starts_with("thinking") { ContentKind::Thinking } else { ContentKind::Text };
+                            event.text = delta.get("content").and_then(Value::as_str).unwrap_or_default().to_owned();
+                            event.tool_call_id = None; event.tool_name = None;
+                        }
+                        "toolcall_start" => {
+                            event.kind = ContentKind::Tool; event.text.clear();
+                            event.tool_call_id = delta.get("id").and_then(Value::as_str).map(str::to_owned);
+                            event.tool_name = delta.get("toolName").and_then(Value::as_str).map(str::to_owned);
+                        }
+                        "toolcall_end" => event.set_content(delta.get("toolCall").context("Pi tool completion has no call")?),
+                        _ => bail!("Unsupported Pi content update"),
+                    }
+                    change.events.push(event);
                 }
             }
-            TranscriptChange::Block { entry_id, index, content } => {
-                let entry = self.by_id.get(entry_id).context("Pi block references a missing entry")?;
-                let entry = &mut self.entries[*entry];
-                if entry.phase != EntryPhase::Live { bail!("Pi block references a non-live entry"); }
-                let blocks = &mut entry.content;
-                if *index > blocks.len() { bail!("Pi block references a missing content index"); }
-                if *index == blocks.len() { blocks.push(content.clone()); }
-                else { blocks[*index] = content.clone(); }
-            }
-            TranscriptChange::Delta { entry_id, index, delta } => {
-                let entry = self.by_id.get(entry_id).context("Pi delta references a missing entry")?;
-                let entry = &mut self.entries[*entry];
-                if entry.phase != EntryPhase::Live { bail!("Pi delta references a non-live entry"); }
-                entry.content.get_mut(*index).context("Pi delta references a missing block")?.text.push_str(delta);
-            }
-            TranscriptChange::Head { head } => {
-                let mut visited = HashSet::new();
-                let mut cursor = head.as_ref();
-                while let Some(id) = cursor {
-                    if !visited.insert(id) { bail!("Pi selected a cyclic branch"); }
-                    let entry = &self.entries[*self.by_id.get(id).context("Pi head references a missing entry")?];
-                    if entry.phase != EntryPhase::Saved { bail!("Pi selected a provisional entry"); }
-                    cursor = entry.parent_id.as_ref();
-                }
-                self.head = head.clone();
-            }
-            TranscriptChange::Queue { queue } => self.queue = queue.clone(),
-            TranscriptChange::Interrupted => {
-                self.queue.available = false;
-                for entry in &mut self.entries {
-                    if entry.phase == EntryPhase::Live { entry.phase = EntryPhase::Interrupted; }
-                }
+            Some("queue") => change.queue = Some(QueueState::from_pi(raw)?),
+            _ => bail!("Pi branch changed; read its current snapshot"),
+        }
+        let mut next = self.next_order;
+        for event in &mut change.events {
+            event.order = self.by_id.get(&event.id).copied().unwrap_or_else(|| { let order = next; next += 1; order });
+        }
+        Ok(change)
+    }
+
+    pub fn interrupt(&mut self) -> TranscriptChange {
+        self.queue.available = false; self.source = None;
+        let mut change = TranscriptChange { queue: Some(self.queue.clone()), ..Default::default() };
+        for event in self.events.values_mut().filter(|event| event.phase == EntryPhase::Live) {
+            event.phase = EntryPhase::Interrupted; change.events.push(event.clone());
+        }
+        self.sequence += 1;
+        change
+    }
+
+    pub fn apply(&mut self, change: &TranscriptChange, position: PiPosition) -> Result<()> {
+        if let Some(delta) = &change.delta {
+            let order = self.by_id.get(&delta.event_id).context("Pi delta references a missing event")?;
+            let event = self.events.get_mut(order).unwrap();
+            if event.phase != EntryPhase::Live { bail!("Pi delta references a finished event"); }
+            event.text.push_str(&delta.text);
+        }
+        for id in &change.removed {
+            if let Some(order) = self.by_id.remove(id) && let Some(event) = self.events.remove(&order) {
+                if event.attachment.is_some() { self.attachments.remove(&event.entry_id); }
             }
         }
-        if let Some(position) = position { self.source = Some(position); }
-        self.sequence += 1;
+        for event in &change.events {
+            self.next_order = self.next_order.max(event.order + 1);
+            self.by_id.insert(event.id.clone(), event.order);
+            if event.attachment.is_some() { self.attachments.insert(event.entry_id.clone(), event.order); }
+            self.events.insert(event.order, event.clone());
+        }
+        if let Some(head) = &change.head { self.head = Some(head.clone()); }
+        if let Some(queue) = &change.queue { self.queue = queue.clone(); }
+        self.source = Some(position); self.sequence += 1;
         Ok(())
     }
 }

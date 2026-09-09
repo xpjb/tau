@@ -2,159 +2,107 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn retains_identified_content_across_updates_recovery_and_branches() {
-    let raw = [
-        json!({"type":"message","id":"u","parentId":null,"origin":{"requestId":"prompt","requestRevision":2},"message":{"role":"user","content":"same"}}),
-        json!({"type":"model_change","id":"model","parentId":"u","message":{"content":"provider-only"}}),
-        json!({"type":"message","id":"old","parentId":"model","message":{"role":"user","content":"other branch"}}),
-    ];
-    let entries = raw.iter().map(|entry| Entry::from_pi(entry, false).unwrap()).collect::<Vec<_>>();
-    let source = PiPosition { session_id: "pi".to_owned(), generation: "source".to_owned(), sequence: 40 };
-    let mut transcript = Transcript::new(entries, Some("model".to_owned()), Some(source.clone()), QueueState::default()).unwrap();
-    assert_eq!(transcript.entries.len(), 3);
-    assert_eq!(transcript.snapshot(&[], &[]).entries.len(), 2);
-    assert_eq!(transcript.snapshot(&[], &[]).entries[0].origin.request_revision, Some(2));
-    assert!(transcript.snapshot(&[], &[]).entries[1].content.is_empty());
+fn projects_flat_events_through_streaming_finalization_and_recovery() {
+    let user = json!({"id":"u","type":"message","parentId":null,"origin":{"requestId":"prompt","requestRevision":2},"message":{"role":"user","content":"Check"}});
+    let model = json!({"id":"model","parentId":"u","type":"model_change"});
+    let raw = vec![user.clone(), model.clone(), json!({"id":"other","parentId":"u","type":"message","message":{"role":"user","content":"Other branch"}})];
+    let mut source = PiPosition { session_id: "pi".into(), generation: "g".into(), sequence: 40 };
+    let mut transcript = Transcript::new(&raw, &[], Some("model".into()), Some(source.clone()), QueueState::default(), None).unwrap();
+    assert_eq!(transcript.snapshot(&[]).events.len(), 1);
+    assert_eq!(transcript.snapshot(&[]).events[0].origin.request_revision, Some(2));
     assert!(!transcript.check_position(&source).unwrap());
     assert!(transcript.check_position(&PiPosition { sequence: 42, ..source.clone() }).is_err());
-    assert!(transcript.check_position(&PiPosition { session_id: "other".to_owned(), ..source.clone() }).is_err());
-    assert!(transcript.check_position(&PiPosition { generation: "other".to_owned(), ..source.clone() }).is_err());
-    let entry = Entry::from_pi(&json!({"streamId":"stream","parentId":"model","message":{"role":"assistant","content":[
-        {"type":"thinking","thinking":"visible","thinkingSignature":"private-signature"},
-        {"type":"image","mimeType":"image/png","data":"private-binary"}
-    ]}}), true).unwrap();
-    transcript.apply(&TranscriptChange::Entry { entry: Box::new(entry) }, Some(PiPosition { sequence: 41, ..source.clone() })).unwrap();
-    let cut = transcript.snapshot(&[], &[]);
-    transcript.apply(&TranscriptChange::Delta { entry_id: "live-stream".to_owned(), index: 0, delta: " retained".to_owned() },
-        Some(PiPosition { sequence: 42, ..source.clone() })).unwrap();
-    assert_eq!(cut.entries.last().unwrap().content[0].text, "visible");
-    assert_eq!(transcript.snapshot(&[], &[]).entries.last().unwrap().content[0].text, "visible retained");
-    let encoded = serde_json::to_string(&transcript.snapshot(&[], &[])).unwrap();
-    assert!(!encoded.contains("private-signature") && !encoded.contains("private-binary"));
-    transcript.apply(&TranscriptChange::Interrupted, None).unwrap();
-    assert!(transcript.apply(&TranscriptChange::Delta { entry_id: "live-stream".to_owned(), index: 0, delta: "late".to_owned() }, None).is_err());
-    let mut next = Transcript::new(Vec::new(), None, None, QueueState::default()).unwrap();
-    next.retain_interrupted(&transcript);
-    assert_eq!(next.snapshot(&[], &[]).entries[0].phase, EntryPhase::Interrupted);
-    assert_eq!(next.snapshot(&[], &[]).entries[0].parent_id, None);
-    let saved = Entry::from_pi(&json!({"type":"message","id":"a","parentId":null,"origin":{"streamId":"stream"},
-        "message":{"role":"assistant","content":[{"type":"thinking","thinking":"visible retained"}]}}), false).unwrap();
-    next.apply(&TranscriptChange::Entry { entry: Box::new(saved) }, None).unwrap();
-    assert_eq!(next.snapshot(&[], &[]).entries.len(), 1);
-    assert_eq!(next.snapshot(&[], &[]).entries[0].id, "a");
-    next.retain_interrupted(&transcript);
-    assert_eq!(next.snapshot(&[], &[]).entries.len(), 1);
-    assert!(next.apply(&TranscriptChange::Head { head: Some("missing".to_owned()) }, None).is_err());
-    assert_eq!(next.snapshot(&[], &[]).head.as_deref(), Some("a"));
-    let orphan = vec![json!({"type":"message","id":"a","parentId":"missing"})];
-    assert!(Transcript::new(orphan.iter().map(|entry| Entry::from_pi(entry, false).unwrap()).collect(), None, None, QueueState::default()).is_ok());
-    for entries in [
-        vec![json!({"type":"message","id":"a","parentId":"b"}), json!({"type":"message","id":"b","parentId":"a"})],
-        vec![json!({"type":"message","id":"a","parentId":null}), json!({"type":"message","id":"a","parentId":null})],
-    ] {
-        assert!(Transcript::new(entries.iter().map(|entry| Entry::from_pi(entry, false).unwrap()).collect(), None, None, QueueState::default()).is_err());
+    assert!(transcript.check_position(&PiPosition { generation: "old".into(), ..source.clone() }).is_err());
+    let live = json!({"streamId":"s","parentId":"model","message":{"role":"assistant","content":[]}});
+    let operations = [
+        json!({"type":"live","entry":live}),
+        json!({"type":"delta","streamId":"s","event":{"assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}}),
+        json!({"type":"delta","streamId":"s","event":{"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Thinking π🧠"}}}),
+        json!({"type":"delta","streamId":"s","event":{"assistantMessageEvent":{"type":"toolcall_start","contentIndex":1,"id":"call","toolName":"bash"}}}),
+        json!({"type":"delta","streamId":"s","event":{"assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"{}"}}}),
+    ];
+    for raw in operations {
+        source.sequence += 1;
+        assert!(transcript.check_position(&source).unwrap());
+        let change = transcript.project(&raw).unwrap();
+        transcript.apply(&change, source.clone()).unwrap();
     }
-    assert!(TranscriptChange::from_pi(&json!({"type":"append","leafId":"wrong","entry":{"id":"a","type":"message"}})).is_err());
-    assert!(PiPosition::from_pi(&json!({"sessionId":"","generation":"g","sequence":0})).is_err());
+    let cut = transcript.snapshot(&[]);
+    assert_eq!(cut.events.iter().map(|event| event.id.as_str()).collect::<Vec<_>>(), ["request:prompt:0", "stream:s:0", "stream:s:1"]);
+    assert_eq!(cut.events[1].text, "Thinking π🧠");
+    assert_eq!(cut.events[2].kind, ContentKind::Tool);
+    assert_eq!(cut.events[2].tool_call_id.as_deref(), Some("call"));
+    let saved = json!({"id":"a","parentId":"model","type":"message","origin":{"streamId":"s"},"message":{"role":"assistant","content":[
+        {"type":"thinking","thinking":"Thinking π🧠","thinkingSignature":"private"},
+        {"type":"toolCall","id":"call","name":"bash","arguments":{}},
+        {"type":"image","mimeType":"image/png","data":"private-image"}
+    ]}});
+    let change = transcript.project(&json!({"type":"append","entry":saved,"leafId":"a"})).unwrap();
+    source.sequence += 1; transcript.apply(&change, source.clone()).unwrap();
+    assert_eq!(transcript.event("stream:s:0").unwrap().order, cut.events[1].order);
+    assert_eq!(transcript.event("stream:s:0").unwrap().entry_id, "a");
+    assert_eq!(transcript.event("stream:s:0").unwrap().phase, EntryPhase::Saved);
+    assert_eq!(cut.events[1].phase, EntryPhase::Live);
+    let encoded = serde_json::to_string(&transcript.snapshot(&[])).unwrap();
+    assert!(!encoded.contains("private"));
+    let tool = json!({"streamId":"tool","parentId":"a","message":{"role":"toolResult","toolCallId":"call","toolName":"bash","content":[{"type":"text","text":"Working"}]}});
+    source.sequence += 1;
+    transcript.apply(&transcript.project(&json!({"type":"live","entry":tool})).unwrap(), source.clone()).unwrap();
+    let tool_order = transcript.event("stream:tool:0").unwrap().order;
+    let interrupted = transcript.interrupt();
+    assert!(!interrupted.queue.unwrap().available);
+    assert_eq!(transcript.event("stream:tool:0").unwrap().phase, EntryPhase::Interrupted);
+    let mut recovered = Transcript::new(&[user, model, saved], &[], Some("a".into()), Some(source.clone()), QueueState::default(), Some(&transcript)).unwrap();
+    assert_eq!(recovered.event("stream:tool:0").unwrap().order, tool_order);
+    let final_tool = json!({"id":"result","parentId":"a","type":"message","origin":{"streamId":"tool"},"message":{"role":"toolResult","toolCallId":"call","toolName":"bash","content":[{"type":"text","text":"Done"}]}});
+    let change = recovered.project(&json!({"type":"append","entry":final_tool,"leafId":"result"})).unwrap();
+    source.sequence += 1; recovered.apply(&change, source).unwrap();
+    assert_eq!(recovered.event("stream:tool:0").unwrap().order, tool_order);
+    assert_eq!(recovered.event("stream:tool:0").unwrap().text, "Done");
+    assert_eq!(recovered.event("stream:tool:0").unwrap().phase, EntryPhase::Saved);
+    assert_eq!(recovered.snapshot(&[]).events.len(), 5);
 }
 
 #[test]
-fn projects_prepared_queue_revisions_controls_and_partial_tool_output() {
-    let raw = json!({
-        "queuedRequests":[{"requestId":"q","revision":3,"kind":"followUp","message":{"role":"user","timestamp":123,
-            "content":[{"type":"text","text":"prepared"},{"type":"image","data":"private-image","mimeType":"image/png"}]}}],
-        "runId":"run", "paused":true,
-        "control":{"commandId":"control","runId":"run","action":"prefix","boundary":"reasoning_checkpoint",
-            "requests":[{"requestId":"q","revision":3}],"status":"waiting"},
-        "capabilities":["queue_delete","queue_run_prefix"],"boundaries":["reasoning_checkpoint","turn"]
-    });
+fn pages_inside_messages_and_resolves_requests_outside_the_window() {
+    let user = json!({"id":"u","parentId":null,"type":"message","origin":{"requestId":"request"},"message":{"role":"user","content":"Start"}});
+    let blocks = (0..170).map(|index| json!({"type":"thinking","thinking":format!("Block {index} π🧠")})).collect::<Vec<_>>();
+    let assistant = json!({"id":"a","parentId":"u","type":"message","origin":{"streamId":"s"},"message":{"role":"assistant","content":blocks}});
+    let transcript = Transcript::new(&[user, assistant], &[], Some("a".into()), None, QueueState::default(), None).unwrap();
+    let snapshot = transcript.snapshot(&["request".into()]);
+    assert_eq!(snapshot.events.len(), PAGE_ENTRIES);
+    assert_eq!(snapshot.delivered, ["request"]);
+    let mut events = snapshot.events;
+    let mut before = snapshot.before;
+    while let Some(cursor) = before {
+        let page = transcript.page(Some(cursor));
+        assert!(page.events.iter().all(|event| event.order < cursor));
+        before = page.before;
+        events.splice(0..0, page.events);
+    }
+    assert_eq!(events.len(), 171);
+    assert!(events.windows(2).all(|pair| pair[0].order < pair[1].order));
+    assert_eq!(events.last().unwrap().text, "Block 169 π🧠");
+    let orphan = json!({"id":"a","parentId":"gone","type":"message","message":{"role":"assistant","content":"Kept"}});
+    assert_eq!(Transcript::new(&[orphan], &[], Some("a".into()), None, QueueState::default(), None).unwrap().snapshot(&[]).events.len(), 1);
+    let cycle = [json!({"id":"a","parentId":"b"}), json!({"id":"b","parentId":"a"})];
+    assert!(Transcript::new(&cycle, &[], Some("a".into()), None, QueueState::default(), None).is_err());
+    let duplicate = [json!({"id":"a"}), json!({"id":"a"})];
+    assert!(Transcript::new(&duplicate, &[], Some("a".into()), None, QueueState::default(), None).is_err());
+}
+
+#[test]
+fn preserves_identified_queue_controls_and_hides_binary_content() {
+    let raw = json!({"queuedRequests":[{"requestId":"q","revision":3,"kind":"followUp","message":{"role":"user","timestamp":123,
+        "content":[{"type":"text","text":"prepared"},{"type":"image","data":"private-image"}]}}],
+        "runId":"run","paused":true,"control":{"commandId":"control","runId":"run","action":"prefix","boundary":"reasoning_checkpoint",
+        "requests":[{"requestId":"q","revision":3}],"status":"waiting"},"capabilities":["queue_run_prefix"],"boundaries":["turn"]});
     let queue = QueueState::from_pi(&raw).unwrap();
     assert_eq!(queue.requests[0].text, "prepared");
     assert_eq!(queue.requests[0].images, 1);
-    assert_eq!(queue.requests[0].revision, 3);
     assert_eq!(queue.control.as_ref().unwrap().requests[0].revision, 3);
     assert!(!serde_json::to_string(&queue).unwrap().contains("private-image"));
     let mut duplicate = raw.clone();
     duplicate["queuedRequests"].as_array_mut().unwrap().push(raw["queuedRequests"][0].clone());
     assert!(QueueState::from_pi(&duplicate).is_err());
-    let mut transcript = Transcript::new(Vec::new(), None, None, queue).unwrap();
-    let live = Entry::from_pi(&json!({"streamId":"tool","parentId":null,"message":{"role":"toolResult","toolCallId":"call",
-        "toolName":"bash","content":[{"type":"text","text":"partial output"}],"isError":false}}), true).unwrap();
-    transcript.apply(&TranscriptChange::Entry { entry: Box::new(live) }, None).unwrap();
-    assert_eq!(transcript.snapshot(&[], &[]).entries[0].content[0].text, "partial output");
-    let content = Content::from_pi(&json!({"type":"toolCall","id":"call","name":"bash","partialArguments":"{\"command\":\"ca"}));
-    assert_eq!(content.text, "{\"command\":\"ca");
-    transcript.apply(&TranscriptChange::Interrupted, None).unwrap();
-    assert!(!transcript.queue.available);
-    assert_eq!(transcript.queue.requests.len(), 1);
-    assert_eq!(transcript.queue.control.unwrap().status, "waiting");
-}
-
-#[test]
-fn pages_whole_entries_by_ancestry_and_resolves_work_outside_the_window() {
-    let mut entries = Vec::new();
-    let mut parent = None;
-    for index in 0..1000 {
-        let id = Uuid::new_v4().to_string();
-        let text = if index == 450 { "🧠\n".repeat(80_000) } else { format!("Message {index} π🧠") };
-        let raw = json!({"id":id,"parentId":parent,"type":"message","origin":{"requestId":format!("request-{index}"),"streamId":format!("stream-{index}")},
-            "message":{"role":"assistant","content":[{"type":"text","text":text}]}});
-        entries.push(Entry::from_pi(&raw, false).unwrap());
-        parent = Some(id);
-    }
-    for entry in &entries {
-        assert_eq!(entry.saved_wire_bytes, serde_json::to_vec(entry).unwrap().len());
-        assert!(serde_json::to_value(entry).unwrap().get("savedWireBytes").is_none());
-    }
-    let expected = entries.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>();
-    entries.push(Entry::from_pi(&json!({"id":"other-branch","parentId":expected[0],"type":"message","message":{"role":"user","content":"Other branch"}}), false).unwrap());
-    let mut transcript = Transcript::new(entries, parent.clone(), None, QueueState::default()).unwrap();
-    let snapshot = transcript.snapshot(&["request-0".into(), "missing".into()], &["stream-0".into()]);
-    assert_eq!(snapshot.entries.len(), PAGE_ENTRIES);
-    assert_eq!(snapshot.delivered, ["request-0"]);
-    assert_eq!(snapshot.saved_streams, ["stream-0"]);
-    assert_eq!(snapshot.head, parent);
-    let mut ids = snapshot.entries.iter().rev().map(|entry| entry.id.clone()).collect::<Vec<_>>();
-    let mut before = snapshot.before;
-    let mut oversized = 0;
-    while let Some(cursor) = before {
-        let page = transcript.page(Some(&cursor)).unwrap();
-        assert_eq!(page.entries.last().unwrap().id, cursor);
-        assert!(page.entries.len() <= PAGE_ENTRIES);
-        if page.entries.iter().map(|entry| serde_json::to_vec(entry).unwrap().len()).sum::<usize>() > PAGE_BYTES {
-            assert_eq!(page.entries.len(), 1); oversized += 1;
-        }
-        ids.extend(page.entries.iter().rev().map(|entry| entry.id.clone()));
-        before = page.before;
-    }
-    assert_eq!(oversized, 1);
-    assert_eq!(ids, expected.into_iter().rev().collect::<Vec<_>>());
-    assert_eq!(transcript.sequence, 0);
-    assert!(transcript.page(Some("missing")).is_err());
-    let live = Entry::from_pi(&json!({"streamId":"current","parentId":parent,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"π"}]}}), true).unwrap();
-    transcript.apply(&TranscriptChange::Entry { entry: Box::new(live) }, None).unwrap();
-    let first = transcript.snapshot(&[], &[]);
-    transcript.apply(&TranscriptChange::Delta { entry_id:"live-current".into(), index:0, delta:"🧠".into() }, None).unwrap();
-    assert_eq!(first.sequence, 1);
-    assert_eq!(first.entries.last().unwrap().content[0].text, "π");
-    assert_eq!(transcript.snapshot(&[], &[]).entries.last().unwrap().content[0].text, "π🧠");
-    assert_eq!(transcript.entry("live-current").unwrap().saved_wire_bytes, 0);
-
-    let mut raw = json!({"id":"large", "parentId":null, "type":"message", "message":{"role":"user", "content":""}});
-    let large = Entry::from_pi(&raw, false).unwrap();
-    let attachment = Entry::from_pi(&json!({"id":"file", "parentId":"large", "type":"message", "message":{"role":"toolResult",
-        "details":{"tauAttachment":{"version":1, "kind":"file", "path":"/outbox/result.zip"}}}}), false).unwrap();
-    assert_eq!(serde_json::to_value(&attachment.attachment).unwrap(), json!({"kind":"file", "fileName":"result.zip", "caption":null}));
-    raw["message"]["content"] = Value::String("x".repeat(PAGE_BYTES - large.saved_wire_bytes - attachment.saved_wire_bytes));
-    let large = Entry::from_pi(&raw, false).unwrap();
-    let mut transcript = Transcript::new(vec![large, attachment], Some("file".into()), None, QueueState::default()).unwrap();
-    assert_eq!(transcript.snapshot(&[], &[]).entries.len(), 2);
-    let attachment = &mut transcript.entries[1];
-    attachment.attachment.as_mut().unwrap().size = Some(FILE_LIMIT);
-    attachment.measure_saved_bytes();
-    assert_eq!(attachment.saved_wire_bytes, serde_json::to_vec(attachment).unwrap().len());
-    let page = transcript.page(None).unwrap();
-    assert_eq!(page.entries.len(), 1);
-    assert_eq!(page.before.as_deref(), Some("large"));
-    assert_eq!(transcript.page(page.before.as_deref()).unwrap().entries.len(), 1);
 }

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -7,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::manager::{AgentManager, safe_file_name};
 use crate::protocol::{UploadedFile, MAX_UPLOAD_BYTES};
-use crate::transcript::{AttachmentKind, Entry, attachment_request, FILE_LIMIT, IMAGE_LIMIT};
+use crate::transcript::{AttachmentKind, Event, attachment_request, FILE_LIMIT, IMAGE_LIMIT};
 
 pub struct ResolvedAttachment {
     pub file: fs::File,
@@ -61,43 +60,17 @@ impl AgentManager {
         })
     }
 
-    pub(crate) async fn populate_attachment_sizes(&self, entries: &[Value], messages: &mut [Entry]) {
-        let Ok(root) = fs::canonicalize(&self.inner.config.attachment_root).await else {
-            return;
-        };
-        let by_id = entries
-            .iter()
-            .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
-            .collect::<HashMap<_, _>>();
-        for message in messages {
-            let Some(attachment) = message.attachment.as_mut() else {
-                continue;
-            };
-            if attachment.size.is_some() {
-                continue;
-            }
-            let Some(request) = by_id.get(message.id.as_str()).and_then(|entry| {
-                attachment_request(entry)
-            }) else {
-                continue;
-            };
-            let Ok(path) = fs::canonicalize(&request.path).await else {
-                continue;
-            };
-            if !path.starts_with(&root) {
-                continue;
-            }
-            let Ok(metadata) = fs::metadata(path).await else {
-                continue;
-            };
-            let limit = match request.kind {
-                AttachmentKind::Image => IMAGE_LIMIT,
-                AttachmentKind::File => FILE_LIMIT,
-            };
-            if metadata.is_file() && metadata.len() <= limit {
-                attachment.size = Some(metadata.len());
-                message.measure_saved_bytes();
-            }
+    pub(crate) async fn populate_attachment_sizes<'a>(&self, events: impl Iterator<Item = &'a mut Event> + Send) {
+        let Ok(root) = fs::canonicalize(&self.inner.config.attachment_root).await else { return; };
+        for event in events {
+            let Some(attachment) = event.attachment.as_mut() else { continue; };
+            if attachment.size.is_some() { continue; }
+            let Some(path) = &attachment.source_path else { continue; };
+            let Ok(path) = fs::canonicalize(path).await else { continue; };
+            if !path.starts_with(&root) { continue; }
+            let Ok(metadata) = fs::metadata(path).await else { continue; };
+            let limit = match attachment.kind { AttachmentKind::Image => IMAGE_LIMIT, AttachmentKind::File => FILE_LIMIT };
+            if metadata.is_file() && metadata.len() <= limit { attachment.size = Some(metadata.len()); }
         }
     }
 
@@ -110,7 +83,7 @@ impl AgentManager {
         let cached = {
             let content = runtime.content.lock().await;
             if let Some(transcript) = &content.transcript {
-                let attachment = transcript.entry(entry_id).and_then(|entry| entry.attachment.as_ref())
+                let attachment = transcript.attachment(entry_id)
                     .context("entry has no Tau attachment")?;
                 Some(crate::transcript::AttachmentRequest {
                     kind: attachment.kind,

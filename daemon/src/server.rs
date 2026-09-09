@@ -192,13 +192,12 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 };
                 let manager = state.manager.clone();
                 let response_outbound = outbound_tx.clone();
-                if let ClientCommand::OpenSession { session_id, requests, streams } = &request.command {
+                if let ClientCommand::OpenSession { session_id, requests } = &request.command {
                     for (_, task) in subscriptions.drain() { task.abort(); let _ = task.await; }
                     let session_id = session_id.clone();
                     let requests = requests.clone();
-                    let streams = streams.clone();
                     subscriptions.insert(session_id.clone(), tokio::spawn(async move {
-                        let mut feed = match manager.open_session(&session_id, &requests, &streams).await {
+                        let mut feed = match manager.open_session(&session_id, &requests).await {
                             Ok(feed) => feed,
                             Err(error) => {
                                 let mut response = ServerMessage::command_failure(request.id, error);
@@ -243,7 +242,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                         },
                         ClientCommand::OpenSession { .. } => unreachable!("open requests own their transcript feed"),
                         ClientCommand::GetHistory { session_id, generation, before } => {
-                            match manager.history_page(&session_id, &generation, &before).await {
+                            match manager.history_page(&session_id, &generation, before).await {
                                 Ok(page) => {
                                     if !queue_server(&response_outbound, &ServerMessage::TranscriptPage {
                                         request_id: request_id.clone(), session_id: session_id.clone(), generation, cursor: before, page,

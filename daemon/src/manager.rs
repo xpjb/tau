@@ -18,7 +18,7 @@ use crate::protocol::{
     SessionStatus, SessionSummary, SlashCommand, SlashCommandSource, MAX_PROMPT_CHARS,
     MAX_TITLE_CHARS,
 };
-use crate::transcript::{Entry, PiPosition, QueueState, Transcript, TranscriptChange};
+use crate::transcript::{PiPosition, QueueState, Transcript, TranscriptChange};
 use crate::state::{SessionModel, StateStore};
 
 const EVENT_BUFFER: usize = 2048;
@@ -207,7 +207,7 @@ impl AgentManager {
         Ok(id)
     }
 
-    pub async fn open_session(&self, id: &str, requests: &[String], streams: &[String]) -> Result<SessionFeed> {
+    pub async fn open_session(&self, id: &str, requests: &[String]) -> Result<SessionFeed> {
         let runtime = self.runtime(id).await?;
         let pending = self
             .inner
@@ -225,9 +225,9 @@ impl AgentManager {
         let mut content = runtime.content.lock().await;
         if content.transcript.is_none() {
             let (entries, head) = self.entries_for_read(id, content.process.as_ref()).await?;
-            let mut retained = entries.iter().map(|entry| Entry::from_pi(entry, false)).collect::<Result<Vec<_>>>()?;
-            self.populate_attachment_sizes(&entries, &mut retained).await;
-            content.transcript = Some(Transcript::new(retained, head, None, QueueState::default())?);
+            let mut transcript = Transcript::new(&entries, &[], head, None, QueueState::default(), None)?;
+            self.populate_attachment_sizes(transcript.events_mut()).await;
+            content.transcript = Some(transcript);
         }
         if content.recovering && let Some(process) = content.process.as_ref() {
             process.notify(json!({ "type": "get_transcript" })).await?;
@@ -235,7 +235,7 @@ impl AgentManager {
         let events = content.events.subscribe();
         initial.push(ServerMessage::TranscriptSnapshot {
             session_id: id.to_owned(),
-            snapshot: content.transcript.as_ref().expect("transcript was loaded").snapshot(requests, streams),
+            snapshot: content.transcript.as_ref().expect("transcript was loaded").snapshot(requests),
         });
         drop(content);
         let state = runtime.snapshot();
@@ -248,12 +248,12 @@ impl AgentManager {
         Ok(SessionFeed { initial, events })
     }
 
-    pub async fn history_page(&self, id: &str, generation: &str, before: &str) -> Result<crate::transcript::HistoryPage> {
+    pub async fn history_page(&self, id: &str, generation: &str, before: u64) -> Result<crate::transcript::HistoryPage> {
         let runtime = self.runtime(id).await?;
         let content = runtime.content.lock().await;
         let transcript = content.transcript.as_ref().context("Open this chat before reading history")?;
         if content.recovering || transcript.generation != generation { bail!("History changed; reopen this chat"); }
-        transcript.page(Some(before))
+        Ok(transcript.page(Some(before)))
     }
 
     pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
@@ -1064,24 +1064,17 @@ impl AgentManager {
                         let position = PiPosition::from_pi(&event)?;
                         if !transcript.check_position(&position)? { return Ok(None); }
                         let raw = event.get("change").context("Pi update has no change")?;
-                        let mut change = TranscriptChange::from_pi(raw)?;
-                        if let TranscriptChange::Entry { entry } = &mut change {
-                            self.populate_attachment_sizes(
-                                std::slice::from_ref(raw.get("entry").context("Pi change has no entry")?),
-                                std::slice::from_mut(entry.as_mut()),
-                            ).await;
-                        }
-                        transcript.apply(&change, Some(position))?;
+                        let mut change = transcript.project(raw)?;
+                        self.populate_attachment_sizes(change.events.iter_mut()).await;
+                        transcript.apply(&change, position)?;
                         Ok(Some(change))
                     }.await;
                     match result {
                         Ok(Some(change)) => {
-                            let message = if matches!(change, TranscriptChange::Head { .. }) {
-                                ServerMessage::ResyncRequired { session_id: Some(id.clone()) }
-                            } else { ServerMessage::TranscriptUpdate {
+                            let message = ServerMessage::TranscriptUpdate {
                                 session_id: id.clone(), generation: transcript.generation.clone(),
                                 sequence: transcript.sequence, change,
-                            } };
+                            };
                             let _ = content.events.send(Arc::new(message));
                         }
                         Ok(None) => {}
@@ -1200,9 +1193,7 @@ impl AgentManager {
 
     fn interrupt_transcript(&self, id: &str, content: &mut SessionContent) {
         if let Some(transcript) = content.transcript.as_mut() {
-            let change = TranscriptChange::Interrupted;
-            transcript.apply(&change, None).expect("interrupting entries is infallible");
-            transcript.source = None;
+            let change = transcript.interrupt();
             let message = ServerMessage::TranscriptUpdate {
                 session_id: id.to_owned(), generation: transcript.generation.clone(),
                 sequence: transcript.sequence, change,
@@ -1213,11 +1204,7 @@ impl AgentManager {
 
     async fn replace_transcript(&self, id: &str, content: &mut SessionContent, data: &Value) -> Result<()> {
         let raw = data.get("entries").and_then(Value::as_array).context("Pi transcript has no entries")?;
-        let mut entries = raw.iter().map(|entry| Entry::from_pi(entry, false)).collect::<Result<Vec<_>>>()?;
-        self.populate_attachment_sizes(raw, &mut entries).await;
-        for live in data.get("live").and_then(Value::as_array).context("Pi transcript has no live entries")? {
-            entries.push(Entry::from_pi(live, true)?);
-        }
+        let live = data.get("live").and_then(Value::as_array).context("Pi transcript has no live entries")?;
         let source = PiPosition::from_pi(data)?;
         if let Some(previous) = content.transcript.as_ref().and_then(|transcript| transcript.source.as_ref())
             && source.generation == previous.generation
@@ -1226,12 +1213,10 @@ impl AgentManager {
             if source.sequence < previous.sequence { bail!("Pi snapshot precedes retained transcript state"); }
         }
         let mut next = Transcript::new(
-            entries,
-            data.get("leafId").and_then(Value::as_str).map(str::to_owned),
-            Some(source),
-            QueueState::from_pi(data)?,
+            raw, live, data.get("leafId").and_then(Value::as_str).map(str::to_owned),
+            Some(source), QueueState::from_pi(data)?, content.transcript.as_ref(),
         )?;
-        if let Some(previous) = content.transcript.as_ref() { next.retain_interrupted(previous); }
+        self.populate_attachment_sizes(next.events_mut()).await;
         let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id: Some(id.to_owned()) }));
         content.transcript = Some(next);
         content.recovering = false;

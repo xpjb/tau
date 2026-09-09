@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::SessionModel;
 use crate::transcript::{HistoryPage, QueueRef, TranscriptChange, TranscriptSnapshot};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -22,8 +22,8 @@ pub struct ClientRequest {
 pub enum ClientCommand {
     ListSessions,
     CreateSession,
-    OpenSession { session_id: String, #[serde(default)] requests: Vec<String>, #[serde(default)] streams: Vec<String> },
-    GetHistory { session_id: String, generation: String, before: String },
+    OpenSession { session_id: String, #[serde(default)] requests: Vec<String> },
+    GetHistory { session_id: String, generation: String, before: u64 },
     GetCommands { session_id: String },
     Prompt { session_id: String, text: String },
     ExtensionUiResponse {
@@ -103,7 +103,7 @@ pub enum ServerMessage {
         request_id: String,
         session_id: String,
         generation: String,
-        cursor: String,
+        cursor: u64,
         page: HistoryPage,
     },
     TranscriptUpdate {
