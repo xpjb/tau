@@ -1,5 +1,66 @@
 # Retained transcript contract
 
+## Current builds — Tau 0.5.10 / protocol 6
+
+This is a matched client/daemon update. Builds are accepted, but production is
+still on daemon 0.5.8/protocol 5; the new restart has not been authorized.
+Pi and its JSONL format stay unchanged.
+
+### Ordered flat events
+
+Recovery rebuilds numeric order from Pi's selected branch and block order instead
+of appending newly recovered older content after existing later content. Live
+content follows its source parent. Abandoned streams stay between known neighbors
+as interrupted content. Event IDs stay stable; numeric positions may change with
+the new generation. Skipped blocks or conflicting order request a snapshot rather
+than publishing an out-of-order update. There is no client parent walk or extra
+presentation-side ordering model.
+
+### Retention and warming
+
+OpenSession keeps a feed for each opened chat. Reopening replaces only that chat's
+feed; closing the socket releases all its feeds. It does not start Pi. The client
+keeps loaded rows when switching, applies off-screen updates and keeps outstanding
+history reads. Cached reads do not wait for the prompt/control operation lock.
+
+The selected chat has priority. Running/starting, unread and five recent chats warm
+next, followed by other retained feeds after reconnect. At most two background
+reads run at once. A warm window targets 150 events or 768 KiB; individual events
+stay whole. Explicit scrolling can read more. Failures do not loop; selection, new
+activity, resync or reconnect can retry them. Warming never marks a background chat
+read. No sends or controls are automatically replayed.
+
+A connected same-generation snapshot retains older saved and interrupted rows.
+A new generation or a disconnected window still requires a fresh authoritative
+window; the client does not present a missing range as complete history. Remote
+history remains memory-only. SQLite schema 4 continues to preserve local work.
+
+### Activity and unread state
+
+The content projection sets a daemon-only bumps_chat flag for user messages,
+first assistant text and saved assistant text/images. Run settlement and stopping
+or failure of an active process also bump the chat. Thinking, tool deltas, paging,
+warming and idle sleep do not bump. Existing creation, rename and send activity
+still counts. Handled extension reads do not count as sends.
+
+The existing updatedAtMs field orders chats. Its values increase across chats,
+even within one clock millisecond. Local read timestamps replace raw Pi branch
+heads for unread state and persist in the existing connection metadata. Session
+list publication no longer locks every chat's transcript to read its head.
+
+### Acceptance
+
+All 15 daemon tests and 16 client tests pass, along with strict Clippy, the release
+daemon, signed Android versionCode 30 and minified Windows packaging. The existing
+Android certificate is preserved. A desktop-JVM/Xvfb check loaded three history
+pages and completed 40 sends on one connection with zero crashes. This used an
+isolated fake server, not a physical Windows/Android device or live provider.
+Artifacts and receipts are under `/root/tau-release/0.5.10/`. No production service
+or Pi installation has changed.
+
+## Earlier builds
+
+
 ## Client hotfix — Tau 0.5.9
 
 This client update works with the deployed 0.5.8 daemon and protocol 5.
@@ -19,7 +80,7 @@ loaded three older pages into an unfilled view and completed 40 sends with one
 connection and no crash. This used a local fake server under Xvfb, not a provider
 or physical Windows/Android device. No daemon, Pi or service restart is needed.
 
-## Current — Tau 0.5.8 / protocol 5
+## Previous — Tau 0.5.8 / protocol 5
 
 This section supersedes the earlier protocol/store descriptions below. The rewrite
 is for code health and correctness. It is not a measured latency improvement.

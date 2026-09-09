@@ -8,9 +8,9 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 - `app/`: one Compose Multiplatform client for Android and desktop JVM targets.
 - `windows/`: the portable launcher and version-aware self-extracting Windows setup.
 
-Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects ordered content events; clients keep remote history in memory only. SQLite preserves drafts, pending sends/controls, attached files, preferences and session metadata across client restarts. Cold chats can be read without starting Pi. Reconnect synchronizes the recent event window, and older events load on demand. Thinking and tools remain collapsible across fetch boundaries. New chats use `/root` as their working directory.
+Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects ordered content events; clients keep remote history in memory only. SQLite preserves drafts, pending sends/controls, attached files, preferences and session metadata across client restarts. Cold chats can be read without starting Pi. Loaded history and chat feeds stay in memory across selection changes. Running, unread and recent chats warm in the background; older events also load on demand. Reconnect checks the retained event windows. Thinking and tools remain collapsible across fetch boundaries. New chats use `/root` as their working directory.
 
-Tau 0.5.9 clients use protocol 5 and work with the deployed 0.5.8 daemon. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 discards only the old remote transcript cache; local work stays intact. It requires the identified-transcript Pi fork with RPC model-default persistence from `xpjb/pi`. Existing JSONL files are preserved without migration.
+Tau 0.5.10 uses protocol 6 and requires a matched client/daemon update. The 0.5.10 builds are accepted; production remains on daemon 0.5.8/protocol 5 until the restart is approved. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 discards only the old remote transcript cache; local work stays intact. It requires the identified-transcript Pi fork with RPC model-default persistence from `xpjb/pi`. Existing JSONL files are preserved without migration.
 
 ## Current client operations
 
@@ -23,7 +23,9 @@ Tau 0.5.9 clients use protocol 5 and work with the deployed 0.5.8 daemon. `TauCl
 - Delete queued messages or run the inclusive prefix through a selected message at a safe boundary; later messages stay held until another prefix or explicit Resume.
 - Show a circular context-usage estimate beside the composer, with token counts on Windows hover or Android tap.
 - Show sent prompts immediately, keep unconfirmed sends visible across reconnects, and never automatically resend them.
-- Detect failed connections and reload the selected chat and live Pi state automatically.
+- Keep loaded history across chat switches and warm running, unread and recent chats without starting Pi.
+- Bump chats on assistant replies and stops; preserve unread markers across app restarts.
+- Detect failed connections and restore retained chat feeds without replaying sends or controls.
 - Fork from any visible user message.
 - Attach local files for Pi to inspect, view images from Pi inline, and download files produced through Pi's `send_image` and `send_file` tools.
 - Save viewed images privately for offline inline/full-screen viewing. Export a saved original without downloading it again.

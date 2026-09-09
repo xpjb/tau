@@ -29,7 +29,8 @@ with `transcript` owning Pi formats and `state.rs` owning only Tau's own
 ## Client (`app/composeApp/`, Kotlin, Android + desktop)
 
 - `TauApp.kt` — all Compose UI. State is owned by `TauController`.
-- `TauController.kt` — connection, session orchestration, receive loop.
+- `TauController.kt` — connection, per-chat feeds, bounded history warming,
+  unread state and receive loop.
 - `AttachmentDownloads.kt` — attachment transfer lifecycle (extensions on
   `TauController`).
 - `TauClient.kt` — WebSocket/HTTP transport to the daemon.
@@ -53,5 +54,6 @@ with `transcript` owning Pi formats and `state.rs` owning only Tau's own
   `Protocol.kt` move together with matched client releases.
 - Pi JSONL owns saved history. Remote transcript events stay in client
   memory only; SQLite preserves local work, files and preferences.
-- The daemon owns branch selection, event order and stream lifecycle.
+- The daemon owns branch selection, event order, stream lifecycle and activity
+  bumps. Recovery assigns order from the source, not discovery time.
   Transport pages do not define presentation groups.

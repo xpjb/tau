@@ -36,7 +36,7 @@ Confirmed code paths:
 
 The relative contribution to the user's delay has not been measured. Separate acceptance from post-send maintenance while preserving truthful pending/queued/unconfirmed states and the existing no-replay behavior.
 
-## Active: keep history, warm chats and bump on activity
+## Implemented: keep history, warm chats and bump on activity
 
 The user also requests loaded history retention, background warming for running/unread/recent chats, and chat-list bumps for assistant replies and stops. These are separate from the ordered-flat-events requirement.
 
@@ -51,7 +51,7 @@ Plan:
 
 Retention and warming are implemented on the branch. Protocol 6 keeps one feed per opened chat until disconnect; opening one chat no longer closes the others. The client retains all loaded rows across switches, applies off-screen updates and warms running/starting, unread and five recent chats, then restores other retained feeds after reconnect. Two background reads run at once; a warm window targets 150 events or 768 KiB, while explicit scrolling can read more. Failed reads wait for selection, resync or reconnect rather than spinning. The focused paging/retention/warming tests and all fourteen daemon tests pass, including a multi-feed check that starts no Pi process. A duplicate-open race found by the full suite was fixed by retaining the pending open until snapshot application finishes. The full sixteen-test client suite now passes.
 
-Activity bumps are implemented on the branch. The content projection flags user messages, first assistant text and saved assistant text/images. Run settlement and stopping/failure of an active process also touch the existing activity timestamp. Thinking, tool deltas, paging, warming and idle sleep do not bump. Timestamps increase across chats even within one clock millisecond. Read markers replace raw Pi heads for unread state and persist in existing connection metadata; warming never marks a background chat read. This removes the all-chat transcript locks from session-list publication. Cached reads also bypass the prompt/control operation gate. The focused activity/unread tests pass; final combined tests and builds remain ahead.
+Activity bumps are implemented on the branch. The content projection flags user messages, first assistant text and saved assistant text/images. Run settlement and stopping/failure of an active process also touch the existing activity timestamp. Thinking, tool deltas, paging, warming and idle sleep do not bump. Timestamps increase across chats even within one clock millisecond. Read markers replace raw Pi heads for unread state and persist in existing connection metadata; warming never marks a background chat read. This removes the all-chat transcript locks from session-list publication. Cached reads also bypass the prompt/control operation gate. All fifteen daemon tests, sixteen client tests and strict Clippy pass. The 0.5.10 daemon, signed Android versionCode 30 and minified Windows package are built. The isolated desktop UI check passed three history pages and forty sends with no crash. Production remains unchanged pending restart approval.
 
 The rewrite replaces the old scroll trigger's mixed pixel/item arithmetic with an item-count threshold. Broader networking, client update cost, cold full-JSONL loading and UI rendering work remain separate performance topics; flatness alone is not a measured speedup.
 
