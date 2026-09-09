@@ -111,7 +111,7 @@ class LocalStoreTest {
         val key = ChatKey("account", "chat")
         try {
             val events = (0L until 150L).map { order -> TranscriptEvent("s:$order", order, "saved", role = EventRole.Assistant,
-                kind = EventKind.Thinking, text = "Thinking $order π🧠") }
+                phase = if (order == 0L) EventPhase.Interrupted else EventPhase.Saved, kind = EventKind.Thinking, text = "Thinking $order π🧠") }
             val queue = QueueState(available = true, runId = "run", capabilities = listOf("queue_run_prefix"), boundaries = listOf("turn"))
             val pending = store.beginSend(key, "Same", "")
             val cut = TranscriptCut("g", 0, events.takeLast(50), queue, 100, delivered = listOf(pending.requestId))

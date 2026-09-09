@@ -193,6 +193,20 @@ for line in sys.stdin:
             update({"type": "delta", "streamId": live[0]["streamId"],
                     "event": {"assistantMessageEvent": {"type": "thinking_delta", "contentIndex": 0, "delta": "."}}},
                    skip=1 if kind == "mock_gap" else 0)
+    elif kind == "mock_reply":
+        live[0]["message"]["content"].append({"type": "text", "text": ""})
+        update({"type": "delta", "streamId": live[0]["streamId"],
+                "event": {"assistantMessageEvent": {"type": "text_start", "contentIndex": 1}}})
+        live[0]["message"]["content"][1]["text"] = "Reply"
+        update({"type": "delta", "streamId": live[0]["streamId"],
+                "event": {"assistantMessageEvent": {"type": "text_delta", "contentIndex": 1, "delta": "Reply"}}})
+    elif kind == "mock_reply_more":
+        live[0]["message"]["content"][1]["text"] += " more"
+        update({"type": "delta", "streamId": live[0]["streamId"],
+                "event": {"assistantMessageEvent": {"type": "text_delta", "contentIndex": 1, "delta": " more"}}})
+    elif kind == "mock_finish":
+        append(live[0]["message"]["content"], role="assistant", origin={"streamId": live[0]["streamId"]})
+        live = []
     elif kind == "mock_exit":
         os._exit(0)
     elif kind == "mock_reject":

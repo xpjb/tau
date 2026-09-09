@@ -114,7 +114,7 @@ impl StateStore {
         let _guard = self.inner.write_gate.lock().await;
         let mut state = self.read_state().clone();
         let id = Uuid::new_v4().to_string();
-        let now = now_ms();
+        let now = next_activity_ms(&state);
         state.sessions.insert(
             id.clone(),
             StoredSession {
@@ -158,23 +158,25 @@ impl StateStore {
     pub async fn rename(&self, id: &str, title: String) -> Result<()> {
         let _guard = self.inner.write_gate.lock().await;
         let mut state = self.read_state().clone();
+        let updated = next_activity_ms(&state);
         let session = state
             .sessions
             .get_mut(id)
             .with_context(|| format!("unknown session {id}"))?;
         session.title = title;
-        session.updated_at_ms = now_ms();
+        session.updated_at_ms = updated;
         self.commit(state).await
     }
 
     pub async fn touch(&self, id: &str) -> Result<()> {
         let _guard = self.inner.write_gate.lock().await;
         let mut state = self.read_state().clone();
+        let updated = next_activity_ms(&state);
         let session = state
             .sessions
             .get_mut(id)
             .with_context(|| format!("unknown session {id}"))?;
-        session.updated_at_ms = now_ms();
+        session.updated_at_ms = updated;
         self.commit(state).await
     }
 
@@ -267,13 +269,14 @@ impl StateStore {
     }
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
+fn next_activity_ms(state: &PersistedState) -> u64 {
+    let now: u64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .try_into()
-        .unwrap_or(u64::MAX)
+        .unwrap_or(u64::MAX);
+    now.max(state.sessions.values().map(|session| session.updated_at_ms).max().unwrap_or(0).saturating_add(1))
 }
 
 #[cfg(test)]

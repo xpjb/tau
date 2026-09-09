@@ -19,6 +19,7 @@ import io.ktor.websocket.send
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -129,13 +130,14 @@ class TauConnectionTest {
         val directory = Files.createTempDirectory("tau-unread")
         val path = directory.resolve("transcript.db").toString()
         val quiet = chat.copy(id = "quiet", title = "Quiet")
+        val catalog = AtomicReference(listOf(chat, quiet))
         val sockets = Channel<DefaultWebSocketServerSession>(Channel.UNLIMITED)
         val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
             install(WebSockets)
             routing {
                 webSocket("/v1/ws") {
                     sendMessage(Hello(TauProtocolVersion, "test"))
-                    sendMessage(Sessions(listOf(chat, quiet.copy(lastEntryId = "h1"))))
+                    sendMessage(Sessions(catalog.get()))
                     sockets.send(this)
                     for (frame in incoming) if (frame is Frame.Text) {
                         val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
@@ -159,12 +161,23 @@ class TauConnectionTest {
             val socket = withTimeout(10_000) { sockets.receive() }
             controller.awaitState { !it.restoring }
             assertTrue(controller.state.value.unread.isEmpty())
-            socket.sendMessage(Sessions(listOf(chat, quiet.copy(lastEntryId = "h2"))))
-            controller.awaitState { "quiet" in it.unread }
+            catalog.set(listOf(quiet.copy(updatedAtMs = 2), chat))
+            socket.sendMessage(Sessions(catalog.get()))
+            controller.awaitState { "quiet" in it.unread && it.sessions.first().id == "quiet" }
             withContext(Dispatchers.Swing) { controller.selectSession("quiet") }
             assertTrue(controller.state.value.unread.isEmpty())
-            socket.sendMessage(Sessions(listOf(chat.copy(lastEntryId = "z1"), quiet.copy(lastEntryId = "h2"))))
-            assertTrue(controller.state.value.unread.isEmpty())
+            catalog.set(listOf(chat.copy(updatedAtMs = 3), quiet.copy(updatedAtMs = 2)))
+            socket.sendMessage(Sessions(catalog.get()))
+            controller.awaitState { chat.id in it.unread }
+            withContext(Dispatchers.Swing) { controller.selectSession(chat.id) }
+            catalog.set(listOf(quiet.copy(updatedAtMs = 4), chat.copy(updatedAtMs = 3)))
+            socket.sendMessage(Sessions(catalog.get()))
+            controller.awaitState { quiet.id in it.unread }
+            withContext(Dispatchers.Swing) { controller.dispose() }.join()
+            controller = TauController(Dispatchers.Swing, LocalStore({ path }))
+            withContext(Dispatchers.Swing) { controller.start(settings) }
+            controller.awaitState { it.transcripts[quiet.id]?.synchronized == true && quiet.id in it.unread }
+            assertEquals(2L, controller.state.value.readAt[quiet.id], "Reading metadata and warming history preserve the read marker")
         } finally {
             controller.dispose()
             server.stop(1_000, 1_000)
@@ -179,7 +192,7 @@ class TauConnectionTest {
         val requests = Channel<ClientRequest>(Channel.UNLIMITED)
         val recent = (1..5).map { chat.copy(id = "recent-$it") }
         val running = (1..3).map { chat.copy(id = "running-$it", status = SessionStatus.Running) }
-        val unread = chat.copy(id = "unread", lastEntryId = "old")
+        val unread = chat.copy(id = "unread")
         val sessions = listOf(chat) + recent + unread + running
         val events = (0L until 300L).map { TranscriptEvent("entry:$it:0", it, "$it", role = EventRole.User, kind = EventKind.Text, text = "Message $it") }
         val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
@@ -220,7 +233,7 @@ class TauConnectionTest {
             val third = assertIs<OpenSession>(requests.nextRequest())
             assertEquals(running[2].id, third.sessionId)
             assertNull(controller.state.value.error, "A failed background read stays out of the selected chat")
-            socket.sendMessage(Sessions(sessions.map { if (it.id == unread.id) it.copy(lastEntryId = "new") else it }))
+            socket.sendMessage(Sessions(sessions.map { if (it.id == unread.id) it.copy(updatedAtMs = 2) else it }))
             controller.awaitState { unread.id in it.unread }
             socket.sendMessage(TranscriptSnapshot(running[1].id, TranscriptCut("g", 0, emptyList(), queue)))
             socket.sendMessage(Response(initial[2].id, true, running[1].id))

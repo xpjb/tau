@@ -232,6 +232,8 @@ pub struct TranscriptChange {
     pub delivered: Vec<String>,
     #[serde(skip)]
     head: Option<String>,
+    #[serde(skip)]
+    pub bumps_chat: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -264,7 +266,7 @@ pub struct Transcript {
     by_id: BTreeMap<String, u64>,
     attachments: HashMap<String, u64>,
     next_order: u64,
-    head: Option<String>,
+    pub(crate) head: Option<String>,
     pub queue: QueueState,
 }
 
@@ -422,7 +424,6 @@ impl Transcript {
         Ok(transcript)
     }
 
-    pub(crate) fn head(&self) -> Option<String> { self.head.clone() }
     pub fn event(&self, id: &str) -> Option<&Event> { self.by_id.get(id).and_then(|order| self.events.get(order)) }
     pub fn attachment(&self, entry_id: &str) -> Option<&ChatAttachment> {
         self.attachments.get(entry_id).and_then(|order| self.events.get(order)).and_then(|event| event.attachment.as_ref())
@@ -528,6 +529,11 @@ impl Transcript {
         if change.events.windows(2).any(|pair| pair[0].order >= pair[1].order) {
             bail!("Pi content order changed; read its current snapshot");
         }
+        change.bumps_chat = change.events.iter().any(|event|
+            matches!(event.role, EventRole::User | EventRole::Assistant) && matches!(event.kind, EventKind::Text | EventKind::Image) &&
+            (event.phase == EventPhase::Saved || !event.text.is_empty() && self.event(&event.id).is_none_or(|old| old.text.is_empty()))) ||
+            change.delta.as_ref().is_some_and(|delta| !delta.text.is_empty() && self.event(&delta.event_id).is_some_and(|event|
+                event.role == EventRole::Assistant && event.kind == EventKind::Text && event.text.is_empty()));
         Ok(change)
     }
 

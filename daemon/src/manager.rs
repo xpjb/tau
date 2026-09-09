@@ -154,15 +154,6 @@ impl AgentManager {
 
     pub async fn sessions_message(&self) -> ServerMessage {
         let runtimes = self.inner.runtimes.lock().await;
-        let mut heads = HashMap::new();
-        for (id, runtime) in runtimes.iter() {
-            let content = runtime.content.lock().await;
-            if let Some(transcript) = content.transcript.as_ref()
-                && let Some(head) = transcript.head()
-            {
-                heads.insert(id.clone(), head);
-            }
-        }
         let sessions = self
             .inner
             .state
@@ -173,7 +164,6 @@ impl AgentManager {
                     .get(&id)
                     .map(|runtime| runtime.snapshot())
                     .unwrap_or_default();
-                let last_entry_id = heads.get(&id).cloned();
                 SessionSummary {
                     id,
                     title: stored.title,
@@ -184,7 +174,6 @@ impl AgentManager {
                     parent_id: stored.parent_id,
                     created_at_ms: stored.created_at_ms,
                     updated_at_ms: stored.updated_at_ms,
-                    last_entry_id,
                 }
             })
             .collect();
@@ -221,7 +210,6 @@ impl AgentManager {
         let mut initial = pending.into_iter().map(|request| ServerMessage::ExtensionUi {
             session_id: id.to_owned(), request: Box::new(request),
         }).collect::<Vec<_>>();
-        let _guard = runtime.operation.lock().await;
         let mut content = runtime.content.lock().await;
         if content.transcript.is_none() {
             let (entries, head) = self.entries_for_read(id, content.process.as_ref()).await?;
@@ -353,10 +341,8 @@ impl AgentManager {
 
         let metadata: Result<()> = async {
 
-        if command_handled {
-            self.inner.state.touch(id).await?;
-        } else if let Some(stored) = self.inner.state.get(id)
-            && stored.title == "New chat"
+        if let Some(stored) = self.inner.state.get(id)
+            && !command_handled && stored.title == "New chat"
         {
             let title = self.generate_title(text).await.unwrap_or_else(|| title_from_prompt(text));
             self.inner.state.rename(id, title.clone()).await?;
@@ -366,7 +352,7 @@ impl AgentManager {
             {
                 debug!(session = id, %error, "Pi did not accept the Tau session title");
             }
-        } else {
+        } else if !command_handled {
             self.inner.state.touch(id).await?;
         }
         self.persist_session_file(id, &process).await?;
@@ -503,16 +489,20 @@ impl AgentManager {
         status: SessionStatus,
         detail: Option<String>,
     ) {
+        let stopped = matches!(runtime.snapshot().status, SessionStatus::Running | SessionStatus::Starting);
         let process = content.take_process();
         self.set_runtime_state(id, runtime, status, detail, None);
         self.interrupt_transcript(id, &mut content);
         drop(content);
+        if stopped && let Err(error) = self.inner.state.touch(id).await {
+            warn!(session = id, %error, "failed to record stopped chat activity");
+        }
+        self.broadcast_sessions().await;
         if let Some(process) = process {
             self.inner.pending_extension_ui.lock().await
                 .retain(|_, pending| !Arc::ptr_eq(&pending.process, &process));
             process.shutdown().await;
         }
-        self.broadcast_sessions().await;
     }
 
     async fn sleep_if_idle(&self, id: &str, expected_idle_since: Instant) {
@@ -1071,11 +1061,19 @@ impl AgentManager {
                     }.await;
                     match result {
                         Ok(Some(change)) => {
+                            let bumps_chat = change.bumps_chat;
                             let message = ServerMessage::TranscriptUpdate {
                                 session_id: id.clone(), generation: transcript.generation.clone(),
                                 sequence: transcript.sequence, change,
                             };
                             let _ = content.events.send(Arc::new(message));
+                            if bumps_chat {
+                                drop(content);
+                                if let Err(error) = self.inner.state.touch(&id).await {
+                                    warn!(session = %id, %error, "failed to record chat message activity");
+                                }
+                                self.broadcast_sessions().await;
+                            }
                         }
                         Ok(None) => {}
                         Err(error) => {
@@ -1127,13 +1125,16 @@ impl AgentManager {
                 }
                 Some("agent_settled") => {
                     drop(content);
+                    if let Err(error) = self.inner.state.touch(&id).await {
+                        warn!(session = %id, %error, "failed to record completed chat activity");
+                    }
                     if let Err(error) = self.refresh_runtime_status(&id, &runtime, &process).await {
                         warn!(session = %id, %error, "failed to refresh settled Pi state");
                     }
+                    self.broadcast_sessions().await;
                     if let Err(error) = self.persist_session_file(&id, &process).await {
                         warn!(session = %id, %error, "failed to persist settled Pi session path");
                     }
-                    self.broadcast_sessions().await;
                 }
                 Some("rpc_closed") => {
                     let detail = event

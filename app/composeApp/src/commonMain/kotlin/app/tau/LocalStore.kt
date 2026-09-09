@@ -82,10 +82,11 @@ class LocalStore(
                 ))
             }
         }
-        StoredConnection(sessions, db.records(ChatKey(identity, ""), "connection").firstOrNull { it.first == "selected" }?.second)
+        val preferences = db.records(ChatKey(identity, ""), "connection").toMap()
+        StoredConnection(sessions, preferences["selected"], preferences["readAt"]?.let { TauJson.decodeFromString<Map<String, Long>>(it) }.orEmpty())
     }
 
-    suspend fun saveSessions(identity: String, sessions: List<SessionSummary>) = access { db ->
+    suspend fun saveSessions(identity: String, sessions: List<SessionSummary>, readAt: Map<String, Long>? = null) = access { db ->
         val ids = sessions.mapTo(mutableSetOf()) { it.id }
         require(ids.size == sessions.size) { "Duplicate session identity" }
         db.transaction {
@@ -98,6 +99,7 @@ class LocalStore(
                 for (id in removed) { statement.bindText(2, id); statement.step(); statement.reset() }
             }
             db.writeSessions(identity, sessions)
+            if (readAt != null) db.write(ChatKey(identity, ""), "connection", listOf("readAt" to TauJson.encodeToString(readAt)))
         }
     }
 
@@ -112,8 +114,11 @@ class LocalStore(
         }
     }
 
-    suspend fun select(key: ChatKey) = access { db ->
-        db.write(ChatKey(key.connection, ""), "connection", listOf("selected" to key.session))
+    suspend fun select(key: ChatKey, readAt: Map<String, Long>? = null) = access { db ->
+        db.transaction {
+            db.write(ChatKey(key.connection, ""), "connection", listOf("selected" to key.session))
+            if (readAt != null) db.write(ChatKey(key.connection, ""), "connection", listOf("readAt" to TauJson.encodeToString(readAt)))
+        }
     }
 
     suspend fun chat(key: ChatKey): RetainedChat = access { db -> loadChat(db, key) }
@@ -138,7 +143,7 @@ class LocalStore(
         require(snapshot.generation.isNotEmpty() && snapshot.sequence >= 0)
         val replaced = snapshot.generation != chat.position.generation
         val connected = !replaced && snapshot.before != null && snapshot.events.any { it.order >= snapshot.before && it.id in chat.byId }
-        val older = if (connected) chat.rows.map { it.event }.filter { it.order < snapshot.before && it.phase == EventPhase.Saved } else emptyList()
+        val older = if (connected) chat.rows.map { it.event }.filter { it.order < snapshot.before && it.phase != EventPhase.Live } else emptyList()
         val events = (older + snapshot.events).associateBy { it.id }.values
         require(snapshot.events.map { it.id }.distinct().size == snapshot.events.size)
         if (!replaced) for (event in snapshot.events) chat.byId[event.id]?.let { require(it.event.order == event.order) }
@@ -491,7 +496,7 @@ private fun SQLiteConnection.records(key: ChatKey, kind: String): List<Pair<Stri
 
 private fun SQLiteConnection.write(key: ChatKey, kind: String, values: List<Pair<String, String>>) {
     if (values.isEmpty()) return
-    prepare("INSERT INTO records (connection,chat,kind,id,value) VALUES (?,?,?,?,?) ON CONFLICT(connection,chat,kind,id) DO UPDATE SET value=excluded.value").use { statement ->
+    prepare("INSERT INTO records (connection,chat,kind,id,value) VALUES (?,?,?,?,?) ON CONFLICT(connection,chat,kind,id) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value").use { statement ->
         for ((id, value) in values) {
             statement.bindText(1, key.connection); statement.bindText(2, key.session); statement.bindText(3, kind)
             statement.bindText(4, id); statement.bindText(5, value); statement.step(); statement.reset()

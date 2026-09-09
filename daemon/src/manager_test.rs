@@ -76,7 +76,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.events.is_empty())).await;
     assert!(matches!(manager.prompt(&id, "Say hello", "request-1").await.unwrap().disposition, PromptDisposition::Submitted));
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.role == EventRole::Assistant && event.phase == EventPhase::Saved))).await;
-    receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, .. })).await;
+    receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, context_usage: Some(usage), .. } if usage.tokens == Some(64000))).await;
     let snapshot = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]);
     assert_eq!(snapshot.events.len(), 3);
     assert_eq!(runtime.snapshot().context_usage, Some(ContextUsage { tokens: Some(64000), context_window: 200000 }));
@@ -231,8 +231,8 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
         let runtime = manager.runtime(&id).await.unwrap();
         receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.events.is_empty())).await;
         manager.prompt(&id, "Say hello", "request-1").await.unwrap();
-        receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, .. })).await;
-        let saved_entry_id = runtime.content.lock().await.transcript.as_ref().unwrap().head().unwrap();
+        receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Idle, context_usage: Some(usage), .. } if usage.tokens == Some(64000))).await;
+        let saved_entry_id = runtime.content.lock().await.transcript.as_ref().unwrap().head.clone().unwrap();
         manager.prompt(&id, "hold", "request-2").await.unwrap();
         receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EventPhase::Live))).await;
         receive(&mut events, |event| matches!(event, ServerMessage::SessionState { status: SessionStatus::Running, .. })).await;
@@ -351,7 +351,7 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     events.open(&manager, &id).await;
     let ServerMessage::TranscriptSnapshot { snapshot: TranscriptSnapshot { events: entries, .. }, .. } =
         receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { .. })).await else { unreachable!() };
-    let head = manager.runtime(&id).await.unwrap().content.lock().await.transcript.as_ref().unwrap().head();
+    let head = manager.runtime(&id).await.unwrap().content.lock().await.transcript.as_ref().unwrap().head.clone();
     assert_eq!(head.as_deref(), Some("image"));
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].attachment.as_ref().unwrap().size, Some(8));
@@ -374,7 +374,7 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     events.open(&manager, &id).await;
     let reloaded = runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]);
     assert_eq!(serde_json::to_value(&reloaded.events).unwrap(), serde_json::to_value(&entries).unwrap());
-    assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().head(), head);
+    assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().head.clone(), head);
     assert!(runtime.content.lock().await.process.is_none());
     assert!(manager.resolve_attachment(&id, "link").await.is_err());
     assert!(manager.resolve_attachment(&id, "image").await.is_err());
@@ -394,6 +394,56 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     assert!(!fs::try_exists(&path).await.unwrap());
     assert!(!fs::try_exists(&uploaded.path).await.unwrap());
     assert!(fs::try_exists(&artifact).await.unwrap());
+    manager.shutdown().await;
+    fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn bumps_on_replies_and_stops_but_not_history_or_token_updates() {
+    let (manager, root) = fixture().await;
+    let id = manager.create_session().await.unwrap();
+    manager.rename_session(&id, "Active").await.unwrap();
+    let mut events = Events::new(&manager);
+    events.open(&manager, &id).await;
+    manager.prompt(&id, "hold", "hold").await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EventPhase::Live))).await;
+    let runtime = manager.runtime(&id).await.unwrap();
+    let process = runtime.content.lock().await.process.clone().unwrap();
+    let other = manager.create_session().await.unwrap();
+    let before = manager.inner.state.get(&id).unwrap().updated_at_ms;
+    process.request(json!({"type":"mock_reply"})).await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::Sessions { sessions } if sessions[0].id == id && sessions[0].updated_at_ms > before)).await;
+    assert_eq!(manager.inner.state.list()[0].0, id);
+    let reply = manager.inner.state.get(&id).unwrap().updated_at_ms;
+    manager.rename_session(&other, "Other").await.unwrap();
+    process.request(json!({"type":"mock_reply_more"})).await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.delta.as_ref().is_some_and(|delta| delta.text == " more"))).await;
+    let operation = runtime.operation.lock().await;
+    let feed = tokio::time::timeout(Duration::from_secs(1), manager.open_session(&id, &[])).await.expect("history reads do not wait for prompt/control operations").unwrap();
+    let generation = runtime.content.lock().await.transcript.as_ref().unwrap().generation.clone();
+    manager.history_page(&id, &generation, 1).await.unwrap();
+    assert_eq!(manager.inner.state.get(&id).unwrap().updated_at_ms, reply);
+    assert_eq!(manager.inner.state.list()[0].0, other);
+    drop(feed);
+    drop(operation);
+    process.request(json!({"type":"mock_finish"})).await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::Sessions { sessions } if sessions[0].id == id && sessions[0].updated_at_ms > reply)).await;
+    let completed = manager.inner.state.get(&id).unwrap().updated_at_ms;
+    manager.rename_session(&other, "Other again").await.unwrap();
+    manager.abort(&id).await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::Sessions { sessions } if sessions[0].id == id && sessions[0].status == SessionStatus::Idle && sessions[0].updated_at_ms > completed)).await;
+    let stopped = manager.inner.state.get(&id).unwrap().updated_at_ms;
+    manager.close_session(&id).await.unwrap();
+    assert_eq!(manager.inner.state.get(&id).unwrap().updated_at_ms, stopped, "idle sleep is not new activity");
+    manager.prompt(&id, "hold", "failed-run").await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EventPhase::Live))).await;
+    manager.rename_session(&other, "Latest other activity").await.unwrap();
+    let running = manager.inner.state.get(&id).unwrap().updated_at_ms;
+    let process = runtime.content.lock().await.process.clone().unwrap();
+    assert!(process.request(json!({"type":"mock_exit"})).await.is_err());
+    receive(&mut events, |event| matches!(event, ServerMessage::Sessions { sessions } if sessions[0].id == id && sessions[0].status == SessionStatus::Error && sessions[0].updated_at_ms > running)).await;
+    let persisted = StateStore::load(root.join("state.json")).await.unwrap();
+    assert_eq!(persisted.list()[0].0, id);
     manager.shutdown().await;
     fs::remove_dir_all(root).await.unwrap();
 }

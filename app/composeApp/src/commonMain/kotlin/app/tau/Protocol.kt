@@ -221,7 +221,6 @@ data class SessionSummary(
     val createdAtMs: Long,
     val updatedAtMs: Long,
     val contextUsage: ContextUsage? = null,
-    val lastEntryId: String? = null,
 )
 
 @Serializable

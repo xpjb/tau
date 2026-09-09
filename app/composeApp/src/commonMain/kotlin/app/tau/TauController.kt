@@ -133,7 +133,7 @@ data class TauUiState(
     val extensionStatuses: Map<String, Map<String, String>> = emptyMap(),
     val extensionWidgets: Map<String, Map<String, ExtensionWidget>> = emptyMap(),
     val codexUsage: CodexUsage? = null,
-    val seenHeads: Map<String, String> = emptyMap(),
+    val readAt: Map<String, Long> = emptyMap(),
     val unread: Set<String> = emptySet(),
     val attachmentDownloads: Map<AttachmentDownloadKey, AttachmentDownload> = emptyMap(),
     val pickingFiles: Boolean = false,
@@ -194,14 +194,17 @@ class TauController(
     fun fork(entryId: String) { state.value.selectedSessionId?.let { send(ForkSession(newRequestId(), it, entryId), PendingAction.Select) } }
 
     fun selectSession(sessionId: String) {
-        mutableState.update { it.copy(unread = it.unread - sessionId) }
-        mutableState.update { it.copy(selectedSessionId = sessionId, mobileChatVisible = true, error = null) }
+        mutableState.update { current ->
+            val activity = current.sessions.firstOrNull { it.id == sessionId }?.updatedAtMs
+            current.copy(selectedSessionId = sessionId, mobileChatVisible = true, error = null, unread = current.unread - sessionId,
+                readAt = if (activity == null) current.readAt else current.readAt + (sessionId to maxOf(activity, current.readAt[sessionId] ?: 0)))
+        }
         failedReads.remove(sessionId)
         val key = ChatKey(state.value.settings.identity, sessionId)
         launch {
             val chat = loadChat(key)
             if (state.value.settings.identity == key.connection && state.value.selectedSessionId == sessionId) {
-                store.select(key)
+                store.select(key, state.value.readAt)
                 if (!chat.synchronized) openSession(sessionId)
                 loadCommands(sessionId)
                 warmChats()
@@ -453,8 +456,11 @@ class TauController(
                 store.disconnect(settings.identity)
                 val retained = store.loadConnection(settings.identity)
                 val selected = retained.selected?.takeIf { id -> retained.sessions.any { it.id == id } } ?: retained.sessions.firstOrNull()?.id
+                val readAt = retained.sessions.associate { it.id to it.updatedAtMs } + retained.readAt
+                if (readAt != retained.readAt) store.saveSessions(settings.identity, retained.sessions, readAt)
                 if (selected != null) loadChat(ChatKey(settings.identity, selected))
-                mutableState.update { it.copy(sessions = retained.sessions, selectedSessionId = selected, restoring = false,
+                mutableState.update { it.copy(sessions = retained.sessions, selectedSessionId = selected, restoring = false, readAt = readAt,
+                    unread = retained.sessions.filter { it.id != selected && it.updatedAtMs > readAt.getValue(it.id) }.mapTo(mutableSetOf()) { it.id },
                     mobileChatVisible = selected != null, connectionStatus = if (settings.token.isBlank()) ConnectionStatus.NotConfigured else ConnectionStatus.Connecting) }
                 if (settings.token.isBlank()) return@launch
                 var crashUploaded = false
@@ -583,33 +589,31 @@ class TauController(
                     if (action is PendingAction.History) mutableState.update { it.copy(loadingHistory = it.loadingHistory - action.sessionId) }
                 }
                 is Sessions -> {
-                    store.saveSessions(identity, message.sessions)
                     val ids = message.sessions.mapTo(mutableSetOf()) { it.id }
-                    val selected = state.value.selectedSessionId?.takeIf { it in ids } ?: message.sessions.firstOrNull()?.id
+                    val previousActivity = state.value.sessions.associate { it.id to it.updatedAtMs }
+                    for (session in message.sessions) if (session.updatedAtMs > (previousActivity[session.id] ?: session.updatedAtMs)) failedReads.remove(session.id)
+                    val before = state.value.readAt
                     mutableState.update { current ->
-                        var seenHeads = current.seenHeads
-                        val unread = current.unread.toMutableSet()
-                        unread.retainAll(ids)
+                        val selected = current.selectedSessionId?.takeIf { it in ids } ?: message.sessions.firstOrNull()?.id
+                        val readAt = current.readAt.filterKeys { it in ids }.toMutableMap()
+                        val unread = mutableSetOf<String>()
                         for (session in message.sessions) {
-                            val head = session.lastEntryId ?: continue
-                            val known = current.seenHeads[session.id]
-                            when {
-                                known == null -> seenHeads = seenHeads + (session.id to head)
-                                known != head -> {
-                                    seenHeads = seenHeads + (session.id to head)
-                                    if (session.id != selected) unread += session.id
-                                }
-                            }
+                            val known = readAt[session.id] ?: if (current.sessions.isEmpty()) session.updatedAtMs else session.createdAtMs
+                            readAt[session.id] = if (session.id == selected) maxOf(known, session.updatedAtMs) else known
+                            if (session.id != selected && session.updatedAtMs > known) unread += session.id
                         }
                         current.copy(sessions = message.sessions, selectedSessionId = selected,
-                            mobileChatVisible = current.mobileChatVisible && selected != null,
-                            seenHeads = seenHeads, unread = unread)
+                            mobileChatVisible = current.mobileChatVisible && selected != null, readAt = readAt, unread = unread)
                     }
+                    store.saveSessions(identity, message.sessions, state.value.readAt.takeIf { it != before })
+                    val selected = state.value.selectedSessionId
                     if (selected != null) {
                         val key = ChatKey(identity, selected)
                         val chat = loadChat(key)
-                        store.select(key)
-                        if (!chat.synchronized) openSession(selected)
+                        if (state.value.selectedSessionId == selected) {
+                            store.select(key)
+                            if (!chat.synchronized && selected !in failedReads) openSession(selected)
+                        }
                     }
                 }
                 is Commands -> mutableState.update { it.copy(slashCommands = it.slashCommands + (message.sessionId to message.commands), loadingCommands = it.loadingCommands - message.sessionId) }

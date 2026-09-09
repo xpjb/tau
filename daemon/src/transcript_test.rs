@@ -25,6 +25,7 @@ fn projects_flat_events_through_streaming_finalization_and_recovery() {
         source.sequence += 1;
         assert!(transcript.check_position(&source).unwrap());
         let change = transcript.project(&raw).unwrap();
+        assert!(!change.bumps_chat, "thinking and tool updates do not bump a chat");
         transcript.apply(&change, source.clone()).unwrap();
     }
     assert!(transcript.project(&json!({"type":"delta","streamId":"s","event":{"assistantMessageEvent":{"type":"text_start","contentIndex":3}}})).is_err());
