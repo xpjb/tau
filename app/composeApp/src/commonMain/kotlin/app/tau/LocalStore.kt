@@ -172,22 +172,6 @@ class LocalStore(
         true
     }
 
-    suspend fun trimHistory(key: ChatKey) = access { db ->
-        val chat = loadChat(db, key)
-        var bytes = 0L
-        var count = 0
-        for (row in chat.rows.asReversed()) {
-            if (count > 0 && (count >= HistoryPageEvents || bytes + row.event.pageBytes > HistoryPageBytes)) break
-            bytes += row.event.pageBytes; count++
-        }
-        val recent = chat.rows.takeLast(count)
-        if (recent.size < chat.rows.size) Snapshot.withMutableSnapshot {
-            val before = recent.first().event.order
-            chat.merge(emptyList(), chat.rows.filter { it.event.order < before && it.event.phase != EventPhase.Live }.map { it.key })
-            chat.before = before
-        }
-    }
-
     suspend fun applyUpdates(key: ChatKey, updates: List<TranscriptPatch>): Boolean = access { db ->
         val chat = loadChat(db, key)
         if (!chat.synchronized) return@access false

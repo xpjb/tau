@@ -193,7 +193,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 let manager = state.manager.clone();
                 let response_outbound = outbound_tx.clone();
                 if let ClientCommand::OpenSession { session_id, requests } = &request.command {
-                    for (_, task) in subscriptions.drain() { task.abort(); let _ = task.await; }
+                    if let Some(task) = subscriptions.remove(session_id) { task.abort(); let _ = task.await; }
                     let session_id = session_id.clone();
                     let requests = requests.clone();
                     subscriptions.insert(session_id.clone(), tokio::spawn(async move {
@@ -627,6 +627,7 @@ mod tests {
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
         let id = manager.create_session().await.unwrap();
+        let other = manager.create_session().await.unwrap();
         let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
         let app = Router::new().route("/", get(move |upgrade: WebSocketUpgrade| {
@@ -661,13 +662,40 @@ mod tests {
                 assert!(hello && snapshot);
             }).await.unwrap();
         }
+        healthy.send(ClientMessage::Text(json!({"id":"open-other", "type":"open_session", "sessionId":other}).to_string().into())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = healthy.next().await.unwrap().unwrap();
+                let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if message["requestId"] == "open-other" { assert_eq!(message["ok"], true); break; }
+            }
+        }).await.unwrap();
+        manager.close_session(&id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = healthy.next().await.unwrap().unwrap();
+                let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if message["type"] == "transcript_update" { assert_eq!(message["sessionId"], id); break; }
+            }
+        }).await.expect("opening another chat must retain the first feed");
+        assert!(!root.join("pi-sessions/spawn-args").exists(), "reading chats must not start Pi");
         healthy.send(ClientMessage::Ping(Bytes::from_static(b"client-ping"))).await.unwrap();
-        assert_eq!(tokio::time::timeout(Duration::from_secs(5), healthy.next()).await.unwrap().unwrap().unwrap(),
-            ClientMessage::Pong(Bytes::from_static(b"client-ping")));
+        let pong = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = healthy.next().await.unwrap().unwrap();
+                if !matches!(message, ClientMessage::Text(_)) { break message; }
+            }
+        }).await.unwrap();
+        assert_eq!(pong, ClientMessage::Pong(Bytes::from_static(b"client-ping")));
         for (text, request_id) in [("{", "invalid"), ("{\"id\":\"\",\"type\":\"list_sessions\"}", "")] {
             healthy.send(ClientMessage::Text(text.into())).await.unwrap();
-            let response = tokio::time::timeout(Duration::from_secs(5), healthy.next()).await.unwrap().unwrap().unwrap();
-            let response: serde_json::Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let message = healthy.next().await.unwrap().unwrap();
+                    let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    if message["requestId"] == request_id { break message; }
+                }
+            }).await.unwrap();
             assert_eq!(response["type"], "response");
             assert_eq!(response["requestId"], request_id);
             assert_eq!(response["ok"], false);

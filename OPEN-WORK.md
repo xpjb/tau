@@ -49,6 +49,8 @@ Plan:
 4. Put reply and stop bump rules at the daemon event boundary. Publish the resulting session order to every client. Warming, paging, thinking/tool deltas and idle sleep do not bump a chat.
 5. Check multiple feeds, off-screen updates, switching without refetch, unread warming, reconnect and bump/no-bump cases. Build matched clients and daemon. Hold the production restart for approval.
 
+Retention and warming are implemented on the branch. Protocol 6 keeps one feed per opened chat until disconnect; opening one chat no longer closes the others. The client retains all loaded rows across switches, applies off-screen updates and warms running/starting, unread and five recent chats, then restores other retained feeds after reconnect. Two background reads run at once; a warm window targets 150 events or 768 KiB, while explicit scrolling can read more. Failed reads wait for selection, resync or reconnect rather than spinning. The focused paging/retention/warming tests and all fourteen daemon tests pass, including a multi-feed check that starts no Pi process. A duplicate-open race found by the full suite was fixed by retaining the pending open until snapshot application finishes. Final full-suite acceptance remains ahead.
+
 The rewrite replaces the old scroll trigger's mixed pixel/item arithmetic with an item-count threshold. Broader networking, client update cost, cold full-JSONL loading and UI rendering work remain separate performance topics; flatness alone is not a measured speedup.
 
 ## Parked: new-chat responsiveness

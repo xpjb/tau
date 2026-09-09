@@ -138,9 +138,8 @@ class LocalStoreTest {
             assertEquals(151, chat.rows.size)
             assertSame(liveRow, chat.rows.last())
             assertEquals(EventPhase.Saved, liveRow.event.phase)
-            store.trimHistory(key)
-            assertEquals(50, chat.rows.size)
-            assertEquals(101L, chat.before)
+            assertEquals(151, chat.rows.size)
+            assertEquals(null, chat.before)
 
             val first = store.beginSend(key, "Same", "")
             val second = store.beginSend(key, "Same", "")
