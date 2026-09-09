@@ -1,5 +1,19 @@
 # Retained transcript contract
 
+## Unreleased QA fix — scrolling
+
+Saved Markdown uses its parsed layout on the first measurement. It no longer
+switches from a raw-text placeholder to a different height whenever a lazy item
+re-enters the viewport. Existing content keys and pixel offsets retain the reading
+position through paging; thinking/tool collapsibility is unchanged.
+
+The real-window regression drives up/down wheel input and delayed history pages
+for separate replies and a large expanded thinking group. It fails on the old
+renderer and passes on the fix. All 17 client tests pass under Xvfb, plus Android
+compilation. Run desktop tests with a display to include this regression. This is
+a code fix only: client 0.5.11, daemon 0.5.10, protocol 6 and installers are unchanged.
+
+
 ## Client 0.5.11 — saved downloads
 
 Completed download references now persist in the existing SQLite records, scoped

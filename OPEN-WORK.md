@@ -81,6 +81,28 @@ Older exports have no recorded identity. Do not guess a match from filename alon
 
 The restart regression failed before the fix and now passes. Completed references restore into the existing transfer state; missing-file checks use conditional removal so an old check cannot erase a newer save. Preview failures keep Open available for the exported file. Android 8/9 exports now avoid overwriting same-name files, matching newer Android and Windows. All sixteen client tests, signed Android versionCode 31 and minified Windows packaging pass. An isolated desktop-JVM/Xvfb check visibly restored Open after restarting, with one download and one exported file. Client 0.5.11 is ready; daemon 0.5.10/protocol 6 and services are unchanged.
 
-## Queued next: scrolling gets trapped while loading older history
+## Fixed, unreleased: scrolling gets trapped while loading older history
 
-The user reports that after scrolling back, scrolling down can loop or get pulled back as history loads. They want a stable transcript position so scrolling in either direction keeps making progress. They explicitly require finishing the download fix first. Only scroll-code references have been inspected; no scrolling implementation has changed. Reproduce with a long transcript and delayed page loads, then review stable anchors and group growth before choosing a fix. Preserve collapsible thinking/tools and daemon-owned event order.
+The user wants scrolling to keep making progress in either direction while history
+loads. They explicitly request a code fix, not packaging, shipping or a version
+bump. The download fix was completed first; this change stays in the QA batch.
+
+An isolated desktop UI reproduced the loop: after scrolling up to row 1424, 600
+downward wheel ticks ended near row 1156 and fetched six more older pages. The
+saved-text renderer measured raw Markdown first, then replaced it asynchronously
+with a shorter formatted layout. Lazy-item re-entry repeated that height change
+and pulled the reading position backward.
+
+The fix parses saved text before its first measurement and remembers that document
+for the composition. It removes the changing placeholder; existing content keys
+and pixel offsets now remain stable across re-entry and page loads. There is no
+new coordinate model, scroll override or page eviction, and collapsible details
+stay intact.
+
+Acceptance: the checked-in UI regression fails with the old renderer and passes
+with the fix. It drives actual wheel input, holds/releases an older page and checks
+stable key/offset, monotonic downward movement and return to the newest content.
+Both separate replies and one expanded thinking group pass. All seventeen client
+tests pass under Xvfb, with no skips; Android compilation also passes. The UI test
+skips without a display. Evidence: /root/tau-checks/scroll/acceptance.json. Versions,
+installers, daemon, Pi and production services remain unchanged.

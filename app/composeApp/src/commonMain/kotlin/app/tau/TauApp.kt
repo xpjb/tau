@@ -130,13 +130,10 @@ import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.semantics.heading
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.serialization.decodeFromString
@@ -561,15 +558,7 @@ private fun RetainedText(text: String, markdown: Boolean, small: Boolean = false
             codeBackground = colors.background.copy(alpha = 0.5f), quoteBar = colors.outline,
         )
     }
-    val document by produceState<TranscriptTextDocument?>(null, text, styles) {
-        value = null
-        value = withContext(Dispatchers.Default) { buildChatText(text, true, styles) }
-    }
-    val parsed = document
-    if (parsed == null) {
-        Text(text, style = body)
-        return
-    }
+    val parsed = remember(text, styles) { buildChatText(text, true, styles) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(styles.blockSpacing)) {
         parsed.blocks.forEach { block ->
             when (block.kind) {
