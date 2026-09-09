@@ -1,5 +1,24 @@
 # Retained transcript contract
 
+## Client hotfix — Tau 0.5.9
+
+This client update works with the deployed 0.5.8 daemon and protocol 5.
+
+- Lazy-list counts, keys and bodies use the same list snapshot. Pending-message
+  removal after sending cannot make an old callback index a newer, shorter list.
+  Transcript groups use the same rule.
+- Older-history demand survives reconnect and transcript refresh. One read runs
+  at a time, using the current generation/cursor after synchronization. Stale
+  replies stay ignored. The visible older boundary requests successive pages
+  until the view fills, and Load older provides an explicit retry.
+- Settings, crash reports, Android versionName and Windows packaging all use
+  the existing TauClientVersion constant. Android versionCode is 29.
+
+All 15 client tests and both release builds pass. An isolated desktop UI check
+loaded three older pages into an unfilled view and completed 40 sends with one
+connection and no crash. This used a local fake server under Xvfb, not a provider
+or physical Windows/Android device. No daemon, Pi or service restart is needed.
+
 ## Current — Tau 0.5.8 / protocol 5
 
 This section supersedes the earlier protocol/store descriptions below. The rewrite

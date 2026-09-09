@@ -27,8 +27,9 @@ android {
         applicationId = "app.tau"
         minSdk = 26
         targetSdk = 37
-        versionCode = 28
-        versionName = "0.5.8"
+        versionCode = 29
+        versionName = rootProject.file("composeApp/src/commonMain/kotlin/app/tau/Platform.kt").readLines()
+            .single { it.startsWith("const val TauClientVersion = ") }.substringAfter('"').substringBefore('"')
     }
 
     signingConfigs {

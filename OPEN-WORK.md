@@ -16,7 +16,13 @@ Implementation:
 
 Acceptance: all 12 daemon tests and all 15 shared/desktop client tests pass, as does strict Clippy. Release daemon, signed Android 0.5.8/versionCode 28, and minified Windows 0.5.8 packaging pass. Checks cover event order/lifecycle, paging, stable presentation keys, queue identities, local-work migration/rollback/restart, connection recovery and attachments. No native UI test, provider prompt or live restart was part of this rewrite.
 
-The reported out-of-order thinking/tool events, stranded interrupted events and new content streaming above them are expected to be covered by this cleanup. The user will report any remainder; do not open a separate investigation or add a special acceptance process for that symptom.
+The user has reported some thinking appearing after a closing message in 0.5.8. Inspection found a possible recovery-order issue, but the affected sequence is not yet identified. This remains open; the 0.5.9 client hotfix does not claim to fix it.
+
+## Client hotfix: send crash, older-history loading and version labels
+
+Windows crash receipts identify an IndexOutOfBoundsException in the pending-message lazy-list key callback. Version 0.5.9 captures one list for its count, keys and item bodies, including transcript groups. The older-history test reproduces the false “Connect to load older history” error during refresh; reads now wait for synchronization/reconnect and resume automatically. The visible older boundary loads successive pages, with an explicit retry button.
+
+The old shared TauClientVersion value was still 0.5.5. Settings and crash reports were already using it; installer versions were separate. Version 0.5.9 makes both installers read that existing constant as well. Fifteen client tests, both builds and an isolated 40-send/three-page desktop UI check pass. The deployed 0.5.8/protocol-5 daemon stays unchanged.
 
 ## Parked: existing-chat send confirmation delay
 

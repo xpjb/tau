@@ -2,7 +2,8 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-version=${TAU_VERSION:-0.5.8}
+version=$(awk -F '"' '/^const val TauClientVersion = / { print $2 }' "$root/app/composeApp/src/commonMain/kotlin/app/tau/Platform.kt")
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid TauClientVersion" >&2; exit 1; }
 work="$root/target/windows-sfx-$version"
 bundle="$work/bundle"
 payload="$work/tau-windows-payload.tar.lzma"
