@@ -1,9 +1,9 @@
 # Retained transcript contract
 
-## Current builds — Tau 0.5.10 / protocol 6
+## Current — Tau 0.5.10 / protocol 6
 
-This is a matched client/daemon update. Builds are accepted, but production is
-still on daemon 0.5.8/protocol 5; the new restart has not been authorized.
+This matched client/daemon update is deployed. The user explicitly authorized
+the immediate restart, including interruption of the active run.
 Pi and its JSONL format stay unchanged.
 
 ### Ordered flat events
@@ -55,8 +55,10 @@ daemon, signed Android versionCode 30 and minified Windows packaging. The existi
 Android certificate is preserved. A desktop-JVM/Xvfb check loaded three history
 pages and completed 40 sends on one connection with zero crashes. This used an
 isolated fake server, not a physical Windows/Android device or live provider.
-Artifacts and receipts are under `/root/tau-release/0.5.10/`. No production service
-or Pi installation has changed.
+Artifacts and receipts are under `/root/tau-release/0.5.10/`. Tau was restarted
+on 2026-09-09 at 17:00:32 UTC. Health reports 0.5.10/protocol 6; all 69 saved chat
+IDs and 66 JSONL prefixes passed verification. Telegram, Pi and configuration
+stayed unchanged. Backup: `/var/backups/tau/0.5.10-20260909T170030Z`.
 
 ## Earlier builds
 
