@@ -401,7 +401,7 @@ class TauConnectionTest {
         val controller = TauController(Dispatchers.Swing, LocalStore({ path }))
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
-            val socket = withTimeout(10_000) { sockets.receive() }
+            var socket = withTimeout(10_000) { sockets.receive() }
             val initial = assertIs<OpenSession>(requests.nextRequest())
             val user = TranscriptEvent("entry:u0:0", 0, "u0", role = EventRole.User, kind = EventKind.Text, text = "Start")
             val old = TranscriptEvent("entry:history:0", 0, "history", role = EventRole.User, kind = EventKind.Text, text = "Older history")
@@ -416,13 +416,16 @@ class TauConnectionTest {
             assertTrue(requests.tryReceive().isFailure, "One history request at a time")
             socket.sendMessage(ResyncRequired(chat.id))
             val refreshPage = assertIs<OpenSession>(requests.nextRequest())
+            withContext(Dispatchers.Swing) { controller.loadOlder(chat.id); controller.loadOlder(chat.id) }
+            assertNull(controller.state.value.error, "Refreshing a chat is not an offline error")
+            assertTrue(chat.id in controller.state.value.loadingHistory)
+            assertTrue(requests.tryReceive().isFailure, "Wait for the existing open instead of sending a stale cursor")
             socket.sendMessage(TranscriptSnapshot(chat.id, paged))
             socket.sendMessage(Response(refreshPage.id, true, chat.id))
             socket.sendMessage(TranscriptPage(stalePage.id, chat.id, "pages", recent.order, HistoryPage(listOf(old))))
             socket.sendMessage(SessionState(other.id, SessionStatus.Idle, detail = "Stale page barrier"))
             controller.awaitState { it.sessions.any { session -> session.detail == "Stale page barrier" } }
             assertEquals(1, controller.state.value.transcripts.getValue(chat.id).rows.size)
-            withContext(Dispatchers.Swing) { controller.loadOlder(chat.id) }
             val historyRequest = assertIs<GetHistory>(requests.nextRequest())
             val pagingLive = TranscriptEvent("stream:paging:0", 2, "live-paging", phase = EventPhase.Live, origin = EventOrigin(streamId = "paging"),
                 role = EventRole.Assistant, kind = EventKind.Thinking, text = "π")
@@ -448,6 +451,27 @@ class TauConnectionTest {
             assertTrue(requests.tryReceive().isFailure, "Loaded history remains available while retained in memory")
             socket.sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0, listOf(user), queue)))
             controller.awaitState { it.transcripts[chat.id]?.position?.generation == "g" }
+
+            socket.sendMessage(TranscriptSnapshot(chat.id, paged.copy(generation = "reconnect")))
+            controller.awaitState { it.transcripts[chat.id]?.position?.generation == "reconnect" }
+            socket.close(CloseReason(CloseReason.Codes.NORMAL, "Reconnect with an unloaded page"))
+            controller.awaitState { it.connectionStatus == ConnectionStatus.Offline }
+            withContext(Dispatchers.Swing) { controller.loadOlder(chat.id); controller.loadOlder(chat.id) }
+            assertNull(controller.state.value.error)
+            assertTrue(chat.id in controller.state.value.loadingHistory)
+            socket = withTimeout(10_000) { sockets.receive() }
+            val reconnect = assertIs<OpenSession>(requests.nextRequest())
+            assertTrue(requests.tryReceive().isFailure, "History waits for the new snapshot")
+            socket.sendMessage(TranscriptSnapshot(chat.id, paged.copy(generation = "reconnect")))
+            socket.sendMessage(Response(reconnect.id, true, chat.id))
+            val resumed = assertIs<GetHistory>(requests.nextRequest())
+            assertEquals("reconnect", resumed.generation)
+            assertEquals(recent.order, resumed.before)
+            assertTrue(requests.tryReceive().isFailure, "Only the history read resumes")
+            socket.sendMessage(TranscriptPage(resumed.id, chat.id, resumed.generation, resumed.before, HistoryPage(listOf(old))))
+            socket.sendMessage(Response(resumed.id, true, chat.id))
+            controller.awaitState { it.transcripts[chat.id]?.before == null && chat.id !in it.loadingHistory }
+            assertEquals(listOf(old, recent), controller.state.value.transcripts.getValue(chat.id).rows.map { it.event })
 
         } finally {
             withContext(Dispatchers.Swing) { controller.dispose() }.join()

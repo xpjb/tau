@@ -77,6 +77,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -988,18 +989,12 @@ private fun ChatPanel(
             }
         }.filterNotNull().distinctUntilChanged().collect { controller.saveScroll(sessionId, it) }
     }
+    val historyReady by rememberUpdatedState(state.connectionStatus == ConnectionStatus.Connected && chat.synchronized && sessionId !in state.loadingHistory)
     LaunchedEffect(chat, listState) {
         snapshotFlow {
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()
-            if (chat.before == null || last == null) null
-            else info.totalItemsCount - last.index <= 3
-        }.filterNotNull().distinctUntilChanged().collect { nearEnd ->
-            if (nearEnd) controller.loadOlder(sessionId)
-        }
-    }
-    LaunchedEffect(chat.synchronized, chat.before) {
-        if (chat.synchronized && chat.before != null && chat.rows.size <= 1) controller.loadOlder(sessionId)
+            val before = chat.before
+            if (historyReady && before != null && listState.layoutInfo.visibleItemsInfo.any { it.key == "older" }) chat.position.generation to before else null
+        }.filterNotNull().distinctUntilChanged().collect { controller.loadOlder(sessionId) }
     }
     SideEffect {
         if (draft == controller.state.value.drafts[sessionId].orEmpty() && editorValue.text != draft) {
@@ -1442,8 +1437,7 @@ private fun ChatPanel(
                                     if (sessionId in state.loadingHistory) {
                                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                                     } else {
-                                        Text("Older messages", style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        TextButton(onClick = { controller.loadOlder(sessionId) }) { Text("Load older") }
                                     }
                                 }
                             }

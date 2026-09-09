@@ -230,15 +230,18 @@ class TauController(
 
     fun loadOlder(sessionId: String) {
         val current = state.value
+        if (sessionId != current.selectedSessionId) return
         val chat = current.transcripts[sessionId] ?: return
-        val cursor = chat.before ?: return
-        if (sessionId in current.loadingHistory) return
-        if (socketId == null || !chat.synchronized) {
-            mutableState.update { it.copy(error = "Connect to load older history") }
+        val cursor = chat.before
+        if (cursor == null) {
+            mutableState.update { it.copy(loadingHistory = it.loadingHistory - sessionId) }
             return
         }
-        val request = GetHistory(newRequestId(), sessionId, chat.position.generation, cursor)
+        if (pending.values.any { it is PendingAction.History && it.sessionId == sessionId }) return
         mutableState.update { it.copy(loadingHistory = it.loadingHistory + sessionId, error = null) }
+        if (socketId == null) return
+        if (!chat.synchronized) { openSession(sessionId); return }
+        val request = GetHistory(newRequestId(), sessionId, chat.position.generation, cursor)
         send(request, PendingAction.History(sessionId, request.generation, cursor))
     }
 
@@ -475,7 +478,7 @@ class TauController(
                                 pending.clear()
                                 syncing.clear()
                                 mutableState.update { it.copy(connectionStatus = ConnectionStatus.Offline, daemonVersion = null,
-                                    slashCommands = emptyMap(), loadingCommands = emptySet(), loadingHistory = emptySet(), extensionDialogs = emptyList(), extensionStatuses = emptyMap(), extensionWidgets = emptyMap()) }
+                                    slashCommands = emptyMap(), loadingCommands = emptySet(), extensionDialogs = emptyList(), extensionStatuses = emptyMap(), extensionWidgets = emptyMap()) }
                             }
                         }
                     }
@@ -506,8 +509,10 @@ class TauController(
                     }
                     val key = ChatKey(identity, message.sessionId)
                     val chat = loadChat(key)
-                    if (store.applySnapshot(key, message.snapshot)) syncing.remove(message.sessionId)
-                    else if (!chat.synchronized) {
+                    if (store.applySnapshot(key, message.snapshot)) {
+                        syncing.remove(message.sessionId)
+                        if (message.sessionId in state.value.loadingHistory) loadOlder(message.sessionId)
+                    } else if (!chat.synchronized) {
                         syncing.remove(message.sessionId)
                         openSession(message.sessionId)
                     }
@@ -543,7 +548,10 @@ class TauController(
                     store.acknowledge(identity, message.requestId, message.ok, message.uncertain, message.disposition, message.outcome, message.error)
                     val action = pending.remove(message.requestId)
                     if (!message.ok) {
-                        if (action is PendingAction.Open) syncing.remove(action.sessionId)
+                        if (action is PendingAction.Open) {
+                            syncing.remove(action.sessionId)
+                            mutableState.update { it.copy(loadingHistory = it.loadingHistory - action.sessionId) }
+                        }
                         if (message.sessionId == null || message.sessionId == state.value.selectedSessionId) {
                             mutableState.update { it.copy(error = (if (message.uncertain) "Unconfirmed: " else "") + (message.error ?: "Tau rejected the request.")) }
                         }
@@ -661,7 +669,6 @@ class TauController(
     private fun openSession(sessionId: String) {
         if (socketId == null || state.value.selectedSessionId != sessionId || !syncing.add(sessionId)) return
         pending.entries.removeAll { (_, action) -> action is PendingAction.History && action.sessionId == sessionId }
-        mutableState.update { it.copy(loadingHistory = it.loadingHistory - sessionId) }
         val chat = state.value.transcripts[sessionId]
         send(OpenSession(newRequestId(), sessionId, chat?.pending?.map { it.requestId }.orEmpty()), PendingAction.Open(sessionId))
     }
@@ -691,7 +698,7 @@ class TauController(
                     pending.remove(request.id)
                     if (action is PendingAction.Open) syncing.remove(action.sessionId)
                     if (action is PendingAction.Commands) mutableState.update { it.copy(loadingCommands = it.loadingCommands - action.sessionId) }
-                    if (action is PendingAction.History) mutableState.update { it.copy(loadingHistory = it.loadingHistory - action.sessionId) }
+                    if (action is PendingAction.History && error !is TauConnectionException) mutableState.update { it.copy(loadingHistory = it.loadingHistory - action.sessionId) }
                 }
                 throw error
             }
