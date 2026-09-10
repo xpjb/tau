@@ -129,3 +129,30 @@ client tests pass under Xvfb with no skips; Android compilation passes. These ar
 isolated desktop-JVM checks, not physical Windows/Android acceptance. Evidence:
 /root/tau-checks/copy-message/acceptance.json. No version bump, packaging, daemon
 change, provider prompt or service restart.
+
+## Implemented, unreleased: running takes priority over unread
+
+The user wants unread to mean a finished run is ready to check. The current list
+label checks unread before running, and its separately stored unread set has no
+status rule. The durable readAt markers already retain unseen activity.
+
+Plan: derive isUnread(session) from status, selection and readAt instead of storing
+another set. Use that same rule for the list and history warming. Running/starting
+hide unread without consuming the read marker; status-only completion shows it.
+Keep old failed-response badges below active status too. Extend the existing
+connection test through activity, status-only transitions and restart, then run
+focused/full client checks and Android compilation. This is a separate client-only
+commit; leave the accepted title-prompt branch isolated. No release or restart.
+
+Acceptance: the extended connection regression fails on the old starting/unread
+behavior and now passes through starting/running activity, status-only completion
+and resumption, sleeping/error, selection, warming and restart during a run. The
+read marker stays unchanged until selection; completion needs no extra activity
+update to reveal an unread chat. The separate unread set is removed, and both list
+and warming use the same constant-time query. Old failure badges no longer hide
+starting/running in the list or chat header.
+
+All 17 client tests pass under Xvfb with no skips; Android compilation passes.
+Evidence: /root/tau-checks/unread-running/acceptance.json. No daemon, protocol,
+version, installer, title-script, Pi or production service change. The separate
+accepted title-prompt branch still awaits its live-script deployment gate.

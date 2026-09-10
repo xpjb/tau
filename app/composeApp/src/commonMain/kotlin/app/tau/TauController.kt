@@ -133,14 +133,18 @@ data class TauUiState(
     val extensionWidgets: Map<String, Map<String, ExtensionWidget>> = emptyMap(),
     val codexUsage: CodexUsage? = null,
     val readAt: Map<String, Long> = emptyMap(),
-    val unread: Set<String> = emptySet(),
     val attachmentDownloads: Map<AttachmentDownloadKey, AttachmentDownload> = emptyMap(),
     val pickingFiles: Boolean = false,
     val uploadingSessions: Set<String> = emptySet(),
     val mobileChatVisible: Boolean = false,
     val notice: String? = null,
     val error: String? = null,
-)
+) {
+    fun isUnread(session: SessionSummary): Boolean =
+        session.id != selectedSessionId &&
+        session.status != SessionStatus.Running && session.status != SessionStatus.Starting &&
+        session.updatedAtMs > (readAt[session.id] ?: session.createdAtMs)
+}
 
 class TauController(
     internal val dispatcher: CoroutineDispatcher,
@@ -195,7 +199,7 @@ class TauController(
     fun selectSession(sessionId: String) {
         mutableState.update { current ->
             val activity = current.sessions.firstOrNull { it.id == sessionId }?.updatedAtMs
-            current.copy(selectedSessionId = sessionId, mobileChatVisible = true, error = null, unread = current.unread - sessionId,
+            current.copy(selectedSessionId = sessionId, mobileChatVisible = true, error = null,
                 readAt = if (activity == null) current.readAt else current.readAt + (sessionId to maxOf(activity, current.readAt[sessionId] ?: 0)))
         }
         failedReads.remove(sessionId)
@@ -463,7 +467,6 @@ class TauController(
                 if (readAt != retained.readAt) store.saveSessions(settings.identity, retained.sessions, readAt)
                 if (selected != null) loadChat(ChatKey(settings.identity, selected))
                 mutableState.update { it.copy(sessions = retained.sessions, selectedSessionId = selected, restoring = false, readAt = readAt,
-                    unread = retained.sessions.filter { it.id != selected && it.updatedAtMs > readAt.getValue(it.id) }.mapTo(mutableSetOf()) { it.id },
                     attachmentDownloads = retained.downloads.mapValues { (_, saved) ->
                         AttachmentDownload(AttachmentDownloadStatus.Downloaded, 0, null, saved = saved)
                     },
@@ -602,14 +605,12 @@ class TauController(
                     mutableState.update { current ->
                         val selected = current.selectedSessionId?.takeIf { it in ids } ?: message.sessions.firstOrNull()?.id
                         val readAt = current.readAt.filterKeys { it in ids }.toMutableMap()
-                        val unread = mutableSetOf<String>()
                         for (session in message.sessions) {
                             val known = readAt[session.id] ?: if (current.sessions.isEmpty()) session.updatedAtMs else session.createdAtMs
                             readAt[session.id] = if (session.id == selected) maxOf(known, session.updatedAtMs) else known
-                            if (session.id != selected && session.updatedAtMs > known) unread += session.id
                         }
                         current.copy(sessions = message.sessions, selectedSessionId = selected,
-                            mobileChatVisible = current.mobileChatVisible && selected != null, readAt = readAt, unread = unread)
+                            mobileChatVisible = current.mobileChatVisible && selected != null, readAt = readAt)
                     }
                     store.saveSessions(identity, message.sessions, state.value.readAt.takeIf { it != before })
                     val selected = state.value.selectedSessionId
@@ -682,7 +683,7 @@ class TauController(
         if (socketId == null || current.connectionStatus != ConnectionStatus.Connected) return
         val candidates = (listOfNotNull(current.selectedSessionId) +
             current.sessions.filter { it.status == SessionStatus.Running || it.status == SessionStatus.Starting }.map { it.id } +
-            current.sessions.filter { it.id in current.unread }.map { it.id } +
+            current.sessions.filter { current.isUnread(it) }.map { it.id } +
             current.sessions.take(RecentWarmChats).map { it.id } +
             current.sessions.filter { it.id in current.transcripts }.map { it.id }).distinct()
         for (sessionId in candidates) {

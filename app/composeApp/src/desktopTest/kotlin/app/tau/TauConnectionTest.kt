@@ -45,6 +45,9 @@ class TauConnectionTest {
         capabilities = listOf("queue_edit", "queue_delete", "queue_run_prefix", "queue_resume", "queue_cancel_control"),
         boundaries = listOf("reasoning_checkpoint", "turn"))
 
+    private val TauUiState.unread: Set<String>
+        get() = sessions.filter { isUnread(it) }.mapTo(mutableSetOf()) { it.id }
+
     private suspend fun WebSocketSession.sendMessage(message: ServerMessage) {
         send(TauJson.encodeToString<ServerMessage>(message))
     }
@@ -159,25 +162,40 @@ class TauConnectionTest {
         try {
             withContext(Dispatchers.Swing) { controller.start(settings) }
             val socket = withTimeout(10_000) { sockets.receive() }
-            controller.awaitState { !it.restoring }
+            controller.awaitState { !it.restoring && it.sessions.size == 2 }
             assertTrue(controller.state.value.unread.isEmpty())
-            catalog.set(listOf(quiet.copy(updatedAtMs = 2), chat))
+            catalog.set(listOf(quiet.copy(updatedAtMs = 2, status = SessionStatus.Starting), chat))
             socket.sendMessage(Sessions(catalog.get()))
-            controller.awaitState { "quiet" in it.unread && it.sessions.first().id == "quiet" }
+            controller.awaitState { it.sessions.first().id == quiet.id && it.sessions.first().status == SessionStatus.Starting }
+            assertTrue(quiet.id !in controller.state.value.unread, "Starting must take priority over unread")
+            for (status in listOf(SessionStatus.Running, SessionStatus.Idle, SessionStatus.Starting,
+                SessionStatus.Running, SessionStatus.Sleeping, SessionStatus.Error, SessionStatus.Idle)) {
+                socket.sendMessage(SessionState(quiet.id, status))
+                controller.awaitState { it.sessions.first().status == status }
+                assertEquals(status != SessionStatus.Starting && status != SessionStatus.Running,
+                    quiet.id in controller.state.value.unread, "Unread eligibility for $status")
+                assertEquals(1L, controller.state.value.readAt[quiet.id], "Active status never consumes unseen activity")
+            }
             withContext(Dispatchers.Swing) { controller.selectSession("quiet") }
             assertTrue(controller.state.value.unread.isEmpty())
             catalog.set(listOf(chat.copy(updatedAtMs = 3), quiet.copy(updatedAtMs = 2)))
             socket.sendMessage(Sessions(catalog.get()))
             controller.awaitState { chat.id in it.unread }
             withContext(Dispatchers.Swing) { controller.selectSession(chat.id) }
-            catalog.set(listOf(quiet.copy(updatedAtMs = 4), chat.copy(updatedAtMs = 3)))
+            catalog.set(listOf(quiet.copy(updatedAtMs = 4, status = SessionStatus.Running), chat.copy(updatedAtMs = 3)))
             socket.sendMessage(Sessions(catalog.get()))
-            controller.awaitState { quiet.id in it.unread }
+            controller.awaitState { it.sessions.first().id == quiet.id && it.sessions.first().updatedAtMs == 4L }
+            assertTrue(quiet.id !in controller.state.value.unread)
             withContext(Dispatchers.Swing) { controller.dispose() }.join()
             controller = TauController(Dispatchers.Swing, LocalStore({ path }))
             withContext(Dispatchers.Swing) { controller.start(settings) }
-            controller.awaitState { it.transcripts[quiet.id]?.synchronized == true && quiet.id in it.unread }
+            val reopened = withTimeout(10_000) { sockets.receive() }
+            controller.awaitState { it.transcripts[quiet.id]?.synchronized == true && it.sessions.first().status == SessionStatus.Running }
+            assertTrue(quiet.id !in controller.state.value.unread, "Restored running chats stay active, not unread")
             assertEquals(2L, controller.state.value.readAt[quiet.id], "Reading metadata and warming history preserve the read marker")
+            reopened.sendMessage(SessionState(quiet.id, SessionStatus.Idle))
+            controller.awaitState { quiet.id in it.unread }
+            assertEquals(4L, controller.state.value.sessions.first().updatedAtMs, "Completion needs no extra activity to reveal unread")
         } finally {
             controller.dispose()
             server.stop(1_000, 1_000)

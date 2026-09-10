@@ -664,7 +664,7 @@ private fun SessionList(
                                 ),
                         ) {
                             Column(Modifier.padding(12.dp)) {
-                                val unread = session.id in state.unread
+                                val unread = state.isUnread(session)
                                 Text(
                                     session.title,
                                     maxLines = 2,
@@ -688,7 +688,8 @@ private fun SessionList(
                                 }
                                 val retained = state.transcripts[session.id]
                                 val responseFailed by remember(retained) { derivedStateOf { retained.latestResponseFailed() } }
-                                val failed = session.detail == null && responseFailed
+                                val failed = session.status != SessionStatus.Running && session.status != SessionStatus.Starting &&
+                                    session.detail == null && responseFailed
                                 Text(
                                     if (unread && !failed && session.detail == null) "Unread"
                                     else session.detail ?: if (failed) "Failed" else session.status.label,
@@ -1025,7 +1026,8 @@ private fun ChatPanel(
                     }
                     val extensionStatus = state.extensionStatuses[sessionId].orEmpty().toSortedMap().values.joinToString(" · ")
                     val responseFailed by remember(chat) { derivedStateOf { chat.latestResponseFailed() } }
-                    val failed = session.detail == null && extensionStatus.isEmpty() && responseFailed
+                    val failed = session.status != SessionStatus.Running && session.status != SessionStatus.Starting &&
+                        session.detail == null && extensionStatus.isEmpty() && responseFailed
                     Text(session.detail ?: extensionStatus.ifEmpty { if (failed) "Failed" else session.status.label },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (failed) MaterialTheme.colorScheme.error else session.status.color,
