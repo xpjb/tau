@@ -108,3 +108,24 @@ skips without a display. Evidence: /root/tau-checks/scroll/acceptance.json. Vers
 installers, daemon, Pi and production services remain unchanged.
 
 The user subsequently requested builds and authorized daemon deployment if needed. The combined 0.5.11 rebuild 2 retains the public version, raises Android versionCode to 32, and uses r2 filenames without replacing the archived first build. Signed Android and minified Windows packaging passed against the accepted scrolling code. No daemon code is pending; the installed and running 0.5.10 binary matches its accepted SHA-256, so no restart is needed.
+
+## Implemented, unreleased: Copy message excludes Details
+
+Approved behavior: Copy message includes only actual text parts outside Details,
+regardless of expansion. Keep the whole bubble's main prose, its raw Markdown and
+blank-line separators. Keep explicit Copy selection literal. Image placeholders,
+attachment controls and failure labels stay excluded; pending-message copy stays
+unchanged.
+
+The existing inline copy expression now reads text presentation parts instead of
+raw rows. It has no expansion-state check and leaves the selection override alone.
+No new state or helper was added.
+
+Acceptance: the extended real-window transcript test reproduced copied tool output
+and errors with Details collapsed. It now passes with Details collapsed and
+expanded, preserving both prose blocks, raw Markdown and blank lines while
+excluding thinking, tool input/output/errors and an image marker. All seventeen
+client tests pass under Xvfb with no skips; Android compilation passes. These are
+isolated desktop-JVM checks, not physical Windows/Android acceptance. Evidence:
+/root/tau-checks/copy-message/acceptance.json. No version bump, packaging, daemon
+change, provider prompt or service restart.

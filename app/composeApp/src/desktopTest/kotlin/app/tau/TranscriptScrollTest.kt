@@ -19,6 +19,10 @@ import io.ktor.websocket.readText
 import io.ktor.websocket.send
 import java.awt.GraphicsEnvironment
 import java.awt.Robot
+import java.awt.Toolkit
+import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.StringSelection
+import java.awt.event.InputEvent
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -40,7 +44,7 @@ import kotlin.test.assertTrue
 
 class TranscriptScrollTest {
     @Test
-    fun scrollsBothWaysAndKeepsItsAnchorWhenHistoryArrives() = runBlocking {
+    fun scrollsBothWaysAndCopiesMainText() = runBlocking {
         assumeFalse("Run with a display or Xvfb", GraphicsEnvironment.isHeadless())
         checkScroll(grouped = false)
         checkScroll(grouped = true)
@@ -145,6 +149,49 @@ class TranscriptScrollTest {
             assertTrue(reachedBottom, "Downward scrolling never reached the newest message")
             assertEquals(3, historyReads.get(), "Downward scrolling fetched more older history")
             assertEquals("bottom-anchor", position().key)
+            if (grouped) {
+                val key = ChatKey(settings.identity, session.id)
+                val copied = listOf(
+                    TranscriptEvent("copy-first", 1600, "copy-first", role = EventRole.Assistant, kind = EventKind.Text, text = "First **reply**"),
+                    TranscriptEvent("copy-thought", 1601, "copy-thought", role = EventRole.Assistant, kind = EventKind.Thinking, text = "Private thought"),
+                    TranscriptEvent("copy-call", 1602, "copy-call", role = EventRole.Assistant, kind = EventKind.Tool, text = "Tool input", toolCallId = "copy-tool"),
+                    TranscriptEvent("copy-output", 1603, "copy-output", role = EventRole.Tool, kind = EventKind.Text, text = "Tool output", toolCallId = "copy-tool"),
+                    TranscriptEvent("copy-error", 1604, "copy-error", role = EventRole.Tool, kind = EventKind.Text, text = "Tool error", toolCallId = "copy-tool", isError = true),
+                    TranscriptEvent("copy-last", 1605, "copy-last", role = EventRole.Assistant, kind = EventKind.Text, text = "Last reply"),
+                    TranscriptEvent("copy-image", 1606, "copy-image", role = EventRole.Assistant, kind = EventKind.Image, text = "image/png"),
+                )
+                assertTrue(controller.store.applySnapshot(key, TranscriptCut("copy", 0, copied, QueueState(), null)))
+                controller.store.setPreference(key, "expanded:tool:copy-call", "true")
+                for (expanded in listOf(false, true)) {
+                    controller.store.setPreference(key, "detailsDefault", expanded.toString())
+                    delay(400)
+                    withContext(Dispatchers.Swing) {
+                        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection("Unchanged clipboard"), null)
+                    }
+                    robot.mouseMove(location.x + 700, location.y + 610)
+                    delay(100)
+                    robot.mousePress(InputEvent.BUTTON3_DOWN_MASK)
+                    delay(80)
+                    robot.mouseRelease(InputEvent.BUTTON3_DOWN_MASK)
+                    delay(250)
+                    robot.mouseMove(location.x + 750, location.y + 530)
+                    delay(100)
+                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+                    delay(80)
+                    robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+                    val clipboard = withTimeout(5_000) {
+                        var text = "Unchanged clipboard"
+                        while (text == "Unchanged clipboard") {
+                            delay(30)
+                            text = withContext(Dispatchers.Swing) {
+                                Toolkit.getDefaultToolkit().systemClipboard.getData(DataFlavor.stringFlavor) as String
+                            }
+                        }
+                        text
+                    }
+                    assertEquals("First **reply**\n\nLast reply", clipboard, "Copy message included Details (expanded=$expanded)")
+                }
+            }
         } finally {
             withContext(NonCancellable) {
                 releasePage.complete(Unit)

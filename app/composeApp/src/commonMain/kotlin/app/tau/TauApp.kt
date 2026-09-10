@@ -1412,7 +1412,10 @@ private fun ChatPanel(
                                     PositionedDropdownMenu(menuExpanded, menuPointer, { menuExpanded = false; menuPointer = null }) {
                                         val selectedText = transcriptSelectionState.selectedTexts.joinToString("\n") { it.text }
                                         DropdownMenuItem(text = { Text(if (selectedText.isEmpty()) "Copy message" else "Copy selection") }, onClick = {
-                                            PlatformServices.copyText(selectedText.ifEmpty { group.rows.map { it.event }.filter { it.kind == EventKind.Text }.joinToString("\n\n") { it.text } })
+                                            PlatformServices.copyText(selectedText.ifEmpty {
+                                                parts.asSequence().filterIsInstance<TranscriptPart.Text>().map { it.row.event }
+                                                    .filter { it.kind == EventKind.Text }.joinToString("\n\n") { it.text }
+                                            })
                                             menuExpanded = false
                                         })
                                         if (message.phase == EventPhase.Saved) DropdownMenuItem(text = { Text("Fork here") }, enabled = state.connectionStatus == ConnectionStatus.Connected,
