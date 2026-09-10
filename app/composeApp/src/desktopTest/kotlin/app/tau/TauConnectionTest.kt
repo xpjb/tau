@@ -129,7 +129,7 @@ class TauConnectionTest {
 
 
     @Test
-    fun marks_unseen_chats_unread_until_selected() = runBlocking {
+    fun derives_unread_and_model_failure_status() = runBlocking {
         val directory = Files.createTempDirectory("tau-unread")
         val path = directory.resolve("transcript.db").toString()
         val quiet = chat.copy(id = "quiet", title = "Quiet")
@@ -196,6 +196,44 @@ class TauConnectionTest {
             reopened.sendMessage(SessionState(quiet.id, SessionStatus.Idle))
             controller.awaitState { quiet.id in it.unread }
             assertEquals(4L, controller.state.value.sessions.first().updatedAtMs, "Completion needs no extra activity to reveal unread")
+
+            val call = TranscriptEvent("call", 0, "call", role = EventRole.Assistant, kind = EventKind.Tool,
+                toolName = "bash", toolCallId = "bash", text = "exit 1", stopReason = "toolUse")
+            val tool = TranscriptEvent("tool", 1, "tool", role = EventRole.Tool, kind = EventKind.Text,
+                toolName = "bash", toolCallId = "bash", text = "Exit code 1", isError = true)
+            val reply = TranscriptEvent("reply", 2, "reply", role = EventRole.Assistant, kind = EventKind.Hidden,
+                stopReason = "error", errorMessage = "Provider failed")
+            val system = TranscriptEvent("system", 3, "system", role = EventRole.System, kind = EventKind.Text, text = "Notice")
+            val user = TranscriptEvent("user", 4, "user", role = EventRole.User, kind = EventKind.Text, text = "Try again")
+            val settled = TranscriptEvent("settled", 5, "settled", role = EventRole.Assistant, kind = EventKind.Text,
+                text = "Recovered", stopReason = "stop")
+            val cases = listOf(
+                listOf(call, tool.copy(phase = EventPhase.Live)) to false,
+                listOf(call, tool) to false,
+                listOf(call, tool, reply.copy(phase = EventPhase.Live)) to false,
+                listOf(call, tool, reply, system) to true,
+                listOf(reply, system, tool.copy(order = 4)) to true,
+                listOf(reply, system, user) to false,
+                listOf(reply, user, settled.copy(isError = true)) to false,
+                listOf(reply, user, settled.copy(stopReason = "aborted")) to false,
+                listOf(settled.copy(phase = EventPhase.Interrupted, stopReason = null)) to false,
+                listOf(reply.copy(phase = EventPhase.Interrupted)) to true,
+                listOf(reply, user, settled) to false,
+            )
+            for ((index, entry) in cases.withIndex()) {
+                val (events, failed) = entry
+                val generation = "failure-$index"
+                reopened.sendMessage(TranscriptSnapshot(quiet.id, TranscriptCut(generation, 0, events, queue)))
+                val current = controller.awaitState { it.transcripts[quiet.id]?.position?.generation == generation }
+                val retained = current.transcripts.getValue(quiet.id)
+                assertEquals(failed, retained.latestResponseFailed(), "Model failure classification for case $index")
+                if (index == 1) {
+                    val parts = presentTranscript(retained.rows).single().parts
+                    assertTrue(parts.none { it is TranscriptPart.Failure }, "A recoverable tool error is not a failed response")
+                    assertTrue(assertIs<TranscriptPart.Details>(parts.single()).blocks.single().results.single().event.isError,
+                        "The tool error stays visible in Details")
+                }
+            }
         } finally {
             controller.dispose()
             server.stop(1_000, 1_000)

@@ -1964,11 +1964,6 @@ private val StopIcon = ImageVector.Builder(
     }
 }.build()
 
-private fun RetainedChat?.latestResponseFailed(): Boolean {
-    val latest = this?.rows?.asReversed()?.firstOrNull { it.event.role != EventRole.System }?.event ?: return false
-    return latest.stopReason == "error" || latest.isError
-}
-
 private val SessionStatus.label: String
     get() = when (this) {
         SessionStatus.Sleeping -> "Ready"

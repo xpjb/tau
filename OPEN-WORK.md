@@ -156,3 +156,28 @@ All 17 client tests pass under Xvfb with no skips; Android compilation passes.
 Evidence: /root/tau-checks/unread-running/acceptance.json. No daemon, protocol,
 version, installer, title-script, Pi or production service change. The separate
 accepted title-prompt branch still awaits its live-script deployment gate.
+
+## Implemented, unreleased: Failed means a stopped model failure
+
+The user parked the Do up to here / queue-pause question. This QA item changes
+only failure status. The shared header/list helper currently promotes isError on
+the last non-system event, so a bash/tool error can be mistaken for a model failure.
+
+Plan: move that existing query into transcript presentation, reproduce the tool
+error through the connection/store test, and require the latest user/assistant
+event to be a non-live assistant outcome with stopReason=error. Ignore tool/system
+rows, retain a newer user message as a boundary, and keep the running/starting
+guards. Keep tool errors visible inside Details. No new state, daemon/protocol
+change, queue change, release or restart; the title-prompt branch stays isolated.
+
+Acceptance: the connection/store regression reproduced a live bash error being
+classified as a model failure. It now checks live/saved tool errors, live versus
+terminal model errors, later tool/system notices, newer user input, recovery,
+abort and interrupted history. Tool errors still appear inside Details without a
+response-failure card. The existing test is now named
+TauConnectionTest.derives_unread_and_model_failure_status.
+
+All 17 client tests pass under Xvfb with no skips; Android compilation passes.
+Evidence: /root/tau-checks/model-failure/acceptance.json. No new state or deployed
+change. The queue-pause question stays parked, and the title-prompt branch remains
+isolated behind its existing deployment gate.

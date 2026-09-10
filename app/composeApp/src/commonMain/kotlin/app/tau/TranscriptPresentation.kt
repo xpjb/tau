@@ -73,3 +73,10 @@ internal fun presentTranscript(rows: List<EventRow>, previous: List<TranscriptGr
         TranscriptGroup(prior?.key ?: members.first().key, members, parts)
     }
 }
+
+internal fun RetainedChat?.latestResponseFailed(): Boolean {
+    val latest = this?.rows?.asReversed()?.firstOrNull {
+        it.event.role == EventRole.User || it.event.role == EventRole.Assistant
+    }?.event ?: return false
+    return latest.role == EventRole.Assistant && latest.phase != EventPhase.Live && latest.stopReason == "error"
+}

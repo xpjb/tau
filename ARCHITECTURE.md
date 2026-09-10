@@ -39,7 +39,7 @@ with `transcript` owning Pi formats and `state.rs` owning only Tau's own
 - `RetainedTranscript.kt` — flat event types, stable rows and their ordered
   in-memory collection, plus pending-work and chat-position types.
 - `TranscriptPresentation.kt` — collapsible groups across loaded events,
-  tool-call/result matching and presentation-key reuse.
+  tool-call/result matching, presentation-key reuse and model-failure status.
 - `Protocol.kt` — mirrors `daemon/src/protocol.rs` wire types.
 - `TranscriptText.kt` — text utilities: markdown rendering, suggestion
   scoring, byte formatting.
