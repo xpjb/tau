@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::SessionModel;
 use crate::transcript::{HistoryPage, QueueRef, TranscriptChange, TranscriptSnapshot};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -21,6 +21,8 @@ pub struct ClientRequest {
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ClientCommand {
     ListSessions,
+    GetTitlePrompt,
+    SetTitlePrompt { prompt: String },
     CreateSession,
     OpenSession { session_id: String, #[serde(default)] requests: Vec<String> },
     GetHistory { session_id: String, generation: String, before: u64 },
@@ -79,6 +81,11 @@ pub enum ServerMessage {
         notice: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    TitlePrompt {
+        request_id: String,
+        prompt: String,
+        default_prompt: &'static str,
     },
     Commands {
         session_id: String,

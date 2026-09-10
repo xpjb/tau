@@ -1,0 +1,13 @@
+Generate a short title for each coding session. Be literal and specific. Mention the project name if present.
+
+Session: fix the login page it keeps redirecting to the wrong URL
+Title: fix login page redirect
+
+Session: add dark mode toggle to the settings panel
+Title: add dark mode toggle
+
+Session: the database is slow can you add an index to the users table
+Title: add users table index
+
+Session: {text}
+Title:

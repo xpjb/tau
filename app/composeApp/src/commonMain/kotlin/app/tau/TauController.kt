@@ -120,6 +120,8 @@ data class TauUiState(
     val restoring: Boolean = true,
     val connectionStatus: ConnectionStatus = ConnectionStatus.NotConfigured,
     val daemonVersion: String? = null,
+    val titlePrompt: TitlePrompt? = null,
+    val titlePromptPending: Boolean = false,
     val sessions: List<SessionSummary> = emptyList(),
     val selectedSessionId: String? = null,
     val focusComposerSessionId: String? = null,
@@ -180,7 +182,12 @@ class TauController(
         }
     }
 
-    fun showSettings() { mutableState.update { it.copy(editingSettings = true) } }
+    fun showSettings() { mutableState.update { it.copy(editingSettings = true) }; titlePrompt() }
+    fun titlePrompt(prompt: String? = null) {
+        if (socketId == null || pending.values.any { it == PendingAction.TitlePrompt }) return
+        mutableState.update { it.copy(titlePromptPending = true, error = null) }
+        send(if (prompt == null) GetTitlePrompt(newRequestId()) else SetTitlePrompt(newRequestId(), prompt), PendingAction.TitlePrompt)
+    }
     fun hideSettings() { if (state.value.settings.token.isNotBlank()) mutableState.update { it.copy(editingSettings = false) } }
     fun showSessionList() { mutableState.update { it.copy(mobileChatVisible = false) } }
     fun dismissError() { mutableState.update { it.copy(error = null) } }
@@ -448,7 +455,7 @@ class TauController(
         mutableState.update { previous ->
             val base = if (same) previous else TauUiState()
             base.copy(settings = settings, editingSettings = settings.token.isBlank(), connectionStatus = ConnectionStatus.Connecting,
-                restoring = base.transcripts.isEmpty(), error = null, attachmentDownloads = emptyMap(), uploadingSessions = emptySet(), loadingHistory = emptySet())
+                restoring = base.transcripts.isEmpty(), error = null, titlePromptPending = false, attachmentDownloads = emptyMap(), uploadingSessions = emptySet(), loadingHistory = emptySet())
         }
         connectionJob = scope.launch {
             try {
@@ -490,7 +497,7 @@ class TauController(
                                 socketId = null
                                 pending.clear()
                                 failedReads.clear()
-                                mutableState.update { it.copy(connectionStatus = ConnectionStatus.Offline, daemonVersion = null,
+                                mutableState.update { it.copy(connectionStatus = ConnectionStatus.Offline, daemonVersion = null, titlePromptPending = false,
                                     slashCommands = emptyMap(), loadingCommands = emptySet(), extensionDialogs = emptyList(), extensionStatuses = emptyMap(), extensionWidgets = emptyMap()) }
                             }
                         }
@@ -514,6 +521,10 @@ class TauController(
                     socketId = connectionId
                     mutableState.update { it.copy(connectionStatus = ConnectionStatus.Connected, daemonVersion = message.daemonVersion, error = null) }
                     state.value.selectedSessionId?.let { openSession(it); loadCommands(it) }
+                    if (state.value.editingSettings) titlePrompt()
+                }
+                is TitlePrompt -> if (pending[message.requestId] == PendingAction.TitlePrompt) {
+                    mutableState.update { it.copy(titlePrompt = message) }
                 }
                 is TranscriptSnapshot -> {
                     val key = ChatKey(identity, message.sessionId)
@@ -552,6 +563,7 @@ class TauController(
                 }
                 is Response -> {
                     val action = pending.remove(message.requestId)
+                    if (action == PendingAction.TitlePrompt) mutableState.update { it.copy(titlePromptPending = false) }
                     if (action == null && state.value.transcripts.values.none { chat ->
                         chat.pending.any { it.requestId == message.requestId } || chat.controls.any { it.commandId == message.requestId }
                     }) continue
@@ -721,10 +733,12 @@ class TauController(
                         warmChats()
                     }
                 }
-                if (action is PendingAction.Commands) {
+                if (action is PendingAction.Commands || action == PendingAction.TitlePrompt) {
                     delay(CommandLoadMillis)
                     if (pending.remove(request.id) == action) mutableState.update {
-                        it.copy(loadingCommands = it.loadingCommands - action.sessionId, error = "Pi command list timed out")
+                        it.copy(loadingCommands = if (action is PendingAction.Commands) it.loadingCommands - action.sessionId else it.loadingCommands,
+                            titlePromptPending = if (action == PendingAction.TitlePrompt) false else it.titlePromptPending,
+                            error = if (action == PendingAction.TitlePrompt) "Title prompt request timed out" else "Pi command list timed out")
                     }
                 }
             }
@@ -733,6 +747,7 @@ class TauController(
                 if (version == connectionVersion) {
                     pending.remove(request.id)
                     if (action is PendingAction.Commands) mutableState.update { it.copy(loadingCommands = it.loadingCommands - action.sessionId) }
+                    if (action == PendingAction.TitlePrompt) mutableState.update { it.copy(titlePromptPending = false) }
                     if (action.readSession != null && error !is TauConnectionException) {
                         failedReads.add(action.readSession!!)
                         mutableState.update { it.copy(loadingHistory = it.loadingHistory - action.readSession!!) }
@@ -746,6 +761,7 @@ class TauController(
 
     private sealed interface PendingAction {
         data object Normal : PendingAction
+        data object TitlePrompt : PendingAction
         data object Create : PendingAction
         data object Select : PendingAction
         data class Delete(val sessionId: String) : PendingAction

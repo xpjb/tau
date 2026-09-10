@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -198,6 +199,10 @@ fun TauApp(controller: TauController) {
                 var token by remember(state.settings, state.editingSettings) {
                     mutableStateOf(state.settings.token)
                 }
+                var titleDraft by remember(state.settings.identity) { mutableStateOf<String?>(null) }
+                LaunchedEffect(state.titlePrompt) {
+                    if (titleDraft == state.titlePrompt?.prompt) titleDraft = null
+                }
                 Box(
                     Modifier
                         .fillMaxSize()
@@ -208,7 +213,7 @@ fun TauApp(controller: TauController) {
                 ) {
                     Card(Modifier.padding(24.dp).widthIn(max = 520.dp).fillMaxWidth()) {
                         Column(
-                            Modifier.padding(24.dp),
+                            Modifier.verticalScroll(rememberScrollState()).padding(24.dp),
                             verticalArrangement = Arrangement.spacedBy(16.dp),
                         ) {
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -246,6 +251,36 @@ fun TauApp(controller: TauController) {
                                 Button(onClick = { controller.saveConnection(serverUrl, token) }) {
                                     Text("Connect")
                                 }
+                            }
+                            if (state.settings.token.isNotBlank()) {
+                                HorizontalDivider()
+                                Text("Title system prompt", style = MaterialTheme.typography.titleMedium)
+                                val connected = state.connectionStatus == ConnectionStatus.Connected &&
+                                    serverUrl.trim().trimEnd('/') == state.settings.serverUrl && token.trim() == state.settings.token
+                                val title = state.titlePrompt
+                                if (title != null) {
+                                    OutlinedTextField(
+                                        value = titleDraft ?: title.prompt,
+                                        onValueChange = { titleDraft = it },
+                                        enabled = connected && !state.titlePromptPending,
+                                        minLines = 4,
+                                        maxLines = 8,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                    Text("{text} inserts the first message, up to 600 characters. Shared by all clients of this daemon.",
+                                        style = MaterialTheme.typography.bodySmall)
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)) {
+                                        TextButton(enabled = connected && !state.titlePromptPending,
+                                            onClick = { titleDraft = title.defaultPrompt }) { Text("Reset to default") }
+                                        Button(enabled = connected && !state.titlePromptPending && titleDraft != null && titleDraft != title.prompt,
+                                            onClick = { controller.titlePrompt(titleDraft ?: title.prompt) }) { Text("Save prompt") }
+                                    }
+                                } else if (state.titlePromptPending) {
+                                    Text("Loading title prompt…")
+                                } else if (connected) {
+                                    TextButton(onClick = { controller.titlePrompt() }) { Text("Load title prompt") }
+                                }
+                                if (!connected) Text("Connect to edit this daemon's title prompt.", style = MaterialTheme.typography.bodySmall)
                             }
                             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         }
