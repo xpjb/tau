@@ -477,7 +477,14 @@ class TauController(
                     mutableState.update { it.copy(connectionStatus = ConnectionStatus.Connecting, daemonVersion = null) }
                     try {
                         client.run(settings) { messages, id ->
-                            if (version == connectionVersion) receive(messages, id)
+                            if (version == connectionVersion) {
+                                try { receive(messages, id) }
+                                catch (error: Throwable) {
+                                    ensureActive()
+                                    if (error !is CancellationException) mutableState.update { it.copy(error = error.message?.take(240)) }
+                                    throw error
+                                }
+                            }
                             if (!crashUploaded && state.value.connectionStatus == ConnectionStatus.Connected) {
                                 crashUploaded = true
                                 scope.launch { try { client.uploadPendingCrash(settings) } catch (_: Throwable) {} }
@@ -485,7 +492,7 @@ class TauController(
                         }
                     } catch (error: Throwable) {
                         ensureActive()
-                        if (version == connectionVersion) mutableState.update { it.copy(error = error.message?.take(240)) }
+                        if (version == connectionVersion && !error.isConnectionFailure()) mutableState.update { it.copy(error = error.message?.take(240)) }
                     } finally {
                         withContext(NonCancellable) {
                             store.disconnect(settings.identity)
@@ -717,30 +724,31 @@ class TauController(
                     delay(CommandLoadMillis)
                     if (pending.remove(request.id) == action) {
                         failedReads.add(readSession)
-                        mutableState.update { it.copy(loadingHistory = it.loadingHistory - readSession,
-                            error = if (readSession == it.selectedSessionId) "History read timed out" else it.error) }
+                        mutableState.update { it.copy(loadingHistory = it.loadingHistory - readSession) }
                         warmChats()
                     }
                 }
                 if (action is PendingAction.Commands) {
                     delay(CommandLoadMillis)
                     if (pending.remove(request.id) == action) mutableState.update {
-                        it.copy(loadingCommands = it.loadingCommands - action.sessionId, error = "Pi command list timed out")
+                        it.copy(loadingCommands = it.loadingCommands - action.sessionId)
                     }
                 }
             }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Throwable) {
+                val disconnected = error.isConnectionFailure()
                 if (version == connectionVersion) {
                     pending.remove(request.id)
                     if (action is PendingAction.Commands) mutableState.update { it.copy(loadingCommands = it.loadingCommands - action.sessionId) }
-                    if (action.readSession != null && error !is TauConnectionException) {
+                    if (action.readSession != null && !disconnected) {
                         failedReads.add(action.readSession!!)
                         mutableState.update { it.copy(loadingHistory = it.loadingHistory - action.readSession!!) }
                     }
                 }
+                if (disconnected && (action.readSession != null || action is PendingAction.Commands || request is ListSessions)) return@launch
                 if (action.readSession == null || action.readSession == state.value.selectedSessionId) throw error
-                if (error !is TauConnectionException) warmChats()
+                if (!disconnected) warmChats()
             }
         }
     }

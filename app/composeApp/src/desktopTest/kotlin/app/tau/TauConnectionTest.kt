@@ -32,6 +32,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertNotEquals
@@ -494,7 +495,8 @@ class TauConnectionTest {
             controller.awaitState { chat.id !in it.slashCommands }
             withContext(Dispatchers.Swing) { controller.setDraft(chat.id, "/model astra ") }
             val delayedCommands = assertIs<GetCommands>(requests.nextRequest())
-            controller.awaitState(15_000) { chat.id !in it.loadingCommands && it.error == "Pi command list timed out" }
+            assertNull(controller.awaitState(15_000) { chat.id !in it.loadingCommands }.error,
+                "Automatic command loading produced a timeout banner")
             socket.sendMessage(Commands(chat.id, modelCommands))
             socket.sendMessage(Response(delayedCommands.id, true, chat.id))
             controller.awaitState { it.slashCommands[chat.id] == modelCommands }
@@ -645,6 +647,75 @@ class TauConnectionTest {
             controller.awaitState { it.transcripts[chat.id]?.before == null && chat.id !in it.loadingHistory }
             assertEquals(listOf(old, recent), controller.state.value.transcripts.getValue(chat.id).rows.map { it.event })
 
+        } finally {
+            withContext(Dispatchers.Swing) { controller.dispose() }.join()
+            server.stop(0, 1000)
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun keeps_reconnect_failures_quiet_but_reports_actionable_errors() = runBlocking {
+        for (failure in listOf(java.net.UnknownHostException("fixture"), java.nio.channels.UnresolvedAddressException(),
+            java.net.SocketException("Software caused connection abort"), TauConnectionException("Tau is not responding"))) {
+            assertTrue(failure.isConnectionFailure())
+            assertTrue(Exception("Wrapped failure", failure).isConnectionFailure())
+        }
+        assertFalse(IllegalStateException("Invalid transcript").isConnectionFailure())
+        val directory = Files.createTempDirectory("tau-quiet-reconnect")
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        val protocol = AtomicInteger(TauProtocolVersion + 1)
+        val connections = AtomicInteger()
+        val server = embeddedServer(CIO, host = "127.0.0.1", port = port) {
+            install(WebSockets)
+            routing {
+                webSocket("/v1/ws") {
+                    connections.incrementAndGet()
+                    sendMessage(Hello(protocol.get(), "fixture"))
+                    sendMessage(Sessions(listOf(chat)))
+                    for (frame in incoming) if (frame is Frame.Text) {
+                        val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
+                        when (request) {
+                            is OpenSession -> {
+                                sendMessage(TranscriptSnapshot(chat.id, TranscriptCut("g", 0,
+                                    listOf(TranscriptEvent("user:0", 1, "user", role = EventRole.User, kind = EventKind.Text, text = "Kept history")), queue, 1)))
+                                sendMessage(Response(request.id, true, chat.id))
+                            }
+                            is CreateSession -> sendMessage(Response(request.id, false, error = "Create rejected"))
+                            is GetHistory -> Unit
+                            else -> sendMessage(Response(request.id, true))
+                        }
+                    }
+                }
+            }
+        }
+        val controller = TauController(Dispatchers.Swing, LocalStore({ directory.resolve("local.db").toString() }))
+        try {
+            withContext(Dispatchers.Swing) { controller.start(ConnectionSettings("http://127.0.0.1:$port", "fixture")) }
+            assertNull(controller.awaitState { it.connectionStatus == ConnectionStatus.Offline }.error,
+                "A routine connection failure produced a banner")
+            delay(2_500)
+            assertNull(controller.awaitState { it.connectionStatus == ConnectionStatus.Offline }.error,
+                "A retry repeated the network banner")
+            server.start(wait = false)
+            controller.awaitState { it.error?.contains("matching client and daemon update") == true }
+            protocol.set(TauProtocolVersion)
+            controller.awaitState { it.connectionStatus == ConnectionStatus.Connected && it.transcripts[chat.id]?.synchronized == true }
+            assertNull(controller.state.value.error)
+            assertTrue(connections.get() >= 2)
+            controller.awaitState { chat.id in it.loadingHistory }
+            assertNull(controller.awaitState(15_000) { chat.id !in it.loadingHistory }.error,
+                "Automatic history loading produced a timeout banner")
+            assertEquals(1L, controller.state.value.transcripts.getValue(chat.id).before)
+            withContext(Dispatchers.Swing) { controller.createSession() }
+            controller.awaitState { it.error == "Create rejected" }
+            withContext(Dispatchers.Swing) { controller.dismissError(); controller.setDraft(chat.id, "Keep this draft") }
+            server.stop(0, 1000)
+            assertNull(controller.awaitState { it.connectionStatus == ConnectionStatus.Offline }.error)
+            delay(2_500)
+            val offline = controller.awaitState { it.connectionStatus == ConnectionStatus.Offline }
+            assertNull(offline.error, "A lost connection produced a banner")
+            assertEquals("Keep this draft", offline.drafts[chat.id])
         } finally {
             withContext(Dispatchers.Swing) { controller.dispose() }.join()
             server.stop(0, 1000)

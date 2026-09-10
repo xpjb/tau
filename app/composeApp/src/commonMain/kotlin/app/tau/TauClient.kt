@@ -11,6 +11,7 @@ import io.ktor.client.plugins.HttpTimeoutConfig
 import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.client.plugins.websocket.WebSocketException
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -23,6 +24,8 @@ import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.http.encodeURLPathPart
 import io.ktor.utils.io.readAvailable
+import kotlinx.io.IOException
+import io.ktor.util.network.UnresolvedAddressException
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
@@ -50,6 +53,10 @@ import okio.Path.Companion.toPath
 import okio.buffer
 
 class TauConnectionException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+internal fun Throwable.isConnectionFailure(): Boolean = generateSequence(this) { it.cause }.any {
+    it is TauConnectionException || it is IOException || it is UnresolvedAddressException || it is WebSocketException
+}
 
 sealed class AttachmentFailure(val message: String) {
     data object NotLocal : AttachmentFailure("Not saved on this device. Connect and retry.")

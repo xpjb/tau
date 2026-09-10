@@ -220,3 +220,37 @@ not physical Android/Windows/trackpad acceptance. Test-only iterations corrected
 pixel-color matching, signed-zero equality, a stale cached DISPLAY and a short
 suite timeout. No version, installer, daemon, protocol, title-script or service
 change. The next requested task is routine network-error spam on reconnect.
+
+## Implemented, unreleased: quiet background reconnect failures
+
+The user wants routine network failures, including Android resume/disconnect and
+unresolved hosts, represented by the connection indicator rather than banners.
+The reconnect catch currently copies every exception into the global error field;
+automatic history/command sends can do the same through the operation wrapper.
+
+Plan:
+1. Reproduce repeated connection-refused banners with an isolated socket fixture.
+2. Classify connection failures by exception type/cause, not message text. Keep
+   reconnect/status/retry behavior, but skip banners for those failures and for
+   automatic reads interrupted by a lost connection or timeout. Report receive/application
+   failures at their boundary; keep protocol, storage and user-action errors.
+3. Extend the same fixture through retry, protocol mismatch, recovery, rejected
+   user action and another outage. Run focused checks and combined client
+   acceptance, then commit/merge separately. No new state, replay, timing change,
+   release or production changes; image zoom is already accepted at 0ea6abb.
+
+Acceptance: the socket fixture reproduced a Connection refused banner before the
+fix. It now covers repeated refused connections, protocol mismatch, recovery,
+quiet history timeout with its cursor retained, a rejected create action, another
+outage and draft retention. Typed/wrapped host, unresolved-address, socket-abort
+and heartbeat failures classify as connection failures. The existing connection
+regression now requires command-load timeout cleanup without a banner.
+
+All 20 client tests passed under Xvfb with no skips, including image zoom. Review
+also covered the automatic ListSessions send in the quiet-read guard; the final
+focused connection test and Android compilation passed after that one-line
+addition. Evidence: /root/tau-checks/quiet-reconnect/acceptance.json, full.log,
+results/, final-focused.log and final-focused.xml. No physical device acceptance
+is claimed. The connection indicator, retry/heartbeat timing, failed-read state,
+read-only retry policy and user-action reporting remain unchanged. No new stored
+state, dependency, protocol, version, installer, daemon or production change.
