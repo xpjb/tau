@@ -2,7 +2,13 @@ package app.tau
 
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.tooling.ComposeToolingApi
+import androidx.compose.ui.ComposeDesktopEntryPoint
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.awt.ComposeWindow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -11,6 +17,9 @@ import androidx.compose.ui.window.awaitApplication
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.embeddedServer
+import io.ktor.http.ContentType
+import io.ktor.server.response.respondBytes
+import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
@@ -19,10 +28,15 @@ import io.ktor.websocket.readText
 import io.ktor.websocket.send
 import java.awt.GraphicsEnvironment
 import java.awt.Robot
+import java.awt.Rectangle
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
 import java.awt.event.InputEvent
+import java.awt.event.KeyEvent
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
+import javax.imageio.ImageIO
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -42,9 +56,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+@OptIn(ExperimentalComposeUiApi::class, ComposeToolingApi::class)
 class TranscriptScrollTest {
     @Test
-    fun scrollsBothWaysAndCopiesMainText() = runBlocking {
+    fun scrollsCopiesAndZoomsImages() = runBlocking {
         assumeFalse("Run with a display or Xvfb", GraphicsEnvironment.isHeadless())
         checkScroll(grouped = false)
         checkScroll(grouped = true)
@@ -60,12 +75,24 @@ class TranscriptScrollTest {
                     "[ROW $index paragraph $it](https://example.invalid/${"long-path-".repeat(30)})"
                 })
         }
+        val imageReads = AtomicInteger()
+        val image = BufferedImage(1000, 700, BufferedImage.TYPE_INT_RGB)
+        image.createGraphics().apply {
+            color = java.awt.Color.CYAN; fillRect(0, 0, 1000, 700)
+            color = java.awt.Color.RED; fillRect(630, 250, 40, 40)
+            dispose()
+        }
+        val imageBytes = ByteArrayOutputStream().also { ImageIO.write(image, "png", it) }.toByteArray()
         val historyReads = AtomicInteger()
         val pageRequested = CompletableDeferred<Unit>()
         val releasePage = CompletableDeferred<Unit>()
         val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
             install(WebSockets)
             routing {
+                get("/v1/sessions/scroll/attachments/zoom") {
+                    imageReads.incrementAndGet()
+                    call.respondBytes(imageBytes, ContentType.Image.PNG)
+                }
                 webSocket("/v1/ws") {
                     send(TauJson.encodeToString<ServerMessage>(Hello(TauProtocolVersion, "fixture")))
                     send(TauJson.encodeToString<ServerMessage>(Sessions(listOf(session))))
@@ -191,6 +218,88 @@ class TranscriptScrollTest {
                     }
                     assertEquals("First **reply**\n\nLast reply", clipboard, "Copy message included Details (expanded=$expanded)")
                 }
+                val photo = TranscriptEvent("zoom:0", 1700, "zoom", role = EventRole.Assistant, kind = EventKind.Image,
+                    attachment = ChatAttachment(AttachmentKind.Image, "zoom.png", size = imageBytes.size.toLong()))
+                assertTrue(controller.store.applySnapshot(key, TranscriptCut("image", 0, listOf(photo), QueueState(), null)))
+                suspend fun clickImageControl(label: String) {
+                    val point = withTimeout(5_000) {
+                        var found: Offset? = null
+                        while (found == null) {
+                            found = withContext(Dispatchers.Swing) {
+                                java.awt.Window.getWindows().filter { it.isShowing }.filterIsInstance<ComposeDesktopEntryPoint>()
+                                    .flatMap { it.semanticsOwners }.asSequence().flatMap { owner ->
+                                        generateSequence(listOf(owner.rootSemanticsNode)) { level ->
+                                            level.flatMap { it.children }.takeIf { it.isNotEmpty() }
+                                        }.flatten()
+                                    }.firstOrNull { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains(label) == true }
+                                    ?.let { it.positionOnScreen + Offset(it.size.width / 2f, it.size.height / 2f) }
+                            }
+                            if (found == null) delay(30)
+                        }
+                        found
+                    }
+                    robot.mouseMove(point.x.toInt(), point.y.toInt())
+                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+                    delay(80)
+                    robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+                    delay(350)
+                }
+                fun marker(): Rectangle {
+                    val screen = robot.createScreenCapture(Rectangle(Toolkit.getDefaultToolkit().screenSize))
+                    var left = screen.width; var top = screen.height; var right = -1; var bottom = -1
+                    for (y in 0 until screen.height) for (x in 0 until screen.width) {
+                        val pixel = screen.getRGB(x, y)
+                        if (pixel shr 16 and 255 > 240 && pixel shr 8 and 255 < 32 && pixel and 255 < 32) {
+                            left = minOf(left, x); right = maxOf(right, x)
+                            top = minOf(top, y); bottom = maxOf(bottom, y)
+                        }
+                    }
+                    assertTrue(right >= left && bottom >= top, "Image marker is missing")
+                    return Rectangle(left, top, right - left + 1, bottom - top + 1)
+                }
+                clickImageControl("zoom.png")
+                val fitted = marker()
+                val x = fitted.centerX.toInt(); val y = fitted.centerY.toInt()
+                robot.mouseMove(x, y)
+                robot.mouseWheel(-4)
+                delay(400)
+                val enlarged = marker()
+                assertTrue(enlarged.width > fitted.width * 1.8, "Wheel input did not zoom the full-screen image: $fitted -> $enlarged")
+                assertTrue(kotlin.math.abs(enlarged.centerX - fitted.centerX) < 3 && kotlin.math.abs(enlarged.centerY - fitted.centerY) < 3,
+                    "Wheel zoom moved the image point under the cursor")
+                robot.mouseMove(x + 20, y + 20)
+                delay(500)
+                assertEquals(enlarged, marker(), "Hover moved or reset persistent zoom")
+                robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+                delay(80)
+                robot.mouseMove(x + 70, y + 60)
+                delay(100)
+                robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+                delay(350)
+                val panned = marker()
+                assertEquals(enlarged.width, panned.width)
+                assertTrue(kotlin.math.abs(panned.x - enlarged.x - 50) < 3 && kotlin.math.abs(panned.y - enlarged.y - 40) < 3,
+                    "Dragging did not pan the zoomed image: $enlarged -> $panned")
+                robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+                robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+                delay(250)
+                assertEquals(panned, marker(), "A tap dismissed or changed the image")
+                clickImageControl("Fit image")
+                assertEquals(fitted, marker())
+                clickImageControl("Zoom in")
+                assertTrue(marker().width > fitted.width * 1.8)
+                clickImageControl("Zoom out")
+                assertEquals(fitted, marker())
+                clickImageControl("Zoom in")
+                clickImageControl("Close image")
+                clickImageControl("zoom.png")
+                assertEquals(fitted, marker(), "Reopening retained old zoom")
+                robot.keyPress(KeyEvent.VK_ESCAPE); robot.keyRelease(KeyEvent.VK_ESCAPE)
+                delay(300)
+                clickImageControl("zoom.png")
+                assertEquals(fitted, marker())
+                clickImageControl("Close image")
+                assertEquals(1, imageReads.get(), "Zooming downloaded the image again")
             }
         } finally {
             withContext(NonCancellable) {

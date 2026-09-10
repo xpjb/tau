@@ -1243,10 +1243,11 @@ private fun ChatPanel(
                                                                     properties = DialogProperties(usePlatformDefaultWidth = false),
                                                                 ) {
                                                                     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.94f))
-                                                                        .clickable { imageExpanded = false }.systemBarsPadding().displayCutoutPadding()) {
+                                                                        .systemBarsPadding().displayCutoutPadding()) {
                                                                         LocalImage(attachmentDownload, label, true, 4096,
                                                                             Modifier.fillMaxSize().padding(24.dp),
-                                                                            onRetry = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Reload) })
+                                                                            onRetry = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Reload) },
+                                                                            zoomable = true)
                                                                         FilledTonalIconButton(onClick = { imageExpanded = false },
                                                                             modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
                                                                             Icon(CloseIcon, "Close image")

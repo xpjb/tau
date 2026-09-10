@@ -181,3 +181,42 @@ All 17 client tests pass under Xvfb with no skips; Android compilation passes.
 Evidence: /root/tau-checks/model-failure/acceptance.json. No new state or deployed
 change. The queue-pause question stays parked, and the title-prompt branch remains
 isolated behind its existing deployment gate.
+
+## Implemented, unreleased: normal zoom in the full-screen image viewer
+
+The user chose persistent zoom instead of spring-back peek. Scope is the opened
+image viewer, not inline previews, the transcript or the rest of the app.
+
+Facts/design: LocalImage already owns bounded decoding and fitted image drawing.
+Reuse that bitmap and add a clipped drawing transform, not a new image cache or
+layout/scroll model. Keep only scale and pan in the open viewer. Pinch zoom stays
+under the moving finger midpoint; wheel zoom stays under the cursor. Drag pans.
+Clamp scale to 1–8 times fit and pan to image edges. Add minus, plus and Fit
+controls. Fit, closing/reopening, or a changed viewport returns to the fitted
+view. Close stays explicit through Close/Back/Escape, rather than any image tap.
+No spring-back timer, rotation, inertial pan, new dependency or stored preference.
+
+Plan:
+1. Extend the isolated real-window regression to open a downloaded image and
+   reproduce missing wheel zoom.
+2. Add the shared bounded transform and gesture/control handling in LocalImage;
+   enable it only for the existing full-screen viewer.
+3. Check geometry, common multi-touch input, real mouse zoom/pan/reset and viewer
+   dismissal, then run all client tests under Xvfb and Android compilation.
+4. Review the diff, commit off master, and merge after acceptance. Keep this in
+   the unreleased QA batch; leave the title branch and production unchanged.
+
+Acceptance: the real-window regression reproduced wheel input leaving the image
+at its fitted size. It now checks anchored wheel zoom, drag pan, persistence after
+release/hover, Fit and plus/minus controls, taps without dismissal, close/reopen,
+and one HTTP download across viewer operations. Existing scrolling/copy checks
+still pass. Shared multi-touch input checks pinch with a moving midpoint,
+one-finger pan, release persistence and resize-to-fit. Geometry checks cover
+1,200 steps across viewport/image aspect ratios, scale limits and pan bounds.
+
+All 19 client tests pass under Xvfb with no skips; Android compilation passes.
+Evidence: /root/tau-checks/image-zoom/acceptance.json. These are desktop-JVM checks,
+not physical Android/Windows/trackpad acceptance. Test-only iterations corrected
+pixel-color matching, signed-zero equality, a stale cached DISPLAY and a short
+suite timeout. No version, installer, daemon, protocol, title-script or service
+change. The next requested task is routine network-error spam on reconnect.

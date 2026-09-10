@@ -28,7 +28,8 @@ with `transcript` owning Pi formats and `state.rs` owning only Tau's own
 
 ## Client (`app/composeApp/`, Kotlin, Android + desktop)
 
-- `TauApp.kt` — all Compose UI. State is owned by `TauController`.
+- `TauApp.kt` — app screens and transcript UI. Long-lived state is owned by `TauController`.
+- `LocalImage.kt` — bounded image loading, fitted previews and full-screen zoom/pan controls; zoom state stays in the open viewer.
 - `TauController.kt` — connection, per-chat feeds, bounded history warming,
   unread state and receive loop.
 - `AttachmentDownloads.kt` — attachment transfer lifecycle (extensions on
