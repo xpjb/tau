@@ -274,17 +274,18 @@ class TranscriptScrollTest {
                 val photo = TranscriptEvent("zoom:0", 1700, "zoom", role = EventRole.Assistant, kind = EventKind.Image,
                     attachment = ChatAttachment(AttachmentKind.Image, "zoom.png", size = imageBytes.size.toLong()))
                 assertTrue(controller.store.applySnapshot(key, TranscriptCut("image", 0, listOf(photo), QueueState(), null)))
+                fun imageNodes() = java.awt.Window.getWindows().filter { it.isShowing }.filterIsInstance<ComposeDesktopEntryPoint>()
+                    .flatMap { it.semanticsOwners }.flatMap { owner ->
+                        generateSequence(listOf(owner.rootSemanticsNode)) { level ->
+                            level.flatMap { it.children }.takeIf { it.isNotEmpty() }
+                        }.flatten().toList()
+                    }
                 suspend fun clickImageControl(label: String) {
                     val point = withTimeout(5_000) {
                         var found: Offset? = null
                         while (found == null) {
                             found = withContext(Dispatchers.Swing) {
-                                java.awt.Window.getWindows().filter { it.isShowing }.filterIsInstance<ComposeDesktopEntryPoint>()
-                                    .flatMap { it.semanticsOwners }.asSequence().flatMap { owner ->
-                                        generateSequence(listOf(owner.rootSemanticsNode)) { level ->
-                                            level.flatMap { it.children }.takeIf { it.isNotEmpty() }
-                                        }.flatten()
-                                    }.firstOrNull { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains(label) == true }
+                                imageNodes().firstOrNull { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains(label) == true }
                                     ?.let { it.positionOnScreen + Offset(it.size.width / 2f, it.size.height / 2f) }
                             }
                             if (found == null) delay(30)
@@ -337,6 +338,34 @@ class TranscriptScrollTest {
                 robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
                 delay(250)
                 assertEquals(panned, marker(), "A tap dismissed or changed the image")
+                val viewer = withContext(Dispatchers.Swing) {
+                    imageNodes().single { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains("Close image") == true }.id
+                }
+                val prompt = TranscriptEvent("zoom-prompt", 1701, "zoom-prompt", role = EventRole.User,
+                    kind = EventKind.Text, text = "Next message")
+                val reply = TranscriptEvent("zoom-reply:live", 1702, "zoom-reply", phase = EventPhase.Live,
+                    role = EventRole.Assistant, kind = EventKind.Text, text = "Incoming reply paragraph.\n\n".repeat(80))
+                val changes = listOf(
+                    TranscriptChange(events = listOf(prompt, reply)),
+                    TranscriptChange(delta = TextDelta(reply.id, "More streamed text.\n\n".repeat(20))),
+                    TranscriptChange(events = listOf(reply.copy(id = "zoom-reply:saved", phase = EventPhase.Saved)), removed = listOf(reply.id)),
+                )
+                for ((index, change) in changes.withIndex()) {
+                    assertTrue(controller.store.applyUpdates(key, listOf(TranscriptPatch("image", index + 1L, change))))
+                    delay(400)
+                    withContext(Dispatchers.Swing) {
+                        val nodes = imageNodes()
+                        assertTrue(nodes.any { it.id == viewer }, "Incoming transcript update $index closed the image viewer")
+                        assertEquals(1, nodes.count { it.config.getOrNull(SemanticsProperties.ContentDescription)?.contains("zoom.png") == true },
+                            "The incoming reply did not move the preview out of the transcript window")
+                    }
+                    assertEquals(panned, marker(), "Incoming update $index moved or reset the open image")
+                }
+                assertTrue(controller.store.applySnapshot(key, TranscriptCut("image-refreshed", 0,
+                    listOf(photo.copy(id = "zoom:refreshed")), QueueState(), null)))
+                delay(400)
+                assertTrue(withContext(Dispatchers.Swing) { imageNodes().any { it.id == viewer } }, "Transcript refresh closed the image viewer")
+                assertEquals(panned, marker(), "Transcript refresh moved or reset the open image")
                 clickImageControl("Fit image")
                 assertEquals(fitted, marker())
                 clickImageControl("Zoom in")

@@ -882,6 +882,7 @@ private fun ChatPanel(
     }
     val attachments = chat.files
     val settings = state.settings
+    var expandedImage by remember(settings.identity, sessionId) { mutableStateOf<TranscriptEvent?>(null) }
     val draft = state.drafts[sessionId].orEmpty()
     val editorFocusRequester = remember(sessionId) { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -1290,9 +1291,8 @@ private fun ChatPanel(
                                                         Spacer(Modifier.height(AttachmentTopSpacing))
                                                         if (attachment.kind == AttachmentKind.Image) {
                                                             var imageVisible by remember(settings.identity, message.id) { mutableStateOf(false) }
-                                                            var imageExpanded by remember(settings.identity, message.id) { mutableStateOf(false) }
-                                                            LaunchedEffect(imageVisible, imageExpanded, settings.identity, message.id, state.connectionStatus) {
-                                                                if (imageVisible || imageExpanded) controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Preview)
+                                                            LaunchedEffect(imageVisible, settings.identity, message.id, state.connectionStatus) {
+                                                                if (imageVisible) controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Preview)
                                                             }
                                                             val label = attachment.caption ?: attachment.fileName
                                                             LocalImage(
@@ -1301,27 +1301,9 @@ private fun ChatPanel(
                                                                     .onGloballyPositioned { imageVisible = !it.boundsInWindow().isEmpty }
                                                                     .clip(RoundedCornerShape(8.dp))
                                                                     .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.52f))
-                                                                    .clickable { imageExpanded = true },
+                                                                    .clickable { expandedImage = message },
                                                                 onRetry = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Reload) },
                                                             )
-                                                            if (imageExpanded) {
-                                                                Dialog(
-                                                                    onDismissRequest = { imageExpanded = false },
-                                                                    properties = DialogProperties(usePlatformDefaultWidth = false),
-                                                                ) {
-                                                                    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.94f))
-                                                                        .systemBarsPadding().displayCutoutPadding()) {
-                                                                        LocalImage(attachmentDownload, label, true, 4096,
-                                                                            Modifier.fillMaxSize().padding(24.dp),
-                                                                            onRetry = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Reload) },
-                                                                            zoomable = true)
-                                                                        FilledTonalIconButton(onClick = { imageExpanded = false },
-                                                                            modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
-                                                                            Icon(CloseIcon, "Close image")
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
                                                             Spacer(Modifier.height(ImageDownloadSpacing))
                                                         }
                                                         val totalBytes = attachmentDownload?.totalBytes
@@ -1895,6 +1877,29 @@ private fun ChatPanel(
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold,
                     )
+                }
+            }
+        }
+    }
+    expandedImage?.let { message ->
+        val attachment = checkNotNull(message.attachment)
+        val download = state.attachmentDownloads[AttachmentDownloadKey(sessionId, message.entryId)]
+        LaunchedEffect(settings.identity, sessionId, message.entryId, state.connectionStatus) {
+            controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Preview)
+        }
+        Dialog(
+            onDismissRequest = { expandedImage = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.94f))
+                .systemBarsPadding().displayCutoutPadding()) {
+                LocalImage(download, attachment.caption ?: attachment.fileName, true, 4096,
+                    Modifier.fillMaxSize().padding(24.dp),
+                    onRetry = { controller.downloadAttachment(sessionId, message, AttachmentDownloadAction.Reload) },
+                    zoomable = true)
+                FilledTonalIconButton(onClick = { expandedImage = null },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
+                    Icon(CloseIcon, "Close image")
                 }
             }
         }
