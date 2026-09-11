@@ -4,6 +4,29 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## Authorized release: 0.5.12 / protocol 7
+
+The user requested deployment of the completed batch and confirmed no chats are
+running. Combine master 86b66c4 with accepted title feature 2ba569b in the isolated
+release checkout. Preserve quiet reconnects: title reads stay quiet on connection
+loss/timeout, while title-save failures stay visible. No new request state.
+
+Plan:
+1. Resolve the title/QA overlap, retain all completed fixes, and set clients and
+   daemon to 0.5.12, protocol 7, Android code 33. Keep the live helper unchanged.
+2. Run combined daemon tests/Clippy and client tests under Xvfb; build the release
+   daemon, signed Android APK and minified Windows installer. Verify signatures,
+   versions and artifact hashes before publishing.
+3. Verify idle again, back up binary/configuration/data and the title files, stop
+   Tau, merge the accepted release onto master, install the daemon and start it.
+   Verify protocol-7 health, prior chat IDs and JSONL prefixes, plus a read-only
+   title-settings request. Roll back binary/helper on failure without reverting
+   newer chat data. Keep Telegram, Pi and configuration unchanged.
+4. Send both matched installers and record deployment. No provider prompts.
+
+The preflight check found 80 chats, one live idle queue, and no active/held work.
+Historical unreleased/held notes below describe the earlier acceptance gates.
+
 ## Implemented: flatten the transcript for code health
 
 User authorized execution and permits dropping the transcript store/cache. The goal is simpler, correct code that is easier to change. Performance is not the justification or acceptance gate for this rewrite.

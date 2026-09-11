@@ -10,7 +10,7 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 
 Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects ordered content events; clients keep remote history in memory only. SQLite preserves drafts, pending sends/controls, attached files, preferences and session metadata across client restarts. Cold chats can be read without starting Pi. Loaded history and chat feeds stay in memory across selection changes. Running, unread and recent chats warm in the background; older events also load on demand. Reconnect checks the retained event windows. Thinking and tools remain collapsible across fetch boundaries. New chats use `/root` as their working directory.
 
-Tau 0.5.11 rebuild 2 clients use protocol 6 and work with the deployed 0.5.10 daemon. This build includes the scrolling-loop fix and saved-download actions after reopening. Installers include `r2` in their names; the public version stays 0.5.11 and Android versionCode is 32. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 discards only the old remote transcript cache; local work stays intact. It requires the identified-transcript Pi fork with RPC model-default persistence from `xpjb/pi`. Existing JSONL files are preserved without migration.
+Tau 0.5.12 clients and daemon use protocol 7 and must be updated together. This release includes full title-prompt editing, copying message text without Details, running/unread priority, stopped-model failure status, full-screen image zoom and quiet background reconnects. It also retains the scrolling and remembered-download fixes. Android versionCode is 33. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 preserves local work while remote history remains memory-only. The existing identified-transcript Pi fork and JSONL files stay unchanged.
 
 ## Current client operations
 
@@ -29,6 +29,9 @@ Tau 0.5.11 rebuild 2 clients use protocol 6 and work with the deployed 0.5.10 da
 - Fork from any visible user message.
 - Attach local files for Pi to inspect, view images from Pi inline, and download files produced through Pi's `send_image` and `send_file` tools.
 - Save viewed images privately for offline inline/full-screen viewing. Export a saved original without downloading it again.
+- Zoom and pan full-screen images with pinch or mouse wheel/drag, plus minus/plus/Fit controls.
+- Edit the entire shared title prompt in Settings, with exact whitespace and empty overrides.
+- Use the connection indicator for routine reconnect failures; keep actionable errors visible.
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
 - Use the same chats from Android and Windows.
 
@@ -42,6 +45,8 @@ sudo ./scripts/install-daemon.sh
 ```
 
 The installer generates `/etc/tau.env` once with a random bearer token, binds `taud` to `127.0.0.1:8787`, and publishes that loopback listener through Tailscale Serve on Tailnet port 8787. It prints the URL and token required by the clients. Tailnet traffic is already encrypted; no public listener is created. This works with both kernel and userspace Tailscale networking.
+
+The title helper needs both `scripts/title_gen.py` and its adjacent `scripts/title_prompt.txt`.
 
 Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat under `/root/.local/share/tau/uploads` and deleted with the chat. Pi stages outgoing files under `/root/.local/share/tau/outbox`; `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
 
