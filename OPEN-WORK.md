@@ -23,11 +23,16 @@ Plan:
    run all client tests and Android compilation before merging. Hold packaging,
    versions and service changes for a separate release request.
 
-Focused checks pass: table structure/alignment, inline styles/links, Unicode,
-escaped pipes, short rows and extra cells; real-window long cells and unbroken
-text at wide/narrow widths, full-text copying, sideways scrolling, delayed history
-and existing image zoom. The test uses isolated fixtures, not production chats.
-Full client acceptance is pending. Evidence: /root/tau-checks/markdown-tables/.
+Acceptance passed on f6b3bcf: all 21 client tests under Xvfb, no skips, and Android
+compilation. The final real-window regression fails against the old renderer with
+"Table cell is not rendered separately at width 1100: Layout" and passes with the
+fix. It checks long cells and unbroken text without overflow/ellipsis, wide/narrow
+columns, complete copying, sideways scrolling, delayed history with tables, and
+existing image zoom. Parser checks cover alignment, inline styles/links, Unicode,
+escaped pipes, short rows and extra cells. These are isolated desktop-JVM checks,
+not physical Android/Windows acceptance. No version bump, packaging, provider
+prompt, daemon/Pi change or service restart. Evidence:
+/root/tau-checks/markdown-tables/acceptance.json.
 
 ## Deployed: 0.5.12 / protocol 7
 
