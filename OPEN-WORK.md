@@ -25,6 +25,11 @@ Plan:
 4. Send both matched installers and record deployment. No provider prompts.
 
 The preflight check found 80 chats, one live idle queue, and no active/held work.
+Combined acceptance passed: 16 daemon tests, strict Clippy, 21 client tests under
+Xvfb with no skips, Android compilation, signed Android and minified Windows
+packaging. The staged daemon reports 0.5.12/protocol 7. Signing is unchanged.
+The Cargo wrapper builds into this worktree; staging now uses that verified path.
+Evidence: /root/tau-release/0.5.12/acceptance.json.
 Historical unreleased/held notes below describe the earlier acceptance gates.
 
 ## Implemented: flatten the transcript for code health
