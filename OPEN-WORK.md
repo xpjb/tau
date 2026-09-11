@@ -4,6 +4,34 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## Implemented, unreleased: image viewer survives incoming updates
+
+The user reports incoming chat updates closing the image viewer. Its selection
+and dialog belonged to a transcript row, so replacing that row could dispose
+of the open viewer. Keep one selected image in the current chat panel instead.
+
+Plan:
+1. Replace the row-local open flag with a nullable image event owned by ChatPanel,
+   keyed by connection identity and session ID.
+2. Move the existing dialog and its preview-download effect outside the lazy
+   transcript. Keep thumbnail visibility/download behavior in the row.
+3. Reuse the existing image renderer, zoom/pan, Close/Escape, retry and download
+   cache. Add no controller state, persistence or transcript scroll changes.
+4. Extend the existing real-window image check, verify the old-code failure,
+   run the client suite and Android compilation, and hold client packaging.
+
+Acceptance passed on 8ab00bb: all 21 client tests under Xvfb, no skips, and
+Android compilation. The old code fails the final regression with "Transcript
+refresh closed the image viewer". The check keeps the same viewer and image
+position through incoming replies, streamed text, live-to-saved replacement,
+and a refreshed transcript with a new image row ID. It also checks the preview
+leaves the visible transcript, zoom/pan and Close/Escape/reopen still work, and
+only one image HTTP transfer occurs. Existing table, scrolling, copy, gesture,
+connection and retention checks pass. These are desktop-JVM tests, not physical
+Android/Windows acceptance. No version, protocol, daemon, Pi, service or installer
+change for this QA item. Evidence:
+/root/tau-checks/image-viewer-updates/acceptance.json.
+
 ## Implemented, unreleased: Markdown tables without text loss
 
 The user requests real table rows and columns, with no truncated text. The saved
