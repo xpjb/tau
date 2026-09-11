@@ -232,6 +232,25 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             }
                             ServerMessage::success(request_id, None, None)
                         }
+                        ClientCommand::SetTitlePrompt { prompt } if prompt.chars().count() > MAX_PROMPT_CHARS => {
+                            ServerMessage::failure(request_id, "Title prompt is too long")
+                        }
+                        command @ (ClientCommand::GetTitlePrompt | ClientCommand::SetTitlePrompt { .. }) => {
+                            let replacement = match command {
+                                ClientCommand::SetTitlePrompt { prompt } => Some(prompt),
+                                _ => None,
+                            };
+                            match manager.inner.state.title_prompt(replacement).await {
+                                Ok(prompt) => {
+                                    queue_server(&response_outbound, &ServerMessage::TitlePrompt {
+                                        request_id: request_id.clone(), prompt,
+                                        default_prompt: crate::state::DEFAULT_TITLE_PROMPT,
+                                    }).await;
+                                    ServerMessage::success(request_id, None, None)
+                                }
+                                Err(error) => ServerMessage::command_failure(request_id, error),
+                            }
+                        }
                         ClientCommand::CreateSession => match manager.create_session().await {
                             Ok(session_id) => ServerMessage::success(
                                 request_id,
@@ -603,6 +622,133 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
 
     use super::{authorized, safe_file_name, valid_resource_key};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn saves_the_full_title_prompt_and_passes_it_to_the_generator() {
+        use std::os::unix::fs::PermissionsExt;
+        use super::*;
+        use crate::state::{StateStore, DEFAULT_TITLE_PROMPT};
+        use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, Message as ClientMessage}};
+
+        let root = std::env::temp_dir().join(format!("tau-title-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).await.unwrap();
+        let pi = root.join("pi.py");
+        fs::write(&pi, include_str!("../tests/fixtures/pi.py")).await.unwrap();
+        fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o700)).await.unwrap();
+        fs::write(root.join("title_gen.py"), include_str!("../../scripts/title_gen.py")).await.unwrap();
+        fs::write(root.join("title_prompt.txt"), DEFAULT_TITLE_PROMPT).await.unwrap();
+        fs::write(root.join("llama_cpp.py"), r#"import json
+from pathlib import Path
+class Llama:
+    def __init__(self, model_path, n_ctx, n_threads, verbose):
+        assert (n_ctx, n_threads, verbose) == (2048, 4, False)
+        self.path = Path(model_path)
+    def __call__(self, prompt, **options):
+        assert options == dict(max_tokens=25, temperature=0.2, stop=["\n", "Session:", "Title:"], echo=False)
+        self.path.write_text(json.dumps({"prompt": prompt}))
+        return {"choices": [{"text": ' "Literal title" '}]}
+"#).await.unwrap();
+        let config = Config {
+            bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
+            pi_command: pi, default_thinking_level: "high".to_owned(), cwd: root.clone(),
+            state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
+            telemetry_path: root.join("crashes.jsonl"), pi_extension_path: root.join("extension.ts"),
+            attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
+            title_command: Some(format!("python3 {} --model {}", root.join("title_gen.py").display(), root.join("model-call.json").display())),
+        };
+        fs::write(&config.state_path, r#"{"schema":1,"sessions":{}}"#).await.unwrap();
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
+        let existing = manager.create_session().await.unwrap();
+        manager.rename_session(&existing, "Existing title").await.unwrap();
+        let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
+        let app = Router::new().route("/v1/ws", get(websocket)).with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        assert!(connect_async(&url).await.is_err());
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(AUTHORIZATION, "Bearer test-token".parse().unwrap());
+        let (mut first, _) = connect_async(request.clone()).await.unwrap();
+        let (mut second, _) = connect_async(request).await.unwrap();
+        let custom = "  Literal \"rules\" 🔧\n{text}\nAgain: {text}\n  ";
+        for (index, (command, expected)) in [
+            (json!({"type":"get_title_prompt"}), Some(DEFAULT_TITLE_PROMPT)),
+            (json!({"type":"set_title_prompt", "prompt":custom}), Some(custom)),
+            (json!({"type":"get_title_prompt"}), Some(custom)),
+            (json!({"type":"set_title_prompt", "prompt":""}), Some("")),
+            (json!({"type":"get_title_prompt"}), Some("")),
+            (json!({"type":"set_title_prompt", "prompt":custom}), Some(custom)),
+            (json!({"type":"set_title_prompt", "prompt":"x".repeat(MAX_PROMPT_CHARS + 1)}), None),
+            (json!({"type":"set_title_prompt", "prompt":"Unsaved"}), None),
+        ].into_iter().enumerate() {
+            if index == 7 {
+                fs::rename(&config.state_path, root.join("backup.json")).await.unwrap();
+                fs::create_dir(&config.state_path).await.unwrap();
+            }
+            let mut command = command;
+            command["id"] = json!(format!("setting-{index}"));
+            let socket = if index % 2 == 0 { &mut first } else { &mut second };
+            socket.send(ClientMessage::Text(command.to_string().into())).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut prompt = None;
+                loop {
+                    let frame = socket.next().await.unwrap().unwrap();
+                    let message: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    if message["type"] == "title_prompt" {
+                        assert_eq!(message["requestId"], command["id"]);
+                        assert_eq!(message["defaultPrompt"], DEFAULT_TITLE_PROMPT);
+                        prompt = Some(message["prompt"].as_str().unwrap().to_owned());
+                    }
+                    if message["type"] == "response" && message["requestId"] == command["id"] {
+                        assert_eq!(message["ok"], expected.is_some());
+                        assert_eq!(prompt.as_deref(), expected);
+                        break;
+                    }
+                }
+            }).await.unwrap();
+        }
+        fs::remove_dir(&config.state_path).await.unwrap();
+        fs::rename(root.join("backup.json"), &config.state_path).await.unwrap();
+        assert_eq!(manager.inner.state.title_prompt(None).await.unwrap(), custom);
+        assert_eq!(manager.inner.state.get(&existing).unwrap().title, "Existing title");
+        assert!(!root.join("pi-sessions/spawn-args").exists());
+        assert!(!root.join("model-call.json").exists());
+        first.close(None).await.unwrap();
+        second.close(None).await.unwrap();
+        server.abort();
+        manager.shutdown().await;
+
+        let restored = StateStore::load(config.state_path.clone()).await.unwrap();
+        assert_eq!(restored.title_prompt(None).await.unwrap(), custom);
+        let manager = AgentManager::new(config, restored);
+        let id = manager.create_session().await.unwrap();
+        let text = format!("First {{text}} 🔧 {}", "z".repeat(900));
+        manager.prompt(&id, &text, "title-test").await.unwrap();
+        let call: serde_json::Value = serde_json::from_slice(&fs::read(root.join("model-call.json")).await.unwrap()).unwrap();
+        assert_eq!(call["prompt"], custom.replace("{text}", &text.chars().take(600).collect::<String>()));
+        assert_eq!(manager.inner.state.get(&id).unwrap().title, "Literal title");
+        manager.shutdown().await;
+        for (template, cli, expected) in [
+            (None, None, DEFAULT_TITLE_PROMPT),
+            (None, Some("CLI {text}"), "CLI {text}"),
+            (Some(""), Some("CLI {text}"), ""),
+            (Some(custom), Some("CLI {text}"), custom),
+        ] {
+            let mut command = tokio::process::Command::new("python3");
+            command.arg(root.join("title_gen.py")).arg("--model").arg(root.join("model-call.json"));
+            if let Some(cli) = cli { command.arg("--prompt-template").arg(cli); }
+            let mut child = command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+            let mut input = json!({"text":"Message {text}"});
+            if let Some(template) = template { input["promptTemplate"] = json!(template); }
+            child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).await.unwrap();
+            let output = child.wait_with_output().await.unwrap();
+            assert!(output.status.success());
+            let call: serde_json::Value = serde_json::from_slice(&fs::read(root.join("model-call.json")).await.unwrap()).unwrap();
+            assert_eq!(call["prompt"], expected.replace("{text}", "Message {text}"));
+        }
+        fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

@@ -344,7 +344,31 @@ impl AgentManager {
         if let Some(stored) = self.inner.state.get(id)
             && !command_handled && stored.title == "New chat"
         {
-            let title = self.generate_title(text).await.unwrap_or_else(|| title_from_prompt(text));
+            let title = async {
+                let command = self.inner.config.title_command.as_ref()?;
+                let template = self.inner.state.title_prompt(None).await.ok()?;
+                let mut child = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .ok()?;
+                {
+                    let stdin = child.stdin.as_mut()?;
+                    stdin.write_all(json!({"text": text, "promptTemplate": template}).to_string().as_bytes()).await.ok()?;
+                    stdin.write_all(b"\n").await.ok()?;
+                    stdin.shutdown().await.ok()?;
+                }
+                let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.ok()?.ok()?;
+                let response: Value = serde_json::from_slice(&output.stdout).ok()?;
+                let title = response.get("title").and_then(Value::as_str)?.trim().to_owned();
+                (title.len() > 1 && title.len() <= MAX_TITLE_CHARS).then_some(title)
+            }.await.unwrap_or_else(|| {
+                let first_line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("New chat");
+                bounded(first_line.trim(), MAX_TITLE_CHARS)
+            });
             self.inner.state.rename(id, title.clone()).await?;
             if let Err(error) = process
                 .request(json!({ "type": "set_session_name", "name": title }))
@@ -1278,28 +1302,6 @@ impl AgentManager {
         let message = self.sessions_message().await;
         let _ = self.inner.events.send(message);
     }
-
-    async fn generate_title(&self, text: &str) -> Option<String> {
-        let command = self.inner.config.title_command.as_ref()?;
-        let mut child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        {
-            let stdin = child.stdin.as_mut()?;
-            stdin.write_all(json!({"text": text}).to_string().as_bytes()).await.ok()?;
-            stdin.write_all(b"\n").await.ok()?;
-            stdin.shutdown().await.ok()?;
-        }
-        let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await.ok()?.ok()?;
-        let response: Value = serde_json::from_slice(&output.stdout).ok()?;
-        let title = response.get("title").and_then(Value::as_str)?.trim().to_owned();
-        (title.len() > 1 && title.len() <= MAX_TITLE_CHARS).then_some(title)
-    }
 }
 
 pub(crate) fn safe_file_name(file_name: &str) -> String {
@@ -1337,11 +1339,6 @@ pub(crate) fn session_model_from_pi_model(model: &Value) -> Option<SessionModel>
         provider: bounded(provider, 120),
         model_id: bounded(model_id, 240),
     })
-}
-
-fn title_from_prompt(prompt: &str) -> String {
-    let first_line = prompt.lines().find(|line| !line.trim().is_empty()).unwrap_or("New chat");
-    bounded(first_line.trim(), MAX_TITLE_CHARS)
 }
 
 pub(crate) fn bounded(value: &str, max_chars: usize) -> String {

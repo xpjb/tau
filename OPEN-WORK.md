@@ -254,3 +254,43 @@ results/, final-focused.log and final-focused.xml. No physical device acceptance
 is claimed. The connection indicator, retry/heartbeat timing, failed-read state,
 read-only retry policy and user-action reporting remain unchanged. No new stored
 state, dependency, protocol, version, installer, daemon or production change.
+
+## Implemented, held for deployment: editable title system prompt
+
+The user wants the full existing title prompt string editable in Settings. Keep
+its examples and {text} substitution visible; add no hidden instructions, model
+change or title-latency work. Save one optional override in existing daemon state.
+The default text stays in one file shared by the daemon and title helper. Empty
+strings and whitespace are literal overrides; reset copies the default into the
+editor. Other clients read the shared setting when opening Settings or reconnecting.
+
+Plan:
+1. Add protocol-7 get/set title-prompt requests and a request-linked prompt reply.
+   Persist the exact override with the existing state write gate. Reads and edits
+   never run Pi or the title model. Return the effective and default strings.
+2. Pass the override through the title helper's existing JSON input. Preserve its
+   legacy text-only input, CLI override, text truncation and generation options.
+3. Add a multiline Settings editor and Save/Reset controls. Reuse request tracking
+   for loading, failure and timeout; keep unsaved input during reconnect and never
+   replay writes. Add only prompt data and pending status to client state.
+4. Test the real daemon socket/state/Python path with fake Pi and llama_cpp, then
+   client read/save/failure/reconnect behavior. Run daemon tests/Clippy and client
+   tests under Xvfb plus Android compilation. No model or provider traffic.
+5. Review and commit on fix/title-prompt. Keep the accepted branch unmerged until
+   deployment is approved: production executes /root/tau/scripts/title_gen.py from
+   the main checkout. No installer/version bump, live script edit or restart.
+
+Acceptance: all 16 daemon tests and strict Clippy pass. The socket/state/helper
+check covers authentication, shared reads, exact whitespace/Unicode and empty
+values, oversized writes, failed persistence, restart, unchanged existing titles,
+and the exact string delivered to fake llama_cpp. Legacy helper input and CLI
+fallback still work. All 18 client tests pass under Xvfb with zero skips; Android
+compilation passes. Client coverage includes rejected and timed-out saves, stale
+replies, restart and reconnect without replaying writes. The default text is
+byte-for-byte unchanged. No physical Windows/Android or real model test is claimed.
+
+The title-generation and fallback helpers were inlined into their sole caller.
+Only this branch has protocol 7; master and production remain unchanged. Evidence:
+/root/tau-checks/title-prompt/acceptance.json. Keep the branch isolated until the
+live-script deployment gate above is approved, then ship matched clients/daemon
+and the title helper with its adjacent title_prompt.txt file.

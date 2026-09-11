@@ -47,6 +47,12 @@ with `transcript` owning Pi formats and `state.rs` owning only Tau's own
 - `Platform.kt` + actuals — the only OS seam (per-platform services and
   image decoding).
 
+## Title helper (`scripts/`)
+
+- `title_gen.py` — one-shot local title inference from daemon JSON input.
+- `title_prompt.txt` — the default full title prompt, shared with daemon state.
+  Settings edits are stored in the existing daemon `state.json`.
+
 ## Rules the codebase keeps
 
 - No single-caller functions unless they are UI composables, axum route

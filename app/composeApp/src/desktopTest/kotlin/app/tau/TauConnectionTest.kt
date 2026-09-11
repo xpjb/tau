@@ -68,6 +68,98 @@ class TauConnectionTest {
 
 
     @Test
+    fun edits_title_prompt_and_reloads_after_disconnect_without_replaying_saves() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("tau-title-client").toFile()
+        val sockets = Channel<DefaultWebSocketServerSession>(Channel.UNLIMITED)
+        val requests = Channel<ClientRequest>(Channel.UNLIMITED)
+        val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
+            install(WebSockets)
+            routing {
+                webSocket("/v1/ws") {
+                    sendMessage(Hello(TauProtocolVersion, "fixture"))
+                    sendMessage(Sessions(emptyList()))
+                    sockets.send(this)
+                    for (frame in incoming) if (frame is Frame.Text) {
+                        val request = TauJson.decodeFromString<ClientRequest>(frame.readText())
+                        if (request is ListSessions && request.id.startsWith("heartbeat-")) sendMessage(Response(request.id, true))
+                        else requests.send(request)
+                    }
+                }
+            }
+        }.start(wait = false)
+        val settings = ConnectionSettings("http://127.0.0.1:${server.engine.resolvedConnectors().single().port}", "fixture")
+        var controller = TauController(Dispatchers.Swing, LocalStore({ root.resolve("local.db").path }))
+        val default = "Default rules\n{text}\nTitle:"
+        val custom = "  Full \"system\" prompt 🔧\n{text}\n  "
+        try {
+            withContext(Dispatchers.Swing) { controller.start(settings) }
+            var socket = withTimeout(10_000) { sockets.receive() }
+            controller.awaitState { it.connectionStatus == ConnectionStatus.Connected }
+            assertNull(controller.state.value.titlePrompt)
+            withContext(Dispatchers.Swing) { controller.showSettings() }
+            val read = assertIs<GetTitlePrompt>(requests.nextRequest())
+            socket.sendMessage(TitlePrompt(read.id, default, default))
+            socket.sendMessage(Response(read.id, true))
+            controller.awaitState { it.titlePrompt?.prompt == default && !it.titlePromptPending }
+            withContext(Dispatchers.Swing) { controller.titlePrompt() }
+            val quietRead = assertIs<GetTitlePrompt>(requests.nextRequest())
+            assertNull(controller.awaitState(15_000) { !it.titlePromptPending }.error, "A title-settings read produced a timeout banner")
+            socket.sendMessage(TitlePrompt(quietRead.id, "Stale read", default))
+            socket.sendMessage(Response(quietRead.id, true))
+            delay(50)
+            assertEquals(default, controller.state.value.titlePrompt?.prompt)
+            withContext(Dispatchers.Swing) { controller.titlePrompt(custom); controller.titlePrompt(custom) }
+            val rejected = assertIs<SetTitlePrompt>(requests.nextRequest())
+            assertEquals(custom, rejected.prompt)
+            socket.sendMessage(Response(rejected.id, false, error = "Disk full"))
+            controller.awaitState { it.error == "Disk full" && !it.titlePromptPending }
+            assertEquals(default, controller.state.value.titlePrompt?.prompt)
+            assertTrue(requests.tryReceive().isFailure)
+            for (value in listOf(custom, "")) {
+                withContext(Dispatchers.Swing) { controller.titlePrompt(value) }
+                val saved = assertIs<SetTitlePrompt>(requests.nextRequest())
+                assertEquals(value, saved.prompt)
+                socket.sendMessage(TitlePrompt(saved.id, value, default))
+                socket.sendMessage(Response(saved.id, true))
+                controller.awaitState { it.titlePrompt?.prompt == value && !it.titlePromptPending }
+            }
+            withContext(Dispatchers.Swing) { controller.titlePrompt("Unconfirmed") }
+            val timedOut = assertIs<SetTitlePrompt>(requests.nextRequest())
+            controller.awaitState(15_000) { !it.titlePromptPending && it.error == "Title prompt request timed out" }
+            socket.sendMessage(TitlePrompt(timedOut.id, "Stale", default))
+            socket.sendMessage(Response(timedOut.id, true))
+            delay(50)
+            assertEquals("", controller.state.value.titlePrompt?.prompt)
+            withContext(Dispatchers.Swing) { controller.titlePrompt(custom) }
+            val lost = assertIs<SetTitlePrompt>(requests.nextRequest())
+            socket.close(CloseReason(CloseReason.Codes.GOING_AWAY, "save reply lost"))
+            socket = withTimeout(10_000) { sockets.receive() }
+            val refreshed = assertIs<GetTitlePrompt>(requests.nextRequest())
+            assertNotEquals(lost.id, refreshed.id)
+            socket.sendMessage(TitlePrompt(lost.id, "Stale", default))
+            socket.sendMessage(TitlePrompt(refreshed.id, custom, default))
+            socket.sendMessage(Response(refreshed.id, true))
+            controller.awaitState { it.titlePrompt?.prompt == custom && !it.titlePromptPending }
+            assertTrue(requests.tryReceive().isFailure, "Reconnect replayed a save")
+            withContext(Dispatchers.Swing) { controller.dispose() }.join()
+            controller = TauController(Dispatchers.Swing, LocalStore({ root.resolve("local.db").path }))
+            withContext(Dispatchers.Swing) { controller.start(settings) }
+            socket = withTimeout(10_000) { sockets.receive() }
+            controller.awaitState { it.connectionStatus == ConnectionStatus.Connected }
+            assertNull(controller.state.value.titlePrompt)
+            withContext(Dispatchers.Swing) { controller.showSettings() }
+            val reopened = assertIs<GetTitlePrompt>(requests.nextRequest())
+            socket.sendMessage(TitlePrompt(reopened.id, custom, default))
+            socket.sendMessage(Response(reopened.id, true))
+            controller.awaitState { it.titlePrompt?.prompt == custom && !it.titlePromptPending }
+        } finally {
+            withContext(Dispatchers.Swing) { controller.dispose() }.join()
+            server.stop(0, 1000)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun surfaces_codex_usage_notices_as_quota_without_dialog() = runBlocking {
         val directory = Files.createTempDirectory("tau-usage")
         val path = directory.resolve("transcript.db").toString()

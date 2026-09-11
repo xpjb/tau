@@ -11,6 +11,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+pub(crate) const DEFAULT_TITLE_PROMPT: &str = include_str!("../../scripts/title_prompt.txt");
+
 #[derive(Clone)]
 pub struct StateStore {
     inner: Arc<Inner>,
@@ -25,6 +27,8 @@ struct Inner {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct PersistedState {
     schema: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title_prompt: Option<String>,
     #[serde(default)]
     sessions: BTreeMap<String, StoredSession>,
 }
@@ -33,6 +37,7 @@ impl Default for PersistedState {
     fn default() -> Self {
         Self {
             schema: 1,
+            title_prompt: None,
             sessions: BTreeMap::new(),
         }
     }
@@ -81,6 +86,18 @@ impl StateStore {
         };
         store.backfill_models().await?;
         Ok(store)
+    }
+
+    pub async fn title_prompt(&self, replacement: Option<String>) -> Result<String> {
+        if let Some(prompt) = replacement {
+            let _guard = self.inner.write_gate.lock().await;
+            let mut state = self.read_state().clone();
+            if state.title_prompt.as_ref() != Some(&prompt) {
+                state.title_prompt = Some(prompt);
+                self.commit(state).await?;
+            }
+        }
+        Ok(self.read_state().title_prompt.as_deref().unwrap_or(DEFAULT_TITLE_PROMPT).to_owned())
     }
 
     pub fn list(&self) -> Vec<(String, StoredSession)> {
