@@ -3,6 +3,8 @@ package app.tau
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -28,9 +30,16 @@ class TranscriptTextTest {
             }
             ```
 
-            | Name | Value |
-            |---|---:|
-            | alpha | 10 |
+            | Name | Value | Notes |
+            |:---|:---:|---:|
+            | **alpha** | 10 | [Tau](https://example.com) |
+            | escaped\|pipe | `code` | Unicode κόσμε 中文 |
+            | only first |
+            | first | second | third | **KEEP-EXTRA** | escaped\|tail |
+
+            Without edge pipes | Final
+            --- | ---
+            ordinary | LAST-CELL
 
             ---
         """.trimIndent()
@@ -47,7 +56,10 @@ class TranscriptTextTest {
                 quoteBar = Color.Blue,
             ),
         )
-        val visible = document.blocks.joinToString("\n") { it.text.text }
+        val visible = document.blocks.joinToString("\n") { block ->
+            if (block.kind == TranscriptTextBlockKind.Table) block.rows.flatten().joinToString("\n") { it.text }
+            else block.text.text
+        }
 
         assertEquals(TranscriptTextBlockKind.Heading, document.blocks.first().kind)
         assertTrue("Heading" in visible)
@@ -58,7 +70,22 @@ class TranscriptTextTest {
         assertTrue("Name" in visible && "Value" in visible && "alpha" in visible && "10" in visible)
         assertFalse("https://example.com" in visible)
         assertTrue(document.blocks.any { it.kind == TranscriptTextBlockKind.Code })
-        assertTrue(document.blocks.any { it.kind == TranscriptTextBlockKind.Table })
+        val tables = document.blocks.filter { it.kind == TranscriptTextBlockKind.Table }
+        assertEquals(2, tables.size)
+        val table = tables.first()
+        assertEquals(listOf(TextAlign.Left, TextAlign.Center, TextAlign.Right), table.alignments)
+        assertEquals(listOf(
+            listOf("Name", "Value", "Notes"),
+            listOf("alpha", "10", "Tau"),
+            listOf("escaped|pipe", "code", "Unicode κόσμε 中文"),
+            listOf("only first"),
+            listOf("first", "second", "third", "KEEP-EXTRA", "escaped|tail"),
+        ), table.rows.map { row -> row.map { it.text.trim() } })
+        assertTrue(table.rows[1][0].spanStyles.any { it.item.fontWeight == FontWeight.Bold })
+        assertTrue(table.rows[4][3].spanStyles.any { it.item.fontWeight == FontWeight.Bold })
+        assertTrue(table.rows[1][2].getLinkAnnotations(0, table.rows[1][2].length).isNotEmpty())
+        assertEquals(listOf(listOf("Without edge pipes", "Final"), listOf("ordinary", "LAST-CELL")),
+            tables.last().rows.map { row -> row.map { it.text.trim() } })
         assertTrue(document.blocks.any { it.kind == TranscriptTextBlockKind.Quote })
         assertTrue(document.blocks.any { it.kind == TranscriptTextBlockKind.Rule })
     }

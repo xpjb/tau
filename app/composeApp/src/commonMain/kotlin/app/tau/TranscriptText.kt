@@ -6,6 +6,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.annotator.DefaultAnnotatorSettings
@@ -24,6 +25,7 @@ import org.intellij.markdown.ast.getTextInNode
 import org.intellij.markdown.flavours.gfm.GFMElementTypes
 import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
 import org.intellij.markdown.flavours.gfm.GFMTokenTypes
+import org.intellij.markdown.flavours.gfm.table.GitHubTableMarkerBlock
 import org.intellij.markdown.parser.CancellationToken
 import org.intellij.markdown.parser.MarkdownParser
 
@@ -54,6 +56,8 @@ internal data class TranscriptTextBlock(
     val text: AnnotatedString,
     val style: TextStyle,
     val kind: TranscriptTextBlockKind,
+    val rows: List<List<AnnotatedString>> = emptyList(),
+    val alignments: List<TextAlign> = emptyList(),
 )
 
 internal data class TranscriptTextDocument(
@@ -78,11 +82,8 @@ internal fun buildChatText(
         )
     } else {
         val flavour = GFMFlavourDescriptor()
-        val parsed = parseMarkdown(
-            content = text,
-            flavour = flavour,
-            parser = MarkdownParser(flavour, false, CancellationToken.NonCancellable),
-        )
+        val parser = MarkdownParser(flavour, false, CancellationToken.NonCancellable)
+        val parsed = parseMarkdown(content = text, flavour = flavour, parser = parser)
         if (parsed !is State.Success) {
             listOf(
                 TranscriptTextBlock(
@@ -107,6 +108,25 @@ internal fun buildChatText(
                     buildMarkdownAnnotatedString(text, contentNode, annotatorSettings)
                 }
             }
+
+            fun tableRows(node: ASTNode): List<List<AnnotatedString>> = node.children
+                .filter { it.type == GFMElementTypes.HEADER || it.type == GFMElementTypes.ROW }
+                .map { row ->
+                    val cells = row.children.filter { it.type == GFMTokenTypes.CELL }.map { annotated(it) }.toMutableList()
+                    val tail = row.children.lastOrNull()
+                    if (tail?.type == GFMTokenTypes.TABLE_SEPARATOR && tail.endOffset - tail.startOffset > 1) {
+                        var start = tail.startOffset
+                        val extra = GitHubTableMarkerBlock.splitByPipes(tail.getTextInNode(text))
+                        extra.forEachIndexed { index, cell ->
+                            val end = start + cell.length
+                            if (cell.isNotBlank() || index < extra.lastIndex) {
+                                cells += annotated(parser.parseInline(GFMTokenTypes.CELL, text, start, end))
+                            }
+                            start = end + 1
+                        }
+                    }
+                    cells
+                }
 
             fun flattened(node: ASTNode): AnnotatedString = buildAnnotatedString {
                 fun appendNode(current: ASTNode, depth: Int) {
@@ -166,16 +186,13 @@ internal fun buildChatText(
                             if (index > 0 && length > 0) append('\n')
                             appendNode(child, depth)
                         }
-                        GFMElementTypes.TABLE -> current.children
-                            .filter { it.type == GFMElementTypes.HEADER || it.type == GFMElementTypes.ROW }
-                            .forEachIndexed { rowIndex, row ->
-                                if (rowIndex > 0) append('\n')
-                                val cells = row.children.filter { it.type == GFMTokenTypes.CELL }
-                                cells.forEachIndexed { cellIndex, cell ->
-                                    if (cellIndex > 0) append("  │  ")
-                                    append(annotated(cell))
-                                }
+                        GFMElementTypes.TABLE -> tableRows(current).forEachIndexed { rowIndex, row ->
+                            if (rowIndex > 0) append('\n')
+                            row.forEachIndexed { cellIndex, cell ->
+                                if (cellIndex > 0) append("  │  ")
+                                append(cell)
                             }
+                        }
                         MarkdownElementTypes.IMAGE -> {
                             val label = current.findChildOfType(MarkdownElementTypes.LINK_TEXT)
                             append(if (label == null) "[image]" else annotated(label))
@@ -268,9 +285,19 @@ internal fun buildChatText(
                         TranscriptTextBlockKind.Flow,
                     )
                     GFMElementTypes.TABLE -> result += TranscriptTextBlock(
-                        flattened(node),
-                        styles.code,
+                        AnnotatedString(""),
+                        styles.body,
                         TranscriptTextBlockKind.Table,
+                        rows = tableRows(node),
+                        alignments = node.findChildOfType(GFMTokenTypes.TABLE_SEPARATOR)?.getTextInNode(text)
+                            ?.trim()?.removePrefix("|")?.removeSuffix("|")?.split('|')?.map {
+                                val marker = it.trim()
+                                when {
+                                    marker.startsWith(':') && marker.endsWith(':') -> TextAlign.Center
+                                    marker.endsWith(':') -> TextAlign.Right
+                                    else -> TextAlign.Left
+                                }
+                            }.orEmpty(),
                     )
                     MarkdownTokenTypes.HORIZONTAL_RULE -> result += TranscriptTextBlock(
                         AnnotatedString(""),

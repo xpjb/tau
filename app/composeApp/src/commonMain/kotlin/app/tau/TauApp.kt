@@ -108,16 +108,22 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.CollectionInfo
+import androidx.compose.ui.semantics.CollectionItemInfo
+import androidx.compose.ui.semantics.collectionInfo
+import androidx.compose.ui.semantics.collectionItemInfo
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -603,9 +609,35 @@ private fun RetainedText(text: String, markdown: Boolean, small: Boolean = false
                     Modifier.fillMaxWidth().background(styles.codeBackground, MaterialTheme.shapes.small)
                         .horizontalScroll(rememberScrollState()).padding(styles.codePadding),
                 ) { Text(block.text, style = block.style, softWrap = false) }
-                TranscriptTextBlockKind.Table -> Box(
-                    Modifier.fillMaxWidth().background(styles.codeBackground, MaterialTheme.shapes.small).padding(styles.codePadding),
-                ) { Text(block.text, style = block.style, modifier = Modifier.fillMaxWidth()) }
+                TranscriptTextBlockKind.Table -> BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val columns = block.rows.maxOf { it.size }
+                    Column(
+                        Modifier.horizontalScroll(rememberScrollState()).width(maxOf(maxWidth, 120.dp * columns))
+                            .semantics { collectionInfo = CollectionInfo(block.rows.size, columns) },
+                    ) {
+                        HorizontalDivider()
+                        block.rows.forEachIndexed { rowIndex, row ->
+                            Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)
+                                .then(if (rowIndex == 0) Modifier.background(colors.surface) else Modifier)) {
+                                repeat(columns) { columnIndex ->
+                                    VerticalDivider()
+                                    Text(
+                                        row.getOrNull(columnIndex) ?: AnnotatedString(""),
+                                        style = block.style,
+                                        fontWeight = if (rowIndex == 0) FontWeight.SemiBold else null,
+                                        textAlign = block.alignments.getOrElse(columnIndex) { TextAlign.Left },
+                                        modifier = Modifier.weight(1f).padding(8.dp).semantics {
+                                            if (rowIndex == 0) heading()
+                                            collectionItemInfo = CollectionItemInfo(rowIndex, 1, columnIndex, 1)
+                                        },
+                                    )
+                                }
+                                VerticalDivider()
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
                 TranscriptTextBlockKind.Quote -> Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
                     Box(Modifier.width(styles.quoteBarWidth).fillMaxHeight().background(styles.quoteBar))
                     Text(block.text, style = block.style, modifier = Modifier.padding(start = styles.quoteIndent).fillMaxWidth())

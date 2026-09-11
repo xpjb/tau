@@ -4,6 +4,31 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## Implemented, unreleased: Markdown tables without text loss
+
+The user requests real table rows and columns, with no truncated text. The saved
+comparison is valid, unfenced Markdown. Tau's table block flattened cells into
+code-styled text; the former library table renderer also defaults to one-line
+ellipsis. Keep the current synchronous parsing and scroll anchors instead.
+
+Plan:
+1. Extend the existing parsed table block with annotated cell rows and alignment.
+2. Draw shared column widths, headers and rules. Wrap cells to full height; use
+   existing horizontal scrolling when 120 dp per column exceeds the view width.
+   Add no line/height limit, text cache, persistent state or new scroll model.
+3. Preserve extra body cells: the parser marks content beyond the header count as
+   a separator. Reuse its pipe splitter and inline parser for that remaining text,
+   rather than silently dropping it. Keep complete source Markdown for copying.
+4. Extend the existing parser and real-window transcript checks, then review and
+   run all client tests and Android compilation before merging. Hold packaging,
+   versions and service changes for a separate release request.
+
+Focused checks pass: table structure/alignment, inline styles/links, Unicode,
+escaped pipes, short rows and extra cells; real-window long cells and unbroken
+text at wide/narrow widths, full-text copying, sideways scrolling, delayed history
+and existing image zoom. The test uses isolated fixtures, not production chats.
+Full client acceptance is pending. Evidence: /root/tau-checks/markdown-tables/.
+
 ## Deployed: 0.5.12 / protocol 7
 
 The user requested deployment of the completed batch and confirmed no chats are

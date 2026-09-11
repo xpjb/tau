@@ -1,5 +1,18 @@
 # Retained transcript contract
 
+## Unreleased client QA — Markdown tables
+
+Table blocks retain annotated cell rows and column alignment. The view draws
+shared columns, header emphasis and borders instead of a code-styled text block.
+Cells wrap to full height without line limits or ellipsis. Wide tables use the
+existing horizontal scroll container, with at least 120 dp per column. Extra
+cells beyond the header count remain visible rather than being discarded by the
+Markdown parser. Copy message keeps the complete original Markdown.
+
+Saved text still parses before its first measurement. Existing transcript keys,
+scroll anchors, collapsible Details and ordinary message text stay unchanged.
+There is no new text cache, stored preference, protocol change or release.
+
 ## Client 0.5.11 rebuild 2 — scrolling
 
 Saved Markdown uses its parsed layout on the first measurement. It no longer

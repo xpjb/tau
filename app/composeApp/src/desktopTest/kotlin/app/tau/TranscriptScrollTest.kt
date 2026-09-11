@@ -7,7 +7,9 @@ import androidx.compose.ui.ComposeDesktopEntryPoint
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -73,7 +75,7 @@ class TranscriptScrollTest {
             TranscriptEvent("row:$index", index.toLong(), "entry-$index", role = if (!grouped && index % 2 == 0) EventRole.User else EventRole.Assistant,
                 kind = if (grouped) EventKind.Thinking else EventKind.Text, text = if (!grouped && index % 2 == 0) "USER ROW $index" else (0 until 6).joinToString("\n\n") {
                     "[ROW $index paragraph $it](https://example.invalid/${"long-path-".repeat(30)})"
-                })
+                } + if (index % 20 == 1) "\n\n| History | Full text |\n|---|---|\n| ROW $index | Kept after paging and re-entry |" else "")
         }
         val imageReads = AtomicInteger()
         val image = BufferedImage(1000, 700, BufferedImage.TYPE_INT_RGB)
@@ -178,13 +180,23 @@ class TranscriptScrollTest {
             assertEquals("bottom-anchor", position().key)
             if (grouped) {
                 val key = ChatKey(settings.identity, session.id)
+                val cells = listOf(
+                    listOf("Layout", "Real examples", "What to expect"),
+                    listOf("Single turbo", "A complete example with a long description and a final EXAMPLE-END marker.",
+                        "Full boost response details. ".repeat(30) + "BOOST-END"),
+                    listOf("Twin turbo", "Second example", "Unbroken".repeat(50) + "-TOKEN-END", "EXTRA-COLUMN-END"),
+                )
+                val table = cells.mapIndexed { index, row ->
+                    row.joinToString("|", "|", "|") + if (index == 0) "\n|:---|:---:|---:|" else ""
+                }.joinToString("\n")
+                val lastReply = "Last reply\n\n$table\n\nAfter the complete table."
                 val copied = listOf(
                     TranscriptEvent("copy-first", 1600, "copy-first", role = EventRole.Assistant, kind = EventKind.Text, text = "First **reply**"),
                     TranscriptEvent("copy-thought", 1601, "copy-thought", role = EventRole.Assistant, kind = EventKind.Thinking, text = "Private thought"),
                     TranscriptEvent("copy-call", 1602, "copy-call", role = EventRole.Assistant, kind = EventKind.Tool, text = "Tool input", toolCallId = "copy-tool"),
                     TranscriptEvent("copy-output", 1603, "copy-output", role = EventRole.Tool, kind = EventKind.Text, text = "Tool output", toolCallId = "copy-tool"),
                     TranscriptEvent("copy-error", 1604, "copy-error", role = EventRole.Tool, kind = EventKind.Text, text = "Tool error", toolCallId = "copy-tool", isError = true),
-                    TranscriptEvent("copy-last", 1605, "copy-last", role = EventRole.Assistant, kind = EventKind.Text, text = "Last reply"),
+                    TranscriptEvent("copy-last", 1605, "copy-last", role = EventRole.Assistant, kind = EventKind.Text, text = lastReply),
                     TranscriptEvent("copy-image", 1606, "copy-image", role = EventRole.Assistant, kind = EventKind.Image, text = "image/png"),
                 )
                 assertTrue(controller.store.applySnapshot(key, TranscriptCut("copy", 0, copied, QueueState(), null)))
@@ -216,7 +228,48 @@ class TranscriptScrollTest {
                         }
                         text
                     }
-                    assertEquals("First **reply**\n\nLast reply", clipboard, "Copy message included Details (expanded=$expanded)")
+                    assertEquals("First **reply**\n\n$lastReply", clipboard, "Copy message changed or truncated text (expanded=$expanded)")
+                }
+                withContext(Dispatchers.Swing) { controller.selectSession(session.id) }
+                for (width in listOf(1100, 380, 1100)) {
+                    withContext(Dispatchers.Swing) { frame.setSize(width, 760) }
+                    delay(500)
+                    withContext(Dispatchers.Swing) {
+                        val nodes = frame.semanticsOwners.flatMap { owner ->
+                            generateSequence(listOf(owner.unmergedRootSemanticsNode)) { level ->
+                                level.flatMap { it.children }.takeIf { it.isNotEmpty() }
+                            }.flatten().toList()
+                        }
+                        val positions = cells.map { row -> row.map { cell ->
+                            val node = checkNotNull(nodes.firstOrNull {
+                                it.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == cell
+                            }) { "Table cell is not rendered separately at width $width: ${cell.take(60)}" }
+                            val layouts = mutableListOf<TextLayoutResult>()
+                            assertTrue(node.config.getOrNull(SemanticsActions.GetTextLayoutResult)?.action?.invoke(layouts) == true)
+                            val layout = layouts.single()
+                            assertEquals(cell, layout.layoutInput.text.text)
+                            assertTrue(!layout.hasVisualOverflow, "Table cell is clipped at width $width: ${cell.take(60)}")
+                            assertEquals(cell.length, layout.getLineEnd(layout.lineCount - 1), "Table cell lost its ending")
+                            assertTrue((0 until layout.lineCount).none(layout::isLineEllipsized))
+                            if (cell.length > 400) assertTrue(layout.lineCount > 1, "Long cell did not wrap")
+                            node.positionInRoot
+                        } }
+                        positions.forEach { row ->
+                            assertTrue(row.zipWithNext().all { (left, right) -> right.x > left.x }, "Table columns overlap")
+                            assertTrue(row.all { it.y == row.first().y }, "Cells do not share a row")
+                        }
+                        positions.zipWithNext().forEach { (above, below) ->
+                            assertTrue(above.zip(below).all { (top, bottom) -> top.x == bottom.x && bottom.y > top.y },
+                                "Table columns do not line up")
+                        }
+                        if (width == 380) {
+                            val scroll = nodes.single { it.config.getOrNull(SemanticsProperties.HorizontalScrollAxisRange)?.maxValue()?.let { it > 0 } == true }
+                            val range = scroll.config[SemanticsProperties.HorizontalScrollAxisRange]
+                            assertTrue(scroll.config.getOrNull(SemanticsActions.ScrollBy)?.action?.invoke(range.maxValue(), 0f) == true)
+                            withTimeout(5_000) { while (range.value() < range.maxValue()) delay(20) }
+                            assertTrue(range.value() > 0, "Wide table cannot scroll to its final column")
+                        }
+                    }
                 }
                 val photo = TranscriptEvent("zoom:0", 1700, "zoom", role = EventRole.Assistant, kind = EventKind.Image,
                     attachment = ChatAttachment(AttachmentKind.Image, "zoom.png", size = imageBytes.size.toLong()))
