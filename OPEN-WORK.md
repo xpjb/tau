@@ -4,7 +4,7 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
-## Authorized release: 0.5.12 / protocol 7
+## Deployed: 0.5.12 / protocol 7
 
 The user requested deployment of the completed batch and confirmed no chats are
 running. Combine master 86b66c4 with accepted title feature 2ba569b in the isolated
@@ -30,6 +30,13 @@ Xvfb with no skips, Android compilation, signed Android and minified Windows
 packaging. The staged daemon reports 0.5.12/protocol 7. Signing is unchanged.
 The Cargo wrapper builds into this worktree; staging now uses that verified path.
 Evidence: /root/tau-release/0.5.12/acceptance.json.
+Deployment completed at 2026-09-11T06:48:06Z after another successful idle check.
+Tau is healthy at 0.5.12/protocol 7; all 80 prior chat IDs and 77 JSONL byte
+prefixes are preserved. The authenticated title-setting read matches the shared
+default. Telegram, Pi and configuration stay unchanged; no provider prompts.
+Both matched installers were queued for delivery. Backup and deployment receipt:
+/var/backups/tau/0.5.12-20260911T064802Z and
+/root/tau-release/0.5.12/deployment.json. The title deployment gate is complete.
 Historical unreleased/held notes below describe the earlier acceptance gates.
 
 ## Implemented: flatten the transcript for code health
