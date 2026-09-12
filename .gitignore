@@ -4,6 +4,8 @@
 /app/.gradle/
 /app/.kotlin/
 /app/build/
+/app/buildSrc/.gradle/
+/app/buildSrc/build/
 /app/androidApp/build/
 /app/composeApp/build/
 /app/local.properties

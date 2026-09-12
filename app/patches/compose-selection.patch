@@ -1,0 +1,13 @@
+--- a/compose/foundation/foundation/src/commonMain/kotlin/androidx/compose/foundation/text/selection/MultiWidgetSelectionDelegate.kt
++++ b/compose/foundation/foundation/src/commonMain/kotlin/androidx/compose/foundation/text/selection/MultiWidgetSelectionDelegate.kt
+@@ -401,8 +401,8 @@
+ // map offsets above/below the text to 0/length respectively
+ private fun getOffsetForPosition(position: Offset, textLayoutResult: TextLayoutResult): Int =
+     when {
+-        position.y <= 0f -> 0
+-        position.y >= textLayoutResult.multiParagraph.height ->
++        position.y < 0f -> 0
++        position.y > textLayoutResult.multiParagraph.height ->
+             textLayoutResult.layoutInput.text.length
+         else -> textLayoutResult.getOffsetForPosition(position)
+     }

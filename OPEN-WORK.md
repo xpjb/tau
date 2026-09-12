@@ -4,19 +4,42 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
-## Reported: crash while selecting long, off-screen tool text
+## In progress: horizontal selection crash and useful exception diagnostics
 
-The user reported a Windows crash while highlighting a long tool-use code block
-that extended off screen. The daemon received report
-`2a4c7da0-529d-46fb-8857-28030d9dc274` at 2026-09-12T19:25:47Z from client 0.5.12.
-It records IllegalArgumentException in MultiParagraph.getPathForRange, called by
-SelectionController.draw on the AWT event thread. The daemon stayed running.
+The user approved the dependency patch and logging repair, then asked whether an
+upgrade already fixes it. Windows uses latest stable Compose Multiplatform 1.12.0;
+the newer 1.13 alpha retains the same faulty selection code. The user confirmed
+that the patch should proceed. No release or service restart is authorized.
 
-This confirms a selection-highlight crash, not its exact trigger or a link to the
-user's weak connection. Reports omit exception messages and chat content. Preserve
-the long/off-screen detail for reproduction; no selection fix is implemented yet.
-Evidence: `/root/tau-checks/text-selection-crash/report.json` and `journal.log`.
-Keep this separate from the Enter submission fix.
+The exact gesture is a horizontal selection drag along a long, unwrapped code
+line. At its top edge, Compose maps y <= 0 to character 0 but only y < 0 to the
+area before the text. When scrolling reaches the end, a point to the right is
+classified as after the text: a selection from 5 to 0 is incorrectly marked
+forward. Its highlight throws through the same stack as Windows report
+2a4c7da0-529d-46fb-8857-28030d9dc274. A synthetic real-window probe reproduces it
+without text updates or network activity. The bottom-edge comparisons also differ.
+
+Design: apply the two strict comparisons to the pinned desktop JAR and Android
+AAR during the build, using a cached Gradle artifact transform with class hashes
+and branch-count checks. Keep a source patch beside it. This avoids a full Compose
+fork and adds no runtime hook, reflection, catch-all, selection reset or new UI
+state. All other artifacts pass through unchanged; original dependencies remain
+untouched. Keep full bounded exception diagnostics locally and send only safe
+range messages and cause stacks. Reporting failures must remain visible. The
+changed report fields require a matched, versioned client/daemon release later.
+
+Plan:
+1. Keep one real selection/copy regression covering both horizontal directions
+   and center/top/bottom edges; verify the old-code failure.
+2. Apply and verify the build-time patch for both resolved platform artifacts.
+3. Share the JVM crash writer, retain a bounded full local trace, extend the
+   bounded remote report and daemon validation, and advance the wire version.
+4. Check crash persistence/upload/failure paths, source and artifact diffs, the
+   full client suite and Android compilation, plus daemon tests and strict lint.
+5. Commit off master and merge after acceptance. Hold installers and deployment.
+
+Evidence: `/root/tau-checks/text-selection-crash/findings.md`, its `upstream/`
+release check, and `/root/tau-checks/selection-fix/` implementation checks.
 
 ## Implemented, unreleased: Enter submits single-line forms
 
