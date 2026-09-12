@@ -21,6 +21,7 @@ subprojects {
                 if (id.version != "1.12.0") throw GradleException("Review the Compose selection patch before changing $id")
             }
         }
+        artifactTypes.maybeCreate("aar")
         artifactTypes.configureEach {
             if (name == "jar" || name == "aar") attributes.attribute(selectionPatched, false)
         }

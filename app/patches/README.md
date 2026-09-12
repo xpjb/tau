@@ -16,7 +16,10 @@ checks the original class SHA-256 and exactly two changed branches. Component
 metadata rejects any other version. Inputs in Gradle's dependency cache remain
 unchanged; only derived build artifacts are patched. The transform is registered
 for both client modules so compilation, desktop shrinking and Android DEX consume
-the same fix. Other dependencies are untouched.
+the same fix. Other dependencies are untouched. The explicit AAR artifact type
+registration is required: AGP does not define its default transform attributes.
+The hash-only passthrough in the transform is JetBrains' empty Android wrapper;
+the implementation lives in the separate AndroidX AAR.
 
 This avoids a full framework source fork for two comparisons. ASM is build-only.
 The JVM changes are IFGT -> IFGE and IFLT -> IFLE: these branches skip the early
