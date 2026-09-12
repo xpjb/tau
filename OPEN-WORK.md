@@ -4,42 +4,61 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
-## In progress: horizontal selection crash and useful exception diagnostics
+## Accepted: horizontal selection crash and exception diagnostics (unreleased)
 
-The user approved the dependency patch and logging repair, then asked whether an
-upgrade already fixes it. Windows uses latest stable Compose Multiplatform 1.12.0;
-the newer 1.13 alpha retains the same faulty selection code. The user confirmed
-that the patch should proceed. No release or service restart is authorized.
+The user approved the dependency patch and logging repair after verifying that
+Windows already uses latest stable Compose Multiplatform 1.12.0. The 1.13 alpha
+retains the same defect. No release or service restart is authorized.
 
-The exact gesture is a horizontal selection drag along a long, unwrapped code
-line. At its top edge, Compose maps y <= 0 to character 0 but only y < 0 to the
-area before the text. When scrolling reaches the end, a point to the right is
-classified as after the text: a selection from 5 to 0 is incorrectly marked
-forward. Its highlight throws through the same stack as Windows report
-2a4c7da0-529d-46fb-8857-28030d9dc274. A synthetic real-window probe reproduces it
-without text updates or network activity. The bottom-edge comparisons also differ.
+The source patch changes two lines in getOffsetForPosition: y < 0 and
+y > textLayoutResult.size.height. This matches getYDirection's strict bounds.
+Glyph height is not always layout height: changing only the comparison operators
+still crashes a reverse drag over padded text. A checked Gradle artifact transform
+applies the fix to desktop and Android without a runtime hook, class overlay,
+selection reset, range clamping or blanket catch-and-continue handler.
 
-Design: apply the two strict comparisons to the pinned desktop JAR and Android
-AAR during the build, using a cached Gradle artifact transform with class hashes
-and branch-count checks. Keep a source patch beside it. This avoids a full Compose
-fork and adds no runtime hook, reflection, catch-all, selection reset or new UI
-state. All other artifacts pass through unchanged; original dependencies remain
-untouched. Keep full bounded exception diagnostics locally and send only safe
-range messages and cause stacks. Reporting failures must remain visible. The
-changed report fields require a matched, versioned client/daemon release later.
+Both resolved artifacts were inspected. Only MultiWidgetSelectionDelegateKt
+changes, and only its getOffsetForPosition method instructions change. Inputs
+remain untouched. Version and class-hash checks reject unknown dependencies.
+Android needed an explicit AAR artifact-type registration; compilation alone did
+not expose that missing transform. The final Android runtime artifacts and DEX
+builds were checked. Desktop shrinking consumes the patched JAR as well.
 
-Plan:
-1. Keep one real selection/copy regression covering both horizontal directions
-   and center/top/bottom edges; verify the old-code failure.
-2. Apply and verify the build-time patch for both resolved platform artifacts.
-3. Share the JVM crash writer, retain a bounded full local trace, extend the
-   bounded remote report and daemon validation, and advance the wire version.
-4. Check crash persistence/upload/failure paths, source and artifact diffs, the
-   full client suite and Android compilation, plus daemon tests and strict lint.
-5. Commit off master and merge after acceptance. Hold installers and deployment.
+The shared JVM crash writer retains the latest bounded full local trace, including
+messages, causes and suppressed exceptions. The remote report stays under 24 KiB
+and omits arbitrary messages; schema 2 adds bounded cause stacks and safe numeric
+selection ranges. Old pending reports, including files without a schema field,
+retain schema 1 compatibility. New reports explicitly use schema 2. Upload replies
+clear only their matching pending report, so a stale reply cannot erase a newer
+crash. Local traces survive upload. Reporting failures are printed to stderr.
+The Windows javaw launcher has no console; this adds no separate native fatal-error
+UI or launcher monitor for storage failures.
 
-Evidence: `/root/tau-checks/text-selection-crash/findings.md`, its `upstream/`
-release check, and `/root/tau-checks/selection-fix/` implementation checks.
+Protocol 8 is reserved for this pending matched client/daemon batch. Release
+numbers remain 0.5.12 / Android versionCode 33 until the release is requested.
+
+Acceptance, 2026-09-12:
+- Final padded-text regression fails against the original library with 5..0.
+  The incomplete operator-only patch also fails a reverse drag with 710..705.
+  The final patch passes all six center/top/bottom and left/right selection/copy
+  cases, with real horizontal auto-scroll and native clipboard input.
+- Full client suite: 24 passed, no skips. Final focused selection, crash/report
+  and protocol checks: 4 passed after the receipt-match refinement.
+- Crash checks cover real fatal-handler execution, local message/cause retention,
+  private-message exclusion from HTTP uploads, byte limits, cyclic/suppressed
+  exceptions, failed writes, failed uploads, old reports and stale receipts.
+- Android compilation plus external/library DEX merging pass. Desktop release-JAR
+  shrinking passes. No installer was built or distributed.
+- Daemon: 18 nextest tests pass; strict all-target Clippy passes. Crash ingest checks
+  cover auth, old/new schemas, Unicode limits, invalid ranges and durable writes.
+- Unknown version, changed/missing class and deterministic-output guards pass.
+- Physical Windows/Android acceptance remains device QA. Service remains PID111289,
+  active with NRestarts0; it still runs the released code.
+
+Evidence: `/root/tau-checks/selection-fix/acceptance.json`, final-artifacts.json,
+full-results/, final-results/, final-regression-before.xml, padded-before.xml,
+accepted.log, receipt-acceptance.log, daemon-tests.log and clippy.log. Original
+investigation and release checks remain under text-selection-crash/.
 
 ## Implemented, unreleased: Enter submits single-line forms
 
