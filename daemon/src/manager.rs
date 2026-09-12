@@ -187,19 +187,24 @@ impl AgentManager {
             process.is_alive() && uuid::Uuid::parse_str(token).ok() == Some(process.flag_token)
         });
         if !permitted { return Ok(None); }
-        let saved = self.inner.state.flag(id, text).await;
-        let (message, level) = match &saved {
-            Ok(flag) => (format!("Flagged {} · {}: {}", flag.id, bounded(&flag.session_title, 80), bounded(text, 320)), "info"),
-            Err(error) => (format!("Flag save failed · {}: {}", id, bounded(&error.to_string(), 240)), "error"),
-        };
-        let _ = self.inner.events.send(ServerMessage::ExtensionUi {
-            session_id: id.to_owned(),
-            request: Box::new(ExtensionUiRequest {
-                id: uuid::Uuid::new_v4().to_string(), method: "notify".to_owned(),
-                message: Some(message), notify_type: Some(level.to_owned()), ..Default::default()
-            }),
-        });
-        saved.map(Some)
+        let inner = self.inner.clone();
+        let id = id.to_owned();
+        let text = text.to_owned();
+        tokio::spawn(async move {
+            let saved = inner.state.flag(&id, &text).await;
+            let (message, level) = match &saved {
+                Ok(flag) => (format!("Flagged {} · {}: {}", flag.id, bounded(&flag.session_title, 80), bounded(&text, 320)), "info"),
+                Err(error) => (format!("Flag save failed · {}: {}", id, bounded(&error.to_string(), 240)), "error"),
+            };
+            let _ = inner.events.send(ServerMessage::ExtensionUi {
+                session_id: id,
+                request: Box::new(ExtensionUiRequest {
+                    id: uuid::Uuid::new_v4().to_string(), method: "notify".to_owned(),
+                    message: Some(message), notify_type: Some(level.to_owned()), ..Default::default()
+                }),
+            });
+            saved.map(Some)
+        }).await.context("Tau flag save task stopped")?
     }
 
     pub async fn create_session(&self) -> Result<String> {

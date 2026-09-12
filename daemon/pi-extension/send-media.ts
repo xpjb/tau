@@ -27,7 +27,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Flag incidental technical debt, environment problems or operational inefficiency without changing task scope.",
     promptGuidelines: [
       "Use flag_it for new, actionable findings outside the current task. State what you observed, where, and why it matters; distinguish facts from suspicions and omit secrets.",
-      "Continue the current task after flagging. A flag does not authorize investigation or extra work. Do not repeatedly flag the same known issue.",
+      "Continue the current task after flagging. A flag does not authorize investigation or extra work. Do not repeatedly flag the same known issue or bypass this tool by editing the daemon's flag log.",
     ],
     parameters: Type.Object({ str: Type.String({ minLength: 1, maxLength: 4096, description: "The finding, location and impact; no secrets" }) }),
     async execute(_toolCallId, params, signal) {

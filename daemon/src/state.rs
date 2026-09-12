@@ -174,6 +174,7 @@ impl StateStore {
         let mut encoded = serde_json::to_vec(&flag)?;
         encoded.push(b'\n');
         let path = self.inner.path.with_file_name("flags.jsonl");
+        if path == self.inner.path { bail!("Tau state and flag log paths must differ"); }
         let mut options = OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]

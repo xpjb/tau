@@ -751,6 +751,19 @@ mod tests {
             }
         }
         assert_eq!(fs::metadata(&log).await.unwrap().mode() & 0o777, 0o600);
+        {
+            let mut cancelled = Box::pin(manager.flag(&first, &tokens[0], "Caller disconnected"));
+            assert!(futures_util::poll!(&mut cancelled).is_pending());
+        }
+        for socket in &mut clients {
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+            let message: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(message["request"]["notifyType"], "info");
+            assert!(message["request"]["message"].as_str().unwrap().contains("Caller disconnected"));
+        }
+        let completed: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(completed.len(), 3);
+        assert_eq!(completed.last().unwrap()["text"], "Caller disconnected");
         let before_failure = fs::read(&log).await.unwrap();
         fs::rename(&log, root.join("flags-backup")).await.unwrap();
         fs::create_dir(&log).await.unwrap();
@@ -767,7 +780,7 @@ mod tests {
         let (left, right) = tokio::join!(submit(address, &first, &tokens[0], "Concurrent first"), submit(address, &second, &tokens[1], "Concurrent second"));
         assert_eq!((left.0, right.0), (200, 200));
         let rows: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         assert!(rows.contains(&left.1) && rows.contains(&right.1));
         assert_eq!(manager.inner.state.get(&first).unwrap().updated_at_ms, session.updated_at_ms);
         assert_eq!(fs::read(session.session_file.as_ref().unwrap()).await.unwrap(), history);
@@ -778,12 +791,19 @@ mod tests {
         for socket in &mut clients { socket.close(None).await.unwrap(); }
         manager.shutdown().await;
         server.abort();
-        let restored = StateStore::load(config.state_path).await.unwrap();
+        let restored = StateStore::load(config.state_path.clone()).await.unwrap();
         let saved = restored.flag(&first, "After restart").await.unwrap();
         assert_eq!(saved.session_id, first);
         let rows: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
         assert_eq!(rows.last().unwrap()["id"], saved.id);
+        fs::create_dir(root.join("collision")).await.unwrap();
+        let collision = root.join("collision/flags.jsonl");
+        fs::copy(config.state_path, &collision).await.unwrap();
+        let before = fs::read(&collision).await.unwrap();
+        let colliding = StateStore::load(collision.clone()).await.unwrap();
+        assert!(colliding.flag(&first, "Must not overwrite state").await.is_err());
+        assert_eq!(fs::read(collision).await.unwrap(), before);
         fs::remove_dir_all(root).await.unwrap();
     }
 
