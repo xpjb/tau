@@ -815,9 +815,8 @@ private fun SessionList(
     }
 
     renaming?.let { session ->
-        val canSave = actionsEnabled && renameText.isNotBlank()
         val save = {
-            if (canSave) {
+            if (actionsEnabled && renameText.isNotBlank()) {
                 controller.renameSession(session.id, renameText)
                 renaming = null
             }
@@ -837,7 +836,7 @@ private fun SessionList(
             confirmButton = {
                 TextButton(
                     onClick = save,
-                    enabled = canSave,
+                    enabled = actionsEnabled && renameText.isNotBlank(),
                 ) { Text("Save") }
             },
             dismissButton = {

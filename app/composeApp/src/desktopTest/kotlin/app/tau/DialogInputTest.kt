@@ -142,6 +142,12 @@ class DialogInputTest {
             enter()
             assertNull(withTimeoutOrNull(300) { writes.receive() }, "Enter submitted a blank title")
             edit(rename, "Renamed chat")
+            withContext(Dispatchers.Swing) {
+                assertTrue(rename.config[SemanticsActions.SetText].action!!.invoke(AnnotatedString("")))
+                assertTrue(rename.config[SemanticsActions.OnImeAction].action!!.invoke())
+            }
+            assertNull(withTimeoutOrNull(300) { writes.receive() }, "Done submitted text cleared in the same input event")
+            edit(rename, "Renamed chat")
             enter()
             val renamed = assertIs<RenameSession>(withTimeoutOrNull(5_000) { writes.receive() }, "Enter did not save the chat title")
             assertEquals(session.id, renamed.sessionId)
