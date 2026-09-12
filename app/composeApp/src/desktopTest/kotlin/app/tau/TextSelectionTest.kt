@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -72,7 +73,7 @@ class TextSelectionTest {
                                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Text("Tool input $index")
                                         if (index == 0) Box(Modifier.width(650.dp).horizontalScroll(scroll)) {
-                                            Text(code, fontFamily = FontFamily.Monospace, softWrap = false)
+                                            Text(code, Modifier.height(40.dp), fontFamily = FontFamily.Monospace, softWrap = false)
                                         } else Text("Earlier content $index")
                                         Text("End of tool $index")
                                     }
@@ -104,6 +105,7 @@ class TextSelectionTest {
                     }.single { it.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == code }
                     val layouts = mutableListOf<TextLayoutResult>()
                     assertTrue(node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts))
+                    assertTrue(layouts.single().size.height > layouts.single().multiParagraph.height, "Exercise padding beyond the glyphs")
                     val cursor = layouts.single().getCursorRect(if (direction > 0) 5 else code.length - 5)
                     val origin = node.positionOnScreen
                     val endX = origin.x + scroll.value + if (direction > 0) scroll.viewportSize + 130 else -130

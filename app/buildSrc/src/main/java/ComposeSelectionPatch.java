@@ -49,7 +49,7 @@ public abstract class ComposeSelectionPatch implements TransformAction<Transform
         try {
             byte[] original = Files.readAllBytes(input.toPath());
             String hash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(original));
-            if (hash.equals("17c4466ca753a6ce68dcf4333674e0934d15c8246b223653d18f5dbaef0f6c10")) {
+            if (input.getName().equals("foundation.aar") && hash.equals("17c4466ca753a6ce68dcf4333674e0934d15c8246b223653d18f5dbaef0f6c10")) {
                 outputs.file(input);
                 return;
             }
@@ -78,7 +78,7 @@ public abstract class ComposeSelectionPatch implements TransformAction<Transform
                     }
                     ClassReader reader = new ClassReader(content);
                     ClassWriter writer = new ClassWriter(reader, 0);
-                    int[] changes = {0};
+                    int[] changes = {0, 0};
                     reader.accept(new ClassVisitor(Opcodes.ASM9, writer) {
                         @Override
                         public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
@@ -86,6 +86,19 @@ public abstract class ComposeSelectionPatch implements TransformAction<Transform
                             if (!name.equals("getOffsetForPosition-3MmeM6k") ||
                                 !descriptor.equals("(JLandroidx/compose/ui/text/TextLayoutResult;)I")) return method;
                             return new MethodVisitor(Opcodes.ASM9, method) {
+                                @Override
+                                public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean isInterface) {
+                                    if (owner.equals("androidx/compose/ui/text/TextLayoutResult") && name.equals("getMultiParagraph") && changes[1] == 0) {
+                                        super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, owner, "getSize-YbymL2g", "()J", false);
+                                        changes[1]++;
+                                    } else if (owner.equals("androidx/compose/ui/text/MultiParagraph") && name.equals("getHeight") && changes[1] == 1) {
+                                        super.visitInsn(Opcodes.L2I);
+                                        super.visitInsn(Opcodes.I2F);
+                                        changes[1]++;
+                                    } else {
+                                        super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                                    }
+                                }
                                 @Override
                                 public void visitJumpInsn(int opcode, Label label) {
                                     if (opcode == Opcodes.IFGT && changes[0] == 0) {
@@ -100,7 +113,7 @@ public abstract class ComposeSelectionPatch implements TransformAction<Transform
                             };
                         }
                     }, 0);
-                    if (changes[0] != 2) throw new GradleException("Compose selection comparison layout changed");
+                    if (changes[0] != 2 || changes[1] != 2) throw new GradleException("Compose selection comparison layout changed");
                     content = writer.toByteArray();
                     patchedEntries++;
                 }

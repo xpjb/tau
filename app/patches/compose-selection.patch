@@ -7,7 +7,7 @@
 -        position.y <= 0f -> 0
 -        position.y >= textLayoutResult.multiParagraph.height ->
 +        position.y < 0f -> 0
-+        position.y > textLayoutResult.multiParagraph.height ->
++        position.y > textLayoutResult.size.height ->
              textLayoutResult.layoutInput.text.length
          else -> textLayoutResult.getOffsetForPosition(position)
      }
