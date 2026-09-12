@@ -4,6 +4,36 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## Implemented, unreleased: Tau-only `flag_it(str)`
+
+Record incidental findings for later work without changing the current task.
+Implementation: 56c3935, with cancellation and state-path safety in 44026eb.
+The existing Tau extension sends a small request using a per-worker flag-only
+capability. The daemon appends an ID, time, source chat/title and full text to
+`flags.jsonl` beside `state.json`, syncs it, and uses the existing connected-client
+notification banner. The full client token stays out of workers. Temporary fork
+workers have no flag access. No tracker, offline push, provider call or automatic
+investigation is added. The flag log does not change chat activity or history.
+
+Review found caller cancellation could interrupt a write. Accepted flags now
+finish in a daemon task even when the caller disconnects. The regression polls
+an accepted call once, drops it, and checks both its saved record and two client
+notices. It fails before the fix and passes after it. A configured state file
+named `flags.jsonl` is rejected as a flag destination rather than overwritten.
+
+Acceptance: 17 daemon tests, strict Clippy, strict extension TypeScript and the
+extension HTTP test pass. Checks cover scoped/expired access, Unicode, limits,
+concurrent appends, failed writes, cancellation, restart retention and two client
+notifications. The tool test fails on the original extension with no `flag_it`.
+An isolated daemon with a real installed Pi worker also saves and acknowledges a
+flag, hides the full token, and sends the banner, with no model request. That
+check uses an ephemeral listener and the production daemon route and extension.
+Evidence: `/root/tau-checks/flag-it/acceptance.json`.
+
+No production restart, installer, client edit or version/protocol bump. Deploy
+both the daemon and Tau extension when the batch is released. Physical client
+acceptance remains a release check.
+
 ## Implemented, unreleased: image viewer survives incoming updates
 
 The user reports incoming chat updates closing the image viewer. Its selection

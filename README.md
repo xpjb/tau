@@ -35,6 +35,34 @@ Tau 0.5.12 clients and daemon use protocol 7 and must be updated together. This 
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
 - Use the same chats from Android and Windows.
 
+## Incidental flags (unreleased)
+
+Tau agents can call `flag_it(str)` to record a new finding outside the current
+work: technical debt, environment problems, or wasted resources. Include what
+was observed, where, and why it matters. Omit secrets and continue the current
+task; flagging does not authorize extra work or start another agent.
+
+The daemon appends one JSON record to `flags.jsonl` beside its configured
+`state.json` (normally `/var/lib/tau/flags.jsonl`). Each record contains `id`,
+`timestampMs`, `sessionId`, `sessionTitle`, and the full `text`, limited to 4096
+characters. The daemon serializes and syncs the write before confirming it and
+broadcasting a **Flagged** notice through the existing client banner. The file
+is created with owner-only permissions. Accepted writes and their notifications
+finish even if the calling connection closes. If the tool reports an unconfirmed
+save, inspect the log before retrying; it never automatically retries.
+
+The tool is registered only in Tau workers. The daemon supplies a worker-scoped,
+flag-only capability; it does not expose the full client bearer token. A worker
+cannot flag another chat, and its capability expires when it stops. The new
+`POST /v1/sessions/{session_id}/flags` endpoint accepts only that capability.
+Temporary fork workers do not receive it. Existing client notification messages
+and protocol 7 stay unchanged. Notifications reach connected clients; this adds
+no offline push service, issue tracker, or automatic investigation.
+
+Later, ask an agent to read the log and investigate a flag by ID. Deployment must
+include both the updated daemon and Tau extension; no installer has been issued
+for this feature yet.
+
 ## Daemon installation
 
 Build and install the independent systemd service:

@@ -21,10 +21,13 @@ One-sentence responsibility per module. Read this before opening files.
   branch projection into flat events, ordered updates, recovery, paging,
   queue state and model backfill walks.
 - `protocol.rs` — the client↔daemon wire contract. Pure data.
+- `state.rs` — Tau-owned session metadata and the serialized, durable flag log.
+- `pi-extension/send-media.ts` — Tau agent tools for sending media and flagging
+  incidental findings; flag writes use a capability scoped to the current worker.
 
 Dependencies point one way: `server → manager → {pi, transcript, state}`,
-with `transcript` owning Pi formats and `state.rs` owning only Tau's own
-`state.json`. Events flow back up via broadcast channels, never calls.
+with `transcript` owning Pi formats and `state.rs` owning Tau's own
+`state.json` and `flags.jsonl`. Events flow back up via broadcast channels, never calls.
 
 ## Client (`app/composeApp/`, Kotlin, Android + desktop)
 
