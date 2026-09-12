@@ -4,6 +4,53 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## Reported: crash while selecting long, off-screen tool text
+
+The user reported a Windows crash while highlighting a long tool-use code block
+that extended off screen. The daemon received report
+`2a4c7da0-529d-46fb-8857-28030d9dc274` at 2026-09-12T19:25:47Z from client 0.5.12.
+It records IllegalArgumentException in MultiParagraph.getPathForRange, called by
+SelectionController.draw on the AWT event thread. The daemon stayed running.
+
+This confirms a selection-highlight crash, not its exact trigger or a link to the
+user's weak connection. Reports omit exception messages and chat content. Preserve
+the long/off-screen detail for reproduction; no selection fix is implemented yet.
+Evidence: `/root/tau-checks/text-selection-crash/report.json` and `journal.log`.
+Keep this separate from the Enter submission fix.
+
+## Implemented, unreleased: Enter submits single-line forms
+
+Rename and extension input dialogs have no keyboard submit callback. The Settings
+connection fields have the same gap. Reuse the existing button actions for Enter
+and IME Done; preserve blank-title/connection validation and keep Enter as a
+newline in the extension editor and title system-prompt editor. Add no new state,
+platform key handler, controller change or dependency.
+
+Plan:
+1. Reproduce missing Rename submission with real keyboard input and an isolated
+   client/socket fixture.
+2. Add shared keyboard actions to the affected single-line fields in TauApp.
+3. Check submission, validation, empty extension input and multiline newlines;
+   run the client suite under Xvfb and Android compilation.
+4. Review, commit off master and merge after acceptance. Hold packaging, versions
+   and service changes for the client QA batch.
+
+Acceptance passed on b5f9aec, following e67de59: all 22 client tests, no skips,
+and Android compilation. The keyboard/socket regression fails on the original
+missing Rename action. Review also reproduced Done submitting an empty title
+when text was cleared in the same input event. The shared callback now checks
+current text, not a previously composed validation boolean. Tests cover hardware
+Enter, IME Done, blank titles, empty extension input, connection validation and
+submission, multiline newlines, explicit editor Submit and duplicate writes.
+
+The initial scrolling/clipboard timeout was test setup: this host's xvfb-run
+uses a 640x480 screen by default, smaller than the test window. The full rerun
+passes with `xvfb-run -a -s '-screen 0 1600x1200x24'` and
+`--no-configuration-cache`. No scrolling code or test changed. These are isolated
+desktop-JVM checks, not physical Windows/Android acceptance. No installer,
+version/protocol bump, daemon/Pi change, provider prompt or service restart.
+Evidence: `/root/tau-checks/dialog-enter/acceptance.json`.
+
 ## Implemented, unreleased: Tau-only `flag_it(str)`
 
 Record incidental findings for later work without changing the current task.
