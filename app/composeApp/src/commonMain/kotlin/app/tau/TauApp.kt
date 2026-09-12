@@ -37,6 +37,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.selection.rememberSelectionState
@@ -121,6 +123,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
@@ -205,6 +208,7 @@ fun TauApp(controller: TauController) {
                 var token by remember(state.settings, state.editingSettings) {
                     mutableStateOf(state.settings.token)
                 }
+                val connect = { controller.saveConnection(serverUrl, token) }
                 var titleDraft by remember(state.settings.identity) { mutableStateOf<String?>(null) }
                 LaunchedEffect(state.titlePrompt) {
                     if (titleDraft == state.titlePrompt?.prompt) titleDraft = null
@@ -237,6 +241,8 @@ fun TauApp(controller: TauController) {
                                 label = { Text("Daemon URL") },
                                 placeholder = { Text("http://vibe:8787") },
                                 singleLine = true,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                keyboardActions = KeyboardActions(onDone = { connect() }),
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             OutlinedTextField(
@@ -245,6 +251,8 @@ fun TauApp(controller: TauController) {
                                 label = { Text("Access token") },
                                 visualTransformation = PasswordVisualTransformation(),
                                 singleLine = true,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                keyboardActions = KeyboardActions(onDone = { connect() }),
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             Row(
@@ -254,7 +262,7 @@ fun TauApp(controller: TauController) {
                                 if (state.settings.token.isNotBlank()) {
                                     TextButton(onClick = controller::hideSettings) { Text("Cancel") }
                                 }
-                                Button(onClick = { controller.saveConnection(serverUrl, token) }) {
+                                Button(onClick = connect) {
                                     Text("Connect")
                                 }
                             }
@@ -392,6 +400,7 @@ fun TauApp(controller: TauController) {
                 }
             }
             val dismiss = { controller.respondExtensionUi(dialog, cancelled = true) }
+            val submit = { controller.respondExtensionUi(dialog, value = responseText) }
             when (request.method) {
                 "select" -> AlertDialog(
                     onDismissRequest = dismiss,
@@ -458,15 +467,13 @@ fun TauApp(controller: TauController) {
                             minLines = if (request.method == "editor") 4 else 1,
                             maxLines = if (request.method == "editor") 14 else 1,
                             singleLine = request.method == "input",
+                            keyboardOptions = KeyboardOptions(imeAction = if (request.method == "input") ImeAction.Done else ImeAction.Default),
+                            keyboardActions = if (request.method == "input") KeyboardActions(onDone = { submit() }) else KeyboardActions.Default,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     },
                     confirmButton = {
-                        TextButton(
-                            onClick = {
-                                controller.respondExtensionUi(dialog, value = responseText)
-                            },
-                        ) { Text("Submit") }
+                        TextButton(onClick = submit) { Text("Submit") }
                     },
                     dismissButton = {
                         TextButton(onClick = dismiss) { Text("Cancel") }
@@ -808,6 +815,13 @@ private fun SessionList(
     }
 
     renaming?.let { session ->
+        val canSave = actionsEnabled && renameText.isNotBlank()
+        val save = {
+            if (canSave) {
+                controller.renameSession(session.id, renameText)
+                renaming = null
+            }
+        }
         AlertDialog(
             onDismissRequest = { renaming = null },
             title = { Text("Rename chat") },
@@ -816,15 +830,14 @@ private fun SessionList(
                     value = renameText,
                     onValueChange = { renameText = it },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { save() }),
                 )
             },
             confirmButton = {
                 TextButton(
-                    onClick = {
-                        controller.renameSession(session.id, renameText)
-                        renaming = null
-                    },
-                    enabled = actionsEnabled && renameText.isNotBlank(),
+                    onClick = save,
+                    enabled = canSave,
                 ) { Text("Save") }
             },
             dismissButton = {
