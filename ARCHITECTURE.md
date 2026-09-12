@@ -49,6 +49,8 @@ with `transcript` owning Pi formats and `state.rs` owning Tau's own
   scoring, byte formatting.
 - `Platform.kt` + actuals — the only OS seam (per-platform services and
   image decoding).
+- `CrashLog.kt` (`jvmMain`) — the platform seam's shared JVM crash writer:
+  bounded full local traces, safe pending reports and durable file replacement.
 
 ## Title helper (`scripts/`)
 

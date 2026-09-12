@@ -41,7 +41,7 @@ expect object PlatformServices {
     fun saveConnection(settings: ConnectionSettings)
     fun installCrashHandler()
     fun pendingCrashReport(): String?
-    fun clearPendingCrashReport()
+    fun clearPendingCrashReport(expected: String)
     fun copyText(text: String)
     fun formatMessageTime(timestampMs: Long): String
     suspend fun pickFiles(): List<PickedFile>

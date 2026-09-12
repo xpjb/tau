@@ -28,6 +28,9 @@ kotlin {
     }
 
     sourceSets {
+        val jvmMain by creating { dependsOn(commonMain.get()) }
+        androidMain.get().dependsOn(jvmMain)
+        getByName("desktopMain").dependsOn(jvmMain)
         commonMain.dependencies {
             implementation("org.jetbrains.compose.runtime:runtime:1.12.0")
             implementation("org.jetbrains.compose.foundation:foundation:1.12.0")

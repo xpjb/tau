@@ -554,25 +554,37 @@ async fn crash_report(
         Ok(report) => report,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let valid = report.schema == 1
+    let valid_frame = |frame: &crate::protocol::CrashFrame| {
+        frame.class_name.chars().count() <= 192
+            && frame.method_name.chars().count() <= 192
+            && frame.file_name.as_ref().is_none_or(|name| name.chars().count() <= 192)
+    };
+    let valid_range = |range: &Option<crate::protocol::CrashRange>| {
+        range.as_ref().is_none_or(|range| range.text_length >= 0
+            && (range.start < 0 || range.start > range.end || range.end > range.text_length))
+    };
+    let valid = matches!(report.schema, 1 | 2)
+        && (report.schema == 2 || (report.selection_range.is_none() && report.causes.is_empty()))
         && !report.report_id.is_empty()
-        && report.report_id.len() <= 128
+        && report.report_id.chars().count() <= 128
         && !report.platform.is_empty()
-        && report.platform.len() <= 64
+        && report.platform.chars().count() <= 64
         && !report.app_version.is_empty()
-        && report.app_version.len() <= 64
-        && report.os_version.len() <= 192
-        && report.thread.len() <= 128
+        && report.app_version.chars().count() <= 64
+        && report.os_version.chars().count() <= 192
+        && report.thread.chars().count() <= 128
         && !report.exception_class.is_empty()
-        && report.exception_class.len() <= 192
+        && report.exception_class.chars().count() <= 192
         && report.stack.len() <= 64
-        && report.stack.iter().all(|frame| {
-            frame.class_name.len() <= 192
-                && frame.method_name.len() <= 192
-                && frame
-                    .file_name
-                    .as_ref()
-                    .is_none_or(|file_name| file_name.len() <= 192)
+        && report.stack.iter().all(valid_frame)
+        && valid_range(&report.selection_range)
+        && report.causes.len() <= 3
+        && report.causes.iter().all(|cause| {
+            !cause.exception_class.is_empty()
+                && cause.exception_class.chars().count() <= 192
+                && cause.stack.len() <= 12
+                && cause.stack.iter().all(valid_frame)
+                && valid_range(&cause.selection_range)
         });
     if !valid {
         return StatusCode::BAD_REQUEST.into_response();
@@ -610,6 +622,8 @@ async fn crash_report(
         platform = %report.platform,
         app_version = %report.app_version,
         exception = %report.exception_class,
+        selection_range = ?report.selection_range,
+        causes = report.causes.len(),
         "Tau client crash report received"
     );
     StatusCode::NO_CONTENT.into_response()
@@ -648,6 +662,95 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
 
     use super::{authorized, safe_file_name, valid_resource_key};
+
+    #[tokio::test]
+    async fn persists_bounded_crash_reports_with_safe_diagnostics() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        use axum::extract::DefaultBodyLimit;
+        use axum::routing::post;
+        use axum::Router;
+        use serde_json::json;
+        use tokio::fs;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::sync::Mutex;
+        use crate::config::Config;
+        use crate::manager::AgentManager;
+        use crate::protocol::MAX_CRASH_BYTES;
+        use crate::state::StateStore;
+        use super::{AppState, crash_report};
+
+        let root = std::env::temp_dir().join(format!("tau-crashes-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let log = root.join("crashes.jsonl");
+        let config = Config {
+            bind: address, token: Arc::from("test-token"), pi_command: root.join("unused-pi"),
+            default_thinking_level: "high".to_owned(), cwd: root.clone(), state_path: root.join("state.json"),
+            session_dir: root.join("pi-sessions"), telemetry_path: log.clone(),
+            pi_extension_path: root.join("extension.ts"), attachment_root: root.join("outbox"),
+            upload_root: root.join("uploads"), title_command: None,
+        };
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
+        let app = Router::new().route("/v1/telemetry/crash", post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)))
+            .with_state(AppState { config, manager, telemetry_gate: Arc::new(Mutex::new(())) });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let frame = json!({"className":"example.Frame", "methodName":"draw", "fileName":"File.kt", "lineNumber":5});
+        let legacy = json!({"schema":1, "reportId":"legacy", "platform":"windows", "appVersion":"0.5.12",
+            "osVersion":"Windows 11", "thread":"AWT-EventQueue-0", "exceptionClass":"java.lang.IllegalStateException", "stack":[frame]});
+        let cause = json!({"exceptionClass":"java.lang.IllegalArgumentException", "stack":[frame],
+            "selectionRange":{"start":5, "end":0, "textLength":710}});
+        let mut modern = legacy.clone();
+        modern["schema"] = json!(2);
+        modern["reportId"] = json!("modern");
+        modern["causes"] = json!([cause]);
+        modern["ignoredMessage"] = json!("private exception message must not be retained");
+        let mut cases = vec![(legacy.clone(), "wrong-token", 401), (legacy, "test-token", 204), (modern.clone(), "test-token", 204)];
+        for (field, value) in [("schema", json!(3)), ("schema", json!(1)), ("causes", json!(vec![cause.clone(); 4])),
+            ("stack", json!(vec![frame.clone(); 65]))] {
+            let mut invalid = modern.clone();
+            invalid[field] = value;
+            cases.push((invalid, "test-token", 400));
+        }
+        let mut unicode = modern.clone();
+        unicode["stack"][0]["fileName"] = json!("界".repeat(192));
+        cases.push((unicode.clone(), "test-token", 204));
+        unicode["stack"][0]["fileName"] = json!("界".repeat(193));
+        cases.push((unicode, "test-token", 400));
+        let mut too_many_frames = modern.clone();
+        too_many_frames["causes"][0]["stack"] = json!(vec![frame; 13]);
+        cases.push((too_many_frames, "test-token", 400));
+        for range in [json!({"start":0,"end":10,"textLength":710}), json!({"start":5,"end":0,"textLength":-1})] {
+            let mut invalid = modern.clone();
+            invalid["causes"][0]["selectionRange"] = range;
+            cases.push((invalid, "test-token", 400));
+        }
+        cases.push((json!("x".repeat(MAX_CRASH_BYTES)), "test-token", 413));
+        let mut accepted = Vec::new();
+        for (mut body, token, expected) in cases {
+            let payload = body.to_string();
+            let status = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+                stream.write_all(format!("POST /v1/telemetry/crash HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).as_bytes()).await.unwrap();
+                let mut reply = String::new();
+                stream.read_to_string(&mut reply).await.unwrap();
+                reply.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap()
+            }).await.unwrap();
+            assert_eq!(status, expected);
+            if status == 204 {
+                body.as_object_mut().unwrap().remove("ignoredMessage");
+                accepted.push(body);
+            }
+            let saved = if log.exists() { fs::read_to_string(&log).await.unwrap() } else { String::new() };
+            let reports: Vec<serde_json::Value> = saved.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(reports, accepted, "Success preceded a durable complete report, or an invalid report was saved");
+            assert!(!saved.contains("private exception message"));
+        }
+        server.abort();
+        let _ = server.await;
+        fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

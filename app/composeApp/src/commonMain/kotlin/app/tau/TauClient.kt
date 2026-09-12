@@ -268,7 +268,7 @@ class TauClient(private val attachmentDirectory: () -> String = { PlatformServic
             setBody(payload)
         }
         if (response.status.isSuccess()) {
-            PlatformServices.clearPendingCrashReport()
+            PlatformServices.clearPendingCrashReport(payload)
         }
     }
 

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::SessionModel;
 use crate::transcript::{HistoryPage, QueueRef, TranscriptChange, TranscriptSnapshot};
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -315,6 +315,27 @@ pub struct CrashReport {
     pub thread: String,
     pub exception_class: String,
     pub stack: Vec<CrashFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_range: Option<CrashRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub causes: Vec<CrashCause>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrashCause {
+    pub exception_class: String,
+    pub stack: Vec<CrashFrame>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_range: Option<CrashRange>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrashRange {
+    pub start: i32,
+    pub end: i32,
+    pub text_length: i32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

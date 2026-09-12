@@ -78,7 +78,7 @@ import kotlinx.serialization.encodeToString
 actual object PlatformServices {
     actual fun epochMillis(): Long = System.currentTimeMillis()
     private val installed = AtomicBoolean(false)
-    private val fileLock = Any()
+    private val crashLog by lazy { CrashLog(dataDirectory.toFile()) }
     private val dataDirectory: Path by lazy {
         val os = System.getProperty("os.name").orEmpty().lowercase()
         val path = if (os.contains("windows")) {
@@ -162,38 +162,11 @@ actual object PlatformServices {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
-                val report = CrashReport(
-                    reportId = UUID.randomUUID().toString(),
-                    platform = platformName,
-                    appVersion = appVersion,
-                    osVersion = osVersion.take(192),
-                    thread = thread.name.take(128),
-                    exceptionClass = throwable.javaClass.name.take(192),
-                    stack = throwable.stackTrace.take(48).map { frame ->
-                        CrashFrame(
-                            className = frame.className.take(192),
-                            methodName = frame.methodName.take(192),
-                            fileName = frame.fileName?.take(192),
-                            lineNumber = frame.lineNumber,
-                        )
-                    },
-                )
-                val encoded = TauJson.encodeToString(report)
-                if (encoded.encodeToByteArray().size <= 24 * 1024) {
-                    synchronized(fileLock) {
-                        val pending = dataDirectory.resolve("client-crash.pending.json")
-                        if (!Files.exists(pending)) {
-                            val temporary = dataDirectory.resolve(".client-crash.pending.json.tmp")
-                            Files.writeString(temporary, encoded)
-                            try {
-                                Files.move(temporary, pending, StandardCopyOption.ATOMIC_MOVE)
-                            } catch (_: Throwable) {
-                                Files.deleteIfExists(temporary)
-                            }
-                        }
-                    }
-                }
-            } catch (_: Throwable) {
+                throwable.printStackTrace()
+                crashLog.write(thread, throwable)
+            } catch (error: Throwable) {
+                System.err.println("Tau crash reporting failed")
+                error.printStackTrace()
             } finally {
                 if (previous != null) {
                     previous.uncaughtException(thread, throwable)
@@ -204,21 +177,9 @@ actual object PlatformServices {
         }
     }
 
-    actual fun pendingCrashReport(): String? = synchronized(fileLock) {
-        val pending = dataDirectory.resolve("client-crash.pending.json")
-        if (!Files.isRegularFile(pending) || runCatching { Files.size(pending) }.getOrDefault(0) > 24 * 1024) {
-            return@synchronized null
-        }
-        runCatching {
-            TauJson.encodeToString(TauJson.decodeFromString<CrashReport>(Files.readString(pending)))
-        }.getOrNull()
-    }
+    actual fun pendingCrashReport(): String? = crashLog.pendingReport()
 
-    actual fun clearPendingCrashReport() {
-        synchronized(fileLock) {
-            Files.deleteIfExists(dataDirectory.resolve("client-crash.pending.json"))
-        }
-    }
+    actual fun clearPendingCrashReport(expected: String) = crashLog.clearPendingReport(expected)
 
     actual fun copyText(text: String) {
         Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)

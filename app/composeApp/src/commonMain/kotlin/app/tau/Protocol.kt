@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonClassDiscriminator
 
-const val TauProtocolVersion = 7
+const val TauProtocolVersion = 8
 
 val TauJson = Json {
     classDiscriminator = "type"
@@ -276,7 +276,19 @@ data class CrashReport(
     val thread: String,
     val exceptionClass: String,
     val stack: List<CrashFrame>,
+    val selectionRange: CrashRange? = null,
+    val causes: List<CrashCause> = emptyList(),
 )
+
+@Serializable
+data class CrashCause(
+    val exceptionClass: String,
+    val stack: List<CrashFrame>,
+    val selectionRange: CrashRange? = null,
+)
+
+@Serializable
+data class CrashRange(val start: Int, val end: Int, val textLength: Int)
 
 @Serializable
 data class CrashFrame(

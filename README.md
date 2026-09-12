@@ -35,6 +35,32 @@ Tau 0.5.12 clients and daemon use protocol 7 and must be updated together. This 
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
 - Use the same chats from Android and Windows.
 
+## Selection and crash diagnostics (unreleased)
+
+The pending batch uses protocol 8 and requires matched client and daemon updates.
+Release numbers and installers remain unchanged until that release.
+
+A build-time patch fixes the top/bottom edge mismatch in current stable Compose
+1.12.0. Long horizontal selection drags retain scrolling and copying. The same
+checked patch reaches desktop and Android; see `app/patches/README.md`.
+
+Crash reporting keeps the latest full local trace, including messages, causes
+and suppressed exceptions, in `client-crash.log`. It is capped at 64K characters
+(under 256 KiB plus a truncation marker). On Windows it is in
+`%LOCALAPPDATA%\Tau\data`; on Linux, `$XDG_DATA_HOME/Tau` or
+`~/.local/share/Tau`; on Android, in the app's private files directory. This file
+can contain private text or tokens: review it before sharing. Uploading a report
+does not delete it. A later crash replaces this local trace.
+
+The first pending remote report remains in `client-crash.pending.json` until its
+successful upload. A reply for an older report cannot clear a newer one.
+Report schema 2 adds up to three cause stacks and numeric
+`selectionRange` details (`start`, `end`, `textLength`) for the known text-range
+error. Arbitrary messages and the full local trace are never uploaded. Reports
+stay under 24 KiB; the daemon also accepts old schema 1 pending reports. Failed
+report writes are printed to stderr instead of silently discarded. The patch
+prevents this selection defect; it adds no blanket UI catch-and-continue policy.
+
 ## Incidental flags (unreleased)
 
 Tau agents can call `flag_it(str)` to record a new finding outside the current
@@ -55,8 +81,8 @@ The tool is registered only in Tau workers. The daemon supplies a worker-scoped,
 flag-only capability; it does not expose the full client bearer token. A worker
 cannot flag another chat, and its capability expires when it stops. The new
 `POST /v1/sessions/{session_id}/flags` endpoint accepts only that capability.
-Temporary fork workers do not receive it. Existing client notification messages
-and protocol 7 stay unchanged. Notifications reach connected clients; this adds
+Temporary fork workers do not receive it. This feature keeps the existing client
+notification messages. Notifications reach connected clients; this adds
 no offline push service, issue tracker, or automatic investigation.
 
 Later, ask an agent to read the log and investigate a flag by ID. Deployment must

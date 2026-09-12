@@ -27,7 +27,6 @@ import io.ktor.client.engine.okhttp.OkHttp
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Date
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
 import kotlinx.coroutines.CancellableContinuation
@@ -88,7 +87,7 @@ internal object TauAndroidContext {
 actual object PlatformServices {
     actual fun epochMillis(): Long = System.currentTimeMillis()
     private val installed = AtomicBoolean(false)
-    private val fileLock = Any()
+    private val crashLog by lazy { CrashLog(TauAndroidContext.require().filesDir) }
 
     actual val platformName: String = "android"
     actual val appVersion: String = TauClientVersion
@@ -122,34 +121,11 @@ actual object PlatformServices {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
-                val report = CrashReport(
-                    reportId = UUID.randomUUID().toString(),
-                    platform = platformName,
-                    appVersion = appVersion,
-                    osVersion = osVersion.take(192),
-                    thread = thread.name.take(128),
-                    exceptionClass = throwable.javaClass.name.take(192),
-                    stack = throwable.stackTrace.take(48).map { frame ->
-                        CrashFrame(
-                            className = frame.className.take(192),
-                            methodName = frame.methodName.take(192),
-                            fileName = frame.fileName?.take(192),
-                            lineNumber = frame.lineNumber,
-                        )
-                    },
-                )
-                val encoded = TauJson.encodeToString(report)
-                if (encoded.encodeToByteArray().size <= 24 * 1024) {
-                    synchronized(fileLock) {
-                        val pending = File(TauAndroidContext.require().filesDir, "client-crash.pending.json")
-                        if (!pending.exists()) {
-                            val temporary = File(pending.parentFile, ".${pending.name}.tmp")
-                            temporary.writeText(encoded)
-                            if (!temporary.renameTo(pending)) temporary.delete()
-                        }
-                    }
-                }
-            } catch (_: Throwable) {
+                throwable.printStackTrace()
+                crashLog.write(thread, throwable)
+            } catch (error: Throwable) {
+                System.err.println("Tau crash reporting failed")
+                error.printStackTrace()
             } finally {
                 if (previous != null) {
                     previous.uncaughtException(thread, throwable)
@@ -161,19 +137,9 @@ actual object PlatformServices {
         }
     }
 
-    actual fun pendingCrashReport(): String? = synchronized(fileLock) {
-        val pending = File(TauAndroidContext.require().filesDir, "client-crash.pending.json")
-        if (!pending.isFile || pending.length() > 24 * 1024) return@synchronized null
-        runCatching {
-            TauJson.encodeToString(TauJson.decodeFromString<CrashReport>(pending.readText()))
-        }.getOrNull()
-    }
+    actual fun pendingCrashReport(): String? = crashLog.pendingReport()
 
-    actual fun clearPendingCrashReport() {
-        synchronized(fileLock) {
-            File(TauAndroidContext.require().filesDir, "client-crash.pending.json").delete()
-        }
-    }
+    actual fun clearPendingCrashReport(expected: String) = crashLog.clearPendingReport(expected)
 
     actual fun copyText(text: String) {
         val clipboard = TauAndroidContext.require()
