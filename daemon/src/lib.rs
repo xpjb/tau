@@ -16,7 +16,7 @@ pub use config::Config;
 use manager::AgentManager;
 use state::StateStore;
 
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(mut config: Config) -> Result<()> {
     let cwd = fs::metadata(&config.cwd)
         .await
         .with_context(|| format!("working directory {} is unavailable", config.cwd.display()))?;
@@ -59,7 +59,11 @@ pub async fn run(config: Config) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
+    let listener = tokio::net::TcpListener::bind(config.bind)
+        .await
+        .with_context(|| format!("failed to bind {}", config.bind))?;
+    config.bind = listener.local_addr()?;
     let state = StateStore::load(config.state_path.clone()).await?;
     let manager = AgentManager::new(config.clone(), state);
-    server::serve(config, manager).await
+    server::serve(config, manager, listener).await
 }

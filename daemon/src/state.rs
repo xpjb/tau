@@ -12,6 +12,17 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 pub(crate) const DEFAULT_TITLE_PROMPT: &str = include_str!("../../scripts/title_prompt.txt");
+pub(crate) const MAX_FLAG_CHARS: usize = 4096;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Flag {
+    pub id: String,
+    pub timestamp_ms: u64,
+    pub session_id: String,
+    pub session_title: String,
+    pub text: String,
+}
 
 #[derive(Clone)]
 pub struct StateStore {
@@ -145,6 +156,40 @@ impl StateStore {
         );
         self.commit(state).await?;
         Ok(id)
+    }
+
+    pub async fn flag(&self, id: &str, text: &str) -> Result<Flag> {
+        if text.trim().is_empty() || text.chars().count() > MAX_FLAG_CHARS {
+            bail!("Flag text must contain 1–{MAX_FLAG_CHARS} characters");
+        }
+        let _guard = self.inner.write_gate.lock().await;
+        let session = self.get(id).with_context(|| format!("unknown session {id}"))?;
+        let flag = Flag {
+            id: Uuid::new_v4().to_string(),
+            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis().try_into()?,
+            session_id: id.to_owned(),
+            session_title: session.title,
+            text: text.to_owned(),
+        };
+        let mut encoded = serde_json::to_vec(&flag)?;
+        encoded.push(b'\n');
+        let path = self.inner.path.with_file_name("flags.jsonl");
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&path).await.context("could not open Tau flag log")?;
+        let length = file.metadata().await?.len();
+        let saved = async {
+            file.write_all(&encoded).await?;
+            file.sync_data().await
+        }.await;
+        if let Err(error) = saved {
+            file.set_len(length).await.context("could not remove an incomplete flag entry")?;
+            file.sync_data().await.context("could not sync the flag log after a failed append")?;
+            return Err(error).context("could not save Tau flag");
+        }
+        Ok(flag)
     }
 
     pub async fn set_session_file(&self, id: &str, session_file: String) -> Result<()> {

@@ -214,7 +214,7 @@ pub struct SlashCommand {
     pub arguments: Vec<SlashCommandArgument>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionUiRequest {
     pub id: String,

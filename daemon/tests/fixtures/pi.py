@@ -14,6 +14,10 @@ session_file = sys.argv[sys.argv.index("--session") + 1] if "--session" in sys.a
 if not os.path.exists(session_file):
     with open(session_file, "w") as file:
         file.write(json.dumps({"type": "session", "version": 3, "id": "mock"}) + "\n")
+if os.environ.get("TAU_FLAG_URL"):
+    with open(session_file + ".flag-capability", "w") as file:
+        json.dump({"url": os.environ["TAU_FLAG_URL"], "token": os.environ["TAU_FLAG_TOKEN"],
+                   "clientTokenPresent": "TAU_TOKEN" in os.environ}, file)
 with open(session_file) as file:
     entries = [entry for line in file if (entry := json.loads(line)).get("type") != "session"]
 head = entries[-1]["id"] if entries else None

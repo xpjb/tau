@@ -35,7 +35,7 @@ struct AppState {
     telemetry_gate: Arc<Mutex<()>>,
 }
 
-pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
+pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::TcpListener) -> Result<()> {
     let state = AppState {
         config: config.clone(),
         manager: manager.clone(),
@@ -48,6 +48,7 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
             "protocolVersion": PROTOCOL_VERSION
         })) }))
         .route("/v1/ws", get(websocket))
+        .route("/v1/sessions/{session_id}/flags", post(flag_it).layer(DefaultBodyLimit::max(32 * 1024)))
         .route(
             "/v1/sessions/{session_id}/attachments/{entry_id}",
             get(download_attachment),
@@ -61,9 +62,6 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
             post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)),
         )
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind(config.bind)
-        .await
-        .with_context(|| format!("failed to bind {}", config.bind))?;
     info!(address = %config.bind, "Tau daemon is listening");
 
     let result = axum::serve(listener, app)
@@ -95,6 +93,34 @@ pub async fn serve(config: Config, manager: AgentManager) -> Result<()> {
         .context("Tau HTTP server stopped unexpectedly");
     manager.shutdown().await;
     result
+}
+
+#[derive(Deserialize)]
+struct FlagInput {
+    text: String,
+}
+
+async fn flag_it(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(input): Json<FlagInput>,
+) -> Response {
+    let Some(token) = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer ")) else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"Tau flag capability is required"}))).into_response();
+    };
+    if input.text.trim().is_empty() || input.text.chars().count() > crate::state::MAX_FLAG_CHARS {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Flag text must contain 1–4096 characters"}))).into_response();
+    }
+    match state.manager.flag(&session_id, token, &input.text).await {
+        Ok(Some(flag)) => Json(flag).into_response(),
+        Ok(None) => (StatusCode::UNAUTHORIZED, Json(json!({"error":"Tau flag capability is invalid or expired"}))).into_response(),
+        Err(error) => {
+            warn!(session = %session_id, %error, "Tau flag save failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"Tau could not confirm the flag save; check flags.jsonl before retrying"}))).into_response()
+        }
+    }
 }
 
 async fn websocket(
@@ -622,6 +648,144 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
 
     use super::{authorized, safe_file_name, valid_resource_key};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn saves_flags_and_notifies_all_clients_with_worker_scoped_access() {
+        use std::os::unix::fs::{PermissionsExt, MetadataExt};
+        use super::*;
+        use crate::state::StateStore;
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+
+        async fn submit(address: std::net::SocketAddr, id: &str, token: &str, text: &str) -> (u16, serde_json::Value) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let body = json!({"text":text, "sessionId":"cannot-spoof-source"}).to_string();
+                let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+                stream.write_all(format!("POST /v1/sessions/{id}/flags HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).await.unwrap();
+                let reply = String::from_utf8(bytes).unwrap();
+                let (header, body) = reply.split_once("\r\n\r\n").unwrap();
+                (header.split_whitespace().nth(1).unwrap().parse().unwrap(), serde_json::from_str(body).unwrap())
+            }).await.unwrap()
+        }
+
+        let root = std::env::temp_dir().join(format!("tau-flags-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).await.unwrap();
+        let pi = root.join("pi.py");
+        fs::write(&pi, include_str!("../tests/fixtures/pi.py")).await.unwrap();
+        fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o700)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = Config {
+            bind: address, token: Arc::from("full-client-token"), pi_command: pi,
+            default_thinking_level: "high".to_owned(), cwd: root.clone(), state_path: root.join("state.json"),
+            session_dir: root.join("pi-sessions"), telemetry_path: root.join("crashes.jsonl"),
+            pi_extension_path: root.join("extension.ts"), attachment_root: root.join("outbox"),
+            upload_root: root.join("uploads"), title_command: None,
+        };
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
+        let first = manager.create_session().await.unwrap();
+        let second = manager.create_session().await.unwrap();
+        manager.rename_session(&first, "Flag source").await.unwrap();
+        let mut tokens = Vec::new();
+        for id in [&first, &second] {
+            manager.commands(id).await.unwrap();
+            let session = manager.inner.state.get(id).unwrap().session_file.unwrap();
+            let capability: serde_json::Value = serde_json::from_slice(&fs::read(format!("{session}.flag-capability")).await.unwrap()).unwrap();
+            assert_eq!(capability["url"], format!("http://{address}/v1/sessions/{id}/flags"));
+            assert_eq!(capability["clientTokenPresent"], false);
+            tokens.push(capability["token"].as_str().unwrap().to_owned());
+        }
+        assert_ne!(tokens[0], tokens[1]);
+        let session = manager.inner.state.get(&first).unwrap();
+        let history = fs::read(session.session_file.as_ref().unwrap()).await.unwrap();
+        let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
+        let app = Router::new().route("/v1/ws", get(websocket))
+            .route("/v1/sessions/{session_id}/flags", post(flag_it).layer(DefaultBodyLimit::max(32 * 1024))).with_state(state);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let mut request = format!("ws://{address}/v1/ws").into_client_request().unwrap();
+        request.headers_mut().insert(AUTHORIZATION, format!("Bearer {}", tokens[0]).parse().unwrap());
+        assert!(connect_async(request.clone()).await.is_err(), "Flag token granted client access");
+        request.headers_mut().insert(AUTHORIZATION, "Bearer full-client-token".parse().unwrap());
+        let mut clients = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = connect_async(request.clone()).await.unwrap();
+            for _ in 0..2 { socket.next().await.unwrap().unwrap(); }
+            clients.push(socket);
+        }
+        let log = root.join("flags.jsonl");
+        for (id, token, text, status) in [
+            (first.as_str(), "full-client-token", "Denied", 401),
+            (second.as_str(), tokens[0].as_str(), "Wrong source", 401),
+            ("missing", tokens[0].as_str(), "Missing source", 401),
+            (first.as_str(), tokens[0].as_str(), " \n ", 400),
+            (first.as_str(), tokens[0].as_str(), &"x".repeat(4097), 400),
+        ] {
+            assert_eq!(submit(address, id, token, text).await.0, status);
+            assert!(!log.exists());
+        }
+        let texts = ["Private cache 🔧\nQuote: \"build-dir\"".to_owned(), "x".repeat(4096)];
+        let mut flags = Vec::new();
+        for text in &texts {
+            let (status, saved) = submit(address, &first, &tokens[0], text).await;
+            assert_eq!(status, 200);
+            assert_eq!(saved["text"], *text);
+            assert_eq!(saved["sessionId"], first);
+            assert_eq!(saved["sessionTitle"], "Flag source");
+            assert!(saved["timestampMs"].as_u64().unwrap() > 0);
+            assert!(uuid::Uuid::parse_str(saved["id"].as_str().unwrap()).is_ok());
+            flags.push(saved.clone());
+            let persisted: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(persisted, flags, "Success preceded a complete durable log entry");
+            for socket in &mut clients {
+                let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+                let message: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert_eq!(message["type"], "extension_ui");
+                assert_eq!(message["sessionId"], first);
+                assert_eq!(message["request"]["method"], "notify");
+                assert_eq!(message["request"]["notifyType"], "info");
+                assert!(message["request"]["message"].as_str().unwrap().starts_with(&format!("Flagged {}", saved["id"].as_str().unwrap())));
+                assert!(message["request"]["message"].as_str().unwrap().chars().count() < 480);
+            }
+        }
+        assert_eq!(fs::metadata(&log).await.unwrap().mode() & 0o777, 0o600);
+        let before_failure = fs::read(&log).await.unwrap();
+        fs::rename(&log, root.join("flags-backup")).await.unwrap();
+        fs::create_dir(&log).await.unwrap();
+        assert_eq!(submit(address, &first, &tokens[0], "Unsaved").await.0, 500);
+        for socket in &mut clients {
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+            let message: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(message["request"]["notifyType"], "error");
+            assert!(message["request"]["message"].as_str().unwrap().starts_with("Flag save failed"));
+        }
+        assert_eq!(fs::read(root.join("flags-backup")).await.unwrap(), before_failure);
+        fs::remove_dir(&log).await.unwrap();
+        fs::rename(root.join("flags-backup"), &log).await.unwrap();
+        let (left, right) = tokio::join!(submit(address, &first, &tokens[0], "Concurrent first"), submit(address, &second, &tokens[1], "Concurrent second"));
+        assert_eq!((left.0, right.0), (200, 200));
+        let rows: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.contains(&left.1) && rows.contains(&right.1));
+        assert_eq!(manager.inner.state.get(&first).unwrap().updated_at_ms, session.updated_at_ms);
+        assert_eq!(fs::read(session.session_file.as_ref().unwrap()).await.unwrap(), history);
+        manager.close_session(&first).await.unwrap();
+        assert_eq!(submit(address, &first, &tokens[0], "Retired token").await.0, 401);
+        manager.commands(&first).await.unwrap();
+        assert_eq!(submit(address, &first, &tokens[0], "Old worker token").await.0, 401);
+        for socket in &mut clients { socket.close(None).await.unwrap(); }
+        manager.shutdown().await;
+        server.abort();
+        let restored = StateStore::load(config.state_path).await.unwrap();
+        let saved = restored.flag(&first, "After restart").await.unwrap();
+        assert_eq!(saved.session_id, first);
+        let rows: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.last().unwrap()["id"], saved.id);
+        fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

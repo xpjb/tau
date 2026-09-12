@@ -18,6 +18,41 @@ const parameters = Type.Object({
 export default function (pi: ExtensionAPI) {
   register(pi, "send_image", "image", "Send a PNG, JPEG, or WebP image to the user through Tau");
   register(pi, "send_file", "file", "Send a downloadable file to the user through Tau");
+  const flagUrl = process.env.TAU_FLAG_URL;
+  const flagToken = process.env.TAU_FLAG_TOKEN;
+  if (flagUrl && flagToken) pi.registerTool({
+    name: "flag_it",
+    label: "Flag It",
+    description: "Log an incidental issue outside the current task's scope for the user to investigate later.",
+    promptSnippet: "Flag incidental technical debt, environment problems or operational inefficiency without changing task scope.",
+    promptGuidelines: [
+      "Use flag_it for new, actionable findings outside the current task. State what you observed, where, and why it matters; distinguish facts from suspicions and omit secrets.",
+      "Continue the current task after flagging. A flag does not authorize investigation or extra work. Do not repeatedly flag the same known issue.",
+    ],
+    parameters: Type.Object({ str: Type.String({ minLength: 1, maxLength: 4096, description: "The finding, location and impact; no secrets" }) }),
+    async execute(_toolCallId, params, signal) {
+      signal?.throwIfAborted();
+      if (!params.str.trim() || Array.from(params.str).length > 4096) throw new Error("Flag text must contain 1–4096 characters");
+      const deadline = AbortSignal.timeout(30_000);
+      try {
+        const response = await fetch(flagUrl, {
+          method: "POST", redirect: "error",
+          headers: { Authorization: `Bearer ${flagToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ text: params.str }),
+          signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+        });
+        if (!response.ok) throw new Error(`Tau returned HTTP ${response.status}`);
+        const saved: unknown = await response.json();
+        if (!saved || typeof saved !== "object" || !("id" in saved) || typeof saved.id !== "string" || !saved.id) {
+          throw new Error("Tau returned no flag ID");
+        }
+        return { content: [{ type: "text" as const, text: `Flag ${saved.id} saved in Tau's flags.jsonl. Continue the current task.` }],
+          details: { flagId: saved.id } };
+      } catch (error) {
+        throw new Error(`Flag save unconfirmed; check Tau's flags.jsonl before retrying. ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  });
   pi.registerCommand("tau-fork-at", {
     description: "Create a Tau fork through the selected session entry",
     handler: async (args, context) => {

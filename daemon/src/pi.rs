@@ -33,6 +33,7 @@ impl std::fmt::Display for UnconfirmedCommand {
 impl std::error::Error for UnconfirmedCommand {}
 
 pub struct RpcProcess {
+    pub(crate) flag_token: uuid::Uuid,
     shutdown_gate: Mutex<()>,
     writer: Mutex<Option<ChildStdin>>,
     child: Mutex<Option<Child>>,
@@ -45,7 +46,8 @@ pub struct RpcProcess {
 }
 
 impl RpcProcess {
-    pub fn spawn(config: &Config, session: Option<&str>) -> Result<Arc<Self>> {
+    pub fn spawn(config: &Config, session: Option<&str>, tau_session: Option<&str>) -> Result<Arc<Self>> {
+        let flag_token = uuid::Uuid::new_v4();
         let mut command = Command::new(&config.pi_command);
         command
             .arg("--mode")
@@ -58,11 +60,21 @@ impl RpcProcess {
             .arg(&config.pi_extension_path)
             .env("TAU_ATTACHMENT_ROOT", &config.attachment_root)
             .env_remove("TAU_TOKEN")
+            .env_remove("TAU_FLAG_URL")
+            .env_remove("TAU_FLAG_TOKEN")
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(id) = tau_session {
+            let mut address = config.bind;
+            if address.ip().is_unspecified() {
+                address.set_ip(if address.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
+            }
+            command.env("TAU_FLAG_URL", format!("http://{address}/v1/sessions/{id}/flags"))
+                .env("TAU_FLAG_TOKEN", flag_token.to_string());
+        }
         if let Some(session) = session {
             command.arg("--session").arg(session);
         } else {
@@ -158,6 +170,7 @@ impl RpcProcess {
         });
 
         Ok(Arc::new(Self {
+            flag_token,
             shutdown_gate: Mutex::new(()),
             writer: Mutex::new(Some(stdin)),
             child: Mutex::new(Some(child)),

@@ -180,6 +180,28 @@ impl AgentManager {
         ServerMessage::Sessions { sessions }
     }
 
+    pub async fn flag(&self, id: &str, token: &str, text: &str) -> Result<Option<crate::state::Flag>> {
+        self.ensure_running()?;
+        let Some(runtime) = self.inner.runtimes.lock().await.get(id).cloned() else { return Ok(None); };
+        let permitted = runtime.content.lock().await.process.as_ref().is_some_and(|process| {
+            process.is_alive() && uuid::Uuid::parse_str(token).ok() == Some(process.flag_token)
+        });
+        if !permitted { return Ok(None); }
+        let saved = self.inner.state.flag(id, text).await;
+        let (message, level) = match &saved {
+            Ok(flag) => (format!("Flagged {} · {}: {}", flag.id, bounded(&flag.session_title, 80), bounded(text, 320)), "info"),
+            Err(error) => (format!("Flag save failed · {}: {}", id, bounded(&error.to_string(), 240)), "error"),
+        };
+        let _ = self.inner.events.send(ServerMessage::ExtensionUi {
+            session_id: id.to_owned(),
+            request: Box::new(ExtensionUiRequest {
+                id: uuid::Uuid::new_v4().to_string(), method: "notify".to_owned(),
+                message: Some(message), notify_type: Some(level.to_owned()), ..Default::default()
+            }),
+        });
+        saved.map(Some)
+    }
+
     pub async fn create_session(&self) -> Result<String> {
         self.ensure_running()?;
         let id = self
@@ -690,7 +712,7 @@ impl AgentManager {
             .context("Pi session file is not available")?
             .to_owned();
 
-        let temporary = RpcProcess::spawn(&self.inner.config, Some(&parent_file))?;
+        let temporary = RpcProcess::spawn(&self.inner.config, Some(&parent_file), None)?;
         let result = async {
             let response = match operation {
                 BranchOperation::Fork(entry_id) if fork_at_entry => {
@@ -925,7 +947,7 @@ impl AgentManager {
             }
         }
         self.set_runtime_state(id, runtime, SessionStatus::Starting, None, None);
-        let process = match RpcProcess::spawn(&self.inner.config, session) {
+        let process = match RpcProcess::spawn(&self.inner.config, session, Some(id)) {
             Ok(process) => process,
             Err(error) => {
                 self.set_runtime_state(
