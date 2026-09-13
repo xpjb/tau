@@ -4,6 +4,34 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## In progress: responsive, single-flight New Chat
+
+The user reports delayed New Chat and multiple chats after repeat clicks, and
+asks us to fix it without requiring further diagnosis. Every click currently
+sends a new request; no pending state reaches the button. Creation saves metadata
+without starting Pi. The client also waits on a needless local acknowledgement
+query and saves selection before sending the open request.
+
+Design: one nullable creation-progress value in TauUiState (waiting for a reply,
+then holding the confirmed session ID until its summary/chat are available).
+Keep the existing pending request entry until handoff completes. Disable the
+button and show Creating… immediately; guard the controller too. Accept either
+reply/list order. Reuse existing request timeout and connection cleanup, with no
+automatic replay, placeholder chat, durable retry queue, daemon or wire change.
+Do not clear a newer operation from a stale completion. Network/disk latency is
+not measured here; show progress and remove avoidable work rather than claiming
+that all latency is eliminated.
+
+Plan:
+1. Add one connection regression for delayed/repeated clicks, both reply/list
+   orders, handoff, failure, timeout and reconnect without replay. Confirm the
+   old duplicate-request failure.
+2. Add creation progress/guard and button feedback, skip the irrelevant create
+   acknowledgement lookup, and send open before persisting the selection.
+3. Check the guarded database handoff and failure cleanup, run client acceptance
+   and Android compilation, review the diff and commit off master.
+4. Merge after acceptance. Hold release versions, installers and deployment.
+
 ## Accepted: horizontal selection crash and exception diagnostics (unreleased)
 
 The user approved the dependency patch and logging repair after verifying that

@@ -60,6 +60,9 @@ with `transcript` owning Pi formats and `state.rs` owning Tau's own
 
 ## Rules the codebase keeps
 
+- Acknowledge user actions in local UI state immediately, before network work.
+  Remote confirmation determines completion or failure, not whether a click
+  received visible feedback.
 - No single-caller functions unless they are UI composables, axum route
   handlers, or platform-interface implementations.
 - Wire changes are versioned: `PROTOCOL_VERSION` in `protocol.rs` and

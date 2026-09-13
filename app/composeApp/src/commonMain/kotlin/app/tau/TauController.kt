@@ -38,6 +38,8 @@ private const val ReconnectDelayMillis = 2_000L
 private const val CommandLoadMillis = 10_000L
 private const val BackgroundReads = 2
 private const val RecentWarmChats = 5
+private const val UnconfirmedCreation = "New chat was not confirmed. Check the chat list before trying again."
+private const val CreatedNotReady = "Chat was created. Check the chat list to open it."
 private const val WarmHistoryEvents = HistoryPageEvents * 3
 private const val WarmHistoryBytes = HistoryPageBytes * 3
 internal const val DownloadProgressIntervalMillis = 200L
@@ -45,6 +47,7 @@ internal const val DownloadProgressIntervalMillis = 200L
 enum class ConnectionStatus { NotConfigured, Connecting, Connected, Offline }
 
 data class SessionExtensionUi(val sessionId: String, val request: ExtensionUiRequest)
+data class SessionCreation(val sessionId: String? = null)
 
 internal const val UsageNoticePrefix = "VIBE_BRIDGE_CODEX_USAGE:"
 private val UsageRequestTimeout = 30.seconds
@@ -123,6 +126,7 @@ data class TauUiState(
     val titlePrompt: TitlePrompt? = null,
     val titlePromptPending: Boolean = false,
     val sessions: List<SessionSummary> = emptyList(),
+    val creatingSession: SessionCreation? = null,
     val selectedSessionId: String? = null,
     val focusComposerSessionId: String? = null,
     val transcripts: Map<String, RetainedChat> = emptyMap(),
@@ -197,7 +201,11 @@ class TauController(
     fun dismissError() { mutableState.update { it.copy(error = null) } }
     fun dismissNotice() { mutableState.update { it.copy(notice = null) } }
 
-    fun createSession() { send(CreateSession(newRequestId()), PendingAction.Create) }
+    fun createSession() {
+        if (socketId == null || state.value.connectionStatus != ConnectionStatus.Connected || state.value.creatingSession != null) return
+        mutableState.update { it.copy(creatingSession = SessionCreation(), error = null, notice = null) }
+        send(CreateSession(newRequestId()), PendingAction.Create)
+    }
     fun renameSession(sessionId: String, title: String) { send(RenameSession(newRequestId(), sessionId, title)) }
     fun deleteSession(sessionId: String) { send(DeleteSession(newRequestId(), sessionId), PendingAction.Delete(sessionId)) }
     fun abort() { state.value.selectedSessionId?.let { send(Abort(newRequestId(), it)) } }
@@ -214,9 +222,9 @@ class TauController(
         launch {
             val chat = loadChat(key)
             if (state.value.settings.identity == key.connection && state.value.selectedSessionId == sessionId) {
-                store.select(key, state.value.readAt)
                 if (!chat.synchronized) openSession(sessionId)
                 loadCommands(sessionId)
+                store.select(key, state.value.readAt)
                 warmChats()
             }
         }
@@ -459,7 +467,9 @@ class TauController(
         mutableState.update { previous ->
             val base = if (same) previous else TauUiState()
             base.copy(settings = settings, editingSettings = settings.token.isBlank(), connectionStatus = ConnectionStatus.Connecting,
-                restoring = base.transcripts.isEmpty(), error = null, titlePromptPending = false, attachmentDownloads = emptyMap(), uploadingSessions = emptySet(), loadingHistory = emptySet())
+                restoring = base.transcripts.isEmpty(), error = null, titlePromptPending = false, creatingSession = null,
+                notice = if (previous.creatingSession == null) base.notice else if (previous.creatingSession.sessionId == null) UnconfirmedCreation else CreatedNotReady,
+                attachmentDownloads = emptyMap(), uploadingSessions = emptySet(), loadingHistory = emptySet())
         }
         connectionJob = scope.launch {
             try {
@@ -508,6 +518,7 @@ class TauController(
                                 pending.clear()
                                 failedReads.clear()
                                 mutableState.update { it.copy(connectionStatus = ConnectionStatus.Offline, daemonVersion = null, titlePromptPending = false,
+                                    creatingSession = null, notice = if (it.creatingSession == null) it.notice else if (it.creatingSession.sessionId == null) UnconfirmedCreation else CreatedNotReady,
                                     slashCommands = emptyMap(), loadingCommands = emptySet(), extensionDialogs = emptyList(), extensionStatuses = emptyMap(), extensionWidgets = emptyMap()) }
                             }
                         }
@@ -516,7 +527,7 @@ class TauController(
                 }
             } catch (error: Throwable) {
                 ensureActive()
-                if (version == connectionVersion) mutableState.update { it.copy(restoring = false, connectionStatus = ConnectionStatus.Offline, error = "Retained store: ${error.message}") }
+                if (version == connectionVersion) mutableState.update { it.copy(restoring = false, creatingSession = null, connectionStatus = ConnectionStatus.Offline, error = "Retained store: ${error.message}") }
             }
         }
     }
@@ -572,13 +583,15 @@ class TauController(
                     if (!store.applyUpdates(key, patches) && message.sessionId == state.value.selectedSessionId) openSession(message.sessionId)
                 }
                 is Response -> {
-                    val action = pending.remove(message.requestId)
+                    val action = pending[message.requestId]
+                    if (action != PendingAction.Create || !message.ok) pending.remove(message.requestId)
                     if (action == PendingAction.TitlePrompt) mutableState.update { it.copy(titlePromptPending = false) }
                     if (action == null && state.value.transcripts.values.none { chat ->
                         chat.pending.any { it.requestId == message.requestId } || chat.controls.any { it.commandId == message.requestId }
                     }) continue
-                    store.acknowledge(identity, message.requestId, message.ok, message.uncertain, message.disposition, message.outcome, message.error)
+                    if (action != PendingAction.Create) store.acknowledge(identity, message.requestId, message.ok, message.uncertain, message.disposition, message.outcome, message.error)
                     if (!message.ok) {
+                        if (action == PendingAction.Create) mutableState.update { it.copy(creatingSession = null) }
                         action?.readSession?.let { sessionId ->
                             failedReads.add(sessionId)
                             store.invalidate(identity, sessionId)
@@ -600,7 +613,13 @@ class TauController(
                             }
                             mutableState.update { it.copy(transcripts = it.transcripts - action.sessionId, drafts = it.drafts - action.sessionId) }
                         }
-                        if ((action == PendingAction.Create || action == PendingAction.Select) && message.sessionId != null) {
+                        if (action == PendingAction.Create) {
+                            if (message.sessionId == null) {
+                                pending.remove(message.requestId)
+                                mutableState.update { it.copy(creatingSession = null, notice = UnconfirmedCreation) }
+                            } else mutableState.update { it.copy(creatingSession = SessionCreation(message.sessionId)) }
+                        }
+                        if (action == PendingAction.Select && message.sessionId != null) {
                             val key = ChatKey(identity, message.sessionId)
                             loadChat(key)
                             if (message.draft != null) {
@@ -693,6 +712,16 @@ class TauController(
                     if (selected != null && (message.sessionId == null || message.sessionId == selected)) openSession(selected)
                 }
             }
+            val created = state.value.creatingSession?.sessionId
+            if (created != null && state.value.sessions.any { it.id == created }) {
+                loadChat(ChatKey(identity, created))
+                if (state.value.creatingSession?.sessionId == created) {
+                    mutableState.update { it.copy(focusComposerSessionId = created) }
+                    selectSession(created)
+                    pending.entries.removeAll { it.value == PendingAction.Create }
+                    mutableState.update { it.copy(creatingSession = null) }
+                }
+            }
         }
         warmChats()
     }
@@ -740,11 +769,14 @@ class TauController(
                         warmChats()
                     }
                 }
-                if (action is PendingAction.Commands || action == PendingAction.TitlePrompt) {
+                if (action is PendingAction.Commands || action == PendingAction.TitlePrompt || action == PendingAction.Create) {
                     delay(CommandLoadMillis)
                     if (pending.remove(request.id) == action) mutableState.update {
                         it.copy(loadingCommands = if (action is PendingAction.Commands) it.loadingCommands - action.sessionId else it.loadingCommands,
                             titlePromptPending = if (action == PendingAction.TitlePrompt) false else it.titlePromptPending,
+                            creatingSession = if (action == PendingAction.Create) null else it.creatingSession,
+                            notice = if (action != PendingAction.Create) it.notice else if (it.creatingSession?.sessionId == null) UnconfirmedCreation
+                                else CreatedNotReady,
                             error = if (request is SetTitlePrompt) "Title prompt request timed out" else it.error)
                     }
                 }
@@ -753,7 +785,7 @@ class TauController(
             catch (error: Throwable) {
                 val disconnected = error.isConnectionFailure()
                 if (version == connectionVersion) {
-                    pending.remove(request.id)
+                    if (pending.remove(request.id) == PendingAction.Create) mutableState.update { it.copy(creatingSession = null, notice = UnconfirmedCreation) }
                     if (action is PendingAction.Commands) mutableState.update { it.copy(loadingCommands = it.loadingCommands - action.sessionId) }
                     if (action == PendingAction.TitlePrompt) mutableState.update { it.copy(titlePromptPending = false) }
                     if (action.readSession != null && !disconnected) {

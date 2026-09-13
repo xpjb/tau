@@ -35,6 +35,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertNotNull
 import kotlin.test.assertNotEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -66,6 +67,155 @@ class TauConnectionTest {
 
     private suspend fun Channel<ClientRequest>.nextRequest(): ClientRequest = withTimeout(10_000) { receive() }
 
+
+    @Test
+    fun creates_one_chat_until_the_new_chat_is_ready() = runBlocking<Unit> {
+        val directory = Files.createTempDirectory("tau-new-chat")
+        val requests = Channel<ClientRequest>(Channel.UNLIMITED)
+        val sockets = Channel<DefaultWebSocketServerSession>(Channel.UNLIMITED)
+        val sessions = AtomicReference(listOf(chat))
+        val pauseStore = AtomicBoolean()
+        val heldIo = Channel<Pair<kotlin.coroutines.CoroutineContext, Runnable>>(Channel.UNLIMITED)
+        val storeDispatcher = object : kotlinx.coroutines.CoroutineDispatcher() {
+            override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+                if (pauseStore.getAndSet(false)) heldIo.trySend(context to block).getOrThrow()
+                else Dispatchers.IO.dispatch(context, block)
+            }
+        }
+        val server = embeddedServer(CIO, host = "127.0.0.1", port = 0) {
+            install(WebSockets)
+            routing {
+                webSocket("/v1/ws") {
+                    sendMessage(Hello(TauProtocolVersion, "fixture"))
+                    sendMessage(Sessions(sessions.get()))
+                    sockets.send(this)
+                    for (frame in incoming) if (frame is Frame.Text) {
+                        when (val request = TauJson.decodeFromString<ClientRequest>(frame.readText())) {
+                            is CreateSession -> requests.send(request)
+                            is OpenSession -> {
+                                sendMessage(TranscriptSnapshot(request.sessionId, TranscriptCut(request.sessionId, 0, emptyList(), queue)))
+                                sendMessage(Response(request.id, true, request.sessionId))
+                            }
+                            is GetTitlePrompt -> {
+                                sendMessage(TitlePrompt(request.id, "Fixture", "Fixture"))
+                                sendMessage(Response(request.id, true))
+                            }
+                            else -> sendMessage(Response(request.id, true))
+                        }
+                    }
+                }
+            }
+        }.start(wait = false)
+        val controller = TauController(Dispatchers.Swing, LocalStore({ directory.resolve("local.db").toString() }, storeDispatcher))
+        try {
+            val port = server.engine.resolvedConnectors().single().port
+            withContext(Dispatchers.Swing) { controller.start(ConnectionSettings("http://127.0.0.1:$port", "fixture")) }
+            var socket = withTimeout(10_000) { sockets.receive() }
+            controller.awaitState { it.connectionStatus == ConnectionStatus.Connected && it.transcripts[chat.id]?.synchronized == true }
+            withContext(Dispatchers.Swing) {
+                controller.createSession()
+                assertNotNull(controller.state.value.creatingSession, "Local acknowledgement must precede any reply")
+                repeat(3) { controller.createSession() }
+                controller.titlePrompt()
+            }
+            controller.awaitState { it.titlePrompt != null && !it.titlePromptPending }
+            val first = assertIs<CreateSession>(requests.nextRequest())
+            assertTrue(requests.tryReceive().isFailure, "Repeated clicks sent more than one create request")
+            val firstChat = chat.copy(id = "new-1", title = "New chat", createdAtMs = 2, updatedAtMs = 2)
+            socket.sendMessage(Response(first.id, true, firstChat.id))
+            controller.awaitState { it.creatingSession?.sessionId == firstChat.id }
+            assertEquals(chat.id, controller.state.value.selectedSessionId, "Keep the old chat until the new one can be shown")
+            val fence = controller.state.value.titlePrompt?.requestId
+            withContext(Dispatchers.Swing) { repeat(3) { controller.createSession() }; controller.titlePrompt() }
+            controller.awaitState { !it.titlePromptPending && it.titlePrompt?.requestId != fence }
+            assertTrue(requests.tryReceive().isFailure, "The reply alone must not release the creation guard")
+
+            pauseStore.set(true)
+            sessions.set(listOf(firstChat, chat))
+            socket.sendMessage(Sessions(sessions.get()))
+            val held = withTimeout(5_000) { heldIo.receive() }
+            try {
+                withContext(Dispatchers.Swing) {
+                    repeat(3) { controller.createSession() }
+                    assertNotNull(controller.state.value.creatingSession, "A blocked local handoff must keep the guard")
+                }
+            } finally {
+                Dispatchers.IO.dispatch(held.first, held.second)
+            }
+            controller.awaitState { it.selectedSessionId == firstChat.id && it.creatingSession == null && it.transcripts[firstChat.id]?.synchronized == true }
+            assertEquals(firstChat.id, controller.state.value.focusComposerSessionId)
+            assertTrue(controller.state.value.mobileChatVisible)
+            val handoffFence = controller.state.value.titlePrompt?.requestId
+            withContext(Dispatchers.Swing) { controller.titlePrompt() }
+            controller.awaitState { !it.titlePromptPending && it.titlePrompt?.requestId != handoffFence }
+            assertTrue(requests.tryReceive().isFailure, "Clicks during the handoff created another chat")
+
+            withContext(Dispatchers.Swing) { controller.createSession() }
+            val second = assertIs<CreateSession>(requests.nextRequest())
+            assertNotEquals(first.id, second.id)
+            val secondChat = firstChat.copy(id = "new-2", createdAtMs = 3, updatedAtMs = 3)
+            sessions.set(listOf(secondChat) + sessions.get())
+            socket.sendMessage(Sessions(sessions.get()))
+            controller.awaitState { it.sessions.any { session -> session.id == secondChat.id } }
+            assertNotNull(controller.state.value.creatingSession)
+            assertEquals(firstChat.id, controller.state.value.selectedSessionId)
+            socket.sendMessage(Response(second.id, true, secondChat.id))
+            controller.awaitState { it.selectedSessionId == secondChat.id && it.creatingSession == null && it.transcripts[secondChat.id]?.synchronized == true }
+
+            for (rejected in listOf(true, false)) {
+                withContext(Dispatchers.Swing) { controller.createSession() }
+                val request = assertIs<CreateSession>(requests.nextRequest())
+                socket.sendMessage(Response(request.id, !rejected, error = if (rejected) "Create rejected" else null))
+                val state = controller.awaitState { it.creatingSession == null && if (rejected) it.error == "Create rejected" else it.notice?.contains("not confirmed") == true }
+                assertEquals(secondChat.id, state.selectedSessionId)
+            }
+
+            withContext(Dispatchers.Swing) { controller.createSession() }
+            val timedOut = assertIs<CreateSession>(requests.nextRequest())
+            controller.awaitState(15_000) { it.creatingSession == null && it.notice?.contains("not confirmed") == true }
+            assertTrue(requests.tryReceive().isFailure, "Timeout must not retry creation")
+            withContext(Dispatchers.Swing) { controller.createSession() }
+            val retry = assertIs<CreateSession>(requests.nextRequest())
+            val lateChat = firstChat.copy(id = "late", createdAtMs = 4, updatedAtMs = 4)
+            sessions.set(listOf(lateChat) + sessions.get())
+            socket.sendMessage(Response(timedOut.id, true, lateChat.id))
+            socket.sendMessage(Sessions(sessions.get()))
+            controller.awaitState { it.sessions.any { session -> session.id == lateChat.id } }
+            assertEquals(secondChat.id, controller.state.value.selectedSessionId)
+            assertNotNull(controller.state.value.creatingSession, "A late reply must not release a newer request")
+            socket.sendMessage(Response(retry.id, false, error = "Retry rejected"))
+            controller.awaitState { it.creatingSession == null && it.error == "Retry rejected" }
+
+            withContext(Dispatchers.Swing) { controller.createSession() }
+            assertIs<CreateSession>(requests.nextRequest())
+            val lostReply = firstChat.copy(id = "lost-reply", createdAtMs = 5, updatedAtMs = 5)
+            sessions.set(listOf(lostReply) + sessions.get())
+            socket.close(CloseReason(CloseReason.Codes.GOING_AWAY, "Lost create reply"))
+            controller.awaitState { it.connectionStatus == ConnectionStatus.Offline && it.creatingSession == null }
+            withContext(Dispatchers.Swing) { repeat(3) { controller.createSession() } }
+            assertNull(controller.state.value.creatingSession)
+            socket = withTimeout(10_000) { sockets.receive() }
+            controller.awaitState { it.connectionStatus == ConnectionStatus.Connected && it.sessions.any { session -> session.id == lostReply.id } }
+            val reconnectFence = controller.state.value.titlePrompt?.requestId
+            withContext(Dispatchers.Swing) { controller.titlePrompt() }
+            controller.awaitState { !it.titlePromptPending && it.titlePrompt?.requestId != reconnectFence }
+            assertTrue(requests.tryReceive().isFailure, "Reconnect must not replay creation")
+            assertNotNull(controller.state.value.notice)
+            withContext(Dispatchers.Swing) { controller.createSession() }
+            val afterReconnect = assertIs<CreateSession>(requests.nextRequest())
+            socket.sendMessage(Response(afterReconnect.id, false, error = "Fixture finished"))
+            controller.awaitState { it.creatingSession == null && it.error == "Fixture finished" }
+        } finally {
+            pauseStore.set(false)
+            while (true) {
+                val held = heldIo.tryReceive().getOrNull() ?: break
+                Dispatchers.IO.dispatch(held.first, held.second)
+            }
+            withContext(Dispatchers.Swing) { controller.dispose() }.join()
+            server.stop(0, 1_000)
+            directory.toFile().deleteRecursively()
+        }
+    }
 
     @Test
     fun edits_title_prompt_and_reloads_after_disconnect_without_replaying_saves() = runBlocking<Unit> {

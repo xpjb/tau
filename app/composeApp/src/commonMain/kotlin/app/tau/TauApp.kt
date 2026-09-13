@@ -687,17 +687,19 @@ private fun SessionList(
                 focusManager.clearFocus(force = true)
                 controller.createSession()
             },
-            enabled = actionsEnabled,
+            enabled = actionsEnabled && state.creatingSession == null,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         ) {
-            Text("New chat")
+            Text(if (state.creatingSession != null) "Creating…" else "New chat")
         }
         Spacer(Modifier.height(12.dp))
         HorizontalDivider()
         if (state.sessions.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    if (actionsEnabled) {
+                    if (state.creatingSession != null) {
+                        "Creating chat…"
+                    } else if (actionsEnabled) {
                         "Create your first Tau chat."
                     } else {
                         "Waiting for the daemon."
@@ -880,7 +882,7 @@ private fun ChatPanel(
     if (sessionId == null || session == null) {
         Box(modifier, contentAlignment = Alignment.Center) {
             if (state.restoring) CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
-            else Text("Select or create a chat.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else Text(if (state.creatingSession != null) "Creating chat…" else "Select or create a chat.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         return
     }
