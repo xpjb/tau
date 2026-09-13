@@ -10,7 +10,7 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 
 Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects ordered content events; clients keep remote history in memory only. SQLite preserves drafts, pending sends/controls, attached files, preferences and session metadata across client restarts. Cold chats can be read without starting Pi. Loaded history and chat feeds stay in memory across selection changes. Running, unread and recent chats warm in the background; older events also load on demand. Reconnect checks the retained event windows. Thinking and tools remain collapsible across fetch boundaries. New chats use `/root` as their working directory.
 
-Tau 0.5.12 clients and daemon use protocol 7 and must be updated together. This release includes full title-prompt editing, copying message text without Details, running/unread priority, stopped-model failure status, full-screen image zoom and quiet background reconnects. It also retains the scrolling and remembered-download fixes. Android versionCode is 33. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 preserves local work while remote history remains memory-only. The existing identified-transcript Pi fork and JSONL files stay unchanged.
+Tau 0.5.13 clients and daemon use protocol 8 and must be updated together. This release includes immediate New Chat feedback and repeat-click protection, the horizontal-selection crash fix and fuller local diagnostics, Enter submission in single-line forms, complete Markdown tables, stable image viewing during updates, and the Tau-only flag_it tool. Android versionCode is 34. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 preserves local work while remote history remains memory-only. Pi JSONL history stays intact. The matched Tau Pi update selects current model-specific base prompts when workers start or restore; Astra uses an empty base with AGENTS.md and appended context retained.
 
 ## Current client operations
 
@@ -35,10 +35,9 @@ Tau 0.5.12 clients and daemon use protocol 7 and must be updated together. This 
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
 - Use the same chats from Android and Windows.
 
-## Selection and crash diagnostics (unreleased)
+## Selection and crash diagnostics
 
-The pending batch uses protocol 8 and requires matched client and daemon updates.
-Release numbers and installers remain unchanged until that release.
+Protocol 8 requires matched client and daemon updates.
 
 A build-time patch fixes the top/bottom edge mismatch in current stable Compose
 1.12.0. Long horizontal selection drags retain scrolling and copying. The same
@@ -61,7 +60,7 @@ stay under 24 KiB; the daemon also accepts old schema 1 pending reports. Failed
 report writes are printed to stderr instead of silently discarded. The patch
 prevents this selection defect; it adds no blanket UI catch-and-continue policy.
 
-## Incidental flags (unreleased)
+## Incidental flags
 
 Tau agents can call `flag_it(str)` to record a new finding outside the current
 work: technical debt, environment problems, or wasted resources. Include what
@@ -86,8 +85,7 @@ notification messages. Notifications reach connected clients; this adds
 no offline push service, issue tracker, or automatic investigation.
 
 Later, ask an agent to read the log and investigate a flag by ID. Deployment must
-include both the updated daemon and Tau extension; no installer has been issued
-for this feature yet.
+include both the updated daemon and Tau extension.
 
 ## Daemon installation
 

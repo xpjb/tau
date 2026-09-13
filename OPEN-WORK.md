@@ -4,6 +4,31 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## Authorized deployment: 0.5.13 / protocol 8
+
+The user says Deploy now after confirming all Tau agents are stopped and that
+existing threads rebuild their base prompt on restore. Deploy the completed Tau
+batch and the accepted Pi model-prompt update together. Preserve chat history,
+AGENTS/appended context, global model settings, CLI Pi and Telegram.
+
+Plan:
+1. Set Tau clients/daemon to0.5.13, Android code34, retaining protocol8. Use the
+   release worktree; no unrelated code, dependency or model-catalog changes.
+2. Run the combined client/daemon checks, signed Android packaging and minified
+   Windows packaging. Build the accepted Pi fork with the existing offline
+   catalog, pack/install it at a new immutable path, and smoke-test it without
+   real provider requests. Verify artifact versions, hashes and Android signing.
+3. Recheck idle, back up binaries, configuration, extension, prompt and data.
+   Stop only Tau; install the matched daemon/extension and new Tau Pi path, and
+   the empty Astra base file. Keep the previous installation for rollback.
+4. Verify protocol8 health, authenticated state, all prior chat IDs and JSONL
+   prefixes, prompt selection and the flag extension. Roll back code/config on
+   failure, retaining newer chat data. Leave Telegram running and unchanged.
+5. Deliver both matched installers; old protocol7 clients must update. Record
+   acceptance/deployment and merge/push the release after checks pass.
+
+Earlier unreleased notes below are superseded only after this deployment passes.
+
 ## Accepted: immediate, single-flight New Chat (unreleased)
 
 The user reported lag and multiple chats from repeated clicks, and required
