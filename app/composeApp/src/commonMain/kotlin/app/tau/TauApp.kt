@@ -742,7 +742,7 @@ private fun SessionList(
                             Column(Modifier.padding(12.dp)) {
                                 val unread = state.isUnread(session)
                                 Text(
-                                    session.title,
+                                    state.chatTitle(session),
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                     fontWeight = if (selected || unread) {
@@ -796,7 +796,7 @@ private fun SessionList(
                                 onClick = {
                                     menuExpanded = false
                                     menuPointer = null
-                                    renameText = session.title
+                                    renameText = state.chatTitle(session)
                                     renaming = session
                                 },
                             )
@@ -852,7 +852,7 @@ private fun SessionList(
             onDismissRequest = { deleting = null },
             title = { Text("Delete chat?") },
             text = {
-                Text("Permanently delete “${session.title}” and its Pi session history? This cannot be undone.")
+                Text("Permanently delete “${state.chatTitle(session)}” and its Pi session history? This cannot be undone.")
             },
             confirmButton = {
                 TextButton(
@@ -1103,7 +1103,7 @@ private fun ChatPanel(
                 }
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(session.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+                        Text(state.chatTitle(session), Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
                         ConnectionDot(state.connectionStatus)
                     }
                     val extensionStatus = state.extensionStatuses[sessionId].orEmpty().toSortedMap().values.joinToString(" · ")

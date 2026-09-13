@@ -147,6 +147,16 @@ data class TauUiState(
     val notice: String? = null,
     val error: String? = null,
 ) {
+    fun hasData(sessionId: String): Boolean {
+        if (!drafts[sessionId].isNullOrBlank() || sessionId in uploadingSessions) return true
+        val chat = transcripts[sessionId] ?: return false
+        return chat.preferences["draft"].orEmpty().isNotBlank() || chat.files.isNotEmpty() ||
+            chat.pending.isNotEmpty() || chat.controls.isNotEmpty() || chat.rows.isNotEmpty()
+    }
+
+    fun chatTitle(session: SessionSummary): String =
+        if (session.title == "New chat" && (!session.starter || hasData(session.id))) "Unnamed chat" else session.title
+
     fun isUnread(session: SessionSummary): Boolean =
         session.id != selectedSessionId &&
         session.status != SessionStatus.Running && session.status != SessionStatus.Starting &&
@@ -211,13 +221,9 @@ class TauController(
         mutableState.update { it.copy(creatingSession = creation, error = null, notice = null) }
         launch {
             try {
-                val chat = starter?.let { loadChat(ChatKey(identity, it)) }
+                if (starter != null) loadChat(ChatKey(identity, starter))
                 if (socketId != socket || state.value.creatingSession !== creation) return@launch
-                val keep = chat?.takeIf {
-                    state.value.drafts[it.key.session].orEmpty().isNotBlank() ||
-                        it.preferences["draft"].orEmpty().isNotBlank() || it.files.isNotEmpty() ||
-                        it.pending.isNotEmpty() || it.controls.isNotEmpty() || it.key.session in state.value.uploadingSessions
-                }?.key?.session
+                val keep = starter?.takeIf { state.value.hasData(it) }
                 send(CreateSession(newRequestId(), keep), PendingAction.Create)
             } catch (error: Throwable) {
                 mutableState.update { if (it.creatingSession === creation) it.copy(creatingSession = null) else it }
@@ -750,7 +756,7 @@ class TauController(
     private suspend fun warmChats() {
         val current = state.value
         if (socketId == null || current.connectionStatus != ConnectionStatus.Connected) return
-        val candidates = (listOfNotNull(current.selectedSessionId) +
+        val candidates = (listOfNotNull(current.selectedSessionId, current.sessions.firstOrNull { it.starter }?.id) +
             current.sessions.filter { it.status == SessionStatus.Running || it.status == SessionStatus.Starting }.map { it.id } +
             current.sessions.filter { current.isUnread(it) }.map { it.id } +
             current.sessions.take(RecentWarmChats).map { it.id } +

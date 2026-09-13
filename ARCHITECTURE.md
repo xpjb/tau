@@ -70,6 +70,8 @@ with `transcript` owning Pi formats and `state.rs` owning Tau's own
 - The daemon owns one reusable starter in session metadata. New Chat starts Pi
   before replying and shows its real model. Sent messages, explicit renames or
   client keep hints retain work. Idle sleep stops the worker, not the chat.
+  Only the blank starter is labeled New chat. Untitled chats with data or kept
+  outside that slot are Unnamed chats, with no count limit.
 - Pi JSONL owns saved history. Remote transcript events stay in client
   memory only; SQLite preserves local work, files and preferences.
 - The daemon owns branch selection, event order, stream lifecycle and activity

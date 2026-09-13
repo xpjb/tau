@@ -228,9 +228,13 @@ class TauConnectionTest {
                 controller.awaitState { it.sessions.last().id == starter.id }
                 val readyFence = controller.state.value.titlePrompt?.requestId
                 withContext(Dispatchers.Swing) { controller.titlePrompt() }
-                controller.awaitState { !it.titlePromptPending && it.titlePrompt?.requestId != readyFence }
+                controller.awaitState { !it.titlePromptPending && it.titlePrompt?.requestId != readyFence && it.transcripts[starter.id]?.synchronized == true }
                 withContext(Dispatchers.Swing) {
-                    assertFalse(starter.id in controller.state.value.transcripts, "Exercise work outside the selected or warmed chats")
+                    val current = controller.state.value
+                    assertNotEquals(starter.id, current.selectedSessionId, "Restore the starter's local work even while another chat is selected")
+                    assertEquals(if (work == "empty") "New chat" else "Unnamed chat", current.chatTitle(starter))
+                    assertEquals("Test chat", current.chatTitle(chat))
+                    assertTrue(current.sessions.count { current.chatTitle(it) == "New chat" } <= 1)
                     controller.createSession()
                     assertNotNull(controller.state.value.creatingSession)
                     repeat(3) { controller.createSession() }
@@ -246,6 +250,9 @@ class TauConnectionTest {
                 withContext(Dispatchers.Swing) {
                     val current = controller.state.value
                     assertEquals(starter.model, current.sessions.first { it.id == returned.id }.model)
+                    assertEquals("New chat", current.chatTitle(returned))
+                    assertEquals(1, current.sessions.count { current.chatTitle(it) == "New chat" })
+                    if (work != "empty") assertEquals("Unnamed chat", current.chatTitle(current.sessions.first { it.id == starter.id }))
                     assertTrue(current.drafts[returned.id].orEmpty().isEmpty())
                     assertTrue(current.transcripts.getValue(returned.id).files.isEmpty())
                     val kept = current.transcripts.getValue(starter.id)
@@ -256,6 +263,14 @@ class TauConnectionTest {
                     }
                 }
                 if (work == "file") assertTrue(store.readFile(key, store.chat(key).files.single()).bytes.contentEquals(byteArrayOf(1, 2, 3)))
+            }
+            withContext(Dispatchers.Swing) {
+                val current = controller.state.value
+                assertTrue(current.sessions.count { current.chatTitle(it) == "Unnamed chat" } >= 3)
+                val starter = current.sessions.single { it.starter }
+                controller.setDraft(starter.id, "First character")
+                assertEquals("Unnamed chat", controller.state.value.chatTitle(starter), "Naming changes with local input, before a server reply")
+                assertEquals(0, controller.state.value.sessions.count { controller.state.value.chatTitle(it) == "New chat" })
             }
         } finally {
             pauseStore.set(false)

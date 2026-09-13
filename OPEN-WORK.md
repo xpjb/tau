@@ -4,6 +4,25 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## Accepted: one New chat, any number of Unnamed chats (unreleased)
+
+The user clarified the naming rule: at most one blank New chat, and any number
+of Unnamed chats with data. The list, header, rename field and delete dialog use
+one computed title. Local input changes the label immediately. Retained untitled
+chats remain Unnamed even when they are empty; generated titles keep their names.
+Stored titles are not rewritten, so first-message title generation stays intact.
+
+Naming and New Chat share the same existing-data check: draft, files, pending
+sends/controls, preparation or transcript content. The marked starter joins the
+existing bounded warm list so retained local work is found even while another
+chat is selected. No new state, timer, protocol, cache schema or daemon changes.
+
+The existing controller/socket test passes with checks for immediate labeling,
+restored draft/file/pending work, multiple Unnamed chats, one blank New chat and
+unchanged generated titles. Desktop and Android compilation pass. Evidence:
+/root/tau-checks/unnamed-chats/client.log. Hold for the matched release batch;
+production remains0.5.13/protocol8 and source remainsprotocol9/cache schema5.
+
 ## Accepted: reusable starter and model before first send (unreleased)
 
 New Chat reuses one daemon-owned starter. Pi starts before the create reply,
