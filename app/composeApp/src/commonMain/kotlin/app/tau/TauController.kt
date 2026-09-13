@@ -40,6 +40,7 @@ private const val BackgroundReads = 2
 private const val RecentWarmChats = 5
 private const val UnconfirmedCreation = "New chat was not confirmed. Check the chat list before trying again."
 private const val CreatedNotReady = "Chat was created. Check the chat list to open it."
+private const val SlowCreation = "New chat is taking longer than expected. Reconnect if it does not finish."
 private const val WarmHistoryEvents = HistoryPageEvents * 3
 private const val WarmHistoryBytes = HistoryPageBytes * 3
 internal const val DownloadProgressIntervalMillis = 200L
@@ -591,7 +592,8 @@ class TauController(
                     }) continue
                     if (action != PendingAction.Create) store.acknowledge(identity, message.requestId, message.ok, message.uncertain, message.disposition, message.outcome, message.error)
                     if (!message.ok) {
-                        if (action == PendingAction.Create) mutableState.update { it.copy(creatingSession = null) }
+                        if (action == PendingAction.Create) mutableState.update { it.copy(creatingSession = null,
+                            notice = if (it.notice == SlowCreation || it.notice == CreatedNotReady) null else it.notice) }
                         action?.readSession?.let { sessionId ->
                             failedReads.add(sessionId)
                             store.invalidate(identity, sessionId)
@@ -719,7 +721,8 @@ class TauController(
                     mutableState.update { it.copy(focusComposerSessionId = created) }
                     selectSession(created)
                     pending.entries.removeAll { it.value == PendingAction.Create }
-                    mutableState.update { it.copy(creatingSession = null) }
+                    mutableState.update { it.copy(creatingSession = null,
+                        notice = if (it.notice == SlowCreation || it.notice == CreatedNotReady) null else it.notice) }
                 }
             }
         }
@@ -771,13 +774,14 @@ class TauController(
                 }
                 if (action is PendingAction.Commands || action == PendingAction.TitlePrompt || action == PendingAction.Create) {
                     delay(CommandLoadMillis)
-                    if (pending.remove(request.id) == action) mutableState.update {
-                        it.copy(loadingCommands = if (action is PendingAction.Commands) it.loadingCommands - action.sessionId else it.loadingCommands,
-                            titlePromptPending = if (action == PendingAction.TitlePrompt) false else it.titlePromptPending,
-                            creatingSession = if (action == PendingAction.Create) null else it.creatingSession,
-                            notice = if (action != PendingAction.Create) it.notice else if (it.creatingSession?.sessionId == null) UnconfirmedCreation
-                                else CreatedNotReady,
-                            error = if (request is SetTitlePrompt) "Title prompt request timed out" else it.error)
+                    if (pending[request.id] == action) {
+                        if (action != PendingAction.Create) pending.remove(request.id)
+                        mutableState.update {
+                            it.copy(loadingCommands = if (action is PendingAction.Commands) it.loadingCommands - action.sessionId else it.loadingCommands,
+                                titlePromptPending = if (action == PendingAction.TitlePrompt) false else it.titlePromptPending,
+                                notice = if (action != PendingAction.Create) it.notice else if (it.creatingSession?.sessionId == null) SlowCreation else CreatedNotReady,
+                                error = if (request is SetTitlePrompt) "Title prompt request timed out" else it.error)
+                        }
                     }
                 }
             }

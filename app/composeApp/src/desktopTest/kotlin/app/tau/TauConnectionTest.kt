@@ -171,18 +171,24 @@ class TauConnectionTest {
             }
 
             withContext(Dispatchers.Swing) { controller.createSession() }
-            val timedOut = assertIs<CreateSession>(requests.nextRequest())
-            controller.awaitState(15_000) { it.creatingSession == null && it.notice?.contains("not confirmed") == true }
-            assertTrue(requests.tryReceive().isFailure, "Timeout must not retry creation")
-            withContext(Dispatchers.Swing) { controller.createSession() }
-            val retry = assertIs<CreateSession>(requests.nextRequest())
+            val slow = assertIs<CreateSession>(requests.nextRequest())
+            controller.awaitState(15_000) { it.creatingSession != null && it.notice?.contains("taking longer") == true }
+            val slowFence = controller.state.value.titlePrompt?.requestId
+            withContext(Dispatchers.Swing) { repeat(3) { controller.createSession() }; controller.titlePrompt() }
+            controller.awaitState { !it.titlePromptPending && it.titlePrompt?.requestId != slowFence }
+            assertTrue(requests.tryReceive().isFailure, "A slow response must keep repeats blocked, not retry creation")
             val lateChat = firstChat.copy(id = "late", createdAtMs = 4, updatedAtMs = 4)
             sessions.set(listOf(lateChat) + sessions.get())
-            socket.sendMessage(Response(timedOut.id, true, lateChat.id))
+            socket.sendMessage(Response(slow.id, true, lateChat.id))
             socket.sendMessage(Sessions(sessions.get()))
-            controller.awaitState { it.sessions.any { session -> session.id == lateChat.id } }
-            assertEquals(secondChat.id, controller.state.value.selectedSessionId)
-            assertNotNull(controller.state.value.creatingSession, "A late reply must not release a newer request")
+            controller.awaitState { it.selectedSessionId == lateChat.id && it.creatingSession == null && it.notice == null }
+            withContext(Dispatchers.Swing) { controller.createSession() }
+            val retry = assertIs<CreateSession>(requests.nextRequest())
+            socket.sendMessage(Response(slow.id, true, lateChat.id))
+            val staleFence = controller.state.value.titlePrompt?.requestId
+            withContext(Dispatchers.Swing) { controller.titlePrompt() }
+            controller.awaitState { !it.titlePromptPending && it.titlePrompt?.requestId != staleFence }
+            assertNotNull(controller.state.value.creatingSession, "A stale reply must not release a newer request")
             socket.sendMessage(Response(retry.id, false, error = "Retry rejected"))
             controller.awaitState { it.creatingSession == null && it.error == "Retry rejected" }
 

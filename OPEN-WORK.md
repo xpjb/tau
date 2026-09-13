@@ -18,7 +18,11 @@ Keep the existing pending request entry until handoff completes. Disable the
 button and show Creating… immediately; guard the controller too. Accept either
 reply/list order. Reuse existing request timeout and connection cleanup, with no
 automatic replay, placeholder chat, durable retry queue, daemon or wire change.
-Do not clear a newer operation from a stale completion. Network/disk latency is
+Do not clear a newer operation from a stale completion. Review caught an unsafe
+initial timeout design: a deadline cannot cancel server creation. The deadline
+now warns without releasing the guard or dropping the pending response. A late
+success still opens the same chat. Failure or connection cleanup releases it.
+Network/disk latency is
 not measured here; show progress and remove avoidable work rather than claiming
 that all latency is eliminated.
 
