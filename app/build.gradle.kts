@@ -10,10 +10,10 @@ plugins {
     id("org.jetbrains.compose") version "1.12.0" apply false
 }
 
-val selectionPatched = Attribute.of("app.tau.selection-patched", Boolean::class.javaObjectType)
+val selectionPatch = Attribute.of("app.tau.selection-patch", String::class.java)
 subprojects {
     configurations.configureEach {
-        attributes.attribute(selectionPatched, true)
+        attributes.attribute(selectionPatch, "patched")
     }
     dependencies {
         for (module in listOf("org.jetbrains.compose.foundation:foundation-desktop", "androidx.compose.foundation:foundation-android")) {
@@ -23,12 +23,12 @@ subprojects {
         }
         artifactTypes.maybeCreate("aar")
         artifactTypes.configureEach {
-            if (name == "jar" || name == "aar") attributes.attribute(selectionPatched, false)
+            if (name == "jar" || name == "aar") attributes.attribute(selectionPatch, "raw-$name")
         }
         for (type in listOf("jar", "aar")) {
             registerTransform(ComposeSelectionPatch::class) {
-                from.attribute(selectionPatched, false).attribute(ARTIFACT_TYPE_ATTRIBUTE, type)
-                to.attribute(selectionPatched, true).attribute(ARTIFACT_TYPE_ATTRIBUTE, type)
+                from.attribute(selectionPatch, "raw-$type").attribute(ARTIFACT_TYPE_ATTRIBUTE, type)
+                to.attribute(selectionPatch, "patched").attribute(ARTIFACT_TYPE_ATTRIBUTE, type)
             }
         }
     }

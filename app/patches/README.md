@@ -22,6 +22,10 @@ unchanged; only derived build artifacts are patched. The transform is registered
 for both client modules so compilation, desktop shrinking and Android DEX consume
 the same fix. Other dependencies are untouched. The explicit AAR artifact type
 registration is required: AGP does not define its default transform attributes.
+The patch attribute distinguishes raw JARs from raw AARs. AGP's AAR-to-JAR
+conversion keeps the raw AAR marker, so only patching before conversion is valid.
+A shared unpatched boolean allowed two orders and made release lint resolution
+ambiguous. Both origins converge on the same patched marker.
 The hash-only passthrough in the transform is JetBrains' empty Android wrapper;
 the implementation lives in the separate AndroidX AAR.
 
