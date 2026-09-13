@@ -204,8 +204,26 @@ class TauController(
 
     fun createSession() {
         if (socketId == null || state.value.connectionStatus != ConnectionStatus.Connected || state.value.creatingSession != null) return
-        mutableState.update { it.copy(creatingSession = SessionCreation(), error = null, notice = null) }
-        send(CreateSession(newRequestId()), PendingAction.Create)
+        val socket = socketId
+        val creation = SessionCreation()
+        val starter = state.value.sessions.firstOrNull { it.starter }?.id
+        val identity = state.value.settings.identity
+        mutableState.update { it.copy(creatingSession = creation, error = null, notice = null) }
+        launch {
+            try {
+                val chat = starter?.let { loadChat(ChatKey(identity, it)) }
+                if (socketId != socket || state.value.creatingSession !== creation) return@launch
+                val keep = chat?.takeIf {
+                    state.value.drafts[it.key.session].orEmpty().isNotBlank() ||
+                        it.preferences["draft"].orEmpty().isNotBlank() || it.files.isNotEmpty() ||
+                        it.pending.isNotEmpty() || it.controls.isNotEmpty() || it.key.session in state.value.uploadingSessions
+                }?.key?.session
+                send(CreateSession(newRequestId(), keep), PendingAction.Create)
+            } catch (error: Throwable) {
+                mutableState.update { if (it.creatingSession === creation) it.copy(creatingSession = null) else it }
+                throw error
+            }
+        }
     }
     fun renameSession(sessionId: String, title: String) { send(RenameSession(newRequestId(), sessionId, title)) }
     fun deleteSession(sessionId: String) { send(DeleteSession(newRequestId(), sessionId), PendingAction.Delete(sessionId)) }

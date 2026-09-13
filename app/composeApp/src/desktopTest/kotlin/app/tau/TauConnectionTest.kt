@@ -106,7 +106,8 @@ class TauConnectionTest {
                 }
             }
         }.start(wait = false)
-        val controller = TauController(Dispatchers.Swing, LocalStore({ directory.resolve("local.db").toString() }, storeDispatcher))
+        val store = LocalStore({ directory.resolve("local.db").toString() }, storeDispatcher)
+        val controller = TauController(Dispatchers.Swing, store)
         try {
             val port = server.engine.resolvedConnectors().single().port
             withContext(Dispatchers.Swing) { controller.start(ConnectionSettings("http://127.0.0.1:$port", "fixture")) }
@@ -211,6 +212,51 @@ class TauConnectionTest {
             val afterReconnect = assertIs<CreateSession>(requests.nextRequest())
             socket.sendMessage(Response(afterReconnect.id, false, error = "Fixture finished"))
             controller.awaitState { it.creatingSession == null && it.error == "Fixture finished" }
+
+            val cold = (1..10).map { chat.copy(id = "cold-$it") }
+            for (work in listOf("empty", "draft", "file", "pending")) {
+                val starter = chat.copy(id = "starter-$work", title = "New chat", starter = true,
+                    model = SessionModel("fixture", "chosen-model"))
+                val key = ChatKey(controller.state.value.settings.identity, starter.id)
+                when (work) {
+                    "draft" -> store.setPreference(key, "draft", "Retained draft")
+                    "file" -> store.addFiles(key, listOf(PickedFile("kept.txt", byteArrayOf(1, 2, 3))))
+                    "pending" -> store.beginSend(key, "Unconfirmed send", "")
+                }
+                sessions.set(cold + sessions.get().filterNot { it.id.startsWith("cold-") }.map { it.copy(starter = false) } + starter)
+                socket.sendMessage(Sessions(sessions.get()))
+                controller.awaitState { it.sessions.last().id == starter.id }
+                val readyFence = controller.state.value.titlePrompt?.requestId
+                withContext(Dispatchers.Swing) { controller.titlePrompt() }
+                controller.awaitState { !it.titlePromptPending && it.titlePrompt?.requestId != readyFence }
+                withContext(Dispatchers.Swing) {
+                    assertFalse(starter.id in controller.state.value.transcripts, "Exercise work outside the selected or warmed chats")
+                    controller.createSession()
+                    assertNotNull(controller.state.value.creatingSession)
+                    repeat(3) { controller.createSession() }
+                }
+                val request = assertIs<CreateSession>(requests.nextRequest())
+                assertEquals(if (work == "empty") null else starter.id, request.keepSessionId)
+                assertTrue(requests.tryReceive().isFailure)
+                val returned = if (work == "empty") starter else starter.copy(id = "fresh-$work")
+                sessions.set(listOf(returned) + sessions.get().filterNot { it.id == returned.id }.map { it.copy(starter = false) })
+                socket.sendMessage(Sessions(sessions.get()))
+                socket.sendMessage(Response(request.id, true, returned.id))
+                controller.awaitState { it.selectedSessionId == returned.id && it.creatingSession == null && it.transcripts[returned.id]?.synchronized == true }
+                withContext(Dispatchers.Swing) {
+                    val current = controller.state.value
+                    assertEquals(starter.model, current.sessions.first { it.id == returned.id }.model)
+                    assertTrue(current.drafts[returned.id].orEmpty().isEmpty())
+                    assertTrue(current.transcripts.getValue(returned.id).files.isEmpty())
+                    val kept = current.transcripts.getValue(starter.id)
+                    when (work) {
+                        "draft" -> assertEquals("Retained draft", current.drafts[starter.id])
+                        "file" -> assertEquals("kept.txt", kept.files.single().name)
+                        "pending" -> assertEquals("Unconfirmed send", kept.pending.single().text)
+                    }
+                }
+                if (work == "file") assertTrue(store.readFile(key, store.chat(key).files.single()).bytes.contentEquals(byteArrayOf(1, 2, 3)))
+            }
         } finally {
             pauseStore.set(false)
             while (true) {

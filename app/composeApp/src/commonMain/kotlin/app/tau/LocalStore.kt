@@ -30,32 +30,33 @@ class LocalStore(
                     opened.execSQL("PRAGMA synchronous=FULL")
                     opened.execSQL("PRAGMA busy_timeout=5000")
                     val version = opened.prepare("PRAGMA user_version").use { it.step(); it.getInt(0) }
-                    check(version <= 4) { "This transcript store needs a newer Tau client" }
-                    if (version < 2) opened.transaction {
-                        opened.execSQL("CREATE TABLE IF NOT EXISTS records (connection TEXT NOT NULL, chat TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(connection,chat,kind,id))")
-                        opened.execSQL("CREATE TABLE IF NOT EXISTS files (connection TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(connection,chat,id))")
-                        opened.execSQL("CREATE INDEX IF NOT EXISTS records_order ON records(connection,chat,kind)")
-                        opened.execSQL("CREATE INDEX IF NOT EXISTS records_requests ON records(connection,id) WHERE kind IN ('pending','control')")
-                        opened.execSQL("""
-                            CREATE TABLE sessions (
-                                connection TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL,
-                                title TEXT NOT NULL, status TEXT NOT NULL, detail TEXT,
-                                provider TEXT, model_id TEXT, parent_id TEXT,
-                                created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
-                                context_tokens INTEGER, context_window INTEGER,
-                                PRIMARY KEY(connection,id)
-                            )
-                        """.trimIndent())
-                        opened.execSQL("CREATE INDEX sessions_order ON sessions(connection,position)")
-                        opened.prepare("SELECT connection,value FROM records WHERE chat='' AND kind='connection' AND id='sessions'").use { statement ->
-                            while (statement.step()) opened.writeSessions(statement.getText(0), TauJson.decodeFromString(statement.getText(1)))
+                    check(version <= 5) { "This transcript store needs a newer Tau client" }
+                    if (version < 5) opened.transaction {
+                        if (version < 2) {
+                            opened.execSQL("CREATE TABLE IF NOT EXISTS records (connection TEXT NOT NULL, chat TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(connection,chat,kind,id))")
+                            opened.execSQL("CREATE TABLE IF NOT EXISTS files (connection TEXT NOT NULL, chat TEXT NOT NULL, id TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(connection,chat,id))")
+                            opened.execSQL("CREATE INDEX IF NOT EXISTS records_order ON records(connection,chat,kind)")
+                            opened.execSQL("CREATE INDEX IF NOT EXISTS records_requests ON records(connection,id) WHERE kind IN ('pending','control')")
+                            opened.execSQL("""
+                                CREATE TABLE sessions (
+                                    connection TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL,
+                                    title TEXT NOT NULL, status TEXT NOT NULL, detail TEXT,
+                                    provider TEXT, model_id TEXT, parent_id TEXT,
+                                    created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+                                    context_tokens INTEGER, context_window INTEGER, starter INTEGER NOT NULL DEFAULT 0,
+                                    PRIMARY KEY(connection,id)
+                                )
+                            """.trimIndent())
+                            opened.execSQL("CREATE INDEX sessions_order ON sessions(connection,position)")
+                            opened.prepare("SELECT connection,value FROM records WHERE chat='' AND kind='connection' AND id='sessions'").use { statement ->
+                                while (statement.step()) opened.writeSessions(statement.getText(0), TauJson.decodeFromString(statement.getText(1)))
+                            }
+                            opened.execSQL("DELETE FROM records WHERE chat='' AND kind='connection' AND id='sessions'")
+                        } else {
+                            opened.execSQL("ALTER TABLE sessions ADD COLUMN starter INTEGER NOT NULL DEFAULT 0")
                         }
-                        opened.execSQL("DELETE FROM records WHERE chat='' AND kind='connection' AND id='sessions'")
-                        opened.execSQL("PRAGMA user_version=2")
-                    }
-                    if (version < 4) opened.transaction {
-                        opened.execSQL("DELETE FROM records WHERE kind IN ('entry','position','page')")
-                        opened.execSQL("PRAGMA user_version=4")
+                        if (version < 4) opened.execSQL("DELETE FROM records WHERE kind IN ('entry','position','page')")
+                        opened.execSQL("PRAGMA user_version=5")
                     }
                     connection = opened
                 } catch (error: Throwable) { opened.close(); throw error }
@@ -66,7 +67,7 @@ class LocalStore(
 
     suspend fun loadConnection(identity: String): StoredConnection = access { db ->
         val sessions = db.prepare("""
-            SELECT id,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window
+            SELECT id,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window,starter
             FROM sessions WHERE connection=? ORDER BY position
         """.trimIndent()).use { statement ->
             statement.bindText(1, identity)
@@ -79,6 +80,7 @@ class LocalStore(
                     createdAtMs = statement.getLong(7), updatedAtMs = statement.getLong(8),
                     contextUsage = if (statement.isNull(10)) null else ContextUsage(
                         if (statement.isNull(9)) null else statement.getLong(9), statement.getLong(10)),
+                    starter = statement.getInt(11) != 0,
                 ))
             }
         }
@@ -469,16 +471,16 @@ private fun reconcileControls(previous: List<PendingControl>, queue: QueueState,
 
 private fun SQLiteConnection.writeSessions(identity: String, sessions: List<SessionSummary>) {
     prepare("""
-        INSERT INTO sessions (connection,id,position,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO sessions (connection,id,position,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window,starter)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(connection,id) DO UPDATE SET
             position=excluded.position,title=excluded.title,status=excluded.status,detail=excluded.detail,
             provider=excluded.provider,model_id=excluded.model_id,parent_id=excluded.parent_id,
             created_at_ms=excluded.created_at_ms,updated_at_ms=excluded.updated_at_ms,
-            context_tokens=excluded.context_tokens,context_window=excluded.context_window
-        WHERE (position,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window)
+            context_tokens=excluded.context_tokens,context_window=excluded.context_window,starter=excluded.starter
+        WHERE (position,title,status,detail,provider,model_id,parent_id,created_at_ms,updated_at_ms,context_tokens,context_window,starter)
             IS NOT (excluded.position,excluded.title,excluded.status,excluded.detail,excluded.provider,excluded.model_id,excluded.parent_id,
-                excluded.created_at_ms,excluded.updated_at_ms,excluded.context_tokens,excluded.context_window)
+                excluded.created_at_ms,excluded.updated_at_ms,excluded.context_tokens,excluded.context_window,excluded.starter)
     """.trimIndent()).use { statement ->
         for ((index, session) in sessions.withIndex()) {
             statement.bindText(1, identity); statement.bindText(2, session.id); statement.bindInt(3, index)
@@ -486,6 +488,7 @@ private fun SQLiteConnection.writeSessions(identity: String, sessions: List<Sess
             statement.bindTextOrNull(7, session.model?.provider); statement.bindTextOrNull(8, session.model?.modelId); statement.bindTextOrNull(9, session.parentId)
             statement.bindLong(10, session.createdAtMs); statement.bindLong(11, session.updatedAtMs)
             statement.bindLongOrNull(12, session.contextUsage?.tokens); statement.bindLongOrNull(13, session.contextUsage?.contextWindow)
+            statement.bindInt(14, if (session.starter) 1 else 0)
             statement.step(); statement.reset()
         }
     }

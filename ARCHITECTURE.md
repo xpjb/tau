@@ -67,6 +67,9 @@ with `transcript` owning Pi formats and `state.rs` owning Tau's own
   handlers, or platform-interface implementations.
 - Wire changes are versioned: `PROTOCOL_VERSION` in `protocol.rs` and
   `Protocol.kt` move together with matched client releases.
+- The daemon owns one reusable starter in session metadata. New Chat starts Pi
+  before replying and shows its real model. Sent messages, explicit renames or
+  client keep hints retain work. Idle sleep stops the worker, not the chat.
 - Pi JSONL owns saved history. Remote transcript events stay in client
   memory only; SQLite preserves local work, files and preferences.
 - The daemon owns branch selection, event order, stream lifecycle and activity

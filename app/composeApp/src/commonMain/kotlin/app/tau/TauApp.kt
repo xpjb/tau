@@ -1620,6 +1620,10 @@ private fun ChatPanel(
                         }
                     }
                 }
+                session.model?.let { model ->
+                    Text("${model.provider}/${model.modelId}", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 OutlinedTextField(
                     value = editorValue,
                     onValueChange = {

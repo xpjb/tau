@@ -4,6 +4,35 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
+## Accepted: reusable starter and model before first send (unreleased)
+
+New Chat reuses one daemon-owned starter. Pi starts before the create reply,
+without a prompt or provider request. The composer shows the actual stored model;
+there is no selecting-model placeholder or separate default-model state.
+Concurrent requests share the starter and its worker. Startup failures retry the
+same record. Read-only opens and commands preserve it, and one-hour idle sleep
+stops only Pi. Sent/queued messages, explicit renames and client keep hints retain
+the chat. Recovery keeps existing transcript content instead of reusing it.
+Startup extension messages do not cause an endless create loop.
+
+Clients check the server-marked starter even when it is outside loaded chats.
+Drafts, files, pending sends/controls and sends being prepared keep the old chat
+before getting a fresh starter. Local work stays local and intact. Existing
+immediate Creating feedback, repeat guards, late-reply handling and no replay on
+reconnect remain. Legacy chats are not guessed, deleted or adopted as starters.
+
+Protocol9 adds keepSessionId and the starter summary flag. Client cache schema5
+stores that same flag; upgrades are atomic and preserve local work. Versions and
+production remain0.5.13/protocol8. Hold deployment and installers for a matched
+batch. Shared unread/network work stays parked.
+
+Acceptance:19 daemon tests and strict Clippy;5 focused desktop tests covering
+controller/socket creation, retained work, protocol and cache migrations; desktop
+and Android compilation. The existing cold-read tests still prove that opening
+history does not start Pi. No live provider call, production mutation, formatter,
+dependency upgrade or packaging. Physical UI checks remain user QA. Evidence:
+/root/tau-checks/starter-chat/{daemon.log,clippy.log,client-focused.log}.
+
 ## Deployed: 0.5.13 / protocol 8
 
 The user authorized the full batch after confirming idle agents and that restored

@@ -50,7 +50,7 @@ class LocalStoreTest {
                 db.prepare("DROP TRIGGER reject_import").use { it.step() }
                 assertEquals(StoredConnection(sessions, key.session), store.loadConnection(key.connection))
                 assertEquals(listOf(other), store.loadConnection("account-b").sessions)
-                db.prepare("PRAGMA user_version").use { it.step(); assertEquals(4, it.getInt(0)) }
+                db.prepare("PRAGMA user_version").use { it.step(); assertEquals(5, it.getInt(0)) }
                 db.prepare("SELECT count(*) FROM records WHERE kind='connection' AND id='sessions'").use { it.step(); assertEquals(0, it.getInt(0)) }
                 for (table in listOf("records", "files")) for (operation in listOf("INSERT", "UPDATE", "DELETE")) {
                     db.prepare("CREATE TRIGGER protect_${table}_$operation BEFORE $operation ON $table BEGIN SELECT RAISE(ABORT,'unrelated data write'); END").use { it.step() }
@@ -79,7 +79,7 @@ class LocalStoreTest {
                 assertEquals(expected, store.loadConnection(key.connection).sessions)
                 db.prepare("SELECT count(*) FROM writes").use { it.step(); assertEquals(0, it.getInt(0)) }
                 db.prepare("DROP TRIGGER reject_title").use { it.step() }
-                expected = listOf(expected.first().copy(title = "Renamed", model = null, parentId = null, contextUsage = null)) + expected.drop(1).dropLast(1) + other.copy(id = "new")
+                expected = listOf(expected.first().copy(title = "Renamed", model = null, parentId = null, contextUsage = null)) + expected.drop(1).dropLast(1) + other.copy(id = "new", starter = true)
                 store.saveSessions(key.connection, expected)
                 db.prepare("SELECT count(*) FROM writes").use { it.step(); assertEquals(3, it.getInt(0)) }
                 store.saveSessions(key.connection, expected)
@@ -91,6 +91,13 @@ class LocalStoreTest {
                 assertEquals(StoredConnection(expected, key.session), store.loadConnection(key.connection))
                 assertTrue(store.chat(key).rows.isEmpty())
                 assertEquals(0L, store.chat(key).position.sequence)
+                assertEquals("Retained draft", store.chat(key).preferences["draft"])
+                assertTrue(store.readFile(key, store.chat(key).files.single()).bytes.contentEquals(byteArrayOf(1, 2, 3, 4)))
+                store.close()
+                db.prepare("ALTER TABLE sessions DROP COLUMN starter").use { it.step() }
+                db.prepare("PRAGMA user_version=4").use { it.step() }
+                store = LocalStore({ path })
+                assertEquals(expected.map { it.copy(starter = false) }, store.loadConnection(key.connection).sessions)
                 assertEquals("Retained draft", store.chat(key).preferences["draft"])
                 assertTrue(store.readFile(key, store.chat(key).files.single()).bytes.contentEquals(byteArrayOf(1, 2, 3, 4)))
                 store.saveSessions(key.connection, emptyList())

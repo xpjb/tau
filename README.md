@@ -12,6 +12,8 @@ Tau starts a Pi RPC process when needed and stops it after one idle hour, while 
 
 Tau 0.5.13 clients and daemon use protocol 8 and must be updated together. This release includes immediate New Chat feedback and repeat-click protection, the horizontal-selection crash fix and fuller local diagnostics, Enter submission in single-line forms, complete Markdown tables, stable image viewing during updates, and the Tau-only flag_it tool. Android versionCode is 34. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 preserves local work while remote history remains memory-only. Pi JSONL history stays intact. The matched Tau Pi update selects current model-specific base prompts when workers start or restore; Astra uses an empty base with AGENTS.md and appended context retained.
 
+Unreleased source uses protocol 9 and client cache schema 5. New Chat reuses one daemon-owned starter and starts Pi before returning it, so the real model is shown above the composer before the first message. A client with a draft, files or a pending send/control keeps that chat and gets a fresh starter. The existing one-hour idle timeout stops workers without deleting chats. Existing chats remain intact. This change is held for a matched client/daemon release; deployment remains 0.5.13/protocol 8.
+
 ## Current client operations
 
 - List, create, rename, and permanently delete chats.

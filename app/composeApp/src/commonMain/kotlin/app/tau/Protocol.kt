@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonClassDiscriminator
 
-const val TauProtocolVersion = 8
+const val TauProtocolVersion = 9
 
 val TauJson = Json {
     classDiscriminator = "type"
@@ -36,7 +36,7 @@ data class SetTitlePrompt(override val id: String, val prompt: String) : ClientR
 
 @Serializable
 @SerialName("create_session")
-data class CreateSession(override val id: String) : ClientRequest
+data class CreateSession(override val id: String, val keepSessionId: String? = null) : ClientRequest
 
 @Serializable
 @SerialName("open_session")
@@ -233,6 +233,7 @@ data class SessionSummary(
     val createdAtMs: Long,
     val updatedAtMs: Long,
     val contextUsage: ContextUsage? = null,
+    val starter: Boolean = false,
 )
 
 @Serializable

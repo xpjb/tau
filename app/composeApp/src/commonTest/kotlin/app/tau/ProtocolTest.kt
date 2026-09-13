@@ -20,6 +20,9 @@ class ProtocolTest {
 
     @Test
     fun encodes_commands_and_decodes_daemon_events() {
+        assertEquals("""{"type":"create_session","id":"new"}""", TauJson.encodeToString<ClientRequest>(CreateSession("new")))
+        assertEquals("""{"type":"create_session","id":"new","keepSessionId":"draft"}""",
+            TauJson.encodeToString<ClientRequest>(CreateSession("new", "draft")))
         assertEquals(
             "{\"type\":\"fork_session\",\"id\":\"7\",\"sessionId\":\"chat\",\"entryId\":\"entry\"}",
             TauJson.encodeToString<ClientRequest>(ForkSession("7", "chat", "entry")),
@@ -52,6 +55,9 @@ class ProtocolTest {
         ))
         assertEquals("openai-codex", sessions.sessions.single().model?.provider)
         assertEquals("gpt-5.6-sol", sessions.sessions.single().model?.modelId)
+        assertEquals(false, sessions.sessions.single().starter)
+        val starter = sessions.sessions.single().copy(starter = true)
+        assertEquals(starter, TauJson.decodeFromString<SessionSummary>(TauJson.encodeToString(starter)))
 
         val snapshot = assertIs<TranscriptSnapshot>(TauJson.decodeFromString<ServerMessage>(
             """{"type":"transcript_snapshot","sessionId":"chat","snapshot":{"generation":"process","sequence":4,"events":[{"id":"stream:t:0","order":4,"entryId":"tool","phase":"saved","role":"tool","kind":"text","text":"Build","attachment":{"kind":"file","fileName":"tau.zip","caption":"Build","size":12345}}],"queue":{"available":true,"requests":[],"runId":null,"paused":false,"capabilities":["queue_run_prefix"],"boundaries":["turn"]}}}""",
