@@ -4,30 +4,42 @@
 
 Batch small QA fixes into one client release. Keep separate commits and focused checks, then run combined acceptance and build one set of installers for the batch. Do not bump versions or ship an installer for each QA item. The 0.5.11 download-only release was premature. The scrolling request is next, but it does not by itself authorize another release.
 
-## Authorized deployment: 0.5.13 / protocol 8
+## Deployed: 0.5.13 / protocol 8
 
-The user says Deploy now after confirming all Tau agents are stopped and that
-existing threads rebuild their base prompt on restore. Deploy the completed Tau
-batch and the accepted Pi model-prompt update together. Preserve chat history,
-AGENTS/appended context, global model settings, CLI Pi and Telegram.
+The user authorized the full batch after confirming idle agents and that restored
+threads use current model prompts. Deployment completed2026-09-13T16:18:51Z.
+Tau PID1792496 is healthy at0.5.13/protocol8. All109 prior chat IDs and103 JSONL
+byte prefixes are preserved. Telegram remains PID233927, unchanged.
 
-Plan:
-1. Set Tau clients/daemon to0.5.13, Android code34, retaining protocol8. Use the
-   release worktree; no unrelated code, dependency or model-catalog changes.
-2. Run the combined client/daemon checks, signed Android packaging and minified
-   Windows packaging. Build the accepted Pi fork with the existing offline
-   catalog, pack/install it at a new immutable path, and smoke-test it without
-   real provider requests. Verify artifact versions, hashes and Android signing.
-3. Recheck idle, back up binaries, configuration, extension, prompt and data.
-   Stop only Tau; install the matched daemon/extension and new Tau Pi path, and
-   the empty Astra base file. Keep the previous installation for rollback.
-4. Verify protocol8 health, authenticated state, all prior chat IDs and JSONL
-   prefixes, prompt selection and the flag extension. Roll back code/config on
-   failure, retaining newer chat data. Leave Telegram running and unchanged.
-5. Deliver both matched installers; old protocol7 clients must update. Record
-   acceptance/deployment and merge/push the release after checks pass.
+Both matched clients are packaged and queued for delivery: Windows0.5.13 and
+signed Android0.5.13/code34, with the existing signing certificate. Old protocol7
+clients must update. The batch includes New Chat acknowledgement/guarding,
+selection/crash diagnostics, Enter forms, tables, stable image viewing and flag_it.
+The actual Tau extension path is hash-verified against the released extension.
 
-Earlier unreleased notes below are superseded only after this deployment passes.
+Tau now uses the immutable Pi install /opt/pi-fork/02b081c/pi. The Astra model base
+file is zero bytes; restored and new Astra workers use it while retaining AGENTS
+and appended context. Global model settings, CLI Pi and Telegram stay unchanged.
+Pi was built from the accepted source with the existing offline model catalog;
+isolated package/SDK/both CLI entrypoint smoke checks pass. No provider request
+or production test chat was sent. Shared unread/network work remains parked.
+
+Release packaging exposed ambiguous Android transform ordering. The build marker
+now distinguishes raw AARs/JARs, requiring the selection patch before AAR-to-JAR
+conversion. Release lint, DEX, signing and packaging pass. The Windows embedded
+payload matches all prepared libraries; its shrunk bytecode retains both strict
+selection comparisons and the layout-height bound. Shrinking changes the raw
+class hash, so verification checks the final method, not the unshrunk class hash.
+
+Daemon18 tests, strict Clippy and extension test/types pass. The user asked to
+skip redundant acceptance; no further full run was started. The already-running
+client suite completed during packaging:25 passed, no failures/errors/skips.
+Physical Windows/Android checks remain user QA. No formatters or dependency/model
+catalog changes were made in source.
+
+Backup: /var/backups/tau/0.5.13-20260913T161839Z. Evidence and receipts:
+/root/tau-release/0.5.13/{acceptance.json,deployment.json,SHA256SUMS,client-results/}.
+Earlier unreleased notes for these completed items are superseded by this entry.
 
 ## Accepted: immediate, single-flight New Chat (unreleased)
 
