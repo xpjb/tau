@@ -65,14 +65,109 @@ async fn receive(events: &mut Events, predicate: impl Fn(&ServerMessage) -> bool
 }
 
 #[tokio::test]
+async fn reuses_one_ready_starter_and_preserves_work_across_sleep_and_restart() {
+    let (manager, root) = fixture().await;
+    let legacy = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
+    let mock = root.join("pi.py");
+    fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o600)).await.unwrap();
+    assert!(manager.create_session(None).await.is_err());
+    let id = manager.inner.state.list().into_iter().find(|(_, stored)| stored.starter).unwrap().0;
+    assert!(manager.create_session(None).await.is_err());
+    assert_eq!(manager.inner.state.list().len(), 2);
+    let ServerMessage::Sessions { sessions } = manager.sessions_message().await else { unreachable!() };
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, legacy);
+
+    let source = include_str!("../tests/fixtures/pi.py");
+    fs::write(&mock, source.replace("\"model\": {\"provider\": provider, \"id\": model_id}", "\"model\": None")).await.unwrap();
+    fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700)).await.unwrap();
+    assert!(manager.create_session(None).await.unwrap_err().to_string().contains("no model selected"));
+    let file = manager.inner.state.get(&id).unwrap().session_file.unwrap();
+    let history = fs::read(&file).await.unwrap();
+    fs::write(&mock, source).await.unwrap();
+    let mut creates = tokio::task::JoinSet::new();
+    for _ in 0..12 {
+        let manager = manager.clone();
+        creates.spawn(async move { manager.create_session(None).await.unwrap() });
+    }
+    while let Some(created) = creates.join_next().await { assert_eq!(created.unwrap(), id); }
+    assert_eq!(fs::read_to_string(root.join("pi-sessions/spawn-args")).await.unwrap().lines().count(), 2);
+    let ServerMessage::Sessions { sessions } = manager.sessions_message().await else { unreachable!() };
+    let starter = sessions.iter().find(|session| session.id == id).unwrap();
+    assert!(starter.starter);
+    assert_eq!(starter.status, SessionStatus::Idle);
+    assert_eq!(starter.model, Some(SessionModel { provider: "test".to_owned(), model_id: "model".to_owned() }));
+    assert_eq!(manager.inner.state.get(&id).unwrap().session_file.as_deref(), Some(file.as_str()));
+    assert_eq!(fs::read(&file).await.unwrap(), history, "Initialization sent a prompt or changed history");
+    let activity = starter.updated_at_ms;
+    manager.open_session(&id, &[]).await.unwrap();
+    manager.commands(&id).await.unwrap();
+    let runtime = manager.runtime(&id).await.unwrap();
+    manager.sleep_if_idle(&id, runtime.snapshot().idle_since.unwrap()).await;
+    assert!(runtime.content.lock().await.process.is_none());
+    assert!(manager.inner.state.get(&id).unwrap().starter);
+    assert_eq!(manager.inner.state.get(&id).unwrap().updated_at_ms, activity);
+    manager.shutdown().await;
+
+    let manager = AgentManager::new(manager.inner.config.clone(), StateStore::load(root.join("state.json")).await.unwrap());
+    assert_eq!(manager.create_session(None).await.unwrap(), id);
+    assert_eq!(manager.inner.state.list().len(), 2);
+    assert_eq!(fs::read(&file).await.unwrap(), history);
+    let kept = manager.create_session(Some(&id)).await.unwrap();
+    assert_ne!(kept, id);
+    assert!(!manager.inner.state.get(&id).unwrap().starter);
+    assert_eq!(manager.inner.state.get(&id).unwrap().updated_at_ms, activity, "Keeping local work is not remote activity");
+    assert_eq!(manager.create_session(Some(&id)).await.unwrap(), kept);
+    manager.rename_session(&kept, "Kept empty chat").await.unwrap();
+    let sent = manager.create_session(None).await.unwrap();
+    assert_ne!(sent, kept);
+    manager.prompt(&sent, "hold", "first-send").await.unwrap();
+    assert!(!manager.inner.state.get(&sent).unwrap().starter);
+    let recovered = manager.create_session(None).await.unwrap();
+    let mut events = Events::new(&manager);
+    events.open(&manager, &recovered).await;
+    let runtime = manager.runtime(&recovered).await.unwrap();
+    let process = runtime.content.lock().await.process.clone().unwrap();
+    process.request(json!({"type":"prompt", "message":"Recovered send", "requestId":"recovery", "streamingBehavior":"steer"})).await.unwrap();
+    receive(&mut events, |event| matches!(event, ServerMessage::SessionState { session_id, status: SessionStatus::Idle, context_usage: Some(usage), .. }
+        if session_id == &recovered && usage.tokens == Some(64000))).await;
+    assert!(manager.inner.state.get(&recovered).unwrap().starter, "Fixture must simulate a send before metadata was retained");
+    let recovered_file = manager.inner.state.get(&recovered).unwrap().session_file.unwrap();
+    let saved = fs::read(&recovered_file).await.unwrap();
+    manager.shutdown().await;
+
+    let manager = AgentManager::new(manager.inner.config.clone(), StateStore::load(root.join("state.json")).await.unwrap());
+    let fresh = manager.create_session(None).await.unwrap();
+    assert_ne!(fresh, recovered);
+    assert!(!manager.inner.state.get(&recovered).unwrap().starter);
+    assert_eq!(fs::read(&recovered_file).await.unwrap(), saved);
+    manager.delete_session(&fresh).await.unwrap();
+    let welcome = source.replacen(r#"head = entries[-1]["id"] if entries else None"#, r#"if not entries:
+    entry = {"type":"custom_message", "id":"welcome", "parentId":None, "display":True, "content":"Welcome"}
+    entries.append(entry)
+    with open(session_file, "a") as file:
+        file.write(json.dumps(entry) + "\n")
+head = entries[-1]["id"] if entries else None"#, 1);
+    fs::write(root.join("pi.py"), welcome).await.unwrap();
+    let initialized = tokio::time::timeout(Duration::from_secs(5), manager.create_session(None)).await.unwrap().unwrap();
+    assert_ne!(initialized, fresh);
+    let runtime = manager.runtime(&initialized).await.unwrap();
+    assert_eq!(runtime.content.lock().await.transcript.as_ref().unwrap().snapshot(&[]).events[0].text, "Welcome");
+    assert_eq!(manager.inner.state.list().iter().filter(|(_, session)| session.starter).count(), 1);
+    assert!(manager.inner.state.get(&legacy).is_some());
+    manager.shutdown().await;
+    fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
 async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc() {
     let (manager, root) = fixture().await;
     let mut events = Events::new(&manager);
-    let id = manager.create_session().await.unwrap();
-    assert!(manager.inner.state.get(&id).unwrap().model.is_none());
+    let id = manager.create_session(None).await.unwrap();
+    assert_eq!(manager.inner.state.get(&id).unwrap().model.unwrap().model_id, "model");
     events.open(&manager, &id).await;
     let runtime = manager.runtime(&id).await.unwrap();
-    assert!(runtime.content.lock().await.process.is_none());
+    assert!(runtime.content.lock().await.process.is_some());
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.events.is_empty())).await;
     assert!(matches!(manager.prompt(&id, "Say hello", "request-1").await.unwrap().disposition, PromptDisposition::Submitted));
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.role == EventRole::Assistant && event.phase == EventPhase::Saved))).await;
@@ -226,7 +321,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
     async fn forks_from_the_last_saved_entry_while_the_parent_keeps_running() {
         let (manager, root) = fixture().await;
         let mut events = Events::new(&manager);
-        let id = manager.create_session().await.unwrap();
+        let id = manager.create_session(None).await.unwrap();
         events.open(&manager, &id).await;
         let runtime = manager.runtime(&id).await.unwrap();
         receive(&mut events, |event| matches!(event, ServerMessage::TranscriptSnapshot { snapshot, .. } if snapshot.events.is_empty())).await;
@@ -261,7 +356,7 @@ async fn drives_transcript_controls_recovery_and_process_replacement_through_rpc
 #[tokio::test]
 async fn closes_sleeps_and_deletes_processes_with_their_commands_and_transcripts() {
     let (manager, root) = fixture().await;
-    let id = manager.create_session().await.unwrap();
+    let id = manager.create_session(None).await.unwrap();
     let runtime = manager.runtime(&id).await.unwrap();
     let mut events = Events::new(&manager);
     events.open(&manager, &id).await;
@@ -317,7 +412,7 @@ async fn closes_sleeps_and_deletes_processes_with_their_commands_and_transcripts
         assert_eq!(snapshot.events.last().unwrap().phase, EventPhase::Interrupted);
         assert!(!snapshot.queue.available);
     }
-    let cold = manager.create_session().await.unwrap();
+    let cold = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
     let runtime = manager.runtime(&cold).await.unwrap();
     runtime.content.lock().await.commands = Some(Vec::new());
     manager.delete_session(&cold).await.unwrap();
@@ -330,7 +425,7 @@ async fn closes_sleeps_and_deletes_processes_with_their_commands_and_transcripts
 #[tokio::test]
 async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     let (manager, root) = fixture().await;
-    let id = manager.create_session().await.unwrap();
+    let id = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
     let path = root.join("pi-sessions/cold.jsonl");
     let artifact = root.join("outbox/result.zip");
     fs::write(&artifact, b"artifact").await.unwrap();
@@ -384,7 +479,7 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     assert!(PathBuf::from(&uploaded.path).starts_with(root.join("uploads").join(&id)));
     assert!(manager.store_upload(&id, "empty", b"").await.is_err());
     assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
-    let bad = manager.create_session().await.unwrap();
+    let bad = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
     manager.inner.state.set_session_file(&bad, outside.to_string_lossy().into_owned()).await.unwrap();
     assert!(manager.open_session(&bad, &[]).await.is_err());
     assert!(manager.commands(&bad).await.is_err());
@@ -401,7 +496,7 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
 #[tokio::test]
 async fn bumps_on_replies_and_stops_but_not_history_or_token_updates() {
     let (manager, root) = fixture().await;
-    let id = manager.create_session().await.unwrap();
+    let id = manager.create_session(None).await.unwrap();
     manager.rename_session(&id, "Active").await.unwrap();
     let mut events = Events::new(&manager);
     events.open(&manager, &id).await;
@@ -409,7 +504,7 @@ async fn bumps_on_replies_and_stops_but_not_history_or_token_updates() {
     receive(&mut events, |event| matches!(event, ServerMessage::TranscriptUpdate { change, .. } if change.events.iter().any(|event| event.phase == EventPhase::Live))).await;
     let runtime = manager.runtime(&id).await.unwrap();
     let process = runtime.content.lock().await.process.clone().unwrap();
-    let other = manager.create_session().await.unwrap();
+    let other = manager.create_session(None).await.unwrap();
     let before = manager.inner.state.get(&id).unwrap().updated_at_ms;
     process.request(json!({"type":"mock_reply"})).await.unwrap();
     receive(&mut events, |event| matches!(event, ServerMessage::Sessions { sessions } if sessions[0].id == id && sessions[0].updated_at_ms > before)).await;

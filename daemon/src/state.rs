@@ -64,6 +64,8 @@ pub struct SessionModel {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredSession {
     pub title: String,
+    #[serde(default)]
+    pub starter: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,15 +140,20 @@ impl StateStore {
         parent_id: Option<String>,
         session_file: Option<String>,
         model: Option<SessionModel>,
+        starter: bool,
     ) -> Result<String> {
         let _guard = self.inner.write_gate.lock().await;
         let mut state = self.read_state().clone();
+        if starter && let Some((id, _)) = state.sessions.iter().find(|(_, session)| session.starter) {
+            return Ok(id.clone());
+        }
         let id = Uuid::new_v4().to_string();
         let now = next_activity_ms(&state);
         state.sessions.insert(
             id.clone(),
             StoredSession {
                 title,
+                starter,
                 session_file,
                 parent_id,
                 model,
@@ -156,6 +163,14 @@ impl StateStore {
         );
         self.commit(state).await?;
         Ok(id)
+    }
+
+    pub async fn retain(&self, id: &str) -> Result<()> {
+        let _guard = self.inner.write_gate.lock().await;
+        if !self.get(id).with_context(|| format!("unknown session {id}"))?.starter { return Ok(()); }
+        let mut state = self.read_state().clone();
+        state.sessions.get_mut(id).unwrap().starter = false;
+        self.commit(state).await
     }
 
     pub async fn flag(&self, id: &str, text: &str) -> Result<Flag> {
@@ -227,6 +242,7 @@ impl StateStore {
             .get_mut(id)
             .with_context(|| format!("unknown session {id}"))?;
         session.title = title;
+        session.starter = false;
         session.updated_at_ms = updated;
         self.commit(state).await
     }
@@ -360,6 +376,7 @@ mod tests {
                     provider: "openai-codex".to_owned(),
                     model_id: "gpt-5.6-sol".to_owned(),
                 }),
+                false,
             )
             .await
             .unwrap();
@@ -369,6 +386,7 @@ mod tests {
                 Some(parent.clone()),
                 Some("/tmp/child.jsonl".to_owned()),
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -428,6 +446,7 @@ mod tests {
         .unwrap();
 
         let store = StateStore::load(state_path.clone()).await.unwrap();
+        assert!(!store.get("chat").unwrap().starter);
         assert_eq!(
             store.get("chat").unwrap().model,
             Some(SessionModel {

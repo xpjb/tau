@@ -159,6 +159,7 @@ impl AgentManager {
             .state
             .list()
             .into_iter()
+            .filter(|(_, stored)| !stored.starter || stored.model.is_some())
             .map(|(id, stored)| {
                 let runtime = runtimes
                     .get(&id)
@@ -167,6 +168,7 @@ impl AgentManager {
                 SessionSummary {
                     id,
                     title: stored.title,
+                    starter: stored.starter,
                     status: runtime.status,
                     detail: runtime.detail,
                     context_usage: runtime.context_usage,
@@ -207,20 +209,27 @@ impl AgentManager {
         }).await.context("Tau flag save task stopped")?
     }
 
-    pub async fn create_session(&self) -> Result<String> {
+    pub async fn create_session(&self, keep_session_id: Option<&str>) -> Result<String> {
         self.ensure_running()?;
-        let id = self
-            .inner
-            .state
-            .create(
-                "New chat".to_owned(),
-                None,
-                None,
-                None,
-            )
-            .await?;
-        self.broadcast_sessions().await;
-        Ok(id)
+        if let Some(id) = keep_session_id { self.inner.state.retain(id).await?; }
+        loop {
+            let id = self.inner.state.create("New chat".to_owned(), None, None, None, true).await?;
+            let runtime = self.runtime(&id).await?;
+            let _operation = runtime.operation.lock().await;
+            let Some(stored) = self.inner.state.get(&id) else { continue; };
+            if !stored.starter { continue; }
+            self.ensure_process(&id, &runtime).await?;
+            let used = runtime.content.lock().await.transcript.as_mut().is_some_and(|transcript| {
+                !transcript.queue.requests.is_empty() || transcript.events_mut().next().is_some()
+            });
+            if used && stored.session_file.is_some() {
+                self.inner.state.retain(&id).await?;
+                continue;
+            }
+            if !self.inner.state.get(&id).is_some_and(|stored| stored.starter) { continue; }
+            self.broadcast_sessions().await;
+            return Ok(id);
+        }
     }
 
     pub async fn open_session(&self, id: &str, requests: &[String]) -> Result<SessionFeed> {
@@ -367,6 +376,7 @@ impl AgentManager {
         let command_handled = matches!(disposition, PromptDisposition::Handled);
 
         let metadata: Result<()> = async {
+        if !command_handled { self.inner.state.retain(id).await?; }
 
         if let Some(stored) = self.inner.state.get(id)
             && !command_handled && stored.title == "New chat"
@@ -784,6 +794,7 @@ impl AgentManager {
                 Some(id.to_owned()),
                 Some(child_file),
                 model,
+                false,
             )
             .await?;
         self.broadcast_sessions().await;
@@ -969,12 +980,12 @@ impl AgentManager {
         let started: Result<(bool, Option<ContextUsage>)> = async {
             let state = process.request(json!({ "type": "get_state" })).await?;
             let data = state.get("data").context("Pi state response had no data")?;
-            if let Some(model) = data.get("model").and_then(session_model_from_pi_model) {
-                self.inner.state.set_model(id, model).await?;
-            }
             let session_file = data.get("sessionFile").and_then(Value::as_str)
                 .context("Pi did not create a persistent session")?;
             self.inner.state.set_session_file(id, session_file.to_owned()).await?;
+            let model = data.get("model").and_then(session_model_from_pi_model)
+                .context("Pi has no model selected. Configure a model in Pi and try again.")?;
+            self.inner.state.set_model(id, model).await?;
             let streaming = data.get("isStreaming").and_then(Value::as_bool).unwrap_or(false);
             let snapshot = process.request(json!({ "type": "get_transcript" })).await
                 .context("Pi does not provide the identified transcript protocol")?;

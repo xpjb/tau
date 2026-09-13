@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::SessionModel;
 use crate::transcript::{HistoryPage, QueueRef, TranscriptChange, TranscriptSnapshot};
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -23,7 +23,7 @@ pub enum ClientCommand {
     ListSessions,
     GetTitlePrompt,
     SetTitlePrompt { prompt: String },
-    CreateSession,
+    CreateSession { #[serde(default)] keep_session_id: Option<String> },
     OpenSession { session_id: String, #[serde(default)] requests: Vec<String> },
     GetHistory { session_id: String, generation: String, before: u64 },
     GetCommands { session_id: String },
@@ -278,6 +278,7 @@ impl ContextUsage {
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
+    pub starter: bool,
     pub status: SessionStatus,
     pub detail: Option<String>,
     pub context_usage: Option<ContextUsage>,

@@ -277,7 +277,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
-                        ClientCommand::CreateSession => match manager.create_session().await {
+                        ClientCommand::CreateSession { keep_session_id } => match manager.create_session(keep_session_id.as_deref()).await {
                             Ok(session_id) => ServerMessage::success(
                                 request_id,
                                 Some(session_id),
@@ -789,8 +789,8 @@ mod tests {
             upload_root: root.join("uploads"), title_command: None,
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
-        let first = manager.create_session().await.unwrap();
-        let second = manager.create_session().await.unwrap();
+        let first = manager.create_session(None).await.unwrap();
+        let second = manager.create_session(Some(&first)).await.unwrap();
         manager.rename_session(&first, "Flag source").await.unwrap();
         let mut tokens = Vec::new();
         for id in [&first, &second] {
@@ -946,7 +946,7 @@ class Llama:
         };
         fs::write(&config.state_path, r#"{"schema":1,"sessions":{}}"#).await.unwrap();
         let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
-        let existing = manager.create_session().await.unwrap();
+        let existing = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
         manager.rename_session(&existing, "Existing title").await.unwrap();
         let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
         let app = Router::new().route("/v1/ws", get(websocket)).with_state(state);
@@ -1009,7 +1009,7 @@ class Llama:
         let restored = StateStore::load(config.state_path.clone()).await.unwrap();
         assert_eq!(restored.title_prompt(None).await.unwrap(), custom);
         let manager = AgentManager::new(config, restored);
-        let id = manager.create_session().await.unwrap();
+        let id = manager.create_session(None).await.unwrap();
         let text = format!("First {{text}} 🔧 {}", "z".repeat(900));
         manager.prompt(&id, &text, "title-test").await.unwrap();
         let call: serde_json::Value = serde_json::from_slice(&fs::read(root.join("model-call.json")).await.unwrap()).unwrap();
@@ -1059,8 +1059,8 @@ class Llama:
         title_command: None,
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
-        let id = manager.create_session().await.unwrap();
-        let other = manager.create_session().await.unwrap();
+        let id = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
+        let other = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
         let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
         let app = Router::new().route("/", get(move |upgrade: WebSocketUpgrade| {
