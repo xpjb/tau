@@ -20,7 +20,7 @@ import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.embeddedServer
 import io.ktor.http.ContentType
-import io.ktor.server.response.respondBytes
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
@@ -69,6 +69,7 @@ class TranscriptScrollTest {
 
     private suspend fun checkScroll(grouped: Boolean) = coroutineScope {
         val root = Files.createTempDirectory("tau-scroll-").toFile()
+        val native = NativeTransferFixture()
         val controller = TauController(Dispatchers.Swing, LocalStore({ root.resolve("local.db").path }))
         val session = SessionSummary("scroll", "Scroll check", SessionStatus.Idle, createdAtMs = 1, updatedAtMs = 1)
         val events = (0 until 1600).map { index ->
@@ -93,7 +94,7 @@ class TranscriptScrollTest {
             routing {
                 get("/v1/sessions/scroll/attachments/zoom") {
                     imageReads.incrementAndGet()
-                    call.respondBytes(imageBytes, ContentType.Image.PNG)
+                    call.respondText(native.offer(checkNotNull(call.request.queryParameters["transferNode"]), imageBytes), ContentType.Application.Json)
                 }
                 webSocket("/v1/ws") {
                     send(TauJson.encodeToString<ServerMessage>(Hello(TauProtocolVersion, "fixture")))
@@ -392,6 +393,7 @@ class TranscriptScrollTest {
                 } finally {
                     if (renderer == null) System.clearProperty("skiko.renderApi") else System.setProperty("skiko.renderApi", renderer)
                     server.stop(0, 1000)
+                    native.close()
                     root.deleteRecursively()
                 }
             }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-mode=${1:?Specify bindings, linux, windows, or android}
+mode=${1:?Specify bindings, fixture, linux, windows, or android}
 output=${2:?Specify output directory}
 cd "$root"
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=4
@@ -20,6 +20,10 @@ case "$mode" in
         cargo build --locked -p tau-transfer --features bindgen --lib --bin tau-transfer-bindgen
         "$target/debug/tau-transfer-bindgen" generate --library "$target/debug/libtau_transfer.so" \
             --config "$root/transfer/uniffi.toml" --language kotlin --no-format --out-dir "$output"
+        ;;
+    fixture)
+        cargo build --locked -p tau-transfer --example transfer-fixture
+        cp "$target/debug/examples/transfer-fixture" "$output/transfer-fixture"
         ;;
     linux)
         cargo build --locked --release -p tau-transfer

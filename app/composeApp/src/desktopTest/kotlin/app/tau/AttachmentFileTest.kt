@@ -11,6 +11,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.response.respondRedirect
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
@@ -22,10 +23,12 @@ import io.ktor.websocket.send
 import java.nio.file.Files
 import java.net.ServerSocket
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -47,6 +50,9 @@ class AttachmentFileTest {
     @Test
     fun cachesCompleteFilesRejectsBadTransfersAndRestoresOffline(): Unit = runBlocking {
         val root = Files.createTempDirectory("tau-attachment-files").toFile()
+        val native = NativeTransferFixture()
+        val resumedBytes = ByteArray(8_000_000) { ((it * 31) % 251).toByte() }
+        val slowResume = AtomicBoolean(true)
         val reads = AtomicInteger()
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
@@ -61,20 +67,25 @@ class AttachmentFileTest {
                         "redirect" -> call.respondRedirect("/forbidden")
                         "unauthorized" -> call.respond(HttpStatusCode.Unauthorized)
                         "missing" -> call.respond(HttpStatusCode.NotFound)
-                        "image" -> call.respondBytes(png, ContentType.Image.PNG, HttpStatusCode.fromValue(imageStatus.get()))
-                        "timeout" -> call.respondBytesWriter(ContentType.Image.PNG) {
-                            writeFully(png.take(16).toByteArray()); flush()
+                        "image" -> if (imageStatus.get() != 200) call.respond(HttpStatusCode.fromValue(imageStatus.get()))
+                            else call.respondText(native.offer(checkNotNull(call.request.queryParameters["transferNode"]), png), ContentType.Application.Json)
+                        "timeout" -> call.respondBytesWriter(ContentType.Application.Json) {
+                            writeFully("{".toByteArray()); flush()
                             stalled.await()
                         }
-                        "large" -> call.respondBytes(ByteArray(129), ContentType.Application.OctetStream)
-                        "chunked" -> call.respondBytesWriter { writeFully(ByteArray(129)) }
-                        "cancel" -> call.respondBytesWriter(ContentType.Image.PNG) {
-                            writeFully(png.take(16).toByteArray()); flush()
+                        "large" -> call.respondText(native.offer(checkNotNull(call.request.queryParameters["transferNode"]), ByteArray(129)), ContentType.Application.Json)
+                        "chunked" -> {
+                            val offer = native.offer(checkNotNull(call.request.queryParameters["transferNode"]), ByteArray(129))
+                            call.respondBytesWriter(ContentType.Application.Json) { writeFully(offer.toByteArray()) }
+                        }
+                        "metadata" -> call.respondBytes(ByteArray(4097), ContentType.Application.Json)
+                        "resume" -> call.respondText(native.offer(checkNotNull(call.request.queryParameters["transferNode"]), resumedBytes, slowResume.getAndSet(false)), ContentType.Application.Json)
+                        "cancel" -> call.respondBytesWriter(ContentType.Application.Json) {
+                            writeFully("{".toByteArray()); flush()
                             started.complete(Unit)
                             release.await()
-                            writeFully(png.drop(16).toByteArray())
                         }
-                        else -> call.respondBytes(png, ContentType.Image.PNG)
+                        else -> call.respondText(native.offer(checkNotNull(call.request.queryParameters["transferNode"]), png), ContentType.Application.Json)
                     }
                 }
                 get("/forbidden") { error("Attachment request followed a redirect") }
@@ -98,6 +109,7 @@ class AttachmentFileTest {
             }.failure)
             for ((entry, failure) in listOf(
                 "large" to AttachmentFailure.TooLarge, "chunked" to AttachmentFailure.TooLarge,
+                "metadata" to AttachmentFailure.Interrupted,
                 "redirect" to AttachmentFailure.Http(302), "unauthorized" to AttachmentFailure.Http(401),
                 "missing" to AttachmentFailure.Http(404),
             )) {
@@ -147,12 +159,28 @@ class AttachmentFileTest {
             assertEquals(path, client.downloadAttachment(settings, "chat", "image", 10_000_000, allowNetwork = false) { _, _ -> })
             assertContentEquals(png, java.io.File(path).readBytes())
             assertTrue(root.walk().none { it.name.endsWith(".part") })
-        } finally { stalled.complete(Unit); release.complete(Unit); client.close(); server.stop(0, 1000); root.deleteRecursively() }
+            val received = CompletableDeferred<Unit>()
+            val interrupted = async {
+                client.downloadAttachment(settings, "chat", "resume", 10_000_000) { transferred, _ ->
+                    if (transferred >= 1_000_000) { received.complete(Unit); awaitCancellation() }
+                }
+            }
+            withTimeout(30_000) { received.await() }
+            interrupted.cancelAndJoin()
+            assertTrue(root.walk().any { it.isDirectory && it.name.endsWith(".part") })
+            client.close(); client = TauClient { root.path }
+            val resumed = withTimeout(30_000) {
+                client.downloadAttachment(settings, "chat", "resume", 10_000_000) { _, _ -> }
+            }
+            assertContentEquals(resumedBytes, java.io.File(resumed).readBytes())
+            assertTrue(root.walk().none { it.name.endsWith(".part") })
+        } finally { stalled.complete(Unit); release.complete(Unit); client.close(); server.stop(0, 1000); native.close(); root.deleteRecursively() }
     }
 
     @Test
     fun controllerKeepsTransfersAndHandlesPreviewReloadSaveAndOfflineRetry(): Unit = runBlocking {
         val root = Files.createTempDirectory("tau-image-controller").toFile()
+        val native = NativeTransferFixture()
         val path = root.resolve("transcript.db").path
         val home = System.getProperty("user.home")
         val started = CompletableDeferred<Unit>()
@@ -191,7 +219,7 @@ class AttachmentFileTest {
                     }
                     release.await()
                     if (call.parameters["entry"] == "failed") call.respond(HttpStatusCode.NotFound)
-                    else call.respondBytes(png, ContentType.Image.PNG)
+                    else call.respondText(native.offer(checkNotNull(call.request.queryParameters["transferNode"]), png), ContentType.Application.Json)
                 }
             }
         }
@@ -345,7 +373,7 @@ class AttachmentFileTest {
             cancelRelease.complete(Unit); release.complete(Unit)
             withContext(Dispatchers.Swing) { controller.dispose() }.join()
             System.setProperty("user.home", home)
-            server.stop(0, 1000); root.deleteRecursively()
+            server.stop(0, 1000); native.close(); root.deleteRecursively()
         }
     }
 }

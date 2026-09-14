@@ -32,6 +32,14 @@ val buildDesktopTransfer by tasks.registering(Exec::class) {
     commandLine("bash", transferRoot.resolve("scripts/build-transfers.sh"), desktopTransferTarget.get(), desktopTransferResources.get().asFile)
 }
 
+val transferFixture = layout.buildDirectory.dir("generated/transfer/fixture")
+val buildTransferFixture by tasks.registering(Exec::class) {
+    dependsOn(buildDesktopTransfer)
+    inputs.files(generateTransferBindings.map { it.inputs.files })
+    outputs.dir(transferFixture)
+    commandLine("bash", transferRoot.resolve("scripts/build-transfers.sh"), "fixture", transferFixture.get().asFile)
+}
+
 kotlin {
     jvmToolchain(21)
 
@@ -117,6 +125,11 @@ tasks.withType<Test>().configureEach {
     javaLauncher.set(java21)
     environment("XDG_DATA_HOME", temporaryDir.resolve("data").absolutePath)
     environment("LOCALAPPDATA", temporaryDir.resolve("data").absolutePath)
+}
+
+tasks.named<Test>("desktopTest") {
+    dependsOn(buildTransferFixture)
+    systemProperty("tau.transfer.fixture", transferFixture.get().file("transfer-fixture").asFile.absolutePath)
 }
 
 tasks.register<Sync>("prepareWindowsApp") {

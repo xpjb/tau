@@ -22,7 +22,7 @@ val hasReleaseSigning = listOf(
 val nativeTransfers = objects.directoryProperty().convention(layout.buildDirectory.dir("generated/transfer/jniLibs"))
 val buildAndroidTransfer by tasks.registering(Exec::class) {
     dependsOn(":composeApp:generateTransferBindings")
-    mustRunAfter(":composeApp:buildDesktopTransfer")
+    mustRunAfter(":composeApp:buildDesktopTransfer", ":composeApp:buildTransferFixture")
     val root = rootProject.projectDir.parentFile
     inputs.files(fileTree(root.resolve("transfer")) { exclude("target/**") },
         root.resolve("Cargo.toml"), root.resolve("Cargo.lock"), root.resolve("scripts/build-transfers.sh"))
