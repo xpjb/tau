@@ -43,7 +43,7 @@ android {
         applicationId = "app.tau"
         minSdk = 26
         targetSdk = 37
-        versionCode = 34
+        versionCode = 35
         versionName = rootProject.file("composeApp/src/commonMain/kotlin/app/tau/Platform.kt").readLines()
             .single { it.startsWith("const val TauClientVersion = ") }.substringAfter('"').substringBefore('"')
     }

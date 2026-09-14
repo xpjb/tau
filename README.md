@@ -10,9 +10,9 @@ Tau is a private, Tailnet-native client for independent Pi coding-agent sessions
 
 Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects ordered content events; clients keep remote history in memory only. SQLite preserves drafts, pending sends/controls, attached files, preferences and session metadata across client restarts. Cold chats can be read without starting Pi. Loaded history and chat feeds stay in memory across selection changes. Running, unread and recent chats warm in the background; older events also load on demand. Reconnect checks the retained event windows. Thinking and tools remain collapsible across fetch boundaries. New chats use `/root` as their working directory.
 
-Tau 0.5.13 clients and daemon use protocol 8 and must be updated together. This release includes immediate New Chat feedback and repeat-click protection, the horizontal-selection crash fix and fuller local diagnostics, Enter submission in single-line forms, complete Markdown tables, stable image viewing during updates, and the Tau-only flag_it tool. Android versionCode is 34. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 preserves local work while remote history remains memory-only. Pi JSONL history stays intact. The matched Tau Pi update selects current model-specific base prompts when workers start or restore; Astra uses an empty base with AGENTS.md and appended context retained.
+Tau 0.5.14 clients and daemon use protocol 10 and must be updated together. This release adds shared Rust QUIC downloads with verified resume, the reusable New Chat starter with its actual model, and clear New/Unnamed chat labels. Android versionCode is 35. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client cache schema 5 preserves local work while remote history remains memory-only. Pi JSONL history and the existing Pi installation remain intact.
 
-Unreleased source uses protocol 10 and client cache schema 5. New Chat reuses one daemon-owned starter and starts Pi before returning it, so the real model is shown above the composer before the first message. A client with a draft, files or a pending send/control keeps that chat and gets a fresh starter. The existing one-hour idle timeout stops workers without deleting chats. Existing chats remain intact. This change is held for a matched client/daemon release; deployment remains 0.5.13/protocol 8.
+New Chat reuses one daemon-owned starter and starts Pi before returning it, so the real model appears above the composer before the first message. A client with a draft, files or a pending send/control keeps that chat and gets a fresh starter. The existing one-hour idle timeout stops workers without deleting chats. Existing chats remain intact.
 
 ## Current client operations
 
@@ -39,7 +39,7 @@ Unreleased source uses protocol 10 and client cache schema 5. New Chat reuses on
 
 ## Selection and crash diagnostics
 
-Protocol 8 requires matched client and daemon updates.
+Protocol 10 requires matched client and daemon updates.
 
 A build-time patch fixes the top/bottom edge mismatch in current stable Compose
 1.12.0. Long horizontal selection drags retain scrolling and copying. The same
@@ -104,7 +104,7 @@ The title helper needs both `scripts/title_gen.py` and its adjacent `scripts/tit
 
 Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat under `/root/.local/share/tau/uploads` and deleted with the chat. Pi stages outgoing files under `/root/.local/share/tau/outbox`; `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
 
-## Native file transfers (unreleased)
+## Native file transfers
 
 New clients request a file grant through the existing bearer-authenticated HTTP
 endpoint, then download verified blocks over QUIC/UDP using the shared Rust
@@ -126,8 +126,10 @@ one hour. The daemon retains at most 128 recent grants and evicts the oldest
 when full. It retains file handles and small BLAKE3 outboards, not duplicate
 file bodies. A source modified after granting fails integrity checks.
 
-This source change needs a matched client/daemon release. Production stays on
-0.5.13/protocol 8 until deployment is separately accepted.
+The shared library ships for Windows x64 and all four existing Android ABIs.
+Kotlin uses generated UniFFI bindings for setup, progress and cancellation; file
+blocks stay in Rust. The Linux build supports local client acceptance. Build
+through `scripts/build-transfers.sh` and the mandatory shared Cargo wrapper.
 
 ## Android
 

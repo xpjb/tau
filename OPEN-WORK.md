@@ -1,45 +1,31 @@
-## Checkpoint: native client validation pending; build space restored
+## Release candidate: Tau 0.5.14 / protocol 10
 
-Branch feat/rust-transfers, worktree /root/tau-transfers. Do not merge or deploy.
-The tested core commit is 3e884e6 and tested daemon integration is 0f7c6bc:
-21 Rust tests and strict workspace Clippy passed before the current client work.
-The current checkpoint adds unvalidated Kotlin/Gradle/native packaging wiring.
-It also changes native start() to accept bounded JSON metadata so Kotlin does
-not duplicate the Rust wire record. That signature change and its adjusted
-Rust callers still need their tests rerun.
+The user approved deployment and installers if the iroh work is ready, then
+explicitly confirmed Tau is clear for deployment. Recheck live work immediately
+before cutover. Keep Pi/global settings and Telegram unchanged; preserve chat
+state and existing JSONL prefixes. This approval supersedes the earlier hold.
 
-Bindings generation hit the mandatory Cargo lock timeout; another build was
-active. Disk then fell below 1GiB free. The user requested a Rust cache audit
-and approved old Tau cleanup. On 2026-09-14, guarded cleanup removed 33 old
-windows-sfx staging directories and 21 disposable compiler-cache directories.
-Actual space recovered was 7.11GiB, with 7.81GiB free at completion. Normal
-shared dependency caches, Cargo test evidence, source, published releases and
-live services were preserved. No build or native acceptance ran during cleanup.
-Report: /root/maintenance-reports/rust-cache-audit-20260914T131227Z/report.md.
-Do not bypass the Cargo wrapper/shared build cache or the disk reserve.
-The audit also records the wrapper's existing lock/resource-envelope gap for
-cargo xwin and other delegated commands; no wrapper change was made.
+Worktree /root/tau-transfers, branch feat/rust-transfers. Native/daemon tests
+passed after the JSON bridge change (21/21). Generated Kotlin now compiles;
+the native error field avoids Kotlin Exception.message, and generated sources
+use Gradle task dependencies and the Android Variant API. Strict workspace
+Clippy passes, including the native provider fixture. All 25 desktop tests pass
+with no failures or skips. Attachment tests use real Rust/UDP transfers and
+cover native cancellation, retained partial data, reopening and completion.
+The Android release build passes for all four ABIs with versionCode 35.
 
-Next mechanical steps:
-1. Rerun native/daemon tests after the JSON bridge change. Build generated Kotlin
-   bindings with scripts/build-transfers.sh bindings <generated-dir> (--no-format).
-2. Compile the JVM bridge and correct any generated API naming/signature errors.
-   JNA 5.19.1 jar/AAR and the portable JNA cleaner are selected. Gradle tasks and
-   native resource/JNI packaging are drafted but have not been executed.
-3. Adapt the existing AttachmentFileTest and TranscriptScrollTest HTTP fixtures:
-   they still serve raw bytes and will fail against the new metadata request.
-   Use a real Rust provider fixture over local stdio plus UDP, not a fake Kotlin
-   transfer implementation. Extend coverage through native cancel/join too.
-4. Build Linux/Windows libraries and all four Android ABIs. The released APK
-   contains arm64-v8a, armeabi-v7a, x86_64 and x86; preserve all four. The two
-   missing Rust standard-library targets were installed. No Android, Windows
-   or JVM native-load acceptance has happened yet.
-5. Check native page alignment, packaged loading, client regressions, full diff,
-   and real Tailnet speed/restart behavior before acceptance/merge/release.
+Pending: verify packaged native loading and alignment, Windows build/package,
+final diff/artifact review, matched deployment and delivery. Physical Tailnet
+speed remains unmeasured. Do not claim faster real-device throughput from local
+tests. The phone issue was closed by the user after restarting Tailscale; host
+memory was healthy (23GiB available, no current pressure or OOM events).
 
-A worktree-local symlink app/local.properties points to the existing ignored
-/root/tau/app/local.properties; signing details were not printed or changed.
-No formatter, service restart, provider prompt or network configuration change.
+The user-approved cache cleanup is complete. The final default-debug removal
+recovered 8.51GiB physically and left 15.89GiB free before resumed builds.
+Receipt: /root/maintenance-reports/rust-default-debug-cleanup-20260914T141408Z/.
+The normal release and target-specific caches remained intact. New builds use
+the mandatory wrapper, four build jobs, no incremental state or dev debug info,
+and the existing disk reserve. No formatter ran.
 
 ## In progress: native Rust block transfers over Tailscale
 
