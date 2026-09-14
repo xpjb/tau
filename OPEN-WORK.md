@@ -1,3 +1,28 @@
+## Accepted: Windows download completion (unreleased)
+
+The user reports 4.9 KB / 4.9 KB followed by Download interrupted on Windows;
+Android appears to work. The final verification closure opened the exported file
+read-only, then called sync_all. Windows FlushFileBuffers requires write access
+and rejects that handle with access denied (error 5), after data receipt finishes.
+
+One production line now opens the existing completion file with read/write access.
+It does not create, truncate or change file bytes. Hashing, flush, cancellation,
+atomic rename, resume and cleanup remain intact. No new state or dependency.
+
+Both native integration tests and strict transfer-crate Clippy pass. The existing
+grant/empty-file test now also covers a 4,900-byte file, exact final bytes and
+partial-store cleanup. The Windows native library builds. A Windows Rust probe
+under Wine runs the actual before/after verification blocks: the old mode fails
+with error 5 for empty and 4,900-byte files; the new mode verifies, flushes and
+atomically replaces the target with the exact bytes. Full updated-client Windows
+network acceptance remains user QA; no networking workaround was added for Wine.
+Evidence: /root/tau-checks/windows-download-finish/acceptance.json. Code: ad22796.
+
+Hold together with the selection correction below for the next client release.
+No version/protocol bump, installer shipment or daemon restart occurred.
+Use the current guarded Cargo entry /usr/local/bin/cargo; the old .pi path was
+removed. Its shared cache is /root/.cargo/managed/build_cache. No cache override.
+
 ## Accepted: long-line selection correction (unreleased)
 
 Windows 0.5.14 contains the original Compose boundary patch; its complete payload
