@@ -340,7 +340,7 @@ impl TransferDownload {
                             let ready_file = ready.clone();
                             let expected_size = offer.size;
                             let verified = tokio::task::spawn_blocking(move || {
-                                let mut file = File::open(ready_file)?;
+                                let mut file = File::options().read(true).write(true).open(ready_file)?;
                                 if file.metadata()?.len() != expected_size { return Ok(false); }
                                 let mut hasher = blake3::Hasher::new();
                                 hasher.update_reader(&mut file)?;

@@ -113,7 +113,7 @@ async fn resumes_verified_blocks_after_restart_and_preserves_completed_files() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restricts_grants_to_the_client_and_file_and_handles_empty_files() {
+async fn restricts_grants_and_completes_empty_and_small_files() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let target = root.path().join("destination");
@@ -136,13 +136,19 @@ async fn restricts_grants_to_the_client_and_file_and_handles_empty_files() {
     let bounded = TransferDownload::new();
     assert!(bounded.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), 1).is_err());
 
-    std::fs::write(&source, []).unwrap();
-    let empty = TransferDownload::new();
-    let offer = provider.offer(File::open(&source).unwrap(), &empty.node_id(), MAX_FILE_BYTES).await.unwrap();
-    empty.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
-    let result = finished(&empty).await;
-    empty.join();
-    assert!(result.failure.is_none(), "{result:?}");
-    assert_eq!(std::fs::metadata(target).unwrap().len(), 0);
+    for size in [0, 4900] {
+        let bytes = (0..size).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        std::fs::write(&source, &bytes).unwrap();
+        let download = TransferDownload::new();
+        let offer = provider.offer(File::open(&source).unwrap(), &download.node_id(), MAX_FILE_BYTES).await.unwrap();
+        download.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
+        let result = finished(&download).await;
+        download.join();
+        assert!(result.failure.is_none(), "{result:?}");
+        assert_eq!(result.transferred, bytes.len() as u64);
+        assert_eq!(result.total, bytes.len() as u64);
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert!(!root.path().join(".destination.part").exists());
+    }
     provider.shutdown().await;
 }
