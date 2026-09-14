@@ -333,7 +333,7 @@ impl TransferDownload {
                                 }
                             }
                             let export_cancel = cancel.clone();
-                            store.export(hash, ready.clone(), ExportMode::Copy, Box::new(move |_| {
+                            store.export(hash, ready.clone(), ExportMode::TryReference, Box::new(move |_| {
                                 if export_cancel.is_cancelled() { return Err(io::Error::other("cancelled")); }
                                 Ok(())
                             })).await?;

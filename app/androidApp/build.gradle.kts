@@ -27,7 +27,10 @@ val buildAndroidTransfer by tasks.registering(Exec::class) {
     inputs.files(fileTree(root.resolve("transfer")) { exclude("target/**") },
         root.resolve("Cargo.toml"), root.resolve("Cargo.lock"), root.resolve("scripts/build-transfers.sh"))
     outputs.dir(nativeTransfers)
-    commandLine("bash", root.resolve("scripts/build-transfers.sh"), "android", nativeTransfers.get().asFile)
+    val directory = nativeTransfers
+    doFirst {
+        commandLine("bash", root.resolve("scripts/build-transfers.sh"), "android", directory.get().asFile)
+    }
 }
 androidComponents {
     onVariants { variant ->
@@ -38,11 +41,13 @@ androidComponents {
 android {
     namespace = "app.tau"
     compileSdk = 37
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "app.tau"
         minSdk = 26
         targetSdk = 37
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86") }
         versionCode = 35
         versionName = rootProject.file("composeApp/src/commonMain/kotlin/app/tau/Platform.kt").readLines()
             .single { it.startsWith("const val TauClientVersion = ") }.substringAfter('"').substringBefore('"')
@@ -72,6 +77,7 @@ android {
     }
 
     packaging {
+        jniLibs.useLegacyPackaging = true
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 }
