@@ -1,4 +1,4 @@
 [workspace]
-members = ["daemon"]
+members = ["daemon", "transfer"]
 exclude = ["windows"]
 resolver = "2"

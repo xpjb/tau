@@ -675,3 +675,13 @@ Only this branch has protocol 7; master and production remain unchanged. Evidenc
 /root/tau-checks/title-prompt/acceptance.json. Keep the branch isolated until the
 live-script deployment gate above is approved, then ship matched clients/daemon
 and the title helper with its adjacent title_prompt.txt file.
+
+Native-transfer checkpoint: the shared engine passes two UDP integration tests
+and strict Clippy. Coverage includes delayed/lossy datagrams, cancellation and
+new receiver identity with on-disk resume, corrupt retained data, changed source,
+wrong client/hash, size bounds and empty files. An 8,000,000-byte interrupted file
+needed 6,995,400 protocol bytes on resume; corrupt retained data triggered a full
+verified repair. This is local acceptance, not a real Tailnet speed result.
+Upstream iroh-blobs 0.35's lock pins precis-profiles 0.1.12; the compatible pin is
+retained because 0.1.14 mixes precis-core 0.2 with stun-rs's 0.1 API.
+Evidence: /root/tau-checks/rust-transfers/native-{tests,clippy}.log.
