@@ -34,7 +34,7 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_GRANTS: usize = 128;
 pub const MAX_FILE_BYTES: u64 = 50_000_000;
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferOffer {
     pub node_id: String,
@@ -253,7 +253,12 @@ impl TransferDownload {
 
     pub fn node_id(&self) -> String { self.key.public().to_string() }
 
-    pub fn start(&self, offer: TransferOffer, host: String, target: String, limit: u64) -> Result<(), TransferError> {
+    pub fn start(&self, offer_json: String, host: String, target: String, limit: u64) -> Result<(), TransferError> {
+        if offer_json.len() > 4096 {
+            return Err(TransferError::Failed { message: "Transfer metadata is too large".into() });
+        }
+        let offer: TransferOffer = serde_json::from_str(&offer_json)
+            .map_err(|_| TransferError::Failed { message: "Invalid transfer metadata".into() })?;
         let mut thread = self.thread.lock().unwrap();
         if thread.is_some() || self.state.lock().unwrap().status.done {
             return Err(TransferError::Failed { message: "Transfer already started".into() });

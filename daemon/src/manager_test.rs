@@ -513,7 +513,7 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
             let offer: tau_transfer::TransferOffer = serde_json::from_str(body).unwrap();
             assert_eq!(offer.size, 8);
             let target = root.join("downloaded.zip");
-            download.start(offer, "127.0.0.1".into(), target.to_string_lossy().into_owned(), 50_000_000).unwrap();
+            download.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), 50_000_000).unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !download.status().done { tokio::time::sleep(Duration::from_millis(10)).await; }
             }).await.unwrap();

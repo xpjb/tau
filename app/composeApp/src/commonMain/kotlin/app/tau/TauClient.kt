@@ -18,6 +18,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.prepareGet
 import io.ktor.client.request.setBody
 import io.ktor.client.request.url
+import io.ktor.http.Url
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
@@ -50,7 +51,6 @@ import kotlinx.serialization.encodeToString
 import okio.ByteString.Companion.encodeUtf8
 import okio.FileSystem
 import okio.Path.Companion.toPath
-import okio.buffer
 
 class TauConnectionException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
@@ -184,10 +184,11 @@ class TauClient(private val attachmentDirectory: () -> String = { PlatformServic
         if (!allowNetwork) throw AttachmentDownloadException(AttachmentFailure.NotLocal)
         attachmentGate.withPermit {
             files.createDirectories(directory)
-            val temporary = directory / ".${target.name}-${newRequestId()}.part"
+            val transfer = platformTransfer()
             val baseUrl = settings.serverUrl.trim().trimEnd('/')
             try {
-                client.prepareGet("$baseUrl/v1/sessions/${sessionId.encodeURLPathPart()}/attachments/${entryId.encodeURLPathPart()}") {
+                val offer = client.prepareGet("$baseUrl/v1/sessions/${sessionId.encodeURLPathPart()}/attachments/${entryId.encodeURLPathPart()}") {
+                    url { parameters.append("transferNode", transfer.nodeId) }
                     header(HttpHeaders.Authorization, "Bearer ${settings.token}")
                     timeout {
                         requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
@@ -196,29 +197,29 @@ class TauClient(private val attachmentDirectory: () -> String = { PlatformServic
                     }
                 }.execute { response ->
                     if (!response.status.isSuccess()) throw AttachmentDownloadException(AttachmentFailure.Http(response.status.value))
-                    val expected = response.headers[HttpHeaders.ContentLength]?.toLongOrNull()
-                    if (expected != null && expected !in 0..limit) throw AttachmentDownloadException(AttachmentFailure.TooLarge)
                     val input = response.bodyAsChannel()
-                    val buffer = ByteArray(64 * 1024)
-                    var transferred = 0L
-                    files.openReadWrite(temporary, mustCreate = true).use { handle ->
-                        handle.sink().buffer().use { output ->
-                            while (true) {
-                                val count = input.readAvailable(buffer)
-                                if (count < 0) break
-                                transferred += count
-                                if (transferred > limit) throw AttachmentDownloadException(AttachmentFailure.TooLarge)
-                                output.write(buffer, 0, count)
-                                onProgress(transferred, expected)
-                            }
-                            if (expected != null && transferred != expected) throw AttachmentDownloadException(AttachmentFailure.Interrupted)
-                            output.flush()
-                            handle.flush()
-                        }
+                    val bytes = ByteArray(4097)
+                    var size = 0
+                    while (size < bytes.size) {
+                        val count = input.readAvailable(bytes, size, bytes.size - size)
+                        if (count < 0) break
+                        size += count
                     }
+                    if (size > 4096) throw AttachmentDownloadException(AttachmentFailure.Interrupted)
+                    bytes.copyOf(size).decodeToString()
+                }
+                transfer.start(offer, Url(baseUrl).host, target.toString(), limit)
+                while (true) {
                     currentCoroutineContext().ensureActive()
-                    files.atomicMove(temporary, target)
-                    onProgress(transferred, transferred)
+                    val progress = transfer.progress()
+                    onProgress(progress.transferred, progress.total)
+                    if (progress.done) {
+                        if (progress.failure != null) throw AttachmentDownloadException(
+                            if (progress.failure.contains("timed_out")) AttachmentFailure.TimedOut else AttachmentFailure.Interrupted,
+                        )
+                        break
+                    }
+                    delay(DownloadProgressIntervalMillis)
                 }
                 target.toString()
             } catch (error: Throwable) {
@@ -234,7 +235,7 @@ class TauClient(private val attachmentDirectory: () -> String = { PlatformServic
                 }
                 throw AttachmentDownloadException(AttachmentFailure.Interrupted, error)
             } finally {
-                files.delete(temporary, mustExist = false)
+                withContext(NonCancellable + Dispatchers.IO) { transfer.close() }
             }
         }
     }

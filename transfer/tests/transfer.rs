@@ -56,7 +56,7 @@ async fn resumes_verified_blocks_after_restart_and_preserves_completed_files() {
                 }
             }
         });
-        first.start(offer, "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
+        first.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
         timeout(Duration::from_secs(30), async {
             loop {
                 let status = first.status();
@@ -83,7 +83,7 @@ async fn resumes_verified_blocks_after_restart_and_preserves_completed_files() {
         }
         let resumed = TransferDownload::new();
         let offer = provider.offer(File::open(&source).unwrap(), &resumed.node_id(), MAX_FILE_BYTES).await.unwrap();
-        resumed.start(offer, "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
+        resumed.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
         let result = finished(&resumed).await;
         resumed.join();
         assert!(result.failure.is_none(), "{result:?}");
@@ -104,7 +104,7 @@ async fn resumes_verified_blocks_after_restart_and_preserves_completed_files() {
     file.seek(SeekFrom::Start(0)).unwrap();
     file.write_all(b"changed after grant").unwrap();
     file.sync_all().unwrap();
-    changed.start(offer, "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
+    changed.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
     let failed = finished(&changed).await;
     changed.join();
     assert!(failed.failure.is_some(), "changed source was accepted");
@@ -122,24 +122,24 @@ async fn restricts_grants_to_the_client_and_file_and_handles_empty_files() {
     let owner = TransferDownload::new();
     let offer = provider.offer(File::open(&source).unwrap(), &owner.node_id(), MAX_FILE_BYTES).await.unwrap();
     let intruder = TransferDownload::new();
-    intruder.start(offer.clone(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
+    intruder.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
     assert!(finished(&intruder).await.failure.is_some());
     intruder.join();
     assert!(!target.exists());
 
     let mut wrong = offer.clone();
     wrong.hash = blake3::hash(b"another file").to_hex().to_string();
-    owner.start(wrong, "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
+    owner.start(serde_json::to_string(&wrong).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
     assert!(finished(&owner).await.failure.is_some());
     owner.join();
     assert!(!target.exists());
     let bounded = TransferDownload::new();
-    assert!(bounded.start(offer, "127.0.0.1".into(), target.to_string_lossy().into_owned(), 1).is_err());
+    assert!(bounded.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), 1).is_err());
 
     std::fs::write(&source, []).unwrap();
     let empty = TransferDownload::new();
     let offer = provider.offer(File::open(&source).unwrap(), &empty.node_id(), MAX_FILE_BYTES).await.unwrap();
-    empty.start(offer, "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
+    empty.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
     let result = finished(&empty).await;
     empty.join();
     assert!(result.failure.is_none(), "{result:?}");

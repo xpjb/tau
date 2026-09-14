@@ -14,7 +14,7 @@ mkdir -p "$root/dist"
 rm -rf "$work"
 mkdir -p "$bundle"
 
-"$root/app/gradlew" -p "$root/app" :composeApp:prepareWindowsApp
+"$root/app/gradlew" -p "$root/app" -PtauNativeTarget=windows :composeApp:prepareWindowsApp
 mkdir -p "$bundle/app"
 cp -a "$root/app/composeApp/build/windows/app/lib" "$bundle/app/lib"
 

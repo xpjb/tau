@@ -542,7 +542,7 @@ async fn download_attachment(
         };
     }
     let disposition = match HeaderValue::from_str(&format!(
-        "attachment; filename=\"{}\"", 
+        "attachment; filename=\"{}\"",
         safe_file_name(&attachment.file_name)
     )) {
         Ok(value) => value,

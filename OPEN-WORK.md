@@ -1,3 +1,43 @@
+## Blocked checkpoint: native client integration needs build space
+
+Branch feat/rust-transfers, worktree /root/tau-transfers. Do not merge or deploy.
+The tested core commit is 3e884e6 and tested daemon integration is 0f7c6bc:
+21 Rust tests and strict workspace Clippy passed before the current client work.
+The current checkpoint adds unvalidated Kotlin/Gradle/native packaging wiring.
+It also changes native start() to accept bounded JSON metadata so Kotlin does
+not duplicate the Rust wire record. That signature change and its adjusted
+Rust callers still need their tests rerun.
+
+Bindings generation hit the mandatory Cargo lock timeout; another build was
+active. Disk fell from 4.2GiB at start to 994MiB free despite stopping that build.
+Native builds are now held. Do not bypass the Cargo wrapper/shared build cache
+or the disk reserve. The user was asked to approve clearing old disposable
+/root/tau/target/windows-sfx-* staging; no deletion has been performed. Preserve
+source, published dist/release installers, downloads, shared Cargo cache and
+live services. A read-only process exe/cwd check found no old staging users;
+check open files and ownership again before any approved removal.
+
+Next mechanical steps after space is available:
+1. Rerun native/daemon tests after the JSON bridge change. Build generated Kotlin
+   bindings with scripts/build-transfers.sh bindings <generated-dir> (--no-format).
+2. Compile the JVM bridge and correct any generated API naming/signature errors.
+   JNA 5.19.1 jar/AAR and the portable JNA cleaner are selected. Gradle tasks and
+   native resource/JNI packaging are drafted but have not been executed.
+3. Adapt the existing AttachmentFileTest and TranscriptScrollTest HTTP fixtures:
+   they still serve raw bytes and will fail against the new metadata request.
+   Use a real Rust provider fixture over local stdio plus UDP, not a fake Kotlin
+   transfer implementation. Extend coverage through native cancel/join too.
+4. Build Linux/Windows libraries and all four Android ABIs. The released APK
+   contains arm64-v8a, armeabi-v7a, x86_64 and x86; preserve all four. The two
+   missing Rust standard-library targets were installed. No Android, Windows
+   or JVM native-load acceptance has happened yet.
+5. Check native page alignment, packaged loading, client regressions, full diff,
+   and real Tailnet speed/restart behavior before acceptance/merge/release.
+
+A worktree-local symlink app/local.properties points to the existing ignored
+/root/tau/app/local.properties; signing details were not printed or changed.
+No formatter, service restart, provider prompt or network configuration change.
+
 ## In progress: native Rust block transfers over Tailscale
 
 Intent: replace Tau attachment downloads with one shared Rust engine. Kotlin
@@ -20,7 +60,7 @@ Design:
   Use upstream QUIC, Bao/BLAKE3 verification and filesystem resume storage.
   Disable iroh relays and discovery; dial only the existing server hostname.
 - Add a shared Rust crate and generated UniFFI Kotlin bindings. Package Linux
-  test, Windows x64, and Android arm64/x64 native libraries. Native jobs own
+  test, Windows x64, and all four existing Android ABIs. Native jobs own
   their lifetime, cancellation and storage cleanup; UI polling never handles
   blocks. Android native libraries must meet 16KiB page alignment.
 - The existing bearer-authenticated attachment resolver grants a fresh client

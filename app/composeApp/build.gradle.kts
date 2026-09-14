@@ -14,6 +14,28 @@ plugins {
     id("com.android.kotlin.multiplatform.library")
 }
 
+val transferRoot = rootProject.projectDir.parentFile
+val transferBindings = layout.buildDirectory.dir("generated/transfer/kotlin")
+val desktopTransferTarget = providers.gradleProperty("tauNativeTarget").orElse("linux")
+val desktopTransferResources = layout.buildDirectory.dir(desktopTransferTarget.map { "generated/transfer/$it" })
+val generateTransferBindings by tasks.registering(Exec::class) {
+    inputs.files(fileTree(transferRoot.resolve("transfer")) { exclude("target/**") },
+        transferRoot.resolve("Cargo.toml"), transferRoot.resolve("Cargo.lock"), transferRoot.resolve("scripts/build-transfers.sh"))
+    outputs.dir(transferBindings)
+    commandLine("bash", transferRoot.resolve("scripts/build-transfers.sh"), "bindings", transferBindings.get().asFile)
+}
+val buildDesktopTransfer by tasks.registering(Exec::class) {
+    dependsOn(generateTransferBindings)
+    inputs.files(generateTransferBindings.map { it.inputs.files })
+    inputs.property("target", desktopTransferTarget)
+    outputs.dir(desktopTransferResources)
+    commandLine("bash", transferRoot.resolve("scripts/build-transfers.sh"), desktopTransferTarget.get(), desktopTransferResources.get().asFile)
+}
+tasks.matching { it.name.startsWith("compile") && it.name.contains("Kotlin") }.configureEach {
+    dependsOn(generateTransferBindings)
+}
+tasks.matching { it.name == "desktopProcessResources" }.configureEach { dependsOn(buildDesktopTransfer) }
+
 kotlin {
     jvmToolchain(21)
 
@@ -28,7 +50,11 @@ kotlin {
     }
 
     sourceSets {
-        val jvmMain by creating { dependsOn(commonMain.get()) }
+        val jvmMain by creating {
+            dependsOn(commonMain.get())
+            kotlin.srcDir(transferBindings)
+            dependencies { compileOnly("net.java.dev.jna:jna:5.19.1") }
+        }
         androidMain.get().dependsOn(jvmMain)
         getByName("desktopMain").dependsOn(jvmMain)
         commonMain.dependencies {
@@ -47,13 +73,16 @@ kotlin {
             implementation("androidx.sqlite:sqlite-bundled:2.7.0")
         }
         androidMain.dependencies {
+            implementation("net.java.dev.jna:jna:5.19.1@aar")
             implementation("androidx.activity:activity-compose:1.13.0")
             implementation("androidx.core:core:1.18.0")
             implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
             implementation("io.ktor:ktor-client-okhttp:3.5.2")
         }
         val desktopMain by getting {
+            resources.srcDir(desktopTransferResources)
             dependencies {
+                implementation("net.java.dev.jna:jna:5.19.1")
                 implementation(compose.desktop.currentOs)
                 implementation("io.ktor:ktor-client-cio:3.5.2")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")

@@ -1,2 +1,4 @@
 -keep class com.mikepenz.markdown.** { *; }
 -keepclasseswithmembers class androidx.sqlite.driver.bundled.** { native <methods>; }
+-keep class app.tau.transfer.** { *; }
+-keep class com.sun.jna.** { *; }
