@@ -17,6 +17,9 @@ import androidx.compose.foundation.text.selection.rememberSelectionState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.tooling.ComposeToolingApi
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -54,6 +57,8 @@ class TextSelectionTest {
         assumeFalse("Run with a desktop-sized display or Xvfb", GraphicsEnvironment.isHeadless())
         val failure = CompletableDeferred<Throwable>()
         val code = "tool({\"command\":\"" + "sample_argument=12345; ".repeat(30) + "\"})"
+        val multiline = "a".repeat(67) + "\n" + "b".repeat(485)
+        var sample by mutableStateOf("line")
         val scroll = ScrollState(0)
         val selection = CompletableDeferred<SelectionState>()
         val renderer = System.getProperty("skiko.renderApi")
@@ -72,8 +77,11 @@ class TextSelectionTest {
                                 items((0 until 20).toList(), key = { it }) { index ->
                                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Text("Tool input $index")
-                                        if (index == 0) Box(Modifier.width(650.dp).horizontalScroll(scroll)) {
-                                            Text(code, Modifier.height(40.dp), fontFamily = FontFamily.Monospace, softWrap = false)
+                                        if (index == 0) Box(Modifier.width(650.dp)
+                                            .then(if (sample == "wrapped") Modifier else Modifier.horizontalScroll(scroll))) {
+                                            Text(if (sample == "line") code else multiline,
+                                                if (sample == "line") Modifier.height(40.dp) else Modifier,
+                                                fontFamily = FontFamily.Monospace, softWrap = sample == "wrapped")
                                         } else Text("Earlier content $index")
                                         Text("End of tool $index")
                                     }
@@ -90,63 +98,85 @@ class TextSelectionTest {
         val robot = Robot()
         try {
             delay(600)
-            for (direction in listOf(1, -1)) for (edge in listOf("center", "top", "bottom")) {
-                withContext(Dispatchers.Swing) {
-                    selection.await().clear()
-                    scroll.scrollTo(if (direction > 0) 0 else scroll.maxValue)
-                    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection("Unchanged clipboard"), null)
-                }
+            for (kind in listOf("multiline", "wrapped", "line")) {
+                withContext(Dispatchers.Swing) { selection.await().clear(); sample = kind }
                 delay(200)
-                val (start, target) = withContext(Dispatchers.Swing) {
-                    val node = window.semanticsOwners.flatMap { owner ->
-                        generateSequence(listOf(owner.rootSemanticsNode)) { level ->
-                            level.flatMap { it.children }.takeIf { it.isNotEmpty() }
-                        }.flatten().toList()
-                    }.single { it.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == code }
-                    val layouts = mutableListOf<TextLayoutResult>()
-                    assertTrue(node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts))
-                    assertTrue(layouts.single().size.height > layouts.single().multiParagraph.height, "Exercise padding beyond the glyphs")
-                    val cursor = layouts.single().getCursorRect(if (direction > 0) 5 else code.length - 5)
-                    val origin = node.positionOnScreen
-                    val endX = origin.x + scroll.value + if (direction > 0) scroll.viewportSize + 130 else -130
-                    val endY = origin.y + when (edge) { "top" -> 0f; "bottom" -> node.size.height.toFloat(); else -> cursor.center.y }
-                    (origin + cursor.center) to androidx.compose.ui.geometry.Offset(endX, endY)
-                }
-                robot.mouseMove(start.x.toInt(), start.y.toInt())
-                robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
-                delay(60)
-                for (step in 1..12) {
-                    robot.mouseMove((start.x + (target.x - start.x) * step / 12).toInt(),
-                        (start.y + (target.y - start.y) * step / 12).toInt())
-                    delay(50)
-                }
-                val expected = if (direction > 0) code.drop(5) else code.dropLast(5)
-                withTimeout(12_000) {
-                    var step = 0
-                    while (true) {
-                        if (failure.isCompleted) throw failure.await()
-                        robot.mouseMove(target.x.toInt() + step++ % 2, target.y.toInt())
-                        delay(100)
-                        if (withContext(Dispatchers.Swing) {
-                            scroll.value == (if (direction > 0) scroll.maxValue else 0) &&
-                                selection.await().selectedTexts.joinToString("") { it.text } == expected
-                        }) break
+                val text = if (kind == "line") code else multiline
+                for (direction in listOf(1, -1)) for (edge in if (kind == "line") listOf("center", "top", "bottom") else listOf("side")) {
+                    withContext(Dispatchers.Swing) {
+                        selection.await().clear()
+                        scroll.scrollTo(if (direction > 0) 0 else scroll.maxValue)
+                        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection("Unchanged clipboard"), null)
                     }
-                }
-                robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
-                robot.keyPress(KeyEvent.VK_CONTROL); robot.keyPress(KeyEvent.VK_C)
-                robot.keyRelease(KeyEvent.VK_C); robot.keyRelease(KeyEvent.VK_CONTROL)
-                val copied = withTimeout(5_000) {
-                    var value = "Unchanged clipboard"
-                    while (value == "Unchanged clipboard") {
-                        delay(30)
-                        value = withContext(Dispatchers.Swing) {
-                            Toolkit.getDefaultToolkit().systemClipboard.getData(DataFlavor.stringFlavor) as String
+                    delay(200)
+                    val (start, target, expected) = withContext(Dispatchers.Swing) {
+                        val node = window.semanticsOwners.flatMap { owner ->
+                            generateSequence(listOf(owner.rootSemanticsNode)) { level ->
+                                level.flatMap { it.children }.takeIf { it.isNotEmpty() }
+                            }.flatten().toList()
+                        }.single { it.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == text }
+                        val layouts = mutableListOf<TextLayoutResult>()
+                        assertTrue(node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts))
+                        val layout = layouts.single()
+                        val startOffset = if (direction > 0) { if (kind == "line") 5 else 1 }
+                            else text.length - if (kind == "line") 5 else 1
+                        val cursor = layout.getCursorRect(startOffset)
+                        val origin = node.positionOnScreen
+                        val target: androidx.compose.ui.geometry.Offset
+                        val expected: String
+                        if (kind == "line") {
+                            assertTrue(layout.size.height > layout.multiParagraph.height, "Exercise padding beyond the glyphs")
+                            val endX = origin.x + scroll.value + if (direction > 0) scroll.viewportSize + 130 else -130
+                            val endY = origin.y + when (edge) { "top" -> 0f; "bottom" -> node.size.height.toFloat(); else -> cursor.center.y }
+                            target = androidx.compose.ui.geometry.Offset(endX, endY)
+                            expected = if (direction > 0) text.drop(5) else text.dropLast(5)
+                        } else {
+                            val endOffset = if (direction > 0) layout.getLineStart(1) else 0
+                            val localTarget = androidx.compose.ui.geometry.Offset(
+                                if (direction > 0) -8f else node.size.width + 8f,
+                                layout.getCursorRect(endOffset).center.y)
+                            target = origin + localTarget
+                            val selectedEnd = layout.getOffsetForPosition(localTarget)
+                            expected = text.substring(minOf(startOffset, selectedEnd), maxOf(startOffset, selectedEnd))
+                            if (kind == "multiline" && direction > 0) assertEquals(68, selectedEnd)
+                        }
+                        Triple(origin + cursor.center, target, expected)
+                    }
+                    robot.mouseMove(start.x.toInt(), start.y.toInt())
+                    robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
+                    delay(60)
+                    for (step in 1..12) {
+                        robot.mouseMove((start.x + (target.x - start.x) * step / 12).toInt(),
+                            (start.y + (target.y - start.y) * step / 12).toInt())
+                        delay(50)
+                    }
+                    withTimeout(12_000) {
+                        var step = 0
+                        while (true) {
+                            if (failure.isCompleted) throw failure.await()
+                            robot.mouseMove(target.x.toInt() + step++ % 2, target.y.toInt())
+                            delay(100)
+                            if (withContext(Dispatchers.Swing) {
+                                (kind != "line" || scroll.value == (if (direction > 0) scroll.maxValue else 0)) &&
+                                    selection.await().selectedTexts.joinToString("") { it.text } == expected
+                            }) break
                         }
                     }
-                    value
+                    robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
+                    robot.keyPress(KeyEvent.VK_CONTROL); robot.keyPress(KeyEvent.VK_C)
+                    robot.keyRelease(KeyEvent.VK_C); robot.keyRelease(KeyEvent.VK_CONTROL)
+                    val copied = withTimeout(5_000) {
+                        var value = "Unchanged clipboard"
+                        while (value == "Unchanged clipboard") {
+                            delay(30)
+                            value = withContext(Dispatchers.Swing) {
+                                Toolkit.getDefaultToolkit().systemClipboard.getData(DataFlavor.stringFlavor) as String
+                            }
+                        }
+                        value
+                    }
+                    assertEquals(expected, copied, "Copy changed at sample=$kind direction=$direction edge=$edge")
                 }
-                assertEquals(expected, copied, "Copy changed at direction=$direction edge=$edge")
             }
         } finally {
             robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
