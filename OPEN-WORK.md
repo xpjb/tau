@@ -1,4 +1,4 @@
-## Blocked checkpoint: native client integration needs build space
+## Checkpoint: native client validation pending; build space restored
 
 Branch feat/rust-transfers, worktree /root/tau-transfers. Do not merge or deploy.
 The tested core commit is 3e884e6 and tested daemon integration is 0f7c6bc:
@@ -9,15 +9,18 @@ not duplicate the Rust wire record. That signature change and its adjusted
 Rust callers still need their tests rerun.
 
 Bindings generation hit the mandatory Cargo lock timeout; another build was
-active. Disk fell from 4.2GiB at start to 994MiB free despite stopping that build.
-Native builds are now held. Do not bypass the Cargo wrapper/shared build cache
-or the disk reserve. The user was asked to approve clearing old disposable
-/root/tau/target/windows-sfx-* staging; no deletion has been performed. Preserve
-source, published dist/release installers, downloads, shared Cargo cache and
-live services. A read-only process exe/cwd check found no old staging users;
-check open files and ownership again before any approved removal.
+active. Disk then fell below 1GiB free. The user requested a Rust cache audit
+and approved old Tau cleanup. On 2026-09-14, guarded cleanup removed 33 old
+windows-sfx staging directories and 21 disposable compiler-cache directories.
+Actual space recovered was 7.11GiB, with 7.81GiB free at completion. Normal
+shared dependency caches, Cargo test evidence, source, published releases and
+live services were preserved. No build or native acceptance ran during cleanup.
+Report: /root/maintenance-reports/rust-cache-audit-20260914T131227Z/report.md.
+Do not bypass the Cargo wrapper/shared build cache or the disk reserve.
+The audit also records the wrapper's existing lock/resource-envelope gap for
+cargo xwin and other delegated commands; no wrapper change was made.
 
-Next mechanical steps after space is available:
+Next mechanical steps:
 1. Rerun native/daemon tests after the JSON bridge change. Build generated Kotlin
    bindings with scripts/build-transfers.sh bindings <generated-dir> (--no-format).
 2. Compile the JVM bridge and correct any generated API naming/signature errors.
