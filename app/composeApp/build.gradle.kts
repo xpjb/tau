@@ -31,10 +31,6 @@ val buildDesktopTransfer by tasks.registering(Exec::class) {
     outputs.dir(desktopTransferResources)
     commandLine("bash", transferRoot.resolve("scripts/build-transfers.sh"), desktopTransferTarget.get(), desktopTransferResources.get().asFile)
 }
-tasks.matching { it.name.startsWith("compile") && it.name.contains("Kotlin") }.configureEach {
-    dependsOn(generateTransferBindings)
-}
-tasks.matching { it.name == "desktopProcessResources" }.configureEach { dependsOn(buildDesktopTransfer) }
 
 kotlin {
     jvmToolchain(21)
@@ -52,7 +48,7 @@ kotlin {
     sourceSets {
         val jvmMain by creating {
             dependsOn(commonMain.get())
-            kotlin.srcDir(transferBindings)
+            kotlin.srcDir(generateTransferBindings)
             dependencies { compileOnly("net.java.dev.jna:jna:5.19.1") }
         }
         androidMain.get().dependsOn(jvmMain)
@@ -80,7 +76,7 @@ kotlin {
             implementation("io.ktor:ktor-client-okhttp:3.5.2")
         }
         val desktopMain by getting {
-            resources.srcDir(desktopTransferResources)
+            resources.srcDir(buildDesktopTransfer)
             dependencies {
                 implementation("net.java.dev.jna:jna:5.19.1")
                 implementation(compose.desktop.currentOs)

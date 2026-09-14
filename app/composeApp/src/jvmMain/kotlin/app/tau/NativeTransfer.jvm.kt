@@ -11,9 +11,9 @@ internal actual fun platformTransfer(): NativeTransfer = object : NativeTransfer
         require(limit >= 0)
         try {
             native.start(offer, host, target, limit.toULong())
-        } catch (error: TransferException) {
+        } catch (error: TransferException.Failed) {
             throw AttachmentDownloadException(
-                if (error.message == "too_large") AttachmentFailure.TooLarge else AttachmentFailure.Interrupted, error,
+                if (error.reason == "too_large") AttachmentFailure.TooLarge else AttachmentFailure.Interrupted, error,
             )
         }
     }

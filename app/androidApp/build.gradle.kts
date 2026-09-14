@@ -19,7 +19,7 @@ val hasReleaseSigning = listOf(
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
 
-val nativeTransfers = layout.buildDirectory.dir("generated/transfer/jniLibs")
+val nativeTransfers = objects.directoryProperty().convention(layout.buildDirectory.dir("generated/transfer/jniLibs"))
 val buildAndroidTransfer by tasks.registering(Exec::class) {
     dependsOn(":composeApp:generateTransferBindings")
     mustRunAfter(":composeApp:buildDesktopTransfer")
@@ -29,10 +29,13 @@ val buildAndroidTransfer by tasks.registering(Exec::class) {
     outputs.dir(nativeTransfers)
     commandLine("bash", root.resolve("scripts/build-transfers.sh"), "android", nativeTransfers.get().asFile)
 }
-tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(buildAndroidTransfer) }
+androidComponents {
+    onVariants { variant ->
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(buildAndroidTransfer) { nativeTransfers }
+    }
+}
 
 android {
-    sourceSets.getByName("main").jniLibs.srcDir(nativeTransfers)
     namespace = "app.tau"
     compileSdk = 37
 

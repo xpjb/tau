@@ -224,8 +224,8 @@ struct DownloadState {
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum TransferError {
-    #[error("{message}")]
-    Failed { message: String },
+    #[error("{reason}")]
+    Failed { reason: String },
 }
 
 #[derive(uniffi::Object)]
@@ -255,16 +255,16 @@ impl TransferDownload {
 
     pub fn start(&self, offer_json: String, host: String, target: String, limit: u64) -> Result<(), TransferError> {
         if offer_json.len() > 4096 {
-            return Err(TransferError::Failed { message: "Transfer metadata is too large".into() });
+            return Err(TransferError::Failed { reason: "Transfer metadata is too large".into() });
         }
         let offer: TransferOffer = serde_json::from_str(&offer_json)
-            .map_err(|_| TransferError::Failed { message: "Invalid transfer metadata".into() })?;
+            .map_err(|_| TransferError::Failed { reason: "Invalid transfer metadata".into() })?;
         let mut thread = self.thread.lock().unwrap();
         if thread.is_some() || self.state.lock().unwrap().status.done {
-            return Err(TransferError::Failed { message: "Transfer already started".into() });
+            return Err(TransferError::Failed { reason: "Transfer already started".into() });
         }
         if offer.size > limit.min(MAX_FILE_BYTES) {
-            return Err(TransferError::Failed { message: "too_large".into() });
+            return Err(TransferError::Failed { reason: "too_large".into() });
         }
         let state = self.state.clone();
         state.lock().unwrap().status.total = offer.size;
@@ -375,7 +375,7 @@ impl TransferDownload {
             let mut state = state.lock().unwrap();
             state.status.failure = result.err().map(|error: anyhow::Error| format!("{error:#}"));
             state.status.done = true;
-        }).map_err(|error| TransferError::Failed { message: error.to_string() })?);
+        }).map_err(|error| TransferError::Failed { reason: error.to_string() })?);
         Ok(())
     }
 
