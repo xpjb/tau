@@ -1,31 +1,43 @@
-## Release candidate: Tau 0.5.14 / protocol 10
+## Deployed: Tau 0.5.14 / protocol 10
 
-The user approved deployment and installers if the iroh work is ready, then
-explicitly confirmed Tau is clear for deployment. Recheck live work immediately
-before cutover. Keep Pi/global settings and Telegram unchanged; preserve chat
-state and existing JSONL prefixes. This approval supersedes the earlier hold.
+The user approved release, confirmed Tau was clear, and asked for immediate
+cutover. Deployment completed 2026-09-14T15:23:40Z. Live PID 2131921; health
+reports 0.5.14/protocol 10 and native UDP listens on 127.0.0.1:8788. All 128
+prior chat IDs and 122 JSONL byte prefixes are preserved. Pi installation,
+global settings, Tau configuration and Telegram PID 233927 are unchanged.
+No provider prompt was sent. Both matching installers were queued for delivery.
+Android versionCode 35 retains the existing signing certificate and four ABIs.
 
-Worktree /root/tau-transfers, branch feat/rust-transfers. Native/daemon tests
-passed after the JSON bridge change (21/21). Generated Kotlin now compiles;
-the native error field avoids Kotlin Exception.message, and generated sources
-use Gradle task dependencies and the Android Variant API. Strict workspace
-Clippy passes, including the native provider fixture. All 25 desktop tests pass
-with no failures or skips. Attachment tests use real Rust/UDP transfers and
-cover native cancellation, retained partial data, reopening and completion.
-The Android release build passes for all four ABIs with versionCode 35.
+Acceptance: 21 Rust tests after JSON bridge integration, all 25 client tests
+without failures/skips, strict Clippy, and two final native resume/corruption
+regressions after export changes. Android and Windows release builds pass.
+The final APK includes all four Rust libraries and 16KiB-aligned native code;
+NDK stripping and normal compressed JNI packaging keep it below 50MB. Android
+x86_64 runtime completed a fresh verified UDP transfer using the packaged APK
+bindings/libraries. The Windows DLL and generated bindings load under Wine;
+full UDP execution there is blocked by Wine rejecting IPV6_V6ONLY on the socket.
+No dependency fork/workaround was added for Wine. Physical Windows operation
+and real Tailnet speed remain unmeasured; do not claim throughput acceptance.
 
-Pending: verify packaged native loading and alignment, Windows build/package,
-final diff/artifact review, matched deployment and delivery. Physical Tailnet
-speed remains unmeasured. Do not claim faster real-device throughput from local
-tests. The phone issue was closed by the user after restarting Tailscale; host
-memory was healthy (23GiB available, no current pressure or OOM events).
+Android runtime exposed a rejected filesystem-clone operation after transfer.
+The upstream TryReference export mode now moves the received file within its
+partial directory before final hash verification and atomic publication. It
+preserves resume/retry behavior and avoids an extra full-file copy. Android's
+generated JNI output path is resolved at task execution through the Variant
+API. These were caught and corrected before delivery.
 
-The user-approved cache cleanup is complete. The final default-debug removal
-recovered 8.51GiB physically and left 15.89GiB free before resumed builds.
-Receipt: /root/maintenance-reports/rust-default-debug-cleanup-20260914T141408Z/.
-The normal release and target-specific caches remained intact. New builds use
-the mandatory wrapper, four build jobs, no incremental state or dev debug info,
-and the existing disk reserve. No formatter ran.
+Release/evidence: /root/tau-release/0.5.14/ and /root/tau-checks/rust-transfers/.
+Accepted application source: 4e13c4500b234d5829571e6791a6a4958c2d0c26.
+Backup: /var/backups/tau/0.5.14-20260914T152325Z. Roll back code only; retain
+newer chat data. No restart or release authorization remains pending.
+
+Cache cleanup is complete. The explicit default-debug removal recovered
+8.51GiB physically before resumed builds. Receipt:
+/root/maintenance-reports/rust-default-debug-cleanup-20260914T141408Z/.
+The phone incident was closed by the user after restarting Tailscale; host
+memory was healthy. No more phone diagnosis is pending. No formatter ran.
+
+## Previous transfer implementation plan
 
 ## In progress: native Rust block transfers over Tailscale
 
