@@ -1,3 +1,54 @@
+## In progress: native Rust block transfers over Tailscale
+
+Intent: replace Tau attachment downloads with one shared Rust engine. Kotlin
+owns only authenticated setup, start/cancel and progress display. Keep chat,
+uploads, existing completed downloads, exports and file limits unchanged.
+
+Facts: master f7c8a38 is clean; protocol 9 already has a held matched release.
+Desktop uses CIO and Android uses OkHttp. Failed HTTP downloads lose partial
+files. Prior real-link evidence shows loss/reordering at about 230ms RTT; the
+same file served locally at 334MiB/s. This does not locate the network defect.
+Installed Tailscale 1.102.2 uses userspace networking; its pinned netstack source
+forwards incoming node-local UDP to 127.0.0.1 on the same port. No Serve or VPN
+change is required by that path; actual peer reachability remains acceptance.
+Only 4.2GiB of disk was free at start. Preserve other work and shared build
+caches. Use the required Cargo wrapper, bounded builds, and stop before filling
+the disk. No automatic formatting, deployment or installer release.
+
+Design:
+- Pin iroh-blobs 0.35 (upstream's production recommendation) and matching iroh.
+  Use upstream QUIC, Bao/BLAKE3 verification and filesystem resume storage.
+  Disable iroh relays and discovery; dial only the existing server hostname.
+- Add a shared Rust crate and generated UniFFI Kotlin bindings. Package Linux
+  test, Windows x64, and Android arm64/x64 native libraries. Native jobs own
+  their lifetime, cancellation and storage cleanup; UI polling never handles
+  blocks. Android native libraries must meet 16KiB page alignment.
+- The existing bearer-authenticated attachment resolver grants a fresh client
+  QUIC identity access to exactly one validated file. Return daemon identity,
+  UDP port, hash and size. Retain bounded, expiring grants in memory only.
+  Serve the validated open file plus its small Bao outboard, not a second
+  server-side copy of every attachment. A changed source fails verification.
+- Receiver stores partial data beside the existing account/chat/entry-scoped
+  cache target. Keep it on cancellation/failure; delete it after verified,
+  synced atomic publication. Reuse upstream missing-range selection on retry.
+  Verify the full BLAKE3 hash before publication, including resumed data.
+- Keep existing HTTP attachment serving for diagnostics/old callers, but new
+  clients request native transfer metadata and never silently fall back to TCP.
+  Reserve protocol 10 for the matched source change.
+
+Ordered plan:
+1. Add and test the native provider/receiver with real UDP transfers, scoped
+   authorization, interruption/reopen, corruption and changed-source checks.
+2. Wire the existing daemon attachment route to native transfer grants; retain
+   path, kind and size validation and cover this in daemon end-to-end tests.
+3. Generate bindings, package native targets and replace the client download
+   body loop. Reuse cache lookup, controller jobs, progress and export code.
+4. Adapt existing attachment integration coverage; run Rust tests/Clippy,
+   JVM tests, Android compilation/native loading and Windows packaging checks.
+5. Review the complete diff and record measurable speed/resume evidence. Real
+   Windows/phone Tailnet speed acceptance remains a separate device check if
+   those devices cannot be driven here. Merge only after acceptance passes.
+
 # Tau open work
 
 ## Release policy
