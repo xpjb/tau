@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind: SocketAddr,
+    pub transfer_bind: SocketAddrV4,
     pub token: Arc<str>,
     pub pi_command: PathBuf,
     pub default_thinking_level: String,
@@ -34,6 +35,10 @@ impl Config {
             .unwrap_or_else(|_| "127.0.0.1:8787".to_owned())
             .parse()
             .context("TAU_BIND must be an IP address and port")?;
+        let transfer_bind = std::env::var("TAU_TRANSFER_BIND")
+            .unwrap_or_else(|_| "127.0.0.1:8788".to_owned())
+            .parse()
+            .context("TAU_TRANSFER_BIND must be an IPv4 address and UDP port")?;
         let pi_command = std::env::var_os("TAU_PI_COMMAND")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/usr/bin/pi".into());
@@ -83,6 +88,7 @@ impl Config {
 
         Ok(Self {
             bind,
+            transfer_bind,
             token: Arc::from(token),
             pi_command,
             default_thinking_level,

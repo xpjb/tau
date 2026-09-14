@@ -3765,6 +3765,7 @@ dependencies = [
  "futures-util",
  "serde",
  "serde_json",
+ "tau-transfer",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",

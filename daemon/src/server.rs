@@ -33,13 +33,16 @@ struct AppState {
     config: Config,
     manager: AgentManager,
     telemetry_gate: Arc<Mutex<()>>,
+    transfers: Arc<tau_transfer::TransferProvider>,
 }
 
 pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::TcpListener) -> Result<()> {
+    let transfers = Arc::new(tau_transfer::TransferProvider::bind(config.transfer_bind).await?);
     let state = AppState {
         config: config.clone(),
         manager: manager.clone(),
         telemetry_gate: Arc::new(Mutex::new(())),
+        transfers: transfers.clone(),
     };
     let app = Router::new()
         .route("/v1/health", get(|| async { Json(json!({
@@ -91,6 +94,7 @@ pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::
         })
         .await
         .context("Tau HTTP server stopped unexpectedly");
+    transfers.shutdown().await;
     manager.shutdown().await;
     result
 }
@@ -496,10 +500,17 @@ fn valid_resource_key(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentQuery {
+    transfer_node: Option<String>,
+}
+
 async fn download_attachment(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath((session_id, entry_id)): AxumPath<(String, String)>,
+    Query(query): Query<AttachmentQuery>,
 ) -> Response {
     if !authorized(&headers, &state.config.token) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -518,8 +529,20 @@ async fn download_attachment(
             return StatusCode::NOT_FOUND.into_response();
         }
     };
+    if let Some(client_id) = query.transfer_node {
+        if client_id.len() != 64 || !client_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        return match state.transfers.offer(attachment.file.into_std().await, &client_id, attachment.size).await {
+            Ok(offer) => ([(header::CACHE_CONTROL, "no-store")], Json(offer)).into_response(),
+            Err(error) => {
+                warn!(session = %session_id, entry = %entry_id, %error, "Tau transfer setup failed");
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
+        };
+    }
     let disposition = match HeaderValue::from_str(&format!(
-        "attachment; filename=\"{}\"",
+        "attachment; filename=\"{}\"", 
         safe_file_name(&attachment.file_name)
     )) {
         Ok(value) => value,
@@ -686,6 +709,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let log = root.join("crashes.jsonl");
         let config = Config {
+            transfer_bind: "127.0.0.1:0".parse().unwrap(),
             bind: address, token: Arc::from("test-token"), pi_command: root.join("unused-pi"),
             default_thinking_level: "high".to_owned(), cwd: root.clone(), state_path: root.join("state.json"),
             session_dir: root.join("pi-sessions"), telemetry_path: log.clone(),
@@ -694,7 +718,8 @@ mod tests {
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
         let app = Router::new().route("/v1/telemetry/crash", post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)))
-            .with_state(AppState { config, manager, telemetry_gate: Arc::new(Mutex::new(())) });
+            .with_state(AppState { config, manager, telemetry_gate: Arc::new(Mutex::new(())),
+            transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) });
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let frame = json!({"className":"example.Frame", "methodName":"draw", "fileName":"File.kt", "lineNumber":5});
         let legacy = json!({"schema":1, "reportId":"legacy", "platform":"windows", "appVersion":"0.5.12",
@@ -782,6 +807,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = Config {
+            transfer_bind: "127.0.0.1:0".parse().unwrap(),
             bind: address, token: Arc::from("full-client-token"), pi_command: pi,
             default_thinking_level: "high".to_owned(), cwd: root.clone(), state_path: root.join("state.json"),
             session_dir: root.join("pi-sessions"), telemetry_path: root.join("crashes.jsonl"),
@@ -804,7 +830,8 @@ mod tests {
         assert_ne!(tokens[0], tokens[1]);
         let session = manager.inner.state.get(&first).unwrap();
         let history = fs::read(session.session_file.as_ref().unwrap()).await.unwrap();
-        let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
+        let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
+            transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) };
         let app = Router::new().route("/v1/ws", get(websocket))
             .route("/v1/sessions/{session_id}/flags", post(flag_it).layer(DefaultBodyLimit::max(32 * 1024))).with_state(state);
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
@@ -937,6 +964,7 @@ class Llama:
         return {"choices": [{"text": ' "Literal title" '}]}
 "#).await.unwrap();
         let config = Config {
+            transfer_bind: "127.0.0.1:0".parse().unwrap(),
             bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
             pi_command: pi, default_thinking_level: "high".to_owned(), cwd: root.clone(),
             state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
@@ -948,7 +976,8 @@ class Llama:
         let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
         let existing = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
         manager.rename_session(&existing, "Existing title").await.unwrap();
-        let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
+        let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
+            transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) };
         let app = Router::new().route("/v1/ws", get(websocket)).with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
@@ -1051,6 +1080,7 @@ class Llama:
         fs::write(&mock, include_str!("../tests/fixtures/pi.py")).await.unwrap();
         fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700)).await.unwrap();
         let config = Config {
+            transfer_bind: "127.0.0.1:0".parse().unwrap(),
             bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
             pi_command: mock, default_thinking_level: "high".to_owned(),
             cwd: root.clone(), state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
@@ -1061,7 +1091,8 @@ class Llama:
         let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
         let id = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
         let other = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
-        let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())) };
+        let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
+            transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
         let app = Router::new().route("/", get(move |upgrade: WebSocketUpgrade| {
             let state = state.clone();

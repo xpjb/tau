@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonClassDiscriminator
 
-const val TauProtocolVersion = 9
+const val TauProtocolVersion = 10
 
 val TauJson = Json {
     classDiscriminator = "type"

@@ -12,7 +12,7 @@ Tau starts a Pi RPC process when needed and stops it after one idle hour, while 
 
 Tau 0.5.13 clients and daemon use protocol 8 and must be updated together. This release includes immediate New Chat feedback and repeat-click protection, the horizontal-selection crash fix and fuller local diagnostics, Enter submission in single-line forms, complete Markdown tables, stable image viewing during updates, and the Tau-only flag_it tool. Android versionCode is 34. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client schema 4 preserves local work while remote history remains memory-only. Pi JSONL history stays intact. The matched Tau Pi update selects current model-specific base prompts when workers start or restore; Astra uses an empty base with AGENTS.md and appended context retained.
 
-Unreleased source uses protocol 9 and client cache schema 5. New Chat reuses one daemon-owned starter and starts Pi before returning it, so the real model is shown above the composer before the first message. A client with a draft, files or a pending send/control keeps that chat and gets a fresh starter. The existing one-hour idle timeout stops workers without deleting chats. Existing chats remain intact. This change is held for a matched client/daemon release; deployment remains 0.5.13/protocol 8.
+Unreleased source uses protocol 10 and client cache schema 5. New Chat reuses one daemon-owned starter and starts Pi before returning it, so the real model is shown above the composer before the first message. A client with a draft, files or a pending send/control keeps that chat and gets a fresh starter. The existing one-hour idle timeout stops workers without deleting chats. Existing chats remain intact. This change is held for a matched client/daemon release; deployment remains 0.5.13/protocol 8.
 
 ## Current client operations
 
@@ -103,6 +103,31 @@ The installer generates `/etc/tau.env` once with a random bearer token, binds `t
 The title helper needs both `scripts/title_gen.py` and its adjacent `scripts/title_prompt.txt`.
 
 Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat under `/root/.local/share/tau/uploads` and deleted with the chat. Pi stages outgoing files under `/root/.local/share/tau/outbox`; `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
+
+## Native file transfers (unreleased)
+
+New clients request a file grant through the existing bearer-authenticated HTTP
+endpoint, then download verified blocks over QUIC/UDP using the shared Rust
+`tau-transfer` engine. There is no automatic TCP fallback. Partial data stays
+beside the account/chat/entry-scoped private cache across retries and restarts;
+complete files are verified, synced and atomically published. Existing saved
+files and exports remain usable.
+
+`TAU_TRANSFER_BIND` defaults to `127.0.0.1:8788` (UDP). The installed userspace
+Tailscale stack forwards Tailnet UDP to this loopback port. On a kernel-mode
+Tailscale server, set this value to the server's Tailnet IPv4 address and port.
+Allow that UDP port in Tailnet policy. Tailscale Serve remains the HTTP/chat
+proxy and needs no UDP configuration. Iroh discovery and relays are disabled.
+The setup response supplies the UDP port and pinned QUIC identity; clients use
+the hostname from their existing Tau connection settings.
+
+A grant covers one open, validated file and one client QUIC identity for up to
+one hour. The daemon retains at most 128 recent grants and evicts the oldest
+when full. It retains file handles and small BLAKE3 outboards, not duplicate
+file bodies. A source modified after granting fails integrity checks.
+
+This source change needs a matched client/daemon release. Production stays on
+0.5.13/protocol 8 until deployment is separately accepted.
 
 ## Android
 

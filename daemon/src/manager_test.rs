@@ -16,6 +16,7 @@ async fn fixture() -> (AgentManager, PathBuf) {
     fs::write(&mock, include_str!("../tests/fixtures/pi.py")).await.unwrap();
     fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700)).await.unwrap();
     let config = Config {
+        transfer_bind: "127.0.0.1:0".parse().unwrap(),
         bind: "127.0.0.1:0".parse().unwrap(),
         token: Arc::from("test-token-with-at-least-thirty-two-characters"),
         pi_command: mock, default_thinking_level: "high".to_owned(),
@@ -479,6 +480,50 @@ async fn preserves_cold_jsonl_attachments_and_path_boundaries() {
     assert!(PathBuf::from(&uploaded.path).starts_with(root.join("uploads").join(&id)));
     assert!(manager.store_upload(&id, "empty", b"").await.is_err());
     assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut config = manager.inner.config.clone();
+    config.bind = address;
+    let running = manager.clone();
+    let server = tokio::spawn(async move { crate::server::serve(config, running, listener).await.unwrap(); });
+    let download = tau_transfer::TransferDownload::new();
+    let client_id = download.node_id();
+    for (entry, token, node, expected) in [
+        ("artifact", "wrong", client_id.as_str(), 401),
+        ("link", "test-token-with-at-least-thirty-two-characters", client_id.as_str(), 404),
+        ("image", "test-token-with-at-least-thirty-two-characters", client_id.as_str(), 404),
+        ("missing", "test-token-with-at-least-thirty-two-characters", client_id.as_str(), 404),
+        ("artifact", "test-token-with-at-least-thirty-two-characters", "invalid", 400),
+        ("artifact", "test-token-with-at-least-thirty-two-characters", client_id.as_str(), 200),
+    ] {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let reply = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            socket.write_all(format!("GET /v1/sessions/{id}/attachments/{entry}?transferNode={node} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut reply = String::new();
+            socket.read_to_string(&mut reply).await.unwrap();
+            reply
+        }).await.unwrap();
+        let (headers, body) = reply.split_once("\r\n\r\n").unwrap();
+        assert_eq!(headers.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap(), expected);
+        if expected == 200 {
+            assert!(headers.to_lowercase().contains("cache-control: no-store"));
+            assert!(!body.contains(root.to_str().unwrap()));
+            let offer: tau_transfer::TransferOffer = serde_json::from_str(body).unwrap();
+            assert_eq!(offer.size, 8);
+            let target = root.join("downloaded.zip");
+            download.start(offer, "127.0.0.1".into(), target.to_string_lossy().into_owned(), 50_000_000).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !download.status().done { tokio::time::sleep(Duration::from_millis(10)).await; }
+            }).await.unwrap();
+            download.join();
+            assert!(download.status().failure.is_none(), "{:?}", download.status());
+            assert_eq!(fs::read(target).await.unwrap(), b"artifact");
+        }
+    }
+    server.abort();
+    let _ = server.await;
     let bad = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
     manager.inner.state.set_session_file(&bad, outside.to_string_lossy().into_owned()).await.unwrap();
     assert!(manager.open_session(&bad, &[]).await.is_err());
