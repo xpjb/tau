@@ -11,3 +11,19 @@
              textLayoutResult.layoutInput.text.length
          else -> textLayoutResult.getOffsetForPosition(position)
      }
+--- a/compose/foundation/foundation/src/commonMain/kotlin/androidx/compose/foundation/text/selection/SelectionManager.kt
++++ b/compose/foundation/foundation/src/commonMain/kotlin/androidx/compose/foundation/text/selection/SelectionManager.kt
+@@ -1444,7 +1444,12 @@
+         val needToRecomputeSelection =
+             selectionLayout.shouldRecomputeSelection(previousSelectionLayout)
+         if (needToRecomputeSelection) {
+-            val newSelection = adjustment.adjust(selectionLayout)
++            var newSelection = adjustment.adjust(selectionLayout)
++            if (newSelection.start.selectableId == newSelection.end.selectableId &&
++                newSelection.handlesCrossed != (newSelection.start.offset > newSelection.end.offset)
++            ) {
++                newSelection = newSelection.copy(handlesCrossed = !newSelection.handlesCrossed)
++            }
+             if (newSelection != selection) {
+                 if (shouldPerformHaptics()) {
+                     hapticFeedBack?.performHapticFeedback(HapticFeedbackType.TextHandleMove)

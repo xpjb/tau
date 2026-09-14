@@ -98,11 +98,12 @@ class TextSelectionTest {
         val robot = Robot()
         try {
             delay(600)
-            for (kind in listOf("multiline", "wrapped", "line")) {
-                withContext(Dispatchers.Swing) { selection.await().clear(); sample = kind }
+            for (kind in listOf("multiline", "wrapped", "line", "widgets")) {
+                withContext(Dispatchers.Swing) { selection.await().clear(); sample = if (kind == "widgets") "wrapped" else kind }
                 delay(200)
                 val text = if (kind == "line") code else multiline
                 for (direction in listOf(1, -1)) for (edge in if (kind == "line") listOf("center", "top", "bottom") else listOf("side")) {
+                    println("Selecting sample=$kind direction=$direction edge=$edge")
                     withContext(Dispatchers.Swing) {
                         selection.await().clear()
                         scroll.scrollTo(if (direction > 0) 0 else scroll.maxValue)
@@ -110,18 +111,20 @@ class TextSelectionTest {
                     }
                     delay(200)
                     val (start, target, expected) = withContext(Dispatchers.Swing) {
-                        val node = window.semanticsOwners.flatMap { owner ->
+                        val nodes = window.semanticsOwners.flatMap { owner ->
                             generateSequence(listOf(owner.rootSemanticsNode)) { level ->
                                 level.flatMap { it.children }.takeIf { it.isNotEmpty() }
                             }.flatten().toList()
-                        }.single { it.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == text }
+                        }
+                        val node = nodes.single { it.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == text }
                         val layouts = mutableListOf<TextLayoutResult>()
                         assertTrue(node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts))
                         val layout = layouts.single()
-                        val startOffset = if (direction > 0) { if (kind == "line") 5 else 1 }
+                        val startOffset = if (kind == "widgets") text.length - 1 else if (direction > 0) { if (kind == "line") 5 else 1 }
                             else text.length - if (kind == "line") 5 else 1
                         val cursor = layout.getCursorRect(startOffset)
                         val origin = node.positionOnScreen
+                        var start = origin + cursor.center
                         val target: androidx.compose.ui.geometry.Offset
                         val expected: String
                         if (kind == "line") {
@@ -130,6 +133,15 @@ class TextSelectionTest {
                             val endY = origin.y + when (edge) { "top" -> 0f; "bottom" -> node.size.height.toFloat(); else -> cursor.center.y }
                             target = androidx.compose.ui.geometry.Offset(endX, endY)
                             expected = if (direction > 0) text.drop(5) else text.dropLast(5)
+                        } else if (kind == "widgets") {
+                            val footer = "End of tool 0"
+                            val footerNode = nodes.single { it.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text == footer }
+                            val footerLayouts = mutableListOf<TextLayoutResult>()
+                            assertTrue(footerNode.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(footerLayouts))
+                            val footerPoint = footerNode.positionOnScreen + footerLayouts.single().getCursorRect(5).center
+                            target = if (direction > 0) footerPoint else start
+                            if (direction < 0) start = footerPoint
+                            expected = text.takeLast(1) + "\n" + footer.take(5)
                         } else {
                             val endOffset = if (direction > 0) layout.getLineStart(1) else 0
                             val localTarget = androidx.compose.ui.geometry.Offset(
@@ -140,7 +152,7 @@ class TextSelectionTest {
                             expected = text.substring(minOf(startOffset, selectedEnd), maxOf(startOffset, selectedEnd))
                             if (kind == "multiline" && direction > 0) assertEquals(68, selectedEnd)
                         }
-                        Triple(origin + cursor.center, target, expected)
+                        Triple(start, target, expected)
                     }
                     robot.mouseMove(start.x.toInt(), start.y.toInt())
                     robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
@@ -158,7 +170,7 @@ class TextSelectionTest {
                             delay(100)
                             if (withContext(Dispatchers.Swing) {
                                 (kind != "line" || scroll.value == (if (direction > 0) scroll.maxValue else 0)) &&
-                                    selection.await().selectedTexts.joinToString("") { it.text } == expected
+                                    selection.await().selectedTexts.joinToString("\n") { it.text } == expected
                             }) break
                         }
                     }
