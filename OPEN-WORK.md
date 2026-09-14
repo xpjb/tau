@@ -1,3 +1,29 @@
+## Accepted: long-line selection correction (unreleased)
+
+Windows 0.5.14 contains the original Compose boundary patch; its complete payload
+was verified inside the delivered EXE. The reported 68..1 crash is a second bug.
+A real mouse drag in 553 characters reproduces start=1, end=68 with the reversed
+flag set. Compose confuses widget order with character order outside a multiline
+text block's horizontal edges. Wrapped text has the same failure.
+
+SelectionManager now corrects same-widget direction before publishing selection
+and deriving per-widget ranges. It preserves offsets and cross-widget ordering,
+allocating a copy only for an inconsistent flag. The existing guarded build-time
+transform applies the source patch on both platforms. No full framework fork,
+runtime hook, extra state, catch-and-continue policy or dependency was added.
+
+Acceptance: all 25 client tests pass without skips. The existing real-window test
+covers 12 drag/copy cases: multiline, wrapped, padded single lines and selection
+across widgets, in both directions. Removing the original boundary patch still
+breaks top-edge selection, so both fixes remain. Desktop shrinking, Android
+compilation and DEX pass. Artifact review confirms only the two intended methods
+change, both platform guards pass, and both fixes survive shrinking/DEX.
+Evidence: /root/tau-checks/selection-drag/acceptance.json. Code: bff6798.
+
+Hold for the next client release. No version/protocol bump, installer shipment or
+daemon restart occurred. Physical Windows mouse acceptance remains user QA.
+Production and delivered installers remain 0.5.14/protocol 10.
+
 ## Deployed: Tau 0.5.14 / protocol 10
 
 The user approved release, confirmed Tau was clear, and asked for immediate
