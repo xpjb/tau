@@ -179,6 +179,50 @@ class TranscriptScrollTest {
             assertTrue(reachedBottom, "Downward scrolling never reached the newest message")
             assertEquals(3, historyReads.get(), "Downward scrolling fetched more older history")
             assertEquals("bottom-anchor", position().key)
+            if (!grouped) {
+                val key = ChatKey(settings.identity, session.id)
+                val livePrefix = "STREAM VIEWPORT ANCHOR"
+                val live = TranscriptEvent(
+                    "stream:live",
+                    1600,
+                    "stream",
+                    phase = EventPhase.Live,
+                    role = EventRole.Assistant,
+                    kind = EventKind.Text,
+                    text = "$livePrefix\n" + (0 until 120).joinToString("\n") { "Existing streamed line $it" },
+                )
+                assertTrue(controller.store.applyUpdates(key, listOf(
+                    TranscriptPatch("g", 1, TranscriptChange(events = listOf(live))),
+                )))
+                delay(400)
+                assertTrue(position().follow, "A streamed response stopped following while docked")
+                withTimeout(5_000) {
+                    while (position().follow) {
+                        robot.mouseWheel(-1)
+                        delay(250)
+                    }
+                }
+                delay(300)
+                suspend fun liveTextTop(): Float = withContext(Dispatchers.Swing) {
+                    val nodes = frame.semanticsOwners.flatMap { owner ->
+                        generateSequence(listOf(owner.unmergedRootSemanticsNode)) { level ->
+                            level.flatMap { it.children }.takeIf { it.isNotEmpty() }
+                        }.flatten().toList()
+                    }
+                    checkNotNull(nodes.firstOrNull { node ->
+                        node.config.getOrNull(SemanticsProperties.Text)?.singleOrNull()?.text?.startsWith(livePrefix) == true
+                    }) { "The visible streaming response is missing" }.positionInRoot.y
+                }
+                val topBeforeDelta = liveTextTop()
+                assertTrue(controller.store.applyUpdates(key, listOf(
+                    TranscriptPatch("g", 2, TranscriptChange(delta = TextDelta(
+                        live.id,
+                        "\n" + (0 until 30).joinToString("\n") { "New streamed line $it" },
+                    ))),
+                )))
+                delay(500)
+                assertEquals(topBeforeDelta, liveTextTop(), 1f, "Streaming moved the undocked viewport")
+            }
             if (grouped) {
                 val key = ChatKey(settings.identity, session.id)
                 val cells = listOf(
