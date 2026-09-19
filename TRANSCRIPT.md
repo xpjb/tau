@@ -1,6 +1,6 @@
 # Retained transcript contract
 
-## Unreleased client QA — streamed response scrolling
+## Android 0.5.14 hotfix — streamed response scrolling
 
 Incoming transcript revisions preserve the visible item position whenever the
 reader is away from the bottom. Rapid deltas share one temporary anchor. Docked
@@ -9,8 +9,10 @@ The existing reversed list, saved key/pixel offset, history paging, expansion
 pin and scroll controls are unchanged. This adds no durable state or protocol.
 
 The real-window regression fails on the prior code with a 720 px movement and
-passes five rapid deltas within 1 px. All 26 desktop tests and Android client
-compilation pass. No client release or daemon change is included.
+passes five rapid deltas within 1 px. All 26 desktop tests pass. The signed APK
+keeps protocol/version 10/0.5.14, uses upgrade code 36 and the existing release
+certificate, and includes four 16 KiB-aligned native ABIs. It was queued to the
+user as an Android-only hotfix. No daemon or Windows client changed.
 
 ## Unreleased client QA — Markdown tables
 

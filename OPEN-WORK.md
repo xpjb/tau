@@ -1,4 +1,4 @@
-## Accepted: streamed responses keep an undocked viewport fixed (unreleased)
+## Delivered: Android streamed-viewport hotfix
 
 A growing response in the reversed transcript list kept its logical index and
 offset, but Compose placed it from its bottom edge. Each streamed delta therefore
@@ -16,9 +16,17 @@ daemon or alternate scrolling model was added.
 The regression now checks docked following and five rapid undocked deltas; the
 visible text remains within 1 px. All 26 desktop client tests pass without skips,
 and Android client compilation passes. Evidence:
-`/root/tau-checks/stream-scroll/`. Physical Windows and Android interaction remain
-user QA. Hold this client-only fix for the next matched batch; no version bump,
-installer, deployment or service restart occurred. Code: 59d4ccf.
+`/root/tau-checks/stream-scroll/`. Code: 59d4ccf.
+
+At the user's request, a signed Android-only hotfix retains version 0.5.14 and
+protocol 10 while raising versionCode from 35 to 36. The release build, archive,
+v2 signature, unchanged certificate, four ABIs, APK 16 KiB alignment and every
+native LOAD alignment pass. `Tau-0.5.14-android-scroll-hotfix.apk` was queued to
+the user through Tau. SHA-256:
+`5a32cdafd38c6e5d453e0b22948f87ce625c5f92f82525db7329b71fd509f5a4`.
+Receipts: `/root/tau-release/0.5.14-scroll-hotfix/`. Physical Android acceptance
+remains with the user. No Windows build, daemon change, service restart or
+provider request occurred.
 
 ## Accepted: Windows download completion (unreleased)
 
