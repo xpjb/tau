@@ -1,5 +1,17 @@
 # Retained transcript contract
 
+## Unreleased client QA — streamed response scrolling
+
+Incoming transcript revisions preserve the visible item position whenever the
+reader is away from the bottom. Rapid deltas share one temporary anchor. Docked
+views continue following the response, and active user input cancels correction.
+The existing reversed list, saved key/pixel offset, history paging, expansion
+pin and scroll controls are unchanged. This adds no durable state or protocol.
+
+The real-window regression fails on the prior code with a 720 px movement and
+passes five rapid deltas within 1 px. All 26 desktop tests and Android client
+compilation pass. No client release or daemon change is included.
+
 ## Unreleased client QA — Markdown tables
 
 Table blocks retain annotated cell rows and column alignment. The view draws

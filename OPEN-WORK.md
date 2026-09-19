@@ -1,3 +1,25 @@
+## Accepted: streamed responses keep an undocked viewport fixed (unreleased)
+
+A growing response in the reversed transcript list kept its logical index and
+offset, but Compose placed it from its bottom edge. Each streamed delta therefore
+moved text already on screen upward. A real-window regression measured a 720 px
+jump after 30 appended lines while the list was not docked at the bottom.
+
+An undocked, idle transcript now captures one visible item before each existing
+remote transcript revision and corrects only its measured screen displacement
+after layout. Rapid revisions share the same anchor. Bottom docking keeps the
+existing follow behavior, while active user scrolling or returning to the bottom
+cancels correction. The saved key/offset, reversed list, paging, expansion pin,
+scrollbar and bottom button remain unchanged. No persistent state, protocol,
+daemon or alternate scrolling model was added.
+
+The regression now checks docked following and five rapid undocked deltas; the
+visible text remains within 1 px. All 26 desktop client tests pass without skips,
+and Android client compilation passes. Evidence:
+`/root/tau-checks/stream-scroll/`. Physical Windows and Android interaction remain
+user QA. Hold this client-only fix for the next matched batch; no version bump,
+installer, deployment or service restart occurred. Code: 59d4ccf.
+
 ## Accepted: Windows download completion (unreleased)
 
 The user reports 4.9 KB / 4.9 KB followed by Download interrupted on Windows;
