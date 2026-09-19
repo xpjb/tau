@@ -61,9 +61,14 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalComposeUiApi::class, ComposeToolingApi::class)
 class TranscriptScrollTest {
     @Test
-    fun scrollsCopiesAndZoomsImages() = runBlocking {
+    fun keepsScrollingAndStreamingViewportStable() = runBlocking {
         assumeFalse("Run with a display or Xvfb", GraphicsEnvironment.isHeadless())
         checkScroll(grouped = false)
+    }
+
+    @Test
+    fun scrollsCopiesAndZoomsImages() = runBlocking {
+        assumeFalse("Run with a display or Xvfb", GraphicsEnvironment.isHeadless())
         checkScroll(grouped = true)
     }
 
@@ -195,6 +200,13 @@ class TranscriptScrollTest {
                     TranscriptPatch("g", 1, TranscriptChange(events = listOf(live))),
                 )))
                 delay(400)
+                assertTrue(controller.store.applyUpdates(key, listOf(
+                    TranscriptPatch("g", 2, TranscriptChange(delta = TextDelta(
+                        live.id,
+                        "\n" + (0 until 5).joinToString("\n") { "Docked streamed line $it" },
+                    ))),
+                )))
+                delay(300)
                 assertTrue(position().follow, "A streamed response stopped following while docked")
                 withTimeout(5_000) {
                     while (position().follow) {
@@ -214,12 +226,15 @@ class TranscriptScrollTest {
                     }) { "The visible streaming response is missing" }.positionInRoot.y
                 }
                 val topBeforeDelta = liveTextTop()
-                assertTrue(controller.store.applyUpdates(key, listOf(
-                    TranscriptPatch("g", 2, TranscriptChange(delta = TextDelta(
-                        live.id,
-                        "\n" + (0 until 30).joinToString("\n") { "New streamed line $it" },
-                    ))),
-                )))
+                repeat(5) { index ->
+                    assertTrue(controller.store.applyUpdates(key, listOf(
+                        TranscriptPatch("g", index + 3L, TranscriptChange(delta = TextDelta(
+                            live.id,
+                            "\n" + (0 until 6).joinToString("\n") { "New streamed line $index:$it" },
+                        ))),
+                    )))
+                    delay(30)
+                }
                 delay(500)
                 assertEquals(topBeforeDelta, liveTextTop(), 1f, "Streaming moved the undocked viewport")
             }

@@ -1052,6 +1052,46 @@ private fun ChatPanel(
     val showScrollToBottom by remember(listState) {
         derivedStateOf { listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0 }
     }
+    val transcriptRevision = chat.position.generation to chat.position.sequence
+    var observedTranscriptRevision by remember(chat) { mutableStateOf(transcriptRevision) }
+    var transcriptViewportAnchor by remember(chat) { mutableStateOf<Pair<String, Int>?>(null) }
+    if (observedTranscriptRevision != transcriptRevision) {
+        SideEffect {
+            if (observedTranscriptRevision != transcriptRevision) {
+                observedTranscriptRevision = transcriptRevision
+                val layout = listState.layoutInfo
+                if (transcriptViewportAnchor == null && !listState.isScrollInProgress &&
+                    (listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0)) {
+                    layout.visibleItemsInfo
+                        .filter { it.key != "bottom-anchor" }
+                        .minByOrNull { it.offset }
+                        ?.let { item ->
+                            (item.key as? String)?.let { key ->
+                                transcriptViewportAnchor = key to
+                                    (layout.viewportSize.height - item.offset - item.size)
+                            }
+                        }
+                }
+            }
+        }
+    }
+    LaunchedEffect(listState, transcriptViewportAnchor) {
+        val anchor = transcriptViewportAnchor ?: return@LaunchedEffect
+        val (anchorKey, anchorY) = anchor
+        while (transcriptViewportAnchor == anchor) {
+            val revision = observedTranscriptRevision
+            withFrameNanos { }
+            if (listState.isScrollInProgress ||
+                listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) break
+            val layout = listState.layoutInfo
+            val item = layout.visibleItemsInfo.firstOrNull { it.key == anchorKey } ?: break
+            val current = layout.viewportSize.height - item.offset - item.size
+            val delta = anchorY - current
+            if (delta != 0) listState.scrollBy(delta.toFloat())
+            if (revision == observedTranscriptRevision) break
+        }
+        if (transcriptViewportAnchor == anchor) transcriptViewportAnchor = null
+    }
     LaunchedEffect(chat, listState) {
         snapshotFlow {
             if (listState.isScrollInProgress || listState.layoutInfo.visibleItemsInfo.isEmpty()) null else {
