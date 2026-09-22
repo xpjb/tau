@@ -1,10 +1,12 @@
-# Streaming QA — release on hold
+# QA build 0.6.2
 
-Unreleased work after `9181388`. The user is sending QA notes while using 0.6.1.
-Commits/pushes are permitted, but **do not package, publish, or send another release
-until the user signals it**. The user subsequently requested minimal system use;
-compilation, GUI sessions and test runs were stopped. Resume heavier verification
-only when system load allows.
+The user explicitly requested both Windows and Android builds after `773e002`,
+lifting the hold for this QA delivery. This is not a stable-client cutover or a
+request to publish a GitHub release. Further deliveries remain on request.
+
+Keep resource use low: sequential builds, `CARGO_BUILD_JOBS=1`, limited Java
+processor count, and `TAU_LZMA_PRESET=3` for Windows packaging. No GUI/emulator
+sessions or full regression run are being started for this delivery.
 
 ## Implemented
 
@@ -59,12 +61,21 @@ no production service, stable app, or release installer was changed.
 
 - A small saved-anchor guard was added during the final static review after builds
   stopped: an empty/unsynchronized frame must not overwrite a saved scroll position.
-  Rebuild and check restart restoration, especially an anchor on an older page.
+  Both delivered targets now compile with it; restart restoration, especially an
+  anchor on an older page, still needs a manual check.
 - Exercise held-middle release, focus-loss cancellation, section-level large output
   toggles, partial tooltip-animation frames, sidebar scroll and touch long-press.
 - Rerun the existing suite, both Android builds, and physical Windows/DirectX/DPI
   acceptance when resources permit. Do not infer physical Windows acceptance from Wine.
 - Check mixed empty/hidden transcript blocks and tools straddling page boundaries
   against Tau 1 before declaring full presentation parity.
-- Wait for the explicit release signal before version bumps, installer packaging,
-  publication, or sending artifacts. No new release was produced for this batch.
+- The current request authorizes this beta build delivery; broader checks above
+  remain deferred, not silently marked passed. Physical Windows and Android
+  acceptance still depends on device QA.
+
+## 0.6.2 delivery checks
+
+Windows x64 installer and Android ARM64 APK built sequentially with one Cargo job.
+APK versionCode is 3; signing and 16KiB ZIP alignment checks passed. Packaged native
+payloads were hash-checked against the freshly built executable/library. No new GUI
+session, emulator, full test suite, or Android x86_64 build was started for delivery.

@@ -1,8 +1,8 @@
 # Tau 2 · native Rust frontend
 
-**Unreleased QA changes / release hold:** see [QA.md](QA.md). No new installer is
-being shipped until the user's explicit signal; heavier verification is paused
-while the system is under load.
+**QA build 0.6.2:** the user authorized Windows and Android builds of the latest
+interaction changes. See [QA.md](QA.md) for checks completed and deferred. Builds
+are kept sequential and low-concurrency while the system is under load.
 
 Branch: `tau2/rust-frontend`. **Tau Beta** is a parallel-install Rust preview,
 not the production cutover. `app/` remains the Kotlin reference. The beta installer
@@ -47,7 +47,7 @@ package `app.tau.rust` is labeled **Tau Beta**. Only Internet permission is
 requested; files use the system document picker. Plain HTTP is supported for
 Tailnet/loopback setups, just as in the existing client—not for public networks.
 
-Windows: ship **`dist/Tau-Beta-0.6.1-windows-x64.exe`**, a per-user installer using
+Windows: ship **`dist/Tau-Beta-0.6.2-windows-x64.exe`**, a per-user installer using
 the normal Tau setup path with a `beta` feature/channel. It installs a small native
 launcher to `%LOCALAPPDATA%\Tau Beta\Tau Beta.exe`, a distinct **Tau Beta** Start
 Menu entry, and hash-keyed versions under `%LOCALAPPDATA%\Tau Beta\versions`.

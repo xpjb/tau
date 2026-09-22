@@ -54,7 +54,8 @@ with lzma.open(
     payload,
     "wb",
     format=lzma.FORMAT_ALONE,
-    preset=9 | lzma.PRESET_EXTREME,
+    # An explicit 0..9 preset trades a little installer size for lower memory/CPU.
+    preset=int(os.environ["TAU_LZMA_PRESET"]) if "TAU_LZMA_PRESET" in os.environ else 9 | lzma.PRESET_EXTREME,
 ) as compressed:
     with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.USTAR_FORMAT) as archive:
         for path in sorted(bundle.rglob("*")):
