@@ -7,8 +7,8 @@ use tau_protocol::{SlashCommand, SlashCommandArgument, SlashCommandSource};
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Preferences {
+    // This configures tiles only. Any legacy `default` field is ignored by serde.
     pub slugs: Vec<String>,
-    pub default: Option<String>,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -21,37 +21,19 @@ impl Default for Preferences {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        Self {
-            default: slugs.last().cloned(),
-            slugs,
-        }
+        Self { slugs }
     }
 }
 impl Preferences {
     pub fn text(&self) -> String {
-        self.slugs
-            .iter()
-            .map(|s| {
-                format!(
-                    "{}{s}",
-                    if self.default.as_ref() == Some(s) {
-                        "* "
-                    } else {
-                        ""
-                    }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.slugs.join(
+            "
+",
+        )
     }
     pub fn parse(text: &str) -> Result<Self> {
-        let mut preferences = Self {
-            slugs: vec![],
-            default: None,
-        };
-        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-            let starred = line.starts_with('*');
-            let slug = line.strip_prefix('*').unwrap_or(line).trim();
+        let mut preferences = Self { slugs: vec![] };
+        for slug in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
             ensure!(
                 slug.len() <= 240
                     && !slug.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -64,13 +46,6 @@ impl Preferences {
                 !preferences.slugs.iter().any(|s| s == slug),
                 "Duplicate model: {slug}"
             );
-            if starred {
-                ensure!(
-                    preferences.default.is_none(),
-                    "Mark only one default with *"
-                );
-                preferences.default = Some(slug.into());
-            }
             preferences.slugs.push(slug.into());
             ensure!(
                 preferences.slugs.len() <= 12,

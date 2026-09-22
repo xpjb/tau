@@ -113,12 +113,6 @@ pub(crate) struct RuntimeState {
     context_usage: Option<ContextUsage>,
 }
 
-impl RuntimeState {
-    fn idle_remaining_ms(&self) -> Option<u64> {
-        self.idle_since.map(|since| IDLE_TIMEOUT.saturating_sub(since.elapsed()).as_millis() as u64)
-    }
-}
-
 enum BranchOperation<'a> {
     Fork(&'a str),
     Clone,
@@ -178,7 +172,6 @@ impl AgentManager {
                     title: stored.title,
                     starter: stored.starter,
                     status: runtime.status,
-                    idle_remaining_ms: runtime.idle_remaining_ms(),
                     detail: runtime.detail,
                     context_usage: runtime.context_usage,
                     model: stored.model,
@@ -275,7 +268,6 @@ impl AgentManager {
         initial.push(ServerMessage::SessionState {
             session_id: id.to_owned(),
             status: state.status,
-            idle_remaining_ms: state.idle_remaining_ms(),
             detail: state.detail,
             context_usage: state.context_usage,
         });
@@ -1329,7 +1321,6 @@ impl AgentManager {
         let _ = self.inner.events.send(ServerMessage::SessionState {
             session_id: id.to_owned(),
             status: next.status,
-            idle_remaining_ms: next.idle_remaining_ms(),
             detail: next.detail,
             context_usage: next.context_usage,
         });

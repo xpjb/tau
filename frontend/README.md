@@ -1,7 +1,7 @@
 # Tau 2 · native Rust frontend
 
 **Streaming QA: release on hold.** Unreleased transcript styling, connection
-health, contextual chat actions, worker TTL rings and new-chat model tiles are
+health, contextual chat actions, estimated cache TTL rings and new-chat model tiles are
 tracked in [QA.md](QA.md); 0.6.3 remains the shipped build until the user asks for
 another delivery.
 
@@ -95,16 +95,16 @@ unchanged account. Notices remain visible even without a selected chat.
   there is no duplicate bottom-left connection label.
 - Right-click a sidebar chat or its header for chat actions (hold on touch).
   Message context menus remain separate. Stop is a centered 40dp tonal circle.
-- Chat rings show the one-hour idle **worker** TTL; history is not deleted.
-  Exact countdown requires the updated daemon's optional `idleRemainingMs` field.
-  Older daemons still connect and show an unavailable countdown rather than a guess.
+- Chat rings show a **one-hour cache TTL estimate**, using existing reply
+  timestamps. No daemon/protocol update is needed. For unloaded history, chat
+  activity is a clearly labeled, weaker proxy; actual provider retention is unknown.
 - Empty starter chats offer quick model tiles. Settings → Quick model selection
-  manages up to 12 provider/model slugs; prefix one with `*` for the new-chat default.
-  The searchable catalog can add/remove choices; no `*` uses the daemon default,
-  and an empty list disables tiles. Preferences are local to this daemon/account.
-  Presets request Codex `gpt-6-luna`, `gpt-6-sol`, `gpt-6-astra` and OpenRouter
-  DeepSeek v4.1 Flash (preferred default). A model must actually appear in the
-  daemon's built-in catalog to be sent. Missing defaults leave its model unchanged.
+  manages up to 12 provider/model slugs with a searchable catalog and add/remove
+  choices; an empty list disables tiles. Preferences are local to this daemon/account.
+  Presets include Codex `gpt-6-luna`, `gpt-6-sol`, `gpt-6-astra` and OpenRouter
+  DeepSeek v4.1 Flash. **New chats keep the last chosen model**, using the existing
+  daemon behavior; the tile list never forces a default. A model must actually
+  appear in the daemon's built-in catalog to be sent.
 
 Desktop automation can explicitly set
 `TAU2_SERVER` and `TAU2_TOKEN`; these override and save the settings. Do not put

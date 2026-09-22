@@ -687,8 +687,8 @@ impl Renderer {
         let size = rect.width.ceil().max(1.) as u32;
         let stamp = icon.stamp(color);
         // Multiple TTL rings in one frame must not alias the final row's texture.
-        // Lifetimes quantize to 61 minute-sized variants rather than caching per chat.
-        let variant = if matches!(icon, crate::icons::Icon::Lifetime(_)) {
+        // Cache TTL estimates quantize to 61 minute-sized variants rather than caching per chat.
+        let variant = if matches!(icon, crate::icons::Icon::CacheTtl(_)) {
             stamp
         } else {
             0

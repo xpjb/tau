@@ -6,7 +6,7 @@ pub enum Icon {
     Send,
     Stop,
     Context(Option<f32>),
-    Lifetime(Option<f32>),
+    CacheTtl(Option<f32>),
 }
 impl Icon {
     pub fn name(self) -> &'static str {
@@ -15,13 +15,13 @@ impl Icon {
             Self::Send => "send",
             Self::Stop => "stop",
             Self::Context(_) => "context",
-            Self::Lifetime(_) => "lifetime",
+            Self::CacheTtl(_) => "cache-ttl",
         }
     }
     pub fn stamp(self, color: u32) -> u64 {
         u64::from(color) << 32
             | match self {
-                Self::Context(Some(r)) | Self::Lifetime(Some(r)) => {
+                Self::Context(Some(r)) | Self::CacheTtl(Some(r)) => {
                     (r.clamp(0., 1.) * 1000.).round() as u64 + 1
                 }
                 _ => 0,
@@ -76,7 +76,7 @@ impl Icon {
                 p.line_to(6., 18.);
                 p.close();
             }
-            Self::Context(ratio) | Self::Lifetime(ratio) => {
+            Self::Context(ratio) | Self::CacheTtl(ratio) => {
                 // 20dp circle, 2dp stroke, like Tau 1. Coordinates below use 24 units.
                 let stroke = Stroke {
                     width: 2.4,

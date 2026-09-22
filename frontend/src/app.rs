@@ -68,7 +68,7 @@ enum Action {
 #[derive(Clone, PartialEq, Eq)]
 enum Info {
     Connection,
-    Lifetime(String),
+    CacheTtl(String),
 }
 #[derive(Clone)]
 enum ModalKind {
@@ -1261,9 +1261,6 @@ impl App {
                         crate::models::Preferences::parse(&modal.fields[0].1.value)?;
                     if preferences.slugs.contains(&slug) {
                         preferences.slugs.retain(|s| s != &slug);
-                        if preferences.default.as_ref() == Some(&slug) {
-                            preferences.default = None;
-                        }
                     } else {
                         anyhow::ensure!(
                             preferences.slugs.len() < 12,
@@ -1967,19 +1964,15 @@ impl App {
                 action: Action::Select(session.id.clone()),
             });
             let ring = Rect::new(rect.x + rect.width - 33. * s, y + 11. * s, 18. * s, 18. * s);
-            let (ratio, tint) = self.controller.lifetimes.meter(
-                &session.id,
-                session.status,
-                self.controller.epoch.is_some(),
-            );
+            let (ratio, tint) = self.controller.cache_ttl(session).meter();
             self.renderer
-                .clipped_icon(ctx, layer, Icon::Lifetime(ratio), ring, tint, clip);
+                .clipped_icon(ctx, layer, Icon::CacheTtl(ratio), ring, tint, clip);
             let target = crate::render::intersect(
                 Rect::new(ring.x - 7. * s, ring.y - 7. * s, 32. * s, 32. * s),
                 clip,
             );
             if target.height > 0. {
-                let info = Info::Lifetime(session.id.clone());
+                let info = Info::CacheTtl(session.id.clone());
                 self.info_areas.push((target, info.clone()));
                 self.hits.push(Hit {
                     rect: target,
@@ -2879,8 +2872,7 @@ impl App {
         {
             self.usage.text.push_str("\nLast known value");
         }
-        let choosing = self.controller.chats[&session].default_pending
-            || self.controller.chats[&session].model_request.is_some();
+        let choosing = self.controller.chats[&session].model_request.is_some();
         let can_send =
             connected && !choosing && (!self.composer.value.trim().is_empty() || !files.is_empty());
         self.icon_button(
@@ -3031,7 +3023,7 @@ impl App {
         let s = self.scale;
         let chat = &self.controller.chats[session];
         let connected = self.controller.epoch.is_some();
-        let busy = chat.default_pending || chat.model_request.is_some();
+        let busy = chat.model_request.is_some();
         let hint = if !connected {
             "Connect to choose a model"
         } else if busy {
@@ -3117,8 +3109,6 @@ impl App {
                 "Selecting…"
             } else if selected {
                 "Selected"
-            } else if self.controller.model_preferences.default.as_ref() == Some(selector) {
-                "New-chat default"
             } else {
                 "Select"
             };
@@ -3398,7 +3388,7 @@ impl App {
                 .controller
                 .health
                 .details(&self.controller.settings, &self.controller.connection),
-            Info::Lifetime(id) => {
+            Info::CacheTtl(id) => {
                 let Some(session) = self
                     .controller
                     .account
@@ -3408,11 +3398,9 @@ impl App {
                 else {
                     return;
                 };
-                self.controller.lifetimes.details(
-                    id,
-                    session.status,
-                    self.controller.epoch.is_some(),
-                )
+                self.controller
+                    .cache_ttl(session)
+                    .details(self.controller.epoch.is_some())
             }
         };
         let s = self.scale;
@@ -3681,8 +3669,8 @@ impl App {
         let compact = b.height / s < 480.;
         let show_catalog = b.height / s >= 320.;
         let help_h = if compact { 32. } else { 58. } * s;
-        self.renderer.label(layer, if compact { "One slug per line; * marks the default. Empty disables tiles." }
-            else { "One provider/model per line (max 12). Prefix one with * for the new-chat default; no * keeps the daemon default. Empty disables tiles." },
+        self.renderer.label(layer, if compact { "One slug per line. Last chosen model is remembered. Empty disables tiles." }
+            else { "One provider/model per line (max 12). New chats keep the last chosen model. This list only controls quick-select tiles; empty disables them." },
             Rect::new(x, top + 36. * s, w, help_h), 12. * s, color(0xb7c2ce), false);
         let edit_y = top + 36. * s + help_h + 8. * s;
         let edit_h = (b.height * 0.25)
@@ -3785,7 +3773,7 @@ impl App {
             self.controller
                 .notice
                 .as_deref()
-                .unwrap_or("Changes apply to future new chats. Search to narrow the catalog."),
+                .unwrap_or("This list doesn't change your model. Search to narrow the catalog."),
             Rect::new(x, footer - 44. * s, w, 36. * s),
             12. * s,
             color(if self.controller.notice.is_some() {
@@ -3798,7 +3786,7 @@ impl App {
         let button_w = (w - 16. * s) / 3.;
         for (i, (label, action)) in [
             ("Save", Action::Confirm),
-            ("Defaults", Action::ResetModels),
+            ("Presets", Action::ResetModels),
             ("Cancel", Action::CancelModal),
         ]
         .into_iter()

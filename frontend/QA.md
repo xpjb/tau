@@ -50,28 +50,35 @@ next signal. Continue keeping build/test/verification resource use low.
   active chat. Target highlight follows the stable ID during list reordering.
   Touch hold duration no longer resets on sub-threshold finger movement.
 
-- Chat-list TTL rings count down the one-hour **worker idle** allowance, not chat
-  deletion. The daemon supplies optional `idleRemainingMs` in v10 session lists
-  and state events, calculated from the very same monotonic `idle_since` used by
-  its sleep timer. New fields are backward-compatible; timestamps such as
-  `updatedAt` are deliberately not used to guess expiry. Running/starting,
-  sleeping, offline/unknown and elapsed-but-retained workers have distinct states.
-  Hover/tap explains the ring and that history is kept. The client ages sampled
-  remaining durations monotonically and clears them on disconnect. Existing 20s
-  heartbeats refresh minute-sized rings; there is no new polling/render timer.
-  Multiple rings use bounded, distinct texture variants, clipped to the list.
+- Chat-list rings are now a **one-hour provider-cache estimate**, per the user's
+  clarification, not worker-idle deadlines. Existing transcript `timestampMs` or
+  RFC3339 `timestamp` supplies the latest received assistant reply time (including
+  thinking/tool calls, excluding local tool results, errors and hidden entries).
+  Unloaded chats may use existing `updatedAt` as a clearly labeled activity proxy;
+  its tooltip notes that metadata changes can affect it. Fresh empty chats and
+  missing/unusable/future timestamps show unknown rather than an invented deadline.
+  Reconnect/history receipt and heartbeats do not renew source timestamps; worker
+  running/sleeping state does not freeze or empty the estimate. No extra history
+  requests, probes or render timer. Minute-sized rings use bounded, distinct
+  texture variants and clip to the list. The one-hour assumption is **not** a
+  confirmed OpenAI/ChatGPT/OpenRouter cache lifetime.
+- Removed the mistaken daemon/protocol worker-TTL additions completely; the
+  existing daemon is sufficient. The unrelated worker-sleep retry flag remains
+  a separate backend follow-up, not a requirement for these rings.
 - Untouched starter chats expose responsive, scrollable model tiles until the
   first pending/queued/actual conversation turn. Draft text/files are preserved.
-  Settings → Quick model selection edits the per-account list/default, searches
-  the daemon catalog, adds/removes entries, restores presets, or disables tiles.
-  Presets are Codex GPT-6 Luna/Sol/Astra and OpenRouter DeepSeek v4.1 Flash; DeepSeek
-  is preferred for newly-created chats only. These are preferences, not invented
-  availability: commands use only a unique matching **built-in** `/model` catalog
-  entry. Missing choices are disabled, and a missing default keeps the daemon's
-  current model with a notice. No forced model change on reconnect, clone, fork
-  or existing chats. Model changes block send until resolved, do not overwrite
-  drafts/attachments, are not optimistically labeled selected, and are never
-  replayed automatically after connection loss.
+  Settings → Quick model selection edits only the per-account tile list, searches
+  the daemon catalog, adds/removes choices, restores presets, or disables tiles.
+  Presets include Codex GPT-6 Luna/Sol/Astra and OpenRouter DeepSeek v4.1 Flash;
+  **none is forced as a default**. New chats retain the existing last-chosen-model
+  behavior via the daemon's persistent `/model` command. Removed the fixed default,
+  `*` syntax, automatic startup selection and pending-default send gate; a legacy
+  saved `default` field is ignored. Explicit selection still gates send until
+  resolved, never overwrites drafts/files, never optimistically marks a new model
+  selected, and is never replayed after reconnect. Selecting an already-active
+  tile still persists that choice, since another chat may have changed the default.
+  Only unambiguous real built-in catalog entries can be sent; missing choices are
+  disabled. Editing/resetting the tile list alone never changes the selected model.
 
 ## Checks / limits
 
@@ -83,25 +90,23 @@ need device acceptance before delivery. Connection hover/tap, timeout/reconnect
 and RTT display also await device acceptance; the incremental library check for
 this change took 1.28s (one managed Cargo job). Header/context-menu library check
 also passed (0.78s); GUI/touch acceptance remains deferred.
-TTL/model library check passed (1.18s); daemon library check passed (8.00s),
-both managed and single-job; final frontend check after edge-case cleanup also
-passed (0.71s). One earlier Cargo attempt exited 75 (shared build
-busy); work continued on source rather than contending. No new tests were added
-merely to exercise UI/API calls, and no full suites, binaries or devices started.
+The earlier TTL/model iteration passed frontend and daemon library checks
+(1.18s / 8.00s, then 0.71s frontend); its worker-TTL backend wiring is now removed.
+One Cargo attempt exited 75 (shared build busy); work continued on source rather
+than contending. The corrected frontend passed a managed single-job library check
+(1.64s; final check 0.67s). No full suites, GUI/emulators, release binaries or new
+trivial API tests.
 
 **Before delivery:** verify header centering and right-click/long-press targets;
-TTL active→idle→sleep, unavailable old daemon, offline/reconnect and retained
-queued work; model tile scrolling and settings on narrow/landscape screens;
-canonical catalog matches, missing/failed defaults, preserved drafts/files,
-rapid send during selection, no replay after disconnect, and hiding after first
-turn. Actual preferred model availability must be checked against the user's
-connected daemon catalog, not assumed from preset text.
+cache-ring aging across worker state changes, reconnect, offline, old history and
+missing timestamps; proxy-vs-reply tooltip labels; model tile scrolling/settings on
+narrow/landscape screens; last-chosen model reuse, unchanged choice after editing
+presets, preserved drafts/files, rapid send during selection, no replay after
+connection loss, and hiding after first turn. Model availability must come from
+the user's daemon catalog, not be assumed from preset text.
 
-**Integration requirement:** exact TTL countdown needs the updated daemon's
-optional field; an older daemon remains compatible but shows TTL unavailable.
-No daemon deployment or package delivery was performed. Potential one-shot idle
-sleep retry/rescheduling issue is separately flagged for lifecycle integration:
-`d4bea33e-cd4b-45a6-baf3-f54a4c8fe409`.
+No daemon deployment, protocol change, version bump or package delivery is needed
+for this correction or was performed. Releases remain on hold.
 
 **Timing source limitation (user accepted; deferred to backend integration):** Pi/daemon currently clones an entry/message timestamp
 onto its content blocks. Details and text within that same entry can therefore

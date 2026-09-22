@@ -20,7 +20,6 @@ pub struct Chat {
     pub commands: Vec<SlashCommand>,
     pub commands_loaded: bool,
     pub model_request: Option<(String, String)>,
-    pub default_pending: bool,
     pub statuses: BTreeMap<String, String>,
     pub status_times: BTreeMap<String, Option<u64>>,
     pub widgets: BTreeMap<String, Vec<String>>,
@@ -38,7 +37,6 @@ pub struct Controller {
     pub title_prompt: Option<(String, String)>,
     pub connection: String,
     pub health: crate::connection::Health,
-    pub lifetimes: crate::lifetime::Lifetimes,
     pub epoch: Option<u64>,
     pub notice: Option<String>,
     network: Option<Network>,
@@ -63,7 +61,6 @@ impl Controller {
             title_prompt: None,
             connection: "Not connected".into(),
             health: crate::connection::Health::default(),
-            lifetimes: crate::lifetime::Lifetimes::default(),
             epoch: None,
             notice: None,
             network: None,
@@ -82,7 +79,6 @@ impl Controller {
         self.epoch = None;
         self.connection = "Connecting…".into();
         self.health = crate::connection::Health::connecting();
-        self.lifetimes.clear();
         self.network = Some(Network::start(self.settings.clone(), self.wake.clone()));
     }
     pub fn configure(&mut self, settings: Settings) -> Result<()> {
@@ -123,7 +119,6 @@ impl Controller {
                     commands: vec![],
                     commands_loaded: false,
                     model_request: None,
-                    default_pending: false,
                     statuses: BTreeMap::new(),
                     status_times: BTreeMap::new(),
                     widgets: BTreeMap::new(),
@@ -237,7 +232,7 @@ impl Controller {
             .ok_or_else(|| anyhow::anyhow!("Select a chat"))?;
         let chat = self.chats.get_mut(&session).unwrap();
         ensure!(
-            !chat.default_pending && chat.model_request.is_none(),
+            chat.model_request.is_none(),
             "Wait for model selection to finish; your draft is saved"
         );
         ensure!(
@@ -417,19 +412,10 @@ impl Controller {
         let slug = crate::models::resolve(selector, &chat.commands)
             .ok_or_else(|| anyhow::anyhow!("That model is not offered by this daemon"))?
             .to_owned();
-        self.chats.get_mut(session).unwrap().default_pending = false;
-        if self
-            .account
-            .sessions
-            .iter()
-            .find(|s| s.id == session)
-            .and_then(|s| s.model.as_ref())
-            .is_some_and(|m| format!("{}/{}", m.provider, m.model_id) == slug)
-        {
-            return Ok(());
-        }
-        // The existing built-in model command changes no draft/attachments and
-        // adds no pretend conversation turn. Never replay it after reconnect.
+        // /model already persists the last chosen model in the daemon/Pi.
+        // Send even when it matches this chat: another chat may have changed
+        // the remembered default. Only an explicit tile click reaches here.
+        // Preserve drafts/attachments and never replay after reconnect.
         let id = self.request(ClientCommand::Prompt {
             session_id: session.into(),
             text: format!("/model {slug}"),
@@ -437,32 +423,11 @@ impl Controller {
         self.chats.get_mut(session).unwrap().model_request = Some((id, slug));
         Ok(())
     }
-    fn apply_new_chat_defaults(&mut self) -> bool {
-        let ready: Vec<_> = self
-            .chats
-            .iter()
-            .filter(|(id, c)| {
-                c.default_pending
-                    && c.commands_loaded
-                    && c.feed.synchronized
-                    && !c.feed.opening
-                    && self.account.sessions.iter().any(|s| &s.id == *id)
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &ready {
-            self.chats.get_mut(id).unwrap().default_pending = false;
-            if self.quick_start(id)
-                && let Some(default) = self.model_preferences.default.clone()
-            {
-                if let Err(error) = self.choose_model(id, &default) {
-                    self.notice = Some(format!(
-                        "Default model {default} unavailable: {error}. Keeping the daemon's model."
-                    ));
-                }
-            }
-        }
-        !ready.is_empty()
+    pub fn cache_ttl(&self, session: &SessionSummary) -> crate::cache_ttl::Estimate {
+        crate::cache_ttl::Estimate::from_session(
+            session,
+            self.chats.get(&session.id).map(|c| &c.feed),
+        )
     }
     pub fn new_chat(&mut self) -> Result<()> {
         let keep_session_id = self
@@ -587,12 +552,7 @@ impl Controller {
                 self.store.save_chat(&self.identity, session, &chat.local)?;
             }
         }
-        if let Some(command) = self.requests.remove(id) {
-            if let ClientCommand::GetCommands { session_id } = command
-                && let Some(chat) = self.chats.get_mut(&session_id)
-            {
-                chat.default_pending = false;
-            }
+        if self.requests.remove(id).is_some() {
             self.notice = Some(detail.into());
         }
         Ok(())
@@ -608,7 +568,7 @@ impl Controller {
                 self.notice = Some(error.to_string());
             }
         }
-        self.apply_new_chat_defaults() || changed
+        changed
     }
     fn network_event(&mut self, event: transport::Event) -> Result<()> {
         let fatal = matches!(&event, transport::Event::Fatal(_));
@@ -629,13 +589,11 @@ impl Controller {
                 self.epoch = None;
                 self.connection = detail;
                 self.health.disconnected(fatal);
-                self.lifetimes.clear();
                 self.requests.clear();
                 for (session, chat) in &mut self.chats {
                     if chat.model_request.take().is_some() {
                         self.notice = Some("Model change unconfirmed; check the current model after reconnecting. It was not resent.".into());
                     }
-                    chat.default_pending = false;
                     chat.commands_loaded = false;
                     chat.feed.synchronized = false;
                     chat.feed.loading = false;
@@ -715,11 +673,6 @@ impl Controller {
     pub fn message(&mut self, message: ServerMessage) -> Result<()> {
         match message {
             ServerMessage::Sessions { sessions } => {
-                self.lifetimes.clear();
-                for session in &sessions {
-                    self.lifetimes
-                        .update(&session.id, session.status, session.idle_remaining_ms);
-                }
                 self.account.sessions = sessions;
                 if let Some(id) = &self.account.selected
                     && let Some(s) = self.account.sessions.iter().find(|s| &s.id == id)
@@ -806,12 +759,9 @@ impl Controller {
             ServerMessage::SessionState {
                 session_id,
                 status,
-                idle_remaining_ms,
                 context_usage,
                 detail,
             } => {
-                self.lifetimes
-                    .update(&session_id, status, idle_remaining_ms);
                 if let Some(s) = self
                     .account
                     .sessions
@@ -819,7 +769,6 @@ impl Controller {
                     .find(|s| s.id == session_id)
                 {
                     s.status = status;
-                    s.idle_remaining_ms = idle_remaining_ms;
                     s.context_usage = context_usage;
                     s.detail = detail;
                 }
@@ -957,11 +906,6 @@ impl Controller {
                     self.request(ClientCommand::ListSessions)?;
                 }
                 if !ok {
-                    if let Some(ClientCommand::GetCommands { session_id }) = &command
-                        && let Some(chat) = self.chats.get_mut(session_id)
-                    {
-                        chat.default_pending = false;
-                    }
                     if let Some(ClientCommand::GetHistory { session_id, .. }) = &command
                         && let Some(chat) = self.chats.get_mut(session_id)
                     {
@@ -972,16 +916,10 @@ impl Controller {
                     }
                 } else {
                     match command {
-                        Some(ClientCommand::CreateSession { .. }) => {
-                            if let Some(id) = session_id {
-                                self.ensure_chat(&id)?;
-                                self.chats.get_mut(&id).unwrap().default_pending =
-                                    self.model_preferences.default.is_some();
-                                self.select(&id)?;
-                            }
-                        }
                         Some(
-                            ClientCommand::ForkSession { .. } | ClientCommand::CloneSession { .. },
+                            ClientCommand::CreateSession { .. }
+                            | ClientCommand::ForkSession { .. }
+                            | ClientCommand::CloneSession { .. },
                         ) => {
                             if let Some(id) = session_id {
                                 self.select(&id)?;
