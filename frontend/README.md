@@ -1,5 +1,9 @@
 # Tau 2 · native Rust frontend
 
+**Streaming QA: release on hold.** Unreleased section timestamps/grouping, hover
+and paragraph refinements are tracked in [QA.md](QA.md); 0.6.3 remains the shipped
+build until the user asks for another delivery.
+
 **QA build 0.6.3:** smaller Android/Windows packages using system fonts. See
 [PACKAGING.md](PACKAGING.md) for measured download/installed sizes and tradeoffs;
 [QA.md](QA.md) records checks completed and deferred. Builds remain sequential and

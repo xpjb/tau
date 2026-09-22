@@ -33,6 +33,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 url = "2"
 log = "0.4"
 unicode-segmentation = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 

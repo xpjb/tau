@@ -19,7 +19,9 @@ pub struct Chat {
     pub feed: Feed,
     pub commands: Vec<SlashCommand>,
     pub statuses: BTreeMap<String, String>,
+    pub status_times: BTreeMap<String, Option<u64>>,
     pub widgets: BTreeMap<String, Vec<String>>,
+    pub widget_times: BTreeMap<String, Option<u64>>,
 }
 pub struct Controller {
     pub store: Store,
@@ -107,7 +109,9 @@ impl Controller {
                     feed: Feed::default(),
                     commands: vec![],
                     statuses: BTreeMap::new(),
+                    status_times: BTreeMap::new(),
                     widgets: BTreeMap::new(),
+                    widget_times: BTreeMap::new(),
                 },
             );
         }
@@ -235,6 +239,7 @@ impl Controller {
         };
         let pending = Pending {
             request: request.clone(),
+            started_at_ms: crate::clock::now_ms(),
             text: text.clone(),
             files: files.clone(),
             status: if files.is_empty() {
@@ -304,6 +309,7 @@ impl Controller {
         let mut local = chat.local.clone();
         local.pending.push(Pending {
             request: request.clone(),
+            started_at_ms: crate::clock::now_ms(),
             text: "Control requested".into(),
             files: vec![],
             status: Delivery::Sending,
@@ -702,14 +708,25 @@ impl Controller {
                     "setStatus" => {
                         if let Some(key) = request.status_key {
                             if let Some(text) = request.status_text {
+                                chat.status_times
+                                    .entry(key.clone())
+                                    .or_insert_with(crate::clock::now_ms);
                                 chat.statuses.insert(key, text);
                             } else {
                                 chat.statuses.remove(&key);
+                                chat.status_times.remove(&key);
                             }
                         }
                     }
                     "setWidget" => {
                         if let Some(key) = request.widget_key {
+                            if request.widget_lines.is_empty() {
+                                chat.widget_times.remove(&key);
+                            } else {
+                                chat.widget_times
+                                    .entry(key.clone())
+                                    .or_insert_with(crate::clock::now_ms);
+                            }
                             chat.widgets.insert(key, request.widget_lines);
                         }
                     }

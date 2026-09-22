@@ -57,6 +57,46 @@ impl<'a> Tools<'a> {
                         .is_some_and(|first| first.id != e.id)
             })
     }
+    /// Copy this logical Details section, including currently collapsed tools,
+    /// without pulling in the adjacent assistant answer. Only assembled on demand.
+    pub fn copy(&self, group: &[&Event]) -> String {
+        let mut parts = vec![];
+        for e in group {
+            if e.kind == EventKind::Thinking && e.role != EventRole::Tool {
+                if !e.text.is_empty() {
+                    parts.push(format!("Thinking\n{}", e.text));
+                }
+                continue;
+            }
+            let mut tool = format!("Tool · {}", e.tool_name.as_deref().unwrap_or("tool"));
+            if e.role != EventRole::Tool && !e.text.is_empty() {
+                tool.push_str(&format!("\nInput\n{}", e.text));
+            }
+            let results = e
+                .tool_call_id
+                .as_deref()
+                .and_then(|id| self.results.get(id));
+            let orphan = [*e];
+            let results = results.map(Vec::as_slice).unwrap_or_else(|| {
+                if e.role == EventRole::Tool {
+                    &orphan
+                } else {
+                    &[]
+                }
+            });
+            for result in results {
+                if result.kind == EventKind::Text && !result.text.is_empty() {
+                    tool.push_str(&format!(
+                        "\n{}\n{}",
+                        if result.is_error { "Error" } else { "Output" },
+                        result.text
+                    ));
+                }
+            }
+            parts.push(tool);
+        }
+        parts.join("\n\n")
+    }
     pub fn lines(&self, group: &[&Event], local: &LocalChat) -> Vec<Line> {
         // Reuse an explicitly toggled group key when a previous page prepends more details.
         let key = group

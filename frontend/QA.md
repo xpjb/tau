@@ -1,3 +1,51 @@
+# Streaming section QA — release on hold
+
+Unreleased work after `eacaab4` / the shipped 0.6.3 packages. User resumed
+streaming notes; no new packaging, version bump or artifact delivery until their
+next signal. Continue keeping build/test/verification resource use low.
+
+## Implemented
+
+- Independent top timestamps on each logical bubble, including Details, text,
+  pending/queued sends and extension sections. Local time, date + seconds, using
+  source event milliseconds/RFC3339 (first contributing event for Details).
+  Local pending creation times are saved once; old local records remain readable.
+  Extension section times stay fixed while their content changes. Missing source
+  time says “Time unavailable”; history is never dated with its arrival/render time.
+- Same-sender neighbors touch with a faint inset divider, instead of a 12dp gap.
+  Only the outside of the visual group is rounded; logical IDs, disclosure state,
+  selection and copy boundaries stay independent. Different senders retain spacing.
+- Whole-section hover/press tint, including header/timestamp/padding/nested panels,
+  clipped to the actual rounded section and transcript viewport. Text/photos are
+  not washed out. Hit testing uses the same per-corner geometry and half-open
+  shared edges. Pointer transitions between otherwise non-interactive sections
+  request redraw without continuous polling.
+- Context menus keep their target section highlighted by stable key during
+  streaming/reflow, not whatever later occupies the original pointer coordinates.
+  Details “Copy message” includes its thinking/tool input/output even if collapsed,
+  but excludes the neighboring answer. The copy text is only assembled on demand.
+- Paragraph color matches Tau 1's muted onSurfaceVariant #B7C2CE, correctly
+  converted from sRGB to linear GPU color. Links/code retain their distinct colors.
+- Markdown block spacing reduced from 12.8 to 8dp at normal 16dp text size; no
+  trailing paragraph gap after the final block. Explicit authored line breaks and
+  line leading are unchanged. Empty/hidden no-op events no longer split Details.
+
+## Checks / limits
+
+Managed `cargo check --locked -p tau-frontend --lib` passed with one Cargo job;
+formatting/diff checks passed. No GUI/emulator session, release build, full suite
+or new trivial API test was started. Per-corner WGSL pipeline/rendering, hover at
+clipped group ends, timestamps/DST, clipboard boundaries and scroll anchoring still
+need device acceptance before delivery.
+
+**Timing source limitation:** Pi/daemon currently clones an entry/message timestamp
+onto its content blocks. Details and text within that same entry can therefore
+show the same source time; exact distinct historical block-start times need
+upstream capture/persistence. Do not claim those times were reconstructed or
+fabricate them from receipt time. Follow-up: `d9fa2e39-2f9f-4ce8-a55e-e91a27b6b0d3`.
+
+---
+
 # QA build 0.6.3 — packaging
 
 The user requested optimized, directly installable Android/Windows packages.

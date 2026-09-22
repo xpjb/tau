@@ -31,6 +31,25 @@ pub fn contains(r: Rect, p: Vec2) -> bool {
         && p.x <= r.x + r.width
         && p.y <= r.y + r.height
 }
+/// Half-open bounds give adjacent sections an unambiguous pointer/copy boundary.
+/// Corners are ordered top-left, top-right, bottom-right, bottom-left.
+pub fn contains_rounded(rect: Rect, corners: [f32; 4], point: Vec2) -> bool {
+    if !contains(rect, point) || point.x >= rect.x + rect.width || point.y >= rect.y + rect.height {
+        return false;
+    }
+    let x = point.x - rect.x - rect.width * 0.5;
+    let y = point.y - rect.y - rect.height * 0.5;
+    let index = match (x > 0., y > 0.) {
+        (false, false) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+        (false, true) => 3,
+    };
+    let r = corners[index].clamp(0., rect.width.min(rect.height) * 0.5);
+    let qx = x.abs() - rect.width * 0.5 + r;
+    let qy = y.abs() - rect.height * 0.5 + r;
+    qx.max(0.).hypot(qy.max(0.)) + qx.max(qy).min(0.) <= r
+}
 pub fn intersect(a: Rect, b: Rect) -> Rect {
     let x = a.x.max(b.x);
     let y = a.y.max(b.y);
@@ -48,7 +67,7 @@ struct Vertex {
     color: [f32; 4],
     local: [f32; 2],
     half_size: [f32; 2],
-    radius: f32,
+    corners: [f32; 4],
 }
 #[derive(Clone, Copy, Default)]
 pub struct Interaction {
@@ -60,7 +79,7 @@ struct Shape {
     rect: Rect,
     clip: Rect,
     color: Color,
-    radius: f32,
+    corners: [f32; 4],
 }
 #[derive(Default)]
 pub struct Layer {
@@ -86,20 +105,46 @@ impl Layer {
         self.clipped_rounded_rect(rect, 0., color, clip);
     }
     pub fn clipped_rounded_rect(&mut self, rect: Rect, radius: f32, color: Color, clip: Rect) {
+        self.clipped_corners(rect, [radius; 4], color, clip);
+    }
+    pub fn clipped_corners(&mut self, rect: Rect, corners: [f32; 4], color: Color, clip: Rect) {
         let clip = intersect(rect, clip);
         if clip.width > 0. && clip.height > 0. {
             self.rects.push(Shape {
                 rect,
                 clip,
                 color,
-                radius: radius.clamp(0., rect.width.min(rect.height) * 0.5),
+                corners: corners.map(|r| r.clamp(0., rect.width.min(rect.height) * 0.5)),
             });
         }
     }
-    pub fn control_color(&self, rect: Rect, mut base: Color) -> Color {
+    pub fn control_color(&self, rect: Rect, base: Color) -> Color {
+        self.surface_color(rect, [0.; 4], rect, base)
+    }
+    /// Tint the entire section after its panels, but below text/images. Using
+    /// the same full shape prevents square hover patches at rounded corners.
+    pub fn surface_highlight(&mut self, rect: Rect, corners: [f32; 4], clip: Rect, pinned: bool) {
+        let strength = if pinned {
+            0.035
+        } else {
+            self.surface_color(rect, corners, clip, Color([0., 0., 0., 1.]))
+                .0[0]
+        };
+        if strength > 0. {
+            self.clipped_corners(rect, corners, Color([1., 1., 1., strength]), clip);
+        }
+    }
+    pub fn surface_color(
+        &self,
+        rect: Rect,
+        corners: [f32; 4],
+        clip: Rect,
+        mut base: Color,
+    ) -> Color {
+        let inside = |p| contains(clip, p) && contains_rounded(rect, corners, p);
         let input = self.interaction;
-        if input.hover.is_some_and(|p| contains(rect, p)) {
-            let mix = if input.pressed.is_some_and(|p| contains(rect, p)) {
+        if input.hover.is_some_and(inside) {
+            let mix = if input.pressed.is_some_and(inside) {
                 0.09
             } else if !input.held {
                 0.035
@@ -195,7 +240,7 @@ impl Renderer {
                     buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32x2, 4 => Float32],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4],
                     })],
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -655,7 +700,7 @@ impl Renderer {
                             y - full.y - full.height * 0.5,
                         ],
                         half_size: [full.width * 0.5, full.height * 0.5],
-                        radius: shape.radius,
+                        corners: shape.corners,
                     });
                 }
             }
@@ -768,18 +813,21 @@ struct Out {
     @location(0) color: vec4<f32>,
     @location(1) local: vec2<f32>,
     @location(2) half_size: vec2<f32>,
-    @location(3) radius: f32,
+    @location(3) corners: vec4<f32>,
 }
 @vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>,
               @location(2) local: vec2<f32>, @location(3) half_size: vec2<f32>,
-              @location(4) radius: f32) -> Out {
-    return Out(vec4<f32>(pos,0.,1.), color, local, half_size, radius);
+              @location(4) corners: vec4<f32>) -> Out {
+    return Out(vec4<f32>(pos,0.,1.), color, local, half_size, corners);
 }
 @fragment fn fs(in: Out) -> @location(0) vec4<f32> {
-    let q = abs(in.local) - in.half_size + in.radius;
-    let distance = length(max(q, vec2<f32>(0.))) + min(max(q.x, q.y), 0.) - in.radius;
+    let top = select(in.corners.x, in.corners.y, in.local.x > 0.);
+    let bottom = select(in.corners.w, in.corners.z, in.local.x > 0.);
+    let radius = select(top, bottom, in.local.y > 0.);
+    let q = abs(in.local) - in.half_size + vec2<f32>(radius);
+    let distance = length(max(q, vec2<f32>(0.))) + min(max(q.x, q.y), 0.) - radius;
     let coverage = clamp(0.5 - distance / max(fwidth(distance), 1.), 0., 1.);
-    return vec4<f32>(in.color.rgb, in.color.a * select(1., coverage, in.radius > 0.));
+    return vec4<f32>(in.color.rgb, in.color.a * select(1., coverage, radius > 0.));
 }
 "#;
 const IMAGE_SHADER: &str = r#"

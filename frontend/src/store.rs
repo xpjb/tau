@@ -89,6 +89,8 @@ impl Delivery {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Pending {
     pub request: ClientRequest,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
     pub text: String,
     pub files: Vec<LocalFile>,
     pub status: Delivery,

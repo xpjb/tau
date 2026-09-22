@@ -46,7 +46,8 @@ impl Default for Theme {
 }
 impl Theme {
     pub fn foreground(self) -> Color {
-        Color([0.82, 0.85, 0.90, 1.])
+        // Tau 1's muted onSurfaceVariant (#B7C2CE), in linear GPU color space.
+        Color([0.473_531_5, 0.539_479_5, 0.617_206_6, 1.])
     }
     fn role(self, flags: u8) -> Color {
         match flags {
@@ -752,10 +753,15 @@ impl Preview {
         self.order = doc.blocks().iter().map(|b| b.id).collect();
         let mut y = 0.;
         self.width = width;
-        for id in &self.order {
+        for (index, id) in self.order.iter().enumerate() {
+            // 8dp at the normal 16dp body size, like Tau 1. No phantom paragraph
+            // gap at the bottom of every message/details fragment.
+            if index > 0 {
+                y += size * 0.5;
+            }
             let b = self.blocks.get_mut(id).unwrap();
             b.y = y;
-            y += b.height + size * 0.8;
+            y += b.height;
             if let LayoutContent::Table(t) = &b.content {
                 self.width = self.width.max(t.width);
             }

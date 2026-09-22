@@ -1,9 +1,10 @@
 use crate::{
+    clock,
     controller::Controller,
     details::{Line as DetailLine, Tools},
     editor::Editor,
     icons::Icon,
-    render::{Interaction, Layer, Renderer, color, contains},
+    render::{Interaction, Layer, Renderer, color, contains, contains_rounded},
     scroll::{Autoscroll, Drag, Lane, Scrollbar, Wheel},
     store::{Settings, Store},
     tooltip::Tooltip,
@@ -42,6 +43,7 @@ enum Action {
     Sleep,
     Fork(String),
     Copy(String),
+    CopyDetails(String, Vec<String>),
     CopySelection,
     Link(String),
     Attach,
@@ -86,11 +88,18 @@ struct Row {
     header: bool,
     key: String,
     title: String,
+    timestamp: String,
+    sender: EventRole,
     source: String,
     user: bool,
     error: bool,
     actions: Vec<(String, Action)>,
     attachment: Option<(String, ChatAttachment)>,
+}
+impl Row {
+    fn joins(&self, next: Option<&Self>) -> bool {
+        next.is_some_and(|row| self.sender == row.sender)
+    }
 }
 struct Placed {
     key: String,
@@ -99,12 +108,21 @@ struct Placed {
 }
 struct ContextMenu {
     at: Vec2,
+    section: Option<String>,
     options: Vec<(String, Action)>,
     selected: usize,
 }
 struct MessageArea {
+    key: String,
     rect: Rect,
+    corners: [f32; 4],
+    clip: Rect,
     options: Vec<(String, Action)>,
+}
+impl MessageArea {
+    fn contains(&self, point: Vec2) -> bool {
+        contains(self.clip, point) && contains_rounded(self.rect, self.corners, point)
+    }
 }
 struct Pointer {
     id: u64,
@@ -283,6 +301,12 @@ impl App {
             p.is_some_and(|p| self.scrollbars.iter().any(|b| contains(b.track, p)))
         };
         self.dirty |= on_bar(self.hover) != on_bar(point);
+        if self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none() {
+            let section_at = |p: Option<Vec2>| {
+                p.and_then(|p| self.message_areas.iter().position(|a| a.contains(p)))
+            };
+            self.dirty |= section_at(self.hover) != section_at(point);
+        }
         self.hover = point;
         self.dirty |= old != new;
     }
@@ -1318,6 +1342,19 @@ impl App {
             }
             Action::DismissNotice => self.controller.notice = None,
             Action::Copy(text) => self.platform.push(PlatformAction::Copy(text)),
+            Action::CopyDetails(session, ids) => {
+                if let Some(chat) = self.controller.chats.get(&session) {
+                    let tools = Tools::new(chat.feed.events.values());
+                    let group = ids
+                        .iter()
+                        .filter_map(|id| chat.feed.event(id))
+                        .collect::<Vec<_>>();
+                    let text = tools.copy(&group);
+                    if !text.is_empty() {
+                        self.platform.push(PlatformAction::Copy(text));
+                    }
+                }
+            }
             Action::CopySelection => {
                 if let Some(text) = self.renderer.selected_text() {
                     self.platform.push(PlatformAction::Copy(text));
@@ -1464,11 +1501,12 @@ impl App {
                 .map(|p| p.start),
             held: self.pointer.is_some(),
         };
-        let background_input = if self.modal.is_none() && self.viewer.is_none() {
-            input
-        } else {
-            Interaction::default()
-        };
+        let background_input =
+            if self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none() {
+                input
+            } else {
+                Interaction::default()
+            };
         let mut main = Layer::new(background_input);
         let mut body = Layer::new(background_input);
         let mut chrome = Layer::new(background_input);
@@ -1783,18 +1821,19 @@ impl App {
             .events
             .values()
             .filter(|e| {
-                !(e.kind == EventKind::Thinking && e.text.is_empty())
-                    && !(e.attachment.is_none() && tools.paired_result(e))
+                let empty = e.attachment.is_none()
+                    && e.error_message.is_none()
+                    && !e.is_error
+                    && (e.kind == EventKind::Hidden
+                        || matches!(e.kind, EventKind::Thinking | EventKind::Text)
+                            && e.text.is_empty());
+                !empty && !(e.attachment.is_none() && tools.paired_result(e))
             })
             .collect::<Vec<_>>();
         let mut rows = vec![];
         let mut i = 0;
         while i < events.len() {
             let e = events[i];
-            if e.kind == EventKind::Hidden && e.error_message.is_none() {
-                i += 1;
-                continue;
-            }
             let detail = |e: &Event| {
                 e.attachment.is_none()
                     && (e.kind == EventKind::Thinking
@@ -1813,10 +1852,18 @@ impl App {
                     details,
                     header: false,
                     title: String::new(),
+                    timestamp: clock::label(group.iter().find_map(|e| clock::event_ms(e))),
+                    sender: EventRole::Assistant,
                     source: String::new(),
                     user: false,
                     error: false,
-                    actions: vec![],
+                    actions: vec![(
+                        "Copy message".into(),
+                        Action::CopyDetails(
+                            session.into(),
+                            group.iter().map(|e| e.id.clone()).collect(),
+                        ),
+                    )],
                     attachment: None,
                 });
                 continue;
@@ -1852,6 +1899,12 @@ impl App {
                 header: e.role == EventRole::System || e.is_error || e.error_message.is_some(),
                 key: format!("{session}/{}", e.id),
                 title,
+                timestamp: clock::label(clock::event_ms(e)),
+                sender: if e.role == EventRole::Tool {
+                    EventRole::Assistant
+                } else {
+                    e.role
+                },
                 source: if user {
                     literal(&e.text)
                 } else {
@@ -1870,10 +1923,12 @@ impl App {
                 header: true,
                 key: format!("status:{key}"),
                 title: "Extension status".into(),
+                timestamp: clock::label(chat.status_times.get(key).copied().flatten()),
+                sender: EventRole::System,
                 source: literal(value),
                 user: false,
                 error: false,
-                actions: vec![],
+                actions: vec![("Copy message".into(), Action::Copy(value.clone()))],
                 attachment: None,
             });
         }
@@ -1884,10 +1939,12 @@ impl App {
                     header: true,
                     key: format!("widget:{key}"),
                     title: key.clone(),
+                    timestamp: clock::label(chat.widget_times.get(key).copied().flatten()),
+                    sender: EventRole::System,
                     source: literal(&lines.join("\n")),
                     user: false,
                     error: false,
-                    actions: vec![],
+                    actions: vec![("Copy message".into(), Action::Copy(lines.join("\n")))],
                     attachment: None,
                 });
             }
@@ -1898,6 +1955,8 @@ impl App {
                 header: true,
                 key: format!("pending:{}", p.request.id),
                 title: p.status.label().into(),
+                timestamp: clock::label(p.started_at_ms),
+                sender: EventRole::User,
                 source: literal(&format!(
                     "{}{}",
                     p.text,
@@ -1912,6 +1971,7 @@ impl App {
                     crate::store::Delivery::Rejected | crate::store::Delivery::Unconfirmed
                 ),
                 actions: vec![
+                    ("Copy message".into(), Action::Copy(p.text.clone())),
                     (
                         "Restore draft".into(),
                         Action::Restore(p.request.id.clone()),
@@ -1923,7 +1983,7 @@ impl App {
         }
         for (i, q) in chat.feed.queue.requests.iter().enumerate() {
             let state = &chat.feed.queue;
-            let mut actions = vec![];
+            let mut actions = vec![("Copy message".into(), Action::Copy(q.text.clone()))];
             if state.capabilities.iter().any(|c| c == "queue_edit") {
                 actions.push((
                     "Edit".into(),
@@ -1966,6 +2026,8 @@ impl App {
                 header: true,
                 key: format!("queue:{}", q.request_id),
                 title: format!("Queued{}", if state.paused { " · held" } else { "" }),
+                timestamp: clock::label(q.timestamp_ms),
+                sender: EventRole::User,
                 source: literal(&q.text),
                 user: true,
                 error: false,
@@ -2095,10 +2157,15 @@ impl App {
         let mut keys = HashSet::new();
         let mut detail_layouts: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
         self.max_horizontal = 0.;
-        for row in &rows {
+        for (index, row) in rows.iter().enumerate() {
+            let gap = if row.joins(rows.get(index + 1)) {
+                0.
+            } else {
+                12. * s
+            };
             if !row.details.is_empty() {
                 let mut layout = vec![];
-                let mut top = 4. * s;
+                let mut top = 26. * s;
                 for line in &row.details {
                     let key = format!("{session}/{}", line.key);
                     let h = if line.source.is_empty() {
@@ -2125,14 +2192,14 @@ impl App {
                     layout.push((top, h));
                     top += h;
                 }
-                let height = top + 4. * s;
+                let height = top + 8. * s;
                 detail_layouts.insert(row.key.clone(), layout);
                 placements.push(Placed {
                     key: row.key.clone(),
                     top: y,
                     height,
                 });
-                y += height + 12. * s;
+                y += height + gap;
                 continue;
             }
             keys.insert(row.key.clone());
@@ -2160,7 +2227,7 @@ impl App {
             } else {
                 0.
             };
-            let height = (if row.header { 38. } else { 12. }) * s
+            let height = (if row.header { 50. } else { 28. }) * s
                 + text_height
                 + 12. * s
                 + attachment
@@ -2174,7 +2241,7 @@ impl App {
                 top: y,
                 height,
             });
-            y += height + 12. * s;
+            y += height + gap;
         }
         self.renderer.retain_messages(&keys);
         self.horizontal = self.horizontal.clamp(0., self.max_horizontal);
@@ -2230,17 +2297,51 @@ impl App {
             self.remember_scroll();
         }
         self.history_near_top(&session);
-        for (row, p) in rows.iter().zip(&self.placed) {
+        for (index, (row, p)) in rows.iter().zip(&self.placed).enumerate() {
             let top = viewport.y + p.top - self.scroll;
             if top + p.height < viewport.y || top > viewport.y + viewport.height {
                 continue;
             }
             let x = x + if row.user { width - bubble_width } else { 0. };
             let rect = Rect::new(x, top, bubble_width, p.height);
-            layer.clipped_rounded_rect(
+            let joined_above = index > 0 && row.joins(rows.get(index - 1));
+            let joined_below = row.joins(rows.get(index + 1));
+            let upper = if joined_above { 0. } else { 12. * s };
+            let lower = if joined_below { 0. } else { 12. * s };
+            let corners = [upper, upper, lower, lower];
+            layer.clipped_corners(
                 rect,
-                12. * s,
+                corners,
                 color(if row.user { 0x164e63 } else { 0x18212b }),
+                viewport,
+            );
+            if joined_above {
+                layer.clipped_rect(
+                    Rect::new(x + 14. * s, top, text_width, s),
+                    color(if row.user { 0x286176 } else { 0x2a3541 }),
+                    viewport,
+                );
+            }
+            self.message_areas.push(MessageArea {
+                key: row.key.clone(),
+                rect,
+                corners,
+                clip: viewport,
+                options: row.actions.clone(),
+            });
+            // Pin by logical key while a menu is open, not screen coordinates:
+            // streaming and paging may move the target without changing its copy boundary.
+            let pinned = self
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| menu.section.as_deref() == Some(row.key.as_str()));
+            self.renderer.clipped_label(
+                layer,
+                &row.timestamp,
+                Rect::new(x + 14. * s, top + 8. * s, text_width, 16. * s),
+                11. * s,
+                color(if row.user { 0xa7bdc9 } else { 0x82909f }),
+                false,
                 viewport,
             );
             if let Some(layout) = detail_layouts.get(&row.key) {
@@ -2275,14 +2376,6 @@ impl App {
                             line.label.clone()
                         };
                         if let Some(open) = line.toggle {
-                            layer.clipped_rect(
-                                line_rect,
-                                layer.control_color(
-                                    line_rect,
-                                    color(if line.tool { 0x111922 } else { 0x18212b }),
-                                ),
-                                viewport,
-                            );
                             let hit = crate::render::intersect(line_rect, viewport);
                             if hit.height > 0. {
                                 self.hits.push(Hit {
@@ -2311,14 +2404,12 @@ impl App {
                         );
                     }
                 }
+                layer.surface_highlight(rect, corners, viewport, pinned);
                 continue;
             }
-            let label_rect = crate::render::intersect(
-                Rect::new(x + 14. * s, top + 10. * s, text_width, 24. * s),
-                viewport,
-            );
+            let label_rect = Rect::new(x + 14. * s, top + 28. * s, text_width, 20. * s);
             if row.header {
-                self.renderer.label(
+                self.renderer.clipped_label(
                     layer,
                     &row.title,
                     label_rect,
@@ -2331,9 +2422,10 @@ impl App {
                         0xa5b4fc
                     }),
                     true,
+                    viewport,
                 );
             }
-            let text_top = top + if row.header { 38. * s } else { 12. * s };
+            let text_top = top + if row.header { 50. * s } else { 28. * s };
             if !row.source.is_empty() {
                 self.renderer.message(
                     layer,
@@ -2343,10 +2435,6 @@ impl App {
                     self.horizontal,
                 );
             }
-            self.message_areas.push(MessageArea {
-                rect: crate::render::intersect(rect, viewport),
-                options: row.actions.clone(),
-            });
             let mut actions: Vec<(String, Action)> = vec![];
             if let Some((entry, attachment)) = &row.attachment {
                 let image = attachment.kind == AttachmentKind::Image;
@@ -2476,6 +2564,7 @@ impl App {
                 }
                 ax += width + 5. * s;
             }
+            layer.surface_highlight(rect, corners, viewport, pinned);
         }
         self.scrollbar(chrome, Lane::Transcript, viewport);
         chrome.rect(
@@ -2768,12 +2857,14 @@ impl App {
         {
             options.push(("Copy selection".into(), Action::CopySelection));
         }
-        if let Some(area) = self.message_areas.iter().find(|a| contains(a.rect, point)) {
+        let area = self.message_areas.iter().find(|a| a.contains(point));
+        if let Some(area) = area {
             options.extend(area.options.clone());
         }
         if !options.is_empty() {
             self.context_menu = Some(ContextMenu {
                 at: point,
+                section: area.map(|area| area.key.clone()),
                 options,
                 selected: 0,
             });
