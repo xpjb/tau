@@ -107,7 +107,9 @@ pub struct LocalChat {
     pub draft: String,
     pub files: Vec<LocalFile>,
     pub pending: Vec<Pending>,
-    pub expanded: BTreeSet<String>,
+    pub expanded: BTreeSet<String>, // Legacy flat details preferences.
+    pub expansion: BTreeMap<String, bool>,
+    pub details_default: bool,
     pub position: Position,
 }
 impl Default for LocalChat {
@@ -117,6 +119,8 @@ impl Default for LocalChat {
             files: vec![],
             pending: vec![],
             expanded: BTreeSet::new(),
+            expansion: BTreeMap::new(),
+            details_default: false,
             position: Position {
                 follow: true,
                 ..Default::default()

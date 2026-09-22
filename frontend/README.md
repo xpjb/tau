@@ -1,5 +1,9 @@
 # Tau 2 · native Rust frontend
 
+**Unreleased QA changes / release hold:** see [QA.md](QA.md). No new installer is
+being shipped until the user's explicit signal; heavier verification is paused
+while the system is under load.
+
 Branch: `tau2/rust-frontend`. **Tau Beta** is a parallel-install Rust preview,
 not the production cutover. `app/` remains the Kotlin reference. The beta installer
 does not replace stable Tau, migrate its data, or deploy over the daemon.

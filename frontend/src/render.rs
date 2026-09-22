@@ -25,7 +25,12 @@ pub fn color(hex: u32) -> Color {
     ])
 }
 pub fn contains(r: Rect, p: Vec2) -> bool {
-    p.x >= r.x && p.y >= r.y && p.x <= r.x + r.width && p.y <= r.y + r.height
+    r.width > 0.
+        && r.height > 0.
+        && p.x >= r.x
+        && p.y >= r.y
+        && p.x <= r.x + r.width
+        && p.y <= r.y + r.height
 }
 pub fn intersect(a: Rect, b: Rect) -> Rect {
     let x = a.x.max(b.x);
@@ -143,6 +148,16 @@ struct Image {
     width: u32,
     height: u32,
 }
+#[derive(Clone, PartialEq, Eq)]
+pub struct TextPoint {
+    pub key: String,
+    pub byte: usize,
+}
+#[derive(Clone)]
+pub struct Selection {
+    pub anchor: TextPoint,
+    pub focus: TextPoint,
+}
 pub struct Renderer {
     pub text: TextService,
     pub faces: Faces,
@@ -153,8 +168,10 @@ pub struct Renderer {
     image_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     images: HashMap<PathBuf, Image>,
+    icons: HashMap<PathBuf, (u64, Image)>,
     scenes: HashMap<String, (tau_markdown::Scene, Rect)>,
-    pub selection: Option<(String, usize, usize)>,
+    pub selection: Option<Selection>,
+    message_order: Vec<String>,
 }
 impl Renderer {
     pub fn new(ctx: &impl RenderContext) -> Result<Self, String> {
@@ -354,8 +371,10 @@ impl Renderer {
             image_layout,
             sampler,
             images: HashMap::new(),
+            icons: HashMap::new(),
             scenes: HashMap::new(),
             selection: None,
+            message_order: vec![],
         })
     }
     pub fn label(
@@ -366,6 +385,19 @@ impl Renderer {
         size: f32,
         color: Color,
         bold: bool,
+    ) -> f32 {
+        self.clipped_label(layer, value, rect, size, color, bold, rect)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn clipped_label(
+        &mut self,
+        layer: &mut Layer,
+        value: &str,
+        rect: Rect,
+        size: f32,
+        color: Color,
+        bold: bool,
+        clip: Rect,
     ) -> f32 {
         let style = Style {
             chain: self.faces.prose[usize::from(bold)],
@@ -380,7 +412,7 @@ impl Renderer {
                 at: Vec2::new(rect.x, rect.y),
                 size,
                 color,
-                clip: Some(rect),
+                clip: Some(intersect(rect, clip)),
                 ..Default::default()
             });
             height
@@ -389,6 +421,7 @@ impl Renderer {
         }
     }
     pub fn message_height(&mut self, key: &str, source: &str, width: f32, size: f32) -> f32 {
+        self.message_order.push(key.to_owned());
         let message = self.messages.entry(key.into()).or_insert_with(|| {
             let namespace = self.next_namespace;
             self.next_namespace += 1;
@@ -417,6 +450,7 @@ impl Renderer {
         viewport: Rect,
         horizontal: f32,
     ) {
+        let selection = self.selection_range(key);
         let Some(message) = self.messages.get_mut(key) else {
             return;
         };
@@ -429,13 +463,10 @@ impl Renderer {
         for decoration in scene.under.drain(..).chain(scene.over.drain(..)) {
             layer.clipped_rect(decoration.rect, decoration.color, viewport);
         }
-        if let Some((selected, a, b)) = &self.selection
-            && selected == key
-        {
-            for decoration in
-                message
-                    .view
-                    .selection(&scene, &self.text, &message.doc, (*a).min(*b)..(*a).max(*b))
+        if let Some(range) = selection {
+            for decoration in message
+                .view
+                .selection(&scene, &self.text, &message.doc, range)
             {
                 layer.clipped_rect(decoration.rect, decoration.color, viewport);
             }
@@ -445,6 +476,7 @@ impl Renderer {
     }
     pub fn clear_scenes(&mut self) {
         self.scenes.clear();
+        self.message_order.clear();
     }
     pub fn hit_text(&self, point: Vec2) -> Option<(String, usize)> {
         for (key, (scene, viewport)) in &self.scenes {
@@ -468,12 +500,92 @@ impl Renderer {
         }
         None
     }
+    pub fn nearest_text(&self, point: Vec2) -> Option<TextPoint> {
+        let mut nearest: Option<(TextPoint, f32, f32)> = None;
+        for key in &self.message_order {
+            let Some((scene, _)) = self.scenes.get(key) else {
+                continue;
+            };
+            let m = &self.messages[key];
+            if let Some((byte, dy, dx)) = m.view.nearest_source(scene, point, &self.text, &m.doc)
+                && nearest
+                    .as_ref()
+                    .is_none_or(|(_, y, x)| dy < *y || dy == *y && dx < *x)
+            {
+                nearest = Some((
+                    TextPoint {
+                        key: key.clone(),
+                        byte,
+                    },
+                    dy,
+                    dx,
+                ));
+            }
+        }
+        nearest.map(|(point, _, _)| point)
+    }
+    pub fn begin_selection(&mut self, point: TextPoint) {
+        self.selection = Some(Selection {
+            anchor: point.clone(),
+            focus: point,
+        });
+    }
+    pub fn extend_selection(&mut self, point: TextPoint) -> bool {
+        if let Some(selection) = &mut self.selection
+            && selection.focus != point
+        {
+            selection.focus = point;
+            return true;
+        }
+        false
+    }
+    fn selection_range(&self, key: &str) -> Option<std::ops::Range<usize>> {
+        let s = self.selection.as_ref()?;
+        let a = self.message_order.iter().position(|k| k == &s.anchor.key)?;
+        let b = self.message_order.iter().position(|k| k == &s.focus.key)?;
+        let i = self.message_order.iter().position(|k| k == key)?;
+        let (start, end) = if (a, s.anchor.byte) <= (b, s.focus.byte) {
+            (&s.anchor, &s.focus)
+        } else {
+            (&s.focus, &s.anchor)
+        };
+        if i < a.min(b) || i > a.max(b) {
+            return None;
+        }
+        let len = self.messages.get(key)?.source.len();
+        let lo = if start.key == key {
+            start.byte.min(len)
+        } else {
+            0
+        };
+        let hi = if end.key == key {
+            end.byte.min(len)
+        } else {
+            len
+        };
+        (lo < hi).then_some(lo..hi)
+    }
     pub fn selected_text(&self) -> Option<String> {
-        let (key, a, b) = self.selection.as_ref()?;
-        let m = self.messages.get(key)?;
-        Some(m.view.copy_selection(&m.doc, (*a).min(*b)..(*a).max(*b)))
+        self.selection.as_ref()?;
+        let parts = self
+            .message_order
+            .iter()
+            .filter_map(|key| {
+                let range = self.selection_range(key)?;
+                let m = &self.messages[key];
+                Some(m.view.copy_selection(&m.doc, range))
+            })
+            .collect::<Vec<_>>();
+        Some(parts.join("\n\n"))
     }
     pub fn retain_messages(&mut self, keys: &std::collections::HashSet<String>) {
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(|s| !keys.contains(&s.anchor.key) || !keys.contains(&s.focus.key))
+        {
+            self.selection = None;
+        }
         self.messages.retain(|key, m| {
             if keys.contains(key) {
                 true
@@ -509,6 +621,21 @@ impl Renderer {
         };
         let rgba = decoded.to_rgba8();
         let (width, height) = rgba.dimensions();
+        let image = self.upload_image(ctx, &rgba, width, height);
+        // Bound decoded GPU images, not the verified originals on disk.
+        if self.images.len() >= 16 {
+            self.images.clear();
+        }
+        self.images.insert(path.to_owned(), image);
+        Ok((width, height))
+    }
+    fn upload_image(
+        &self,
+        ctx: &impl RenderContext,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Image {
         let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("Tau preview"),
             size: wgpu::Extent3d {
@@ -525,7 +652,7 @@ impl Renderer {
         });
         ctx.queue().write_texture(
             texture.as_image_copy(),
-            &rgba,
+            rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * 4),
@@ -549,19 +676,29 @@ impl Renderer {
                 },
             ],
         });
-        // Bound decoded GPU images, not the verified originals on disk.
-        if self.images.len() >= 16 {
-            self.images.clear();
+        Image {
+            bind,
+            width,
+            height,
         }
-        self.images.insert(
-            path.to_owned(),
-            Image {
-                bind,
-                width,
-                height,
-            },
-        );
-        Ok((width, height))
+    }
+    pub fn icon(
+        &mut self,
+        ctx: &impl RenderContext,
+        layer: &mut Layer,
+        icon: crate::icons::Icon,
+        rect: Rect,
+        color: u32,
+    ) {
+        let size = rect.width.ceil().max(1.) as u32;
+        let key = PathBuf::from(format!("tau-icon/{}/{}", icon.name(), size));
+        let stamp = icon.stamp(color);
+        if self.icons.get(&key).is_none_or(|(old, _)| *old != stamp) {
+            let rgba = icon.pixels(size, color);
+            let image = self.upload_image(ctx, &rgba, size, size);
+            self.icons.insert(key.clone(), (stamp, image));
+        }
+        layer.images.push((key, rect, rect));
     }
     pub fn draw(&mut self, ctx: &impl RenderContext, target: &wgpu::TextureView, layers: &[Layer]) {
         let (width, height) = ctx.size();
@@ -663,7 +800,10 @@ impl Renderer {
                     pass.draw(0..shapes[i].0, 0..1);
                 }
                 for (j, (path, _, clip)) in layer.images.iter().enumerate() {
-                    if let Some(image) = self.images.get(path)
+                    if let Some(image) = self
+                        .images
+                        .get(path)
+                        .or_else(|| self.icons.get(path).map(|(_, image)| image))
                         && let Some([x, y, w, h]) = scissor(*clip, width, height)
                     {
                         pass.set_scissor_rect(x, y, w, h);

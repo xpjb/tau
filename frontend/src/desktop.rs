@@ -5,7 +5,7 @@ use crate::{
 use chad::winit::{
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
-    keyboard::{Key, ModifiersState, NamedKey},
+    keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
     window::CursorIcon,
 };
 use chad::{ChadApp, Config, Ctx, wgpu};
@@ -96,10 +96,26 @@ impl ChadApp for Desktop {
                 ..
             } => {
                 if *state == ElementState::Pressed {
-                    self.app.press(0, self.cursor, false);
+                    if !self.app.cancel_autoscroll() {
+                        self.app.press(0, self.cursor, false);
+                    }
                 } else {
                     self.app.release(0, self.cursor);
                 }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => self
+                .app
+                .middle(*state == ElementState::Pressed, self.cursor),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.app.context_at(self.cursor);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
@@ -113,6 +129,12 @@ impl ChadApp for Desktop {
             WindowEvent::Ime(Ime::Commit(text)) => self.app.input(text),
             WindowEvent::Ime(Ime::Preedit(text, _)) => self.app.preedit(text.clone()),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let cancelled = self.app.cancel_autoscroll();
+                if cancelled && event.logical_key == Key::Named(NamedKey::Escape) {
+                    self.sync_cursor(ctx);
+                    ctx.request_redraw();
+                    return;
+                }
                 let control = (self.modifiers.control_key() && !self.modifiers.alt_key())
                     || self.modifiers.super_key();
                 let shift = self.modifiers.shift_key();
@@ -130,8 +152,44 @@ impl ChadApp for Desktop {
                         | NamedKey::Home
                         | NamedKey::End),
                     ) => self.app.key(&format!("{key:?}"), control, shift),
-                    Key::Character(text) if control => self.app.key(text, true, shift),
-                    _ if !control => {
+                    _ if control => {
+                        // Prefer the layout's shortcut letter (e.g. AZERTY), then
+                        // physical editing keys for non-Latin/named-key layouts.
+                        let logical = match &event.logical_key {
+                            Key::Character(text) => Some(text.as_str()),
+                            _ => event.text.as_deref(),
+                        };
+                        let shortcut = logical
+                            .filter(|text| {
+                                matches!(
+                                    *text,
+                                    "a" | "A"
+                                        | "c"
+                                        | "C"
+                                        | "v"
+                                        | "V"
+                                        | "x"
+                                        | "X"
+                                        | "y"
+                                        | "Y"
+                                        | "z"
+                                        | "Z"
+                                )
+                            })
+                            .or(match event.physical_key {
+                                PhysicalKey::Code(KeyCode::KeyA) => Some("a"),
+                                PhysicalKey::Code(KeyCode::KeyC) => Some("c"),
+                                PhysicalKey::Code(KeyCode::KeyV) => Some("v"),
+                                PhysicalKey::Code(KeyCode::KeyX) => Some("x"),
+                                PhysicalKey::Code(KeyCode::KeyY) => Some("y"),
+                                PhysicalKey::Code(KeyCode::KeyZ) => Some("z"),
+                                _ => None,
+                            });
+                        if let Some(key) = shortcut {
+                            self.app.key(key, true, shift);
+                        }
+                    }
+                    _ => {
                         // Produced text is authoritative, even for named/unidentified keys.
                         // IME composition comes separately through Ime::Commit.
                         if let Some(text) = &event.text
@@ -140,7 +198,6 @@ impl ChadApp for Desktop {
                             self.app.input(text);
                         }
                     }
-                    _ => {}
                 }
             }
             WindowEvent::DroppedFile(path) => {
@@ -191,6 +248,9 @@ impl ChadApp for Desktop {
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
         self.app.frame(ctx, view);
         self.sync_cursor(ctx);
+        if self.app.needs_redraw() {
+            ctx.request_redraw();
+        }
     }
 }
 impl Desktop {

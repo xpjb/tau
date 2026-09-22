@@ -1031,6 +1031,49 @@ impl Preview {
         out.join("\n")
     }
 
+    /// Closest projected caret, including margins and gaps between text blocks.
+    /// Distances are returned separately so clients can prefer the nearest line
+    /// before horizontal proximity (also works for adjacent table cells).
+    pub fn nearest_source(
+        &self,
+        scene: &Scene,
+        point: Vec2,
+        text: &TextService,
+        doc: &Document,
+    ) -> Option<(usize, f32, f32)> {
+        let mut closest: Option<(usize, f32, f32)> = None;
+        for &(id, at) in &scene.placed {
+            let c = &self.texts[&id];
+            let layout = text.measure(c.handle);
+            let dy = (at.y - point.y).max(point.y - at.y - c.height).max(0.);
+            let dx = (at.x - point.x)
+                .max(point.x - at.x - layout.width_em() * c.size)
+                .max(0.);
+            if closest.is_some_and(|(_, y, x)| dy > y || dy == y && dx >= x) {
+                continue;
+            }
+            let Some(hit) = layout.hit_test(Vec2::new(
+                (point.x - at.x) / c.size,
+                (point.y - at.y) / c.size,
+            )) else {
+                continue;
+            };
+            let raw = c.rich.source_byte(hit.byte_index);
+            let i = c
+                .origins
+                .partition_point(|l| l.offset <= raw)
+                .saturating_sub(1);
+            let line = &c.origins[i];
+            if let Some(byte) = doc.resolve(Origin {
+                line: line.origin.line,
+                column: line.origin.column + raw - line.offset,
+            }) {
+                closest = Some((byte, dy, dx));
+            }
+        }
+        closest
+    }
+
     /// Projected positions map through explicit source spans (entities, escaped
     /// delimiters and removed markup are not a constant-offset subtraction).
     pub fn hit_source(

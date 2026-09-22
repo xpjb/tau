@@ -1,14 +1,22 @@
 use crate::{
     controller::Controller,
+    details::{Line as DetailLine, Tools},
     editor::Editor,
+    icons::Icon,
     render::{Interaction, Layer, Renderer, color, contains},
+    scroll::{Autoscroll, Drag, Lane, Scrollbar, Wheel},
     store::{Settings, Store},
+    tooltip::Tooltip,
     transport::Wake,
 };
 use anyhow::Result;
 use chad::{RenderContext, wgpu};
 use sanscale::{Rect, Vec2};
-use std::{collections::HashSet, path::PathBuf, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::Instant,
+};
 use tau_protocol::*;
 
 #[derive(Clone)]
@@ -16,11 +24,11 @@ enum Action {
     Select(String),
     New,
     Settings,
+    Usage,
     Back,
     Menu,
     Send,
     Abort,
-    History,
     Tail,
     DismissNotice,
     Focus(Option<usize>),
@@ -38,7 +46,7 @@ enum Action {
     Link(String),
     Attach,
     RemoveFile(String),
-    Toggle(Vec<String>),
+    Toggle(String, bool),
     Restore(String),
     Dismiss(String),
     Queue(QueueOperation),
@@ -74,6 +82,7 @@ struct Hit {
 }
 #[derive(Clone)]
 struct Row {
+    details: Vec<DetailLine>,
     header: bool,
     key: String,
     title: String,
@@ -87,6 +96,15 @@ struct Placed {
     key: String,
     top: f32,
     height: f32,
+}
+struct ContextMenu {
+    at: Vec2,
+    options: Vec<(String, Action)>,
+    selected: usize,
+}
+struct MessageArea {
+    rect: Rect,
+    options: Vec<(String, Action)>,
 }
 struct Pointer {
     id: u64,
@@ -129,6 +147,10 @@ pub struct App {
     composer: Editor,
     focus: Option<Option<usize>>,
     modal: Option<Modal>,
+    context_menu: Option<ContextMenu>,
+    context_rect: Rect,
+    message_areas: Vec<MessageArea>,
+    usage: Tooltip,
     composer_session: Option<String>,
     show_chats: bool,
     waiting_title: bool,
@@ -136,6 +158,14 @@ pub struct App {
     scroll: f32,
     max_scroll: f32,
     list_scroll: f32,
+    max_list_scroll: f32,
+    wheel: Option<Wheel>,
+    autoscroll: Option<Autoscroll>,
+    scrollbars: Vec<Scrollbar>,
+    scroll_drag: Option<Drag>,
+    expansion_pin: Option<(String, f32)>,
+    expansion_positions: HashMap<String, f32>,
+    history_attempt: Option<(String, String, u64, u64)>,
     horizontal: f32,
     max_horizontal: f32,
     transcript: Rect,
@@ -173,6 +203,10 @@ impl App {
             composer,
             focus: None,
             modal: None,
+            context_menu: None,
+            context_rect: Rect::new(0., 0., 0., 0.),
+            message_areas: vec![],
+            usage: Tooltip::default(),
             composer_session,
             show_chats,
             waiting_title: false,
@@ -180,6 +214,14 @@ impl App {
             scroll: 0.,
             max_scroll: 0.,
             list_scroll: 0.,
+            max_list_scroll: 0.,
+            wheel: None,
+            autoscroll: None,
+            scrollbars: vec![],
+            scroll_drag: None,
+            expansion_pin: None,
+            expansion_positions: HashMap::new(),
+            history_attempt: None,
             horizontal: 0.,
             max_horizontal: 0.,
             transcript: Rect::new(0., 0., 0., 0.),
@@ -202,6 +244,7 @@ impl App {
     }
     pub fn resize(&mut self, size: (u32, u32), scale: f32, origin: Vec2) {
         if self.size != size || self.scale != scale || self.origin != origin {
+            self.cancel_pointer();
             self.size = size;
             self.scale = scale;
             self.origin = origin;
@@ -214,6 +257,15 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn hover(&mut self, point: Option<Vec2>) {
+        self.usage.hover(
+            self.modal.is_none()
+                && self.viewer.is_none()
+                && self.context_menu.is_none()
+                && point.is_some_and(|p| {
+                    contains(self.usage.region, p)
+                        || self.usage.progress > 0. && contains(self.usage.card, p)
+                }),
+        );
         let old = self
             .hover
             .and_then(|p| self.hits.iter().rev().find(|h| contains(h.rect, p)))
@@ -221,15 +273,43 @@ impl App {
         let new = point
             .and_then(|p| self.hits.iter().rev().find(|h| contains(h.rect, p)))
             .map(|h| h.rect);
+        if let Some(auto) = &mut self.autoscroll
+            && let Some(point) = point
+        {
+            auto.pointer = point;
+            self.dirty = true;
+        }
+        let on_bar = |p: Option<Vec2>| {
+            p.is_some_and(|p| self.scrollbars.iter().any(|b| contains(b.track, p)))
+        };
+        self.dirty |= on_bar(self.hover) != on_bar(point);
         self.hover = point;
         self.dirty |= old != new;
     }
     #[cfg(not(target_os = "android"))]
     pub fn cursor(&self) -> chad::winit::window::CursorIcon {
         use chad::winit::window::CursorIcon;
+        if let Some(auto) = &self.autoscroll {
+            return if auto.speed(self.scale) < 0. {
+                CursorIcon::NResize
+            } else if auto.speed(self.scale) > 0. {
+                CursorIcon::SResize
+            } else {
+                CursorIcon::NsResize
+            };
+        }
+        if self.scroll_drag.is_some() {
+            return CursorIcon::Default;
+        }
         let Some(point) = self.hover else {
             return CursorIcon::Default;
         };
+        if self.modal.is_none()
+            && self.viewer.is_none()
+            && self.scrollbars.iter().any(|b| contains(b.track, point))
+        {
+            return CursorIcon::Default;
+        }
         if let Some(hit) = self.hits.iter().rev().find(|h| contains(h.rect, point)) {
             return if matches!(hit.action, Action::Focus(_)) {
                 CursorIcon::Text
@@ -241,7 +321,7 @@ impl App {
             if self.renderer.hit_link(point).is_some() {
                 return CursorIcon::Pointer;
             }
-            if self.renderer.hit_text(point).is_some() {
+            if contains(self.transcript, point) && self.renderer.nearest_text(point).is_some() {
                 return CursorIcon::Text;
             }
         }
@@ -258,6 +338,7 @@ impl App {
     }
     pub fn tick(&mut self, dt: f32) -> bool {
         self.dirty |= self.controller.poll();
+        self.dirty |= self.usage.tick();
         if self.connecting && self.controller.epoch.is_some() {
             self.connecting = false;
             self.modal = None;
@@ -266,6 +347,10 @@ impl App {
         }
         let selected = self.controller.account.selected.clone();
         if selected != self.composer_session {
+            self.cancel_pointer();
+            self.history_attempt = None;
+            self.context_menu = None;
+            self.usage = Tooltip::default();
             self.composer_session = selected;
             self.scroll = 0.;
             self.horizontal = 0.;
@@ -350,6 +435,49 @@ impl App {
             });
             self.dirty = true;
         }
+        if self.modal.is_some() || self.viewer.is_some() {
+            self.autoscroll = None;
+            self.wheel = None;
+        }
+        if let Some(mut wheel) = self.wheel.take() {
+            let (value, max) = self.scroll_value(wheel.lane);
+            let (next, settled) = wheel.step(value, max, self.scale);
+            let lane = wheel.lane;
+            if !settled {
+                self.wheel = Some(wheel);
+            }
+            self.set_scroll(lane, next);
+            self.dirty = true;
+        }
+        if let Some(auto) = &self.autoscroll {
+            let next =
+                (self.scroll + auto.speed(self.scale) * dt.min(0.05)).clamp(0., self.max_scroll);
+            if (next - self.scroll).abs() > 0.001 {
+                self.set_scroll(Lane::Transcript, next);
+                self.dirty = true;
+            }
+        }
+        if self.selecting
+            && let Some(p) = &self.pointer
+            && p.dragged
+        {
+            let y = p.last.y;
+            let margin = 16. * self.scale;
+            let speed = if y < self.transcript.y + margin {
+                (y - self.transcript.y - margin) * 20.
+            } else if y > self.transcript.y + self.transcript.height - margin {
+                (y - self.transcript.y - self.transcript.height + margin) * 20.
+            } else {
+                0.
+            };
+            let next = (self.scroll
+                + speed.clamp(-1800. * self.scale, 1800. * self.scale) * dt.min(0.05))
+            .clamp(0., self.max_scroll);
+            if (next - self.scroll).abs() > 0.001 {
+                self.set_scroll(Lane::Transcript, next);
+                self.dirty = true;
+            }
+        }
         if self.pointer.is_none() && self.velocity.abs() > 4. {
             let old = self.scroll;
             self.scroll = (self.scroll + self.velocity * dt.min(0.05)).clamp(0., self.max_scroll);
@@ -378,7 +506,17 @@ impl App {
             let anchor = self.placed.iter().find(|r| r.top + r.height >= self.scroll);
             chat.local.position.key = anchor.map(|r| r.key.clone());
             chat.local.position.offset = anchor.map_or(0., |r| (self.scroll - r.top) / self.scale);
-            chat.local.position.follow = self.max_scroll - self.scroll < 24. * self.scale;
+            chat.local.position.follow = self.expansion_pin.is_none()
+                && !self
+                    .wheel
+                    .as_ref()
+                    .is_some_and(|w| w.lane == Lane::Transcript)
+                && self.autoscroll.is_none()
+                && !self
+                    .scroll_drag
+                    .as_ref()
+                    .is_some_and(|d| d.lane == Lane::Transcript)
+                && self.max_scroll - self.scroll < self.scale;
         }
     }
     pub fn back(&mut self) {
@@ -393,25 +531,145 @@ impl App {
         }
         self.dirty = true;
     }
+    fn scroll_value(&self, lane: Lane) -> (f32, f32) {
+        match lane {
+            Lane::Transcript => (self.scroll, self.max_scroll),
+            Lane::Sidebar => (self.list_scroll, self.max_list_scroll),
+            Lane::Horizontal => (self.horizontal, self.max_horizontal),
+        }
+    }
+    fn set_scroll(&mut self, lane: Lane, value: f32) {
+        match lane {
+            Lane::Transcript => {
+                self.scroll = value.clamp(0., self.max_scroll);
+                self.remember_scroll();
+            }
+            Lane::Sidebar => self.list_scroll = value.clamp(0., self.max_list_scroll),
+            Lane::Horizontal => self.horizontal = value.clamp(0., self.max_horizontal),
+        }
+    }
+    pub fn cancel_autoscroll(&mut self) -> bool {
+        let active = self.autoscroll.take().is_some();
+        self.dirty |= active;
+        active
+    }
+    #[cfg(not(target_os = "android"))]
+    pub fn middle(&mut self, pressed: bool, point: Vec2) {
+        if pressed {
+            if self.cancel_autoscroll() {
+                return;
+            }
+            if self.modal.is_some()
+                || self.viewer.is_some()
+                || !contains(self.transcript, point)
+                || self.max_scroll <= 0.
+            {
+                return;
+            }
+            self.cancel_pointer();
+            self.autoscroll = Some(Autoscroll {
+                anchor: point,
+                pointer: point,
+                pressed: Some(Instant::now()),
+            });
+        } else if let Some(auto) = &mut self.autoscroll {
+            // Quick click latches; a held press scrolls only until release, as in Tau 1.
+            if auto
+                .pressed
+                .take()
+                .is_some_and(|at| at.elapsed().as_millis() >= 220)
+            {
+                self.autoscroll = None;
+            }
+        }
+        self.remember_scroll();
+        self.dirty = true;
+    }
     #[cfg(not(target_os = "android"))]
     pub fn wheel(&mut self, amount: f32, horizontal: bool, point: Vec2) {
+        self.context_menu = None;
+        self.usage.dismiss();
+        self.cancel_autoscroll();
+        self.expansion_pin = None;
+        self.history_attempt = None;
+        self.velocity = 0.;
         if let Some(v) = &mut self.viewer {
             v.zoom = (v.zoom * (-amount * 0.002).exp()).clamp(1., 16.);
-        } else if horizontal {
-            self.horizontal = (self.horizontal + amount).clamp(0., self.max_horizontal);
-        } else if self.show_chats
-            || self.size.0 as f32 / self.scale >= 760.
-                && point.x < self.origin.x + 300. * self.scale
-        {
-            self.list_scroll = (self.list_scroll + amount).max(0.);
-        } else {
-            self.scroll = (self.scroll + amount).clamp(0., self.max_scroll);
-            self.velocity = 0.;
-            self.remember_scroll();
+        } else if self.modal.is_none() {
+            let lane = if horizontal {
+                Lane::Horizontal
+            } else if self.show_chats
+                || self.size.0 as f32 / self.scale >= 760.
+                    && point.x < self.origin.x + 300. * self.scale
+            {
+                Lane::Sidebar
+            } else {
+                Lane::Transcript
+            };
+            let (value, max) = self.scroll_value(lane);
+            if let Some(wheel) = &mut self.wheel
+                && wheel.lane == lane
+            {
+                wheel.target = (wheel.target + amount).clamp(0., max);
+            } else {
+                self.wheel = Some(Wheel {
+                    lane,
+                    target: (value + amount).clamp(0., max),
+                    last: Instant::now(),
+                });
+            }
         }
         self.dirty = true;
     }
+    fn scrollbar(&mut self, layer: &mut Layer, lane: Lane, viewport: Rect) {
+        let (value, max) = self.scroll_value(lane);
+        if let Some(bar) = Scrollbar::new(lane, viewport, value, max, self.scale) {
+            let active = self.scroll_drag.as_ref().is_some_and(|d| d.lane == lane)
+                || self.hover.is_some_and(|p| contains(bar.track, p));
+            let width = if active { 8. } else { 6. } * self.scale;
+            layer.rounded_rect(
+                Rect::new(
+                    bar.track.x + (bar.track.width - width) * 0.5,
+                    bar.thumb.y,
+                    width,
+                    bar.thumb.height,
+                ),
+                width * 0.5,
+                color(if active { 0xa0aaba } else { 0x596575 }),
+            );
+            self.scrollbars.push(bar);
+        }
+    }
+    fn history_near_top(&mut self, session: &str) {
+        if self.modal.is_some() || self.viewer.is_some() || self.scroll > 180. * self.scale {
+            return;
+        }
+        let feed = &self.controller.chats[session].feed;
+        if !feed.synchronized || feed.loading {
+            return;
+        }
+        if let (Some(before), Some(epoch)) = (feed.before, self.controller.epoch) {
+            let attempt = (session.to_owned(), feed.generation.clone(), before, epoch);
+            if self.history_attempt.as_ref() == Some(&attempt) {
+                return;
+            }
+            self.history_attempt = Some(attempt);
+            let result = self.controller.history();
+            self.report(result);
+        }
+    }
     pub fn press(&mut self, id: u64, point: Vec2, touch: bool) {
+        if self.context_menu.is_some() && !contains(self.context_rect, point) {
+            self.context_menu = None;
+            self.dirty = true;
+            return;
+        }
+        if !contains(self.usage.region, point) {
+            self.usage.dismiss();
+        }
+        self.wheel = None;
+        self.expansion_pin = None;
+        self.history_attempt = None;
         self.velocity = 0.;
         if self.pointer.is_some() {
             if self.viewer.is_some() && touch {
@@ -421,6 +679,43 @@ impl App {
         }
         self.selecting = false;
         self.field_selection = None;
+        if self.modal.is_none()
+            && self.viewer.is_none()
+            && self.context_menu.is_none()
+            && let Some(bar) = self
+                .scrollbars
+                .iter()
+                .find(|b| contains(b.track, point))
+                .copied()
+        {
+            if contains(bar.thumb, point) {
+                self.scroll_drag = Some(Drag {
+                    lane: bar.lane,
+                    grab: (point.y - bar.thumb.y) / bar.thumb.height,
+                });
+            } else {
+                let (value, _) = self.scroll_value(bar.lane);
+                self.set_scroll(
+                    bar.lane,
+                    value
+                        + if point.y < bar.thumb.y {
+                            -bar.track.height * 0.9
+                        } else {
+                            bar.track.height * 0.9
+                        },
+                );
+            }
+            self.pointer = Some(Pointer {
+                id,
+                start: point,
+                last: point,
+                at: Instant::now(),
+                dragged: true,
+                touch,
+            });
+            self.dirty = true;
+            return;
+        }
         if !touch && self.viewer.is_none() {
             if let Some(hit) = self.hits.iter().rev().find(|h| contains(h.rect, point)) {
                 // Controls take priority over transcript selection beneath them.
@@ -430,9 +725,11 @@ impl App {
                     self.field_hit(hit.rect, point, false);
                 }
             } else if self.modal.is_none()
-                && let Some((key, byte)) = self.renderer.hit_text(point)
+                && self.context_menu.is_none()
+                && contains(self.transcript, point)
+                && let Some(caret) = self.renderer.nearest_text(point)
             {
-                self.renderer.selection = Some((key, byte, byte));
+                self.renderer.begin_selection(caret);
                 self.selecting = true;
                 self.focus = None;
             }
@@ -474,15 +771,27 @@ impl App {
         if p.id != id {
             return;
         }
-        if self.selecting {
-            if let Some((key, byte)) = self.renderer.hit_text(point)
-                && let Some((selected, _, end)) = &mut self.renderer.selection
-                && *selected == key
+        if let Some(drag) = &self.scroll_drag {
+            p.last = point;
+            if let Some(bar) = self
+                .scrollbars
+                .iter()
+                .find(|b| b.lane == drag.lane)
+                .copied()
             {
-                *end = byte;
+                let value = bar.value_at(point.y, drag.grab);
+                self.set_scroll(bar.lane, value);
+            }
+            self.dirty = true;
+            return;
+        }
+        if self.selecting {
+            if let Some(caret) = self.renderer.nearest_text(point) {
+                self.renderer.extend_selection(caret);
             }
             p.dragged |=
                 (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 4. * self.scale;
+            p.last = point;
             self.dirty = true;
             return;
         }
@@ -532,8 +841,11 @@ impl App {
             return;
         }
         let p = self.pointer.take().unwrap();
+        self.scroll_drag = None;
         if !p.dragged {
-            if let Some(hit) = self
+            if p.touch && p.at.elapsed().as_millis() > 450 && contains(self.transcript, point) {
+                self.context_at(point);
+            } else if let Some(hit) = self
                 .hits
                 .iter()
                 .rev()
@@ -547,7 +859,12 @@ impl App {
                 && let Some((key, _)) = self.renderer.hit_text(point)
             {
                 let end = self.renderer.messages[&key].source.len();
-                self.renderer.selection = Some((key, 0, end));
+                self.renderer.begin_selection(crate::render::TextPoint {
+                    key: key.clone(),
+                    byte: 0,
+                });
+                self.renderer
+                    .extend_selection(crate::render::TextPoint { key, byte: end });
             }
         }
         self.selecting = false;
@@ -559,8 +876,14 @@ impl App {
         self.report(result);
     }
     pub fn cancel_pointer(&mut self) {
+        self.context_menu = None;
+        self.usage.dismiss();
         self.dirty = true;
         self.hover = None;
+        self.autoscroll = None;
+        self.wheel = None;
+        self.scroll_drag = None;
+        self.expansion_pin = None;
         self.pointer = None;
         self.pinch = None;
         self.velocity = 0.;
@@ -633,6 +956,33 @@ impl App {
         self.dirty = true;
     }
     pub fn key(&mut self, key: &str, ctrl: bool, shift: bool) {
+        if let Some(menu) = &mut self.context_menu {
+            match key {
+                "Escape" => self.context_menu = None,
+                "ArrowUp" => {
+                    self.hover = None;
+                    menu.selected = (menu.selected + menu.options.len() - 1) % menu.options.len()
+                }
+                "ArrowDown" => {
+                    self.hover = None;
+                    menu.selected = (menu.selected + 1) % menu.options.len();
+                }
+                "Enter" => {
+                    let action = menu.options[menu.selected].1.clone();
+                    self.activate(action);
+                }
+                _ => {}
+            }
+            self.dirty = true;
+            return;
+        }
+        if key == "Escape" && (self.usage.pinned || self.usage.progress > 0.) {
+            self.usage.dismiss();
+            self.dirty = true;
+            return;
+        }
+        self.expansion_pin = None;
+        self.wheel = None;
         if let Some(modal) = &self.modal {
             if key == "Tab" && !ctrl && !modal.fields.is_empty() {
                 let count = modal.fields.len();
@@ -730,6 +1080,7 @@ impl App {
         self.report(result);
     }
     fn apply(&mut self, action: Action) -> Result<()> {
+        self.context_menu = None;
         let selected = self.controller.account.selected.clone();
         match action {
             Action::Select(id) => {
@@ -737,6 +1088,10 @@ impl App {
                 self.show_chats = false;
                 self.scroll = 0.;
                 self.focus = Some(None);
+            }
+            Action::Usage => {
+                self.usage.pinned = !self.usage.pinned;
+                self.usage.suppressed = !self.usage.pinned;
             }
             Action::New => {
                 self.controller.new_chat()?;
@@ -957,7 +1312,6 @@ impl App {
                         .control(ClientCommand::Abort { session_id: id })?;
                 }
             }
-            Action::History => self.controller.history()?,
             Action::Tail => {
                 self.scroll = self.max_scroll;
                 self.remember_scroll();
@@ -994,17 +1348,20 @@ impl App {
                 }
             }
             Action::RemoveFile(id) => self.controller.remove_file(&id)?,
-            Action::Toggle(ids) => {
+            Action::Toggle(key, expanded) => {
+                self.wheel = None;
+                self.velocity = 0.;
+                self.expansion_pin = self
+                    .expansion_positions
+                    .get(&key)
+                    .map(|y| (key.clone(), *y - self.scroll));
                 if let Some(id) = selected {
                     let c = self.controller.chats.get_mut(&id).unwrap();
-                    let expanded = ids.iter().any(|id| c.local.expanded.contains(id));
-                    for key in ids {
-                        if expanded {
-                            c.local.expanded.remove(&key);
-                        } else {
-                            c.local.expanded.insert(key);
-                        }
+                    if key.starts_with("details:") {
+                        c.local.details_default = expanded;
                     }
+                    c.local.expansion.insert(key, expanded);
+                    c.local.position.follow = false;
                     self.controller.save_chat(&id)?;
                 }
             }
@@ -1117,6 +1474,9 @@ impl App {
         let mut chrome = Layer::new(background_input);
         let mut overlay = Layer::new(input);
         self.hits.clear();
+        self.scrollbars.clear();
+        self.message_areas.clear();
+        self.usage.region = Rect::new(0., 0., 0., 0.);
         self.renderer.clear_scenes();
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
@@ -1143,6 +1503,35 @@ impl App {
                     bounds.width - side,
                     bounds.height,
                 ),
+            );
+        }
+        self.usage_frame(&mut overlay, bounds);
+        self.context_frame(&mut overlay, bounds);
+        if let Some(auto) = &self.autoscroll {
+            let a = auto.anchor;
+            let radius = 13.5 * s;
+            overlay.rounded_rect(
+                Rect::new(a.x - radius, a.y - radius, radius * 2., radius * 2.),
+                radius,
+                color(0x67d4ff),
+            );
+            overlay.rounded_rect(
+                Rect::new(
+                    a.x - radius + 2. * s,
+                    a.y - radius + 2. * s,
+                    (radius - 2. * s) * 2.,
+                    (radius - 2. * s) * 2.,
+                ),
+                radius - 2. * s,
+                color(0x18212b),
+            );
+            self.renderer.label(
+                &mut overlay,
+                "↕",
+                Rect::new(a.x - 7. * s, a.y - 12. * s, 18. * s, 26. * s),
+                22. * s,
+                color(0x67d4ff),
+                false,
             );
         }
         if let Some(viewer) = &self.viewer {
@@ -1214,29 +1603,6 @@ impl App {
                 );
             }
         }
-        if self
-            .renderer
-            .selection
-            .as_ref()
-            .is_some_and(|(_, a, b)| a != b)
-            && self.modal.is_none()
-        {
-            button(
-                &mut self.renderer,
-                &mut overlay,
-                &mut self.hits,
-                Rect::new(
-                    bounds.x + bounds.width - 150. * s,
-                    bounds.y + 68. * s,
-                    136. * s,
-                    34. * s,
-                ),
-                "Copy selection",
-                Action::CopySelection,
-                s,
-                true,
-            );
-        }
         if matches!(
             self.modal.as_ref().map(|m| &m.kind),
             Some(ModalKind::Settings)
@@ -1250,6 +1616,13 @@ impl App {
             Some(ModalKind::Settings)
         ) {
             self.notice_frame(&mut overlay, bounds);
+        }
+        if self.selecting
+            && let Some(p) = &self.pointer
+            && p.dragged
+            && let Some(caret) = self.renderer.nearest_text(p.last)
+        {
+            self.dirty |= self.renderer.extend_selection(caret);
         }
         self.renderer
             .draw(ctx, view, &[main, body, chrome, overlay]);
@@ -1300,9 +1673,9 @@ impl App {
             true,
         );
         let clip = Rect::new(b.x, b.y + 148. * s, b.width, (b.height - 190. * s).max(0.));
-        self.list_scroll = self
-            .list_scroll
-            .min((self.controller.account.sessions.len() as f32 * 90. * s - clip.height).max(0.));
+        self.max_list_scroll =
+            (self.controller.account.sessions.len() as f32 * 90. * s - clip.height).max(0.);
+        self.list_scroll = self.list_scroll.min(self.max_list_scroll);
         for (i, session) in self.controller.account.sessions.iter().enumerate() {
             let y = clip.y + i as f32 * 90. * s - self.list_scroll;
             let rect = Rect::new(b.x + 8. * s, y, b.width - 16. * s, 84. * s);
@@ -1378,6 +1751,7 @@ impl App {
                 action: Action::Select(session.id.clone()),
             });
         }
+        self.scrollbar(layer, Lane::Sidebar, clip);
         let label = if self.controller.epoch.is_some() {
             "●  Connected"
         } else {
@@ -1403,7 +1777,16 @@ impl App {
     }
     fn rows(&self, session: &str) -> Vec<Row> {
         let chat = &self.controller.chats[session];
-        let events = chat.feed.events.values().collect::<Vec<_>>();
+        let tools = Tools::new(chat.feed.events.values());
+        let events = chat
+            .feed
+            .events
+            .values()
+            .filter(|e| {
+                !(e.kind == EventKind::Thinking && e.text.is_empty())
+                    && !(e.attachment.is_none() && tools.paired_result(e))
+            })
+            .collect::<Vec<_>>();
         let mut rows = vec![];
         let mut i = 0;
         while i < events.len() {
@@ -1424,48 +1807,16 @@ impl App {
                     i += 1;
                 }
                 let group = &events[start..i];
-                let ids = group.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
-                let expanded = ids.iter().any(|id| chat.local.expanded.contains(id));
-                let tools = group.iter().filter(|e| e.kind == EventKind::Tool).count();
-                let title = format!(
-                    "{}  Thinking & tools{}",
-                    if expanded { "▾" } else { "▸" },
-                    if tools > 0 {
-                        format!(" · {tools}")
-                    } else {
-                        String::new()
-                    }
-                );
-                let source = if expanded {
-                    group
-                        .iter()
-                        .map(|e| {
-                            format!(
-                                "**{}**\n\n{}",
-                                e.tool_name.as_deref().unwrap_or("Thinking"),
-                                if e.kind == EventKind::Thinking {
-                                    e.text.clone()
-                                } else {
-                                    code(&e.text)
-                                }
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                } else {
-                    String::new()
-                };
+                let details = tools.lines(group, &chat.local);
                 rows.push(Row {
-                    header: true,
-                    key: format!("{session}/{}", e.id),
-                    title,
-                    source,
+                    key: format!("{session}/{}", details[0].key),
+                    details,
+                    header: false,
+                    title: String::new(),
+                    source: String::new(),
                     user: false,
-                    error: group.iter().any(|e| e.is_error),
-                    actions: vec![(
-                        if expanded { "Collapse" } else { "Expand" }.into(),
-                        Action::Toggle(ids),
-                    )],
+                    error: false,
+                    actions: vec![],
                     attachment: None,
                 });
                 continue;
@@ -1492,11 +1843,12 @@ impl App {
                     }
                 )
             };
-            let mut actions = vec![("Copy".into(), Action::Copy(e.text.clone()))];
-            if user && e.phase == EventPhase::Saved {
-                actions.push(("Fork".into(), Action::Fork(e.entry_id.clone())));
+            let mut actions = vec![("Copy message".into(), Action::Copy(e.text.clone()))];
+            if e.phase == EventPhase::Saved {
+                actions.push(("Fork here".into(), Action::Fork(e.entry_id.clone())));
             }
             rows.push(Row {
+                details: vec![],
                 header: e.role == EventRole::System || e.is_error || e.error_message.is_some(),
                 key: format!("{session}/{}", e.id),
                 title,
@@ -1514,6 +1866,7 @@ impl App {
         }
         for (key, value) in &chat.statuses {
             rows.push(Row {
+                details: vec![],
                 header: true,
                 key: format!("status:{key}"),
                 title: "Extension status".into(),
@@ -1527,6 +1880,7 @@ impl App {
         for (key, lines) in &chat.widgets {
             if !lines.is_empty() {
                 rows.push(Row {
+                    details: vec![],
                     header: true,
                     key: format!("widget:{key}"),
                     title: key.clone(),
@@ -1540,6 +1894,7 @@ impl App {
         }
         for p in &chat.local.pending {
             rows.push(Row {
+                details: vec![],
                 header: true,
                 key: format!("pending:{}", p.request.id),
                 title: p.status.label().into(),
@@ -1607,6 +1962,7 @@ impl App {
                 ));
             }
             rows.push(Row {
+                details: vec![],
                 header: true,
                 key: format!("queue:{}", q.request_id),
                 title: format!("Queued{}", if state.paused { " · held" } else { "" }),
@@ -1712,7 +2068,7 @@ impl App {
         let x = b.x + (b.width - width) / 2.;
         let editor_h = self
             .composer
-            .height(&mut self.renderer, width - 92. * s, 16. * s);
+            .height(&mut self.renderer, width - 132. * s, 16. * s);
         let queue = &self.controller.chats[&session].feed.queue;
         let controls = queue.paused
             || queue
@@ -1735,13 +2091,50 @@ impl App {
         let rows = self.rows(&session);
         let mut placements = vec![];
         let mut y = 12. * s;
-        let has_history = self.controller.chats[&session].feed.before.is_some();
-        if has_history {
-            y += 48. * s;
-        }
+
         let mut keys = HashSet::new();
+        let mut detail_layouts: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
         self.max_horizontal = 0.;
         for row in &rows {
+            if !row.details.is_empty() {
+                let mut layout = vec![];
+                let mut top = 4. * s;
+                for line in &row.details {
+                    let key = format!("{session}/{}", line.key);
+                    let h = if line.source.is_empty() {
+                        if line.toggle.is_some() {
+                            28. * s
+                        } else {
+                            18. * s
+                        }
+                    } else {
+                        keys.insert(key.clone());
+                        let h = self.renderer.message_height(
+                            &key,
+                            &line.source,
+                            text_width - line.indent * s,
+                            if line.code { 12. / 0.9 * s } else { 12. * s },
+                        ) + 6. * s;
+                        if let Some(m) = self.renderer.messages.get(&key) {
+                            self.max_horizontal = self
+                                .max_horizontal
+                                .max(m.view.width - (text_width - line.indent * s));
+                        }
+                        h
+                    };
+                    layout.push((top, h));
+                    top += h;
+                }
+                let height = top + 4. * s;
+                detail_layouts.insert(row.key.clone(), layout);
+                placements.push(Placed {
+                    key: row.key.clone(),
+                    top: y,
+                    height,
+                });
+                y += height + 12. * s;
+                continue;
+            }
             keys.insert(row.key.clone());
             let text_height = if row.source.is_empty() {
                 0.
@@ -1767,20 +2160,15 @@ impl App {
             } else {
                 0.
             };
-            let collapsed = row.source.is_empty()
-                && row
-                    .actions
-                    .iter()
-                    .any(|(_, a)| matches!(a, Action::Toggle(_)));
-            let height = if collapsed {
-                40. * s
-            } else {
-                (if row.header { 38. } else { 12. }) * s
-                    + text_height
-                    + 12. * s
-                    + attachment
-                    + 30. * s
-            };
+            let height = (if row.header { 38. } else { 12. }) * s
+                + text_height
+                + 12. * s
+                + attachment
+                + if row.attachment.is_some() {
+                    30. * s
+                } else {
+                    0.
+                };
             placements.push(Placed {
                 key: row.key.clone(),
                 top: y,
@@ -1796,7 +2184,28 @@ impl App {
                 p.top += viewport.height - y;
             }
         }
+        let old_scroll = self.scroll;
+        self.expansion_positions.clear();
+        for (row, p) in rows.iter().zip(&placements) {
+            if let Some(layout) = detail_layouts.get(&row.key) {
+                for (line, (top, _)) in row.details.iter().zip(layout) {
+                    if line.toggle.is_some() {
+                        self.expansion_positions
+                            .insert(line.key.clone(), p.top + top);
+                    }
+                }
+            }
+        }
         let position = &self.controller.chats[&session].local.position;
+        // An empty/not-yet-loaded frame must not erase the saved anchor. If the
+        // anchor is on an older page, near-top paging can find it before rebasing.
+        let can_remember = self.controller.chats[&session].feed.synchronized
+            && (position.follow
+                || position
+                    .key
+                    .as_ref()
+                    .is_none_or(|key| placements.iter().any(|p| &p.key == key))
+                || self.controller.chats[&session].feed.before.is_none());
         if position.follow {
             self.scroll = self.max_scroll;
         } else if let Some(key) = &position.key
@@ -1806,27 +2215,21 @@ impl App {
         } else {
             self.scroll = self.scroll.clamp(0., self.max_scroll);
         }
-        self.placed = placements;
-        if has_history {
-            let label = if self.controller.chats[&session].feed.loading {
-                "Loading…"
-            } else {
-                "Load earlier messages"
-            };
-            let rect = Rect::new(x, viewport.y + 8. * s - self.scroll, width, 36. * s);
-            if rect.y + rect.height > viewport.y {
-                button(
-                    &mut self.renderer,
-                    layer,
-                    &mut self.hits,
-                    crate::render::intersect(rect, viewport),
-                    label,
-                    Action::History,
-                    s,
-                    false,
-                );
-            }
+        if let Some((key, screen_y)) = &self.expansion_pin
+            && let Some(top) = self.expansion_positions.get(key)
+        {
+            self.scroll = (top - screen_y).clamp(0., self.max_scroll);
         }
+        if let Some(wheel) = &mut self.wheel
+            && wheel.lane == Lane::Transcript
+        {
+            wheel.target = (wheel.target + self.scroll - old_scroll).clamp(0., self.max_scroll);
+        }
+        self.placed = placements;
+        if can_remember {
+            self.remember_scroll();
+        }
+        self.history_near_top(&session);
         for (row, p) in rows.iter().zip(&self.placed) {
             let top = viewport.y + p.top - self.scroll;
             if top + p.height < viewport.y || top > viewport.y + viewport.height {
@@ -1840,33 +2243,74 @@ impl App {
                 color(if row.user { 0x164e63 } else { 0x18212b }),
                 viewport,
             );
-            if row.source.is_empty()
-                && row
-                    .actions
-                    .iter()
-                    .any(|(_, a)| matches!(a, Action::Toggle(_)))
-            {
-                layer.clipped_rounded_rect(
-                    rect,
-                    12. * s,
-                    layer.control_color(rect, color(0x18212b)),
-                    viewport,
-                );
-                self.renderer.label(
-                    layer,
-                    &row.title,
-                    crate::render::intersect(
-                        Rect::new(x + 12. * s, top + 10. * s, text_width, 24. * s),
-                        viewport,
-                    ),
-                    14. * s,
-                    color(0xb7c2ce),
-                    false,
-                );
-                self.hits.push(Hit {
-                    rect: crate::render::intersect(rect, viewport),
-                    action: row.actions[0].1.clone(),
-                });
+            if let Some(layout) = detail_layouts.get(&row.key) {
+                for (line, (offset, h)) in row.details.iter().zip(layout) {
+                    let lx = x + 14. * s + line.indent * s;
+                    let line_rect = Rect::new(
+                        lx - 4. * s,
+                        top + offset,
+                        text_width - line.indent * s + 8. * s,
+                        *h,
+                    );
+                    if line.tool {
+                        layer.clipped_rect(line_rect, color(0x111922), viewport);
+                    }
+                    if !line.source.is_empty() {
+                        self.renderer.message(
+                            layer,
+                            &format!("{session}/{}", line.key),
+                            Vec2::new(lx, top + offset),
+                            Rect::new(
+                                lx,
+                                viewport.y,
+                                text_width - line.indent * s,
+                                viewport.height,
+                            ),
+                            self.horizontal,
+                        );
+                    } else {
+                        let label = if let Some(open) = line.toggle {
+                            format!("{} {}", if open { "▾" } else { "▸" }, line.label)
+                        } else {
+                            line.label.clone()
+                        };
+                        if let Some(open) = line.toggle {
+                            layer.clipped_rect(
+                                line_rect,
+                                layer.control_color(
+                                    line_rect,
+                                    color(if line.tool { 0x111922 } else { 0x18212b }),
+                                ),
+                                viewport,
+                            );
+                            let hit = crate::render::intersect(line_rect, viewport);
+                            if hit.height > 0. {
+                                self.hits.push(Hit {
+                                    rect: hit,
+                                    action: Action::Toggle(line.key.clone(), !open),
+                                });
+                            }
+                        }
+                        self.renderer.clipped_label(
+                            layer,
+                            &label,
+                            Rect::new(
+                                lx,
+                                top + offset + 5. * s,
+                                text_width - line.indent * s,
+                                20. * s,
+                            ),
+                            if line.toggle.is_some() {
+                                12. * s
+                            } else {
+                                11. * s
+                            },
+                            color(if line.error { 0xffb4ab } else { 0xb7c2ce }),
+                            false,
+                            viewport,
+                        );
+                    }
+                }
                 continue;
             }
             let label_rect = crate::render::intersect(
@@ -1899,7 +2343,11 @@ impl App {
                     self.horizontal,
                 );
             }
-            let mut actions = row.actions.clone();
+            self.message_areas.push(MessageArea {
+                rect: crate::render::intersect(rect, viewport),
+                options: row.actions.clone(),
+            });
+            let mut actions: Vec<(String, Action)> = vec![];
             if let Some((entry, attachment)) = &row.attachment {
                 let image = attachment.kind == AttachmentKind::Image;
                 let path = self.controller.store.attachment_path(
@@ -2029,22 +2477,16 @@ impl App {
                 ax += width + 5. * s;
             }
         }
+        self.scrollbar(chrome, Lane::Transcript, viewport);
         chrome.rect(
             Rect::new(b.x, composer_top, b.width, composer_h),
             color(0x0e141b),
         );
-        let mut model = summary
+        let model = summary
             .as_ref()
             .and_then(|s| s.model.as_ref())
             .map(|m| format!("{}/{}", m.provider, m.model_id))
             .unwrap_or_else(|| "Model loads when the worker starts".into());
-        if let Some(usage) = summary.as_ref().and_then(|s| s.context_usage) {
-            model.push_str(&format!(
-                "  ·  {} / {} tokens",
-                usage.tokens.map_or_else(|| "?".into(), |t| t.to_string()),
-                usage.context_window
-            ));
-        }
         self.renderer.label(
             chrome,
             &model,
@@ -2078,7 +2520,7 @@ impl App {
         let composer_rect = Rect::new(
             field.x + 40. * s,
             field.y,
-            field.width - 92. * s,
+            field.width - 132. * s,
             field.height,
         );
         self.composer.draw(
@@ -2095,49 +2537,86 @@ impl App {
             rect: composer_rect,
             action: Action::Focus(None),
         });
-        button(
-            &mut self.renderer,
+        let iy = field.y + (field.height - 40. * s) / 2.;
+        let connected = self.controller.epoch.is_some();
+        self.icon_button(
+            ctx,
             chrome,
-            &mut self.hits,
-            Rect::new(
-                field.x + 4. * s,
-                field.y + (field.height - 40. * s) / 2.,
-                36. * s,
-                40. * s,
-            ),
-            "+",
+            Rect::new(field.x + 4. * s, iy, 36. * s, 40. * s),
+            Icon::Attach,
+            22.,
             Action::Attach,
-            s,
             false,
+            connected,
         );
-        button(
-            &mut self.renderer,
+        let usage_rect = Rect::new(field.x + field.width - 84. * s, iy, 40. * s, 40. * s);
+        let usage = summary.as_ref().and_then(|s| s.context_usage);
+        let capacity = usage.map(|u| u.context_window).filter(|n| *n > 0);
+        let used = usage.and_then(|u| u.tokens);
+        let ratio = capacity
+            .zip(used)
+            .map(|(capacity, used)| used as f32 / capacity as f32);
+        self.icon_button(
+            ctx,
             chrome,
-            &mut self.hits,
-            Rect::new(
-                field.x + field.width - 44. * s,
-                field.y + (field.height - 40. * s) / 2.,
-                40. * s,
-                40. * s,
-            ),
-            "↑",
-            Action::Send,
-            s,
+            usage_rect,
+            Icon::Context(ratio),
+            20.,
+            Action::Usage,
+            false,
             true,
+        );
+        self.usage.region = usage_rect;
+        self.usage.text = if let Some(capacity) = capacity {
+            if let Some(used) = used {
+                format!(
+                    "Estimated context usage: {:.0}%\n{} of {} tokens",
+                    ratio.unwrap() * 100.,
+                    count(used),
+                    count(capacity)
+                )
+            } else {
+                format!(
+                    "Context usage unknown\nCapacity: {} tokens",
+                    count(capacity)
+                )
+            }
+        } else {
+            "Context usage unavailable".into()
+        };
+        if capacity.is_some()
+            && (!connected
+                || !self.controller.chats[&session].feed.synchronized
+                || summary.as_ref().is_none_or(|s| {
+                    !matches!(s.status, SessionStatus::Idle | SessionStatus::Running)
+                }))
+        {
+            self.usage.text.push_str("\nLast known value");
+        }
+        let can_send = connected && (!self.composer.value.trim().is_empty() || !files.is_empty());
+        self.icon_button(
+            ctx,
+            chrome,
+            Rect::new(field.x + field.width - 44. * s, iy, 40. * s, 40. * s),
+            Icon::Send,
+            20.,
+            Action::Send,
+            true,
+            can_send,
         );
         if summary
             .as_ref()
             .is_some_and(|s| s.status == SessionStatus::Running)
         {
-            button(
-                &mut self.renderer,
+            self.icon_button(
+                ctx,
                 chrome,
-                &mut self.hits,
                 Rect::new(b.x + b.width - 98. * s, b.y + 8. * s, 36. * s, 36. * s),
-                "■",
+                Icon::Stop,
+                20.,
                 Action::Abort,
-                s,
                 false,
+                connected,
             );
         }
         let controls_y = field.y + field.height + 4. * s;
@@ -2271,6 +2750,174 @@ impl App {
                 false,
             );
         }
+    }
+    pub fn context_at(&mut self, point: Vec2) {
+        if self.modal.is_some() || self.viewer.is_some() || !contains(self.transcript, point) {
+            return;
+        }
+        if self.cancel_autoscroll() {
+            return;
+        }
+        self.wheel = None;
+        self.usage.dismiss();
+        let mut options = vec![];
+        if self
+            .renderer
+            .selected_text()
+            .is_some_and(|text| !text.is_empty())
+        {
+            options.push(("Copy selection".into(), Action::CopySelection));
+        }
+        if let Some(area) = self.message_areas.iter().find(|a| contains(a.rect, point)) {
+            options.extend(area.options.clone());
+        }
+        if !options.is_empty() {
+            self.context_menu = Some(ContextMenu {
+                at: point,
+                options,
+                selected: 0,
+            });
+        }
+        self.pointer = None;
+        self.selecting = false;
+        self.dirty = true;
+    }
+    fn context_frame(&mut self, layer: &mut Layer, bounds: Rect) {
+        let Some(menu) = &self.context_menu else {
+            return;
+        };
+        let s = self.scale;
+        let w = (240. * s).min(bounds.width);
+        let h = (menu.options.len() as f32 * 36. + 8.) * s;
+        let rect = Rect::new(
+            menu.at
+                .x
+                .clamp(bounds.x, (bounds.x + bounds.width - w).max(bounds.x)),
+            menu.at
+                .y
+                .clamp(bounds.y, (bounds.y + bounds.height - h).max(bounds.y)),
+            w,
+            h,
+        );
+        self.context_rect = rect;
+        self.hits.clear();
+        layer.rounded_rect(rect, 8. * s, color(0x36343b));
+        for (i, (label, action)) in menu.options.iter().enumerate() {
+            let r = Rect::new(
+                rect.x + 4. * s,
+                rect.y + (4. + i as f32 * 36.) * s,
+                w - 8. * s,
+                36. * s,
+            );
+            if self.hover.is_some_and(|p| contains(r, p))
+                || self.hover.is_none() && menu.selected == i
+            {
+                layer.rounded_rect(r, 4. * s, color(0x494750));
+            }
+            self.renderer.label(
+                layer,
+                label,
+                Rect::new(r.x + 12. * s, r.y + 9. * s, r.width - 24. * s, 22. * s),
+                14. * s,
+                color(0xe5eaf0),
+                false,
+            );
+            self.hits.push(Hit {
+                rect: r,
+                action: action.clone(),
+            });
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn icon_button(
+        &mut self,
+        ctx: &impl RenderContext,
+        layer: &mut Layer,
+        r: Rect,
+        icon: Icon,
+        size: f32,
+        action: Action,
+        primary: bool,
+        enabled: bool,
+    ) {
+        let hovered = layer.interaction.hover.is_some_and(|p| contains(r, p));
+        if primary || enabled && hovered {
+            layer.rounded_rect(
+                r,
+                r.height / 2.,
+                layer.control_color(
+                    r,
+                    color(if !enabled {
+                        0x303942
+                    } else if primary {
+                        0x67d4ff
+                    } else {
+                        0x24303b
+                    }),
+                ),
+            );
+        }
+        let pixels = size * self.scale;
+        self.renderer.icon(
+            ctx,
+            layer,
+            icon,
+            Rect::new(
+                r.x + (r.width - pixels) / 2.,
+                r.y + (r.height - pixels) / 2.,
+                pixels,
+                pixels,
+            ),
+            if !enabled {
+                0x68727e
+            } else if primary {
+                0x003546
+            } else if matches!(icon, Icon::Attach) {
+                0xb7c2ce
+            } else {
+                0x67d4ff
+            },
+        );
+        if enabled {
+            self.hits.push(Hit { rect: r, action });
+        }
+    }
+    fn usage_frame(&mut self, layer: &mut Layer, bounds: Rect) {
+        if self.usage.progress <= 0.
+            || self.usage.region.width <= 0.
+            || self.modal.is_some()
+            || self.viewer.is_some()
+            || self.context_menu.is_some()
+        {
+            return;
+        }
+        let s = self.scale;
+        let w = (300. * s).min(bounds.width - 16. * s);
+        let h = (self.usage.text.lines().count() as f32 * 17. + 20.) * s;
+        let anchor = self.usage.region;
+        let x = (anchor.x + anchor.width / 2. - w / 2.)
+            .clamp(bounds.x + 8. * s, bounds.x + bounds.width - w - 8. * s);
+        let bottom = anchor.y - 8. * s;
+        let full = Rect::new(x, bottom - h, w, h);
+        self.usage.card = full;
+        let t = self.usage.progress;
+        let animated = Rect::new(x + w * (1. - t) / 2., bottom - h * t, w * t, h * t);
+        // Opaque X/Y expansion from the indicator. No opacity fade.
+        layer.rounded_rect(animated, 6. * s, color(0xe5e1e6));
+        self.renderer.clipped_label(
+            layer,
+            &self.usage.text,
+            Rect::new(
+                full.x + 10. * s,
+                full.y + 10. * s,
+                full.width - 20. * s,
+                full.height - 20. * s,
+            ),
+            12. * s,
+            color(0x303038),
+            false,
+            animated,
+        );
     }
     fn settings_frame(&mut self, layer: &mut Layer, b: Rect) {
         let s = self.scale;
@@ -2577,7 +3224,7 @@ fn button(
     }
     hits.push(Hit { rect, action });
 }
-fn literal(text: &str) -> String {
+pub(crate) fn literal(text: &str) -> String {
     text.chars()
         .flat_map(|c| {
             if "\\`*_{}[]<>()#+-.!|~>".contains(c) {
@@ -2588,7 +3235,7 @@ fn literal(text: &str) -> String {
         })
         .collect()
 }
-fn code(text: &str) -> String {
+pub(crate) fn code(text: &str) -> String {
     let n = text
         .split(|c| c != '`')
         .map(str::len)
@@ -2598,4 +3245,16 @@ fn code(text: &str) -> String {
         + 1;
     let fence = "`".repeat(n);
     format!("{fence}\n{text}\n{fence}")
+}
+
+fn count(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

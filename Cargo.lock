@@ -5651,6 +5651,7 @@ dependencies = [
  "tau-transfer",
  "taud",
  "tempfile",
+ "tiny-skia",
  "tokio",
  "tokio-tungstenite",
  "unicode-segmentation",
