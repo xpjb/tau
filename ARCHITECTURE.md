@@ -22,8 +22,9 @@ One-sentence responsibility per module. Read this before opening files.
   queue state and model backfill walks.
 - `protocol.rs` — the client↔daemon wire contract. Pure data.
 - `state.rs` — Tau-owned session metadata and the serialized, durable flag log.
-- `pi-extension/send-media.ts` — Tau's unified file-staging tool and incidental
-  flag tool; flag writes use a capability scoped to the current worker.
+- `pi-extension/send-media.ts` — Tau's file delivery and OpenAI image-generation
+  tools, plus the incidental flag tool; flag writes use a capability scoped to
+  the current worker.
 
 Dependencies point one way: `server → manager → {pi, transcript, state}`,
 with `transcript` owning Pi formats and `state.rs` owning Tau's own

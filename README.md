@@ -29,13 +29,27 @@ New Chat reuses one daemon-owned starter and starts Pi before returning it, so t
 - Bump chats on assistant replies and stops; preserve unread markers across app restarts.
 - Detect failed connections and restore retained chat feeds without replaying sends or controls.
 - Fork from any visible user message.
-- Attach local files for Pi to inspect, view supported images from Pi inline, and download files produced through Pi's `send_file` tool. The tool stages files itself and identifies inline images by content.
+- Attach local files for Pi to inspect, view supported images from Pi inline, download files through Pi's `send_file` tool, and create inline images through `generate_image`. File delivery stages files itself and identifies inline images by content.
 - Save viewed images privately for offline inline/full-screen viewing. Export a saved original without downloading it again.
 - Zoom and pan full-screen images with pinch or mouse wheel/drag, plus minus/plus/Fit controls.
 - Edit the entire shared title prompt in Settings, with exact whitespace and empty overrides.
 - Use the connection indicator for routine reconnect failures; keep actionable errors visible.
 - On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
 - Use the same chats from Android and Windows.
+
+## OpenAI image generation
+
+Tau's `generate_image` tool sends one prompt through OpenAI's native Codex
+`image_generation` tool with `gpt-image-2` and PNG output. It uses Pi's existing
+ChatGPT OAuth login; no separate image API key or provider registry is needed.
+Only the tool prompt enters this separate request. A confirmed PNG is written to
+a private unique directory under Tau's outbox and returned through the normal
+inline attachment path.
+
+Generation has no automatic request retry because an interrupted request may
+still consume image allowance. Responses are bounded, and generated images must
+be valid PNG files no larger than 10 MB. `send_file` remains the single tool for
+delivering existing files.
 
 ## Selection and crash diagnostics
 

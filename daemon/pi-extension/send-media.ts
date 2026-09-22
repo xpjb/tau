@@ -1,11 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { chmod, copyFile, mkdtemp, open, realpath, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, copyFile, mkdtemp, open, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 const IMAGE_LIMIT = 10_000_000;
 const FILE_LIMIT = 50_000_000;
 const CAPTION_LIMIT = 1_024;
+const IMAGE_PROMPT_LIMIT = 32_000;
+const CODEX_RESPONSE_LIMIT = 32 * 1024 * 1024;
 const DEFAULT_ROOT = "/root/.local/share/tau/outbox";
 
 export default function (pi: ExtensionAPI) {
@@ -88,6 +91,191 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  const generateDescription = "Generate one new PNG with OpenAI's gpt-image-2 and send it to the user through Tau.";
+  pi.registerTool({
+    name: "generate_image",
+    label: "Generate Image",
+    description: generateDescription,
+    promptSnippet: generateDescription,
+    promptGuidelines: [
+      "Use generate_image when the user asks for a new illustration, picture, or other generative image. Put all requested visual details in one complete prompt.",
+      "One call creates one image. Do not retry an unconfirmed generation unless the user explicitly asks, because OpenAI may have consumed the image allowance.",
+    ],
+    executionMode: "sequential",
+    parameters: Type.Object({
+      prompt: Type.String({ minLength: 1, maxLength: IMAGE_PROMPT_LIMIT, description: "Complete prompt for the image" }),
+    }),
+    async execute(_toolCallId, params, signal, _onUpdate, context) {
+      signal?.throwIfAborted();
+      const prompt = params.prompt.trim();
+      if (!prompt || Array.from(prompt).length > IMAGE_PROMPT_LIMIT) {
+        throw new Error(`Image prompt must contain 1–${IMAGE_PROMPT_LIMIT} characters`);
+      }
+
+      const configuredRoot = process.env.TAU_ATTACHMENT_ROOT ?? DEFAULT_ROOT;
+      if (!isAbsolute(configuredRoot)) throw new Error("Tau attachment root must be absolute");
+      const root = await realpath(configuredRoot).catch(() => {
+        throw new Error(`Tau attachment root does not exist: ${configuredRoot}`);
+      });
+
+      const auth = await context.modelRegistry.getProviderAuth("openai-codex").catch(() => undefined);
+      const token = auth?.auth.apiKey;
+      if (!token) throw new Error("OpenAI image generation requires Pi's Codex sign-in");
+      let account: unknown;
+      try {
+        const payload = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"));
+        account = payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
+      } catch {}
+      if (typeof account !== "string" || !/^[a-z0-9_-]{1,128}$/i.test(account)) {
+        throw new Error("Pi's Codex login has no valid ChatGPT account ID");
+      }
+      const model = context.model?.provider === "openai-codex"
+        ? context.model.id
+        : context.modelRegistry.find("openai-codex", "gpt-6-sol")?.id
+          ?? context.modelRegistry.getAvailable().find((candidate) => candidate.provider === "openai-codex")?.id;
+      if (!model) throw new Error("No OpenAI Codex model is available to start image generation");
+
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(auth.auth.headers ?? {})) {
+        if (typeof value === "string") headers.set(name, value);
+      }
+      const requestId = randomUUID();
+      headers.set("Authorization", `Bearer ${token}`);
+      headers.set("ChatGPT-Account-Id", account);
+      headers.set("Originator", "tau");
+      headers.set("User-Agent", "tau");
+      headers.set("OpenAI-Beta", "responses=experimental");
+      headers.set("Accept", "text/event-stream");
+      headers.set("Content-Type", "application/json");
+      headers.set("Session-Id", requestId);
+      headers.set("X-Client-Request-Id", requestId);
+
+      const deadline = AbortSignal.timeout(10 * 60_000);
+      const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+      let image: Buffer;
+      try {
+        const response = await fetch("https://chatgpt.com/backend-api/codex/responses", {
+          method: "POST",
+          redirect: "error",
+          headers,
+          body: JSON.stringify({
+            model,
+            store: false,
+            stream: true,
+            instructions: "Generate exactly one image from the user's prompt. Use image_generation once and return no prose.",
+            input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
+            tools: [{ type: "image_generation", model: "gpt-image-2", output_format: "png" }],
+            tool_choice: "required",
+            parallel_tool_calls: false,
+            reasoning: { effort: "low", summary: "auto" },
+            text: { verbosity: "low" },
+          }),
+          signal: requestSignal,
+        });
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error(`OpenAI returned HTTP ${response.status}`);
+        }
+        if (!response.body) throw new Error("OpenAI returned no response body");
+        const declaredBytes = Number(response.headers.get("content-length"));
+        if (Number.isFinite(declaredBytes) && declaredBytes > CODEX_RESPONSE_LIMIT) {
+          await response.body.cancel();
+          throw new Error("OpenAI response exceeded its size limit");
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let wire = "";
+        let wireBytes = 0;
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          wireBytes += chunk.value.byteLength;
+          if (wireBytes > CODEX_RESPONSE_LIMIT) {
+            await reader.cancel();
+            throw new Error("OpenAI response exceeded its size limit");
+          }
+          wire += decoder.decode(chunk.value, { stream: true });
+        }
+        wire += decoder.decode();
+
+        let terminal = false;
+        let imageId: string | undefined;
+        let encoded: string | undefined;
+        for (const block of wire.split(/\r?\n\r?\n/)) {
+          const data = block.split(/\r?\n/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).replace(/^ /, ""))
+            .join("\n");
+          if (!data || data === "[DONE]") continue;
+          let event: any;
+          try {
+            event = JSON.parse(data);
+          } catch {
+            throw new Error("OpenAI returned malformed image events");
+          }
+          if (event?.type === "error" || event?.type === "response.failed") {
+            const code = event?.error?.code ?? event?.response?.error?.code ?? event?.code;
+            throw new Error(`OpenAI image generation failed${typeof code === "string" ? ` (${code})` : ""}`);
+          }
+
+          let items: any[] = [];
+          if (event?.type === "response.output_item.done") items = [event.item];
+          if (["response.completed", "response.done", "response.incomplete"].includes(event?.type)) {
+            terminal = true;
+            if (event.type === "response.incomplete" || event?.response?.status !== "completed") {
+              throw new Error("OpenAI did not complete image generation");
+            }
+            if (Array.isArray(event.response.output)) items = event.response.output;
+          }
+          for (const item of items) {
+            if (item?.type !== "image_generation_call") continue;
+            if (item.status !== "completed") throw new Error("OpenAI did not complete the generated image");
+            if (typeof item.id !== "string" || !item.id) throw new Error("OpenAI returned an image without an ID");
+            if (imageId === item.id) continue;
+            if (imageId) throw new Error("OpenAI returned more than one generated image");
+            if (typeof item.result !== "string" || !item.result) throw new Error("OpenAI returned no generated image data");
+            imageId = item.id;
+            encoded = item.result;
+          }
+        }
+        if (!terminal) throw new Error("OpenAI image stream ended before completion");
+        if (!encoded || !imageId) throw new Error("OpenAI completed without a generated image");
+        if (encoded.length > Math.ceil(IMAGE_LIMIT / 3) * 4 || encoded.length % 4 !== 0
+          || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+          throw new Error("OpenAI returned invalid or oversized image data");
+        }
+        image = Buffer.from(encoded, "base64");
+        if (!image.length || image.length > IMAGE_LIMIT || image.toString("base64") !== encoded
+          || !image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+          throw new Error("OpenAI returned invalid or oversized PNG data");
+        }
+      } catch (error) {
+        if (signal?.aborted) signal.throwIfAborted();
+        const reason = deadline.aborted ? "The request timed out." : error instanceof Error ? error.message : "The request failed.";
+        throw new Error(`OpenAI image generation was not confirmed. Do not retry automatically; ask the user before another generation request. ${reason}`);
+      }
+
+      signal?.throwIfAborted();
+      const stagedDirectory = await mkdtemp(join(root, ".tau-image-"));
+      const path = join(stagedDirectory, "generated-image.png");
+      try {
+        await writeFile(path, image, { flag: "wx", mode: 0o600 });
+        await chmod(path, 0o600);
+        signal?.throwIfAborted();
+        return {
+          content: [{ type: "text" as const, text: "Generated image queued for Tau: generated-image.png" }],
+          details: {
+            tauAttachment: { version: 1, kind: "image", path, size: image.length },
+          },
+        };
+      } catch (error) {
+        await rm(stagedDirectory, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
+    },
+  });
+
   const flagUrl = process.env.TAU_FLAG_URL;
   const flagToken = process.env.TAU_FLAG_TOKEN;
   if (flagUrl && flagToken) pi.registerTool({
