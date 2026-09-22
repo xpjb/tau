@@ -37,6 +37,15 @@ fn root() -> PathBuf {
 }
 impl ChadApp for Desktop {
     fn init(ctx: &mut Ctx) -> Result<Self, String> {
+        #[cfg(windows)]
+        {
+            use chad::winit::{
+                platform::windows::{IconExtWindows, WindowExtWindows},
+                window::Icon,
+            };
+            let icon = Icon::from_resource(1, None).map_err(|e| e.to_string())?;
+            ctx.window.set_taskbar_icon(Some(icon));
+        }
         let store = Store::open(root()).map_err(|e| e.to_string())?;
         if let (Ok(server_url), Ok(token)) =
             (std::env::var("TAU2_SERVER"), std::env::var("TAU2_TOKEN"))
@@ -233,8 +242,31 @@ pub fn run() -> Result<(), String> {
             args.iter().any(|a| a == "--phone"),
         );
     }
+    #[cfg(windows)]
+    {
+        // Keep beta taskbar grouping/pins separate from the stable Tau launcher.
+        // SAFETY: the application ID is a static, null-terminated UTF-16 string.
+        let result = unsafe {
+            windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+                windows_sys::core::w!("app.tau.beta"),
+            )
+        };
+        if result < 0 {
+            return Err(format!(
+                "Could not set Tau Beta application identity: {result:#x}"
+            ));
+        }
+    }
+    let icon = image::load_from_memory(include_bytes!("../assets/tau-beta.png"))
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
     chad::run::<Desktop>(Config {
-        title: "Tau 2".into(),
+        title: "Tau Beta".into(),
+        icon: Some(chad::AppIcon {
+            width: icon.width(),
+            height: icon.height(),
+            rgba: icon.into_raw(),
+        }),
         size: (1120, 800),
         redraw: chad::RedrawMode::OnDemand,
         device_limits: limits(),

@@ -16,6 +16,15 @@ IME editing, clipboard, document grants, insets and task Back.
 
 ## Run / build
 
+The beta uses a red-trim Tau icon and the desktop title/executable **Tau Beta**;
+the in-app theme is unchanged. It runs alongside stable Tau: Windows uses a
+separate taskbar identity (`app.tau.beta`) and portable executable, and Android
+keeps its separate package (`app.tau.rust`). No stable installer, updater or
+registration is touched. Local state remains in `%LOCALAPPDATA%\Tau2` (or
+`$XDG_DATA_HOME/Tau2`), preserving settings from the earlier Rust preview but
+not sharing stable Tau's data. Both clients still operate on the **same remote
+chats** when configured for the same daemon.
+
 From the repository root, using the host's normal managed Cargo wrapper:
 
 ```sh
@@ -28,13 +37,17 @@ scripts/build-rust-windows.sh                # Linux + cargo-xwin
 Android: SDK 35, build tools 35.0.0, NDK 27.2.12479018, Java, Python 3 and the
 corresponding Rust target. API 29+, Vulkan 1.1. APKs are development-signed and
 16 KB aligned, under `target/android/<abi>/tau-frontend-<abi>.apk`. The separate
-package `app.tau.rust` is labeled **Tau 2 Preview**. Only Internet permission is
+package `app.tau.rust` is labeled **Tau Beta**. Only Internet permission is
 requested; files use the system document picker. Plain HTTP is supported for
 Tailnet/loopback setups, just as in the existing client—not for public networks.
 
-Windows: native x64 portable `dist/tau2-windows-x64/Tau.exe`. No JVM or UniFFI
+Windows: native x64 portable `dist/tau-beta-windows-x64/Tau Beta.exe`. No JVM or UniFFI
 runtime. Static CRT is selected in `.cargo/config.toml`; Windows system libraries
-are still required. The old Compose self-extractor is deliberately unchanged.
+are still required. The old Compose self-extractor is deliberately unchanged. Windows resource
+embedding uses `llvm-rc` when cross-building, or the Windows SDK on Windows.
+
+Icon source: `frontend/assets/tau-beta.svg`. Regenerate its PNG/ICO launcher
+assets with `python3 frontend/assets/generate-icons.py` (`rsvg-convert` required).
 
 Use Settings to enter the URL and token. Desktop automation can explicitly set
 `TAU2_SERVER` and `TAU2_TOKEN`; these override and save the settings. Do not put
