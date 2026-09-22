@@ -43,13 +43,9 @@ pub struct AttachmentRequest {
 }
 
 pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
-    if entry.get("type").and_then(Value::as_str) != Some("message") {
-        return None;
-    }
     let message = entry.get("message")?;
-    if message.get("role").and_then(Value::as_str) != Some("toolResult") {
-        return None;
-    }
+    if !matches!((entry.get("type")?.as_str()?, message.get("role")?.as_str()?),
+        ("message", "toolResult") | ("tau_attachment", "assistant")) { return None; }
     let attachment = message.get("details")?.get("tauAttachment")?;
     if attachment.get("version").and_then(Value::as_u64) != Some(1) {
         return None;

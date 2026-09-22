@@ -105,7 +105,7 @@ impl Journal {
     pub fn transcript(&self, queue: QueueState) -> Result<Transcript> {
         Transcript::new(&self.entries, self.head(), queue)
     }
-    pub fn messages(&self, system: String, selected: &SessionModel) -> Result<Vec<Value>> {
+    pub async fn messages(&self, system: String, selected: &SessionModel, attachment_root: &Path) -> Result<Vec<Value>> {
         let mut output = vec![json!({"role":"system", "content":system})];
         let mut start = 0;
         for entry in self.entries.iter().rev().filter(|entry| entry["type"] == "compaction") {
@@ -120,6 +120,15 @@ impl Journal {
             break;
         }
         for entry in &self.entries[start..] {
+            if entry["type"] == "tau_attachment" {
+                let request = crate::transcript::attachment_request(entry).context("Invalid generated attachment record")?;
+                let mut parts = vec![json!({"type":"text","text":"The assistant generated this image in the preceding response. It is a reference image, not a new user request."})];
+                match crate::attachments::image_reference(attachment_root, &request).await {
+                    Ok(image) => parts.push(image),
+                    Err(_) => parts.push(json!({"type":"text","text":"The original generated image file is no longer available. Do not assume its contents or silently regenerate it."})),
+                }
+                output.push(json!({"role":"user","content":parts})); continue;
+            }
             if entry["type"] == "custom_message" {
                 output.push(json!({"role":"user","content":entry["content"].as_str().unwrap_or_default()})); continue;
             }

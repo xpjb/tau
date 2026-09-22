@@ -99,8 +99,13 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
         call("shell", "bash", json!({"command":"printf x >> count; cat outbox/artifact.txt"})),
         call("read", "read", json!({"path":"outbox/artifact.txt"})),
         call("image-read", "read", json!({"path":"outbox/pixel.png"})),
-        call("image-send", "send_image", json!({"path":"outbox/pixel.png"})),
-        call("escape", "send_file", json!({"path":"outside.txt"})),
+        call("image-send", "send_file", json!({"path":"outbox/pixel.png"})),
+        call("staged", "send_file", json!({"path":"@outside.txt","caption":" Report "})),
+        call("big-image", "send_file", json!({"path":"large.png"})),
+        call("fake-image", "send_file", json!({"path":"misleading.png"})),
+        call("directory", "send_file", json!({"path":"outbox"})),
+        call("too-large", "send_file", json!({"path":"too-large.bin"})),
+        call("caption", "send_file", json!({"path":"outside.txt","caption":"x".repeat(1025)})),
         call("write-ambiguous", "write", json!({"path":"ambiguous.txt","content":"aaa"})),
         call("edit-ambiguous", "edit", json!({"path":"ambiguous.txt","edits":[{"oldText":"aa","newText":"incorrect"}]})),
         call("media", "send_file", json!({"path":"outbox/artifact.txt","caption":"Result"})),
@@ -114,6 +119,10 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     image.resize(1024 * 1024, 0);
     tokio::fs::write(root.path().join("outbox/pixel.png"), image).await.unwrap();
     tokio::fs::write(root.path().join("outside.txt"), "Not in the outbox").await.unwrap();
+    tokio::fs::write(root.path().join("misleading.png"), "Not a PNG").await.unwrap();
+    tokio::fs::write(root.path().join("large.png"), b"\x89PNG\r\n\x1a\n").await.unwrap();
+    tokio::fs::OpenOptions::new().write(true).open(root.path().join("large.png")).await.unwrap().set_len(crate::transcript::IMAGE_LIMIT + 1).await.unwrap();
+    tokio::fs::File::create(root.path().join("too-large.bin")).await.unwrap().set_len(crate::transcript::FILE_LIMIT + 1).await.unwrap();
     let mut client = Client::connect(&url).await;
     let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
     assert_eq!(client.request(json!({"id":"create2","type":"create_session"})).await["sessionId"], id);
@@ -127,6 +136,9 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     let response = tokio::time::timeout(Duration::from_millis(700), client.request(json!({"id":"first","type":"prompt","sessionId":id,"text":"Make an artifact"}))).await.unwrap();
     assert_eq!(response["ok"], true); assert_eq!(response["uncertain"], false);
     let first = model.request().await;
+    let definitions = first["tools"].as_array().unwrap();
+    assert_eq!(definitions.iter().filter(|tool| tool["function"]["name"] == "send_file").count(), 1);
+    assert!(!definitions.iter().any(|tool| tool["function"]["name"] == "send_image" || tool["type"] == "image_generation"));
     assert_eq!(first["messages"].as_array().unwrap().last().unwrap()["content"], "Make an artifact");
     for (request, text) in [("queued","Original queued text"),("deleted","Do not run me")] {
         assert_eq!(client.request(json!({"id":request,"type":"prompt","sessionId":id,"text":text})).await["disposition"], "queued");
@@ -162,8 +174,22 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     let attachment = snapshot["events"].as_array().unwrap().iter().find(|event| event["attachment"]["fileName"] == "artifact.txt").unwrap();
     let resolved = manager.resolve_attachment(&id, attachment["entryId"].as_str().unwrap()).await.unwrap();
     assert_eq!(resolved.size, 5);
-    assert_eq!(snapshot["events"].as_array().unwrap().iter().filter(|event| event["attachment"].is_object()).count(), 2);
-    assert!(snapshot["events"].as_array().unwrap().iter().any(|event| event["toolName"] == "send_file" && event["isError"] == true));
+    let events = snapshot["events"].as_array().unwrap();
+    assert_eq!(events.iter().filter(|event| event["attachment"].is_object()).count(), 5);
+    assert_eq!(events.iter().filter(|event| event["toolName"] == "send_file" && event["isError"] == true).count(), 3);
+    for (name, kind) in [("pixel.png","image"),("large.png","file"),("misleading.png","file")] {
+        let attachment = events.iter().find(|event| event["attachment"]["fileName"] == name).unwrap();
+        assert_eq!(attachment["attachment"]["kind"], kind);
+        manager.resolve_attachment(&id, attachment["entryId"].as_str().unwrap()).await.unwrap();
+    }
+    let staged = events.iter().find(|event| event["attachment"]["fileName"] == "outside.txt").unwrap();
+    assert_eq!(staged["attachment"]["caption"], "Report");
+    tokio::fs::write(root.path().join("outside.txt"), "changed").await.unwrap();
+    let resolved = manager.resolve_attachment(&id, staged["entryId"].as_str().unwrap()).await.unwrap();
+    use tokio::io::AsyncReadExt;
+    let mut contents = String::new(); let mut file = resolved.file;
+    file.read_to_string(&mut contents).await.unwrap(); assert_eq!(contents, "Not in the outbox");
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; assert_eq!(file.metadata().await.unwrap().permissions().mode() & 0o777, 0o600); }
     assert_eq!(tokio::fs::read_to_string(root.path().join("ambiguous.txt")).await.unwrap(), "aaa");
     assert!(!client.seen.iter().any(|m| m.to_string().contains("fixture-key")));
     let config = manager.inner.config.clone();
@@ -360,4 +386,114 @@ async fn imports_settings_and_active_pi_history_then_recovers_a_torn_tail_withou
     tokio::fs::write(pi.join("settings.json"),"deliberately invalid after import").await.unwrap();
     let restarted = AgentManager::new(config.clone(),StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
     assert_eq!(restarted.inner.settings.get().revision,1); restarted.shutdown().await;
+}
+
+const GENERATED_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
+fn generated(id: &str) -> Value { json!({"type":"image_generation_call","id":id,"status":"completed","output_format":"png","result":GENERATED_PNG}) }
+
+#[tokio::test]
+async fn native_images_are_delivered_reopened_and_replayed_as_references_without_journaling_bytes() {
+    let edit = json!({"type":"function_call","id":"fc_edit","call_id":"edit","name":"bash","arguments":"{\"command\":\"printf ok > edited\"}","status":"completed"});
+    let mut model = ModelServer::start(vec![codex("",vec![generated("img_first")]),
+        codex("Edited images",vec![generated("img_second"),generated("img_third"),edit]), codex("Finished",vec![]), codex("Missing reference acknowledged",vec![])]).await;
+    let (root, manager, url, server) = fixture(&model, Api::Codex).await;
+    let mut client = Client::connect(&url).await;
+    let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+    client.open(&id).await;
+    assert_eq!(client.request(json!({"id":"generate","type":"prompt","sessionId":id,"text":"Generate an image"})).await["ok"], true);
+    let request = model.request().await;
+    assert!(request["tools"].as_array().unwrap().contains(&json!({"type":"image_generation","model":"gpt-image-2","output_format":"png"})));
+    assert!(!request["tools"].to_string().contains("send_image"));
+    client.until(|m| m["type"] == "session_state" && m["status"] == "idle").await;
+    let before = client.open(&id).await;
+    let image = before["events"].as_array().unwrap().iter().find(|event| event["attachment"]["kind"] == "image").unwrap().clone();
+    assert_eq!(image["role"], "assistant"); assert_eq!(image["kind"], "image");
+    assert_eq!(before["queue"]["paused"], false, "An image-only answer finishes normally");
+    let download = format!("{}/v1/sessions/{id}/attachments/{}",url.trim_end_matches("/v1/ws").replace("ws://","http://"),image["entryId"].as_str().unwrap());
+    let http = reqwest::Client::new();
+    assert_eq!(http.get(&download).send().await.unwrap().status(), reqwest::StatusCode::UNAUTHORIZED);
+    let response = http.get(&download).bearer_auth("isolated-test-token").send().await.unwrap();
+    assert_eq!(response.status(),reqwest::StatusCode::OK); assert_eq!(response.headers()["content-type"],"image/png");
+    use base64::Engine as _;
+    assert_eq!(response.bytes().await.unwrap().as_ref(),base64::engine::general_purpose::STANDARD.decode(GENERATED_PNG).unwrap());
+    let journal = manager.inner.state.get(&id).unwrap().session_file.unwrap();
+    assert!(!tokio::fs::read_to_string(&journal).await.unwrap().contains(GENERATED_PNG));
+    assert!(!client.seen.iter().any(|message| message.to_string().contains(GENERATED_PNG)));
+    let config = manager.inner.config.clone();
+    client.socket.close(None).await.unwrap(); manager.shutdown().await; server.abort();
+
+    let manager = AgentManager::new(config.clone(),StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
+    let (url,server) = serve(&manager).await; let mut client = Client::connect(&url).await;
+    let after = client.open(&id).await;
+    assert!(after["events"].as_array().unwrap().contains(&image));
+    assert_eq!(after["queue"]["paused"],false);
+    assert_eq!(client.request(json!({"id":"generate","type":"prompt","sessionId":id,"text":"Generate an image"})).await["ok"],true);
+    assert!(model.requests.try_recv().is_err(),"Retrying an accepted prompt must not regenerate an image");
+    client.request(json!({"id":"edit-image","type":"prompt","sessionId":id,"text":"Make two variations of that image"})).await;
+    let request = model.request().await;
+    let input = request["input"].as_array().unwrap();
+    assert!(!request.to_string().contains("img_first"), "A store:false image ID cannot be replayed");
+    let reference = input.iter().find(|item| item["content"].as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "input_image"))).unwrap();
+    assert!(reference["content"][0]["text"].as_str().unwrap().contains("not a new user request"));
+    assert!(reference.to_string().contains(GENERATED_PNG));
+    let continuation = model.request().await;
+    let input = continuation["input"].as_array().unwrap();
+    assert_eq!(input.iter().flat_map(|item| item["content"].as_array().into_iter().flatten()).filter(|part| part["type"] == "input_image").count(),3);
+    let tool_index = input.iter().position(|item| item["type"] == "function_call").unwrap();
+    let result_index = input.iter().position(|item| item["type"] == "function_call_output").unwrap();
+    assert!(result_index > tool_index && !input[tool_index..result_index].iter().any(|item| item["role"] == "user"), "Image references must not separate a function call from its result");
+    client.until(|m| m["type"] == "session_state" && m["status"] == "idle").await;
+    assert_eq!(tokio::fs::read(root.path().join("edited")).await.unwrap(),b"ok");
+    let snapshot = client.open(&id).await;
+    let images = snapshot["events"].as_array().unwrap().iter().filter(|event| event["attachment"]["kind"] == "image").collect::<Vec<_>>();
+    assert_eq!(images.len(),3);
+    for image in &images { manager.resolve_attachment(&id,image["entryId"].as_str().unwrap()).await.unwrap(); }
+    let fork = client.request(json!({"id":"fork-image","type":"fork_session","sessionId":id,"entryId":images[0]["entryId"]})).await;
+    let fork_id = fork["sessionId"].as_str().unwrap();
+    assert!(client.open(fork_id).await["events"].as_array().unwrap().contains(&image));
+    manager.resolve_attachment(fork_id,image["entryId"].as_str().unwrap()).await.unwrap();
+    for message in &client.seen { assert!(!message.to_string().contains(GENERATED_PNG)); }
+    let history = tokio::fs::read_to_string(&journal).await.unwrap();
+    assert!(!history.contains(GENERATED_PNG) && !history.contains("image_generation_call"));
+    // A deleted original is an explicit missing reference, not a silently repeated paid generation.
+    let entry: Value = history.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).find(|entry| entry["type"] == "tau_attachment").unwrap();
+    tokio::fs::remove_file(entry["message"]["details"]["tauAttachment"]["path"].as_str().unwrap()).await.unwrap();
+    client.open(&id).await;
+    client.request(json!({"id":"missing","type":"prompt","sessionId":id,"text":"Discuss the original"})).await;
+    assert!(model.request().await.to_string().contains("no longer available"));
+    client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
+    manager.shutdown().await; server.abort();
+}
+
+#[tokio::test]
+async fn failed_native_images_never_publish_bytes_or_retry_a_started_generation() {
+    let mut interrupted = codex("",vec![generated("img_interrupted")]);
+    let end = interrupted.bytes.windows(b"data: {\"response\"".len()).position(|part| part == b"data: {\"response\"").unwrap();
+    interrupted.bytes.truncate(end);
+    let mut malformed = generated("img_malformed"); malformed["result"] = json!("not-base64!");
+    let mut unfinished = generated("img_unfinished"); unfinished["status"] = json!("in_progress");
+    let mut wrong_format = generated("img_format"); wrong_format["output_format"] = json!("jpeg");
+    let error = Reply {status:200,gate:None,bytes:format!("data: {}\n\ndata: {}\n\n",
+        json!({"type":"response.image_generation_call.in_progress"}), json!({"type":"error","error":{"code":"server_error"}})).into_bytes()};
+    let replies = vec![interrupted,codex("",vec![generated("img_duplicate"),generated("img_duplicate")]),
+        codex("",vec![generated("img_valid"),malformed]),codex("",vec![unfinished]),codex("",vec![wrong_format]),error];
+    let count = replies.len(); let mut model = ModelServer::start(replies).await;
+    let (root, manager, url, server) = fixture(&model,Api::Codex).await;
+    let mut client = Client::connect(&url).await;
+    for index in 0..count {
+        let id = client.request(json!({"id":format!("create-{index}"),"type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        client.open(&id).await;
+        client.request(json!({"id":format!("bad-{index}"),"type":"prompt","sessionId":id,"text":"Generate an image"})).await;
+        model.request().await;
+        client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "error").await;
+        let snapshot = client.open(&id).await;
+        assert_eq!(snapshot["queue"]["paused"],true);
+        assert!(!snapshot["events"].as_array().unwrap().iter().any(|event| event["attachment"].is_object()));
+        assert!(model.requests.try_recv().is_err());
+        let file = manager.inner.state.get(&id).unwrap().session_file.unwrap();
+        assert!(!tokio::fs::read_to_string(file).await.unwrap().contains(GENERATED_PNG));
+    }
+    assert!(tokio::fs::read_dir(root.path().join("outbox")).await.unwrap().next_entry().await.unwrap().is_none());
+    assert!(!client.seen.iter().any(|message| message.to_string().contains(GENERATED_PNG)));
+    manager.shutdown().await; server.abort();
 }

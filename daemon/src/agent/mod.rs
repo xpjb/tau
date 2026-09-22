@@ -155,7 +155,7 @@ impl AgentManager {
                 queue.run_id.get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
                 content.save_queue(id, queue, None).await?;
                 let agent = content.agent.as_ref().unwrap();
-                let messages = agent.journal.messages(settings.system_prompt(&self.inner.config.cwd).await?, &agent.model)?;
+                let messages = agent.journal.messages(settings.system_prompt(&self.inner.config.cwd).await?, &agent.model, &self.inner.config.attachment_root).await?;
                 (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), messages, agent.tokens)
             };
             let context_window = settings.model(&selected)?.context_window;
@@ -170,7 +170,7 @@ impl AgentManager {
             let (updates, mut receiver) = mpsc::channel(8);
             let generation = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
                 settings:&settings, selected:&selected, thinking:&thinking, messages:&messages, session_id:id,
-                definitions:tools::definitions(&self.inner.config), mode:provider::Mode::Chat,
+                definitions:tools::definitions(), mode:provider::Mode::Chat,
             }, updates);
             tokio::pin!(generation);
             let mut partial = json!({"role":"assistant","content":""});
@@ -199,6 +199,14 @@ impl AgentManager {
             };
             compacted = false;
             let calls = completion.message["tool_calls"].as_array().cloned().unwrap_or_default();
+            let mut attachments = Vec::new();
+            // Decode/validate the entire response before staging or publishing any files.
+            // Native images are deliveries, not fabricated local function calls.
+            for image in &completion.images {
+                let staged = crate::attachments::generated_image(&self.inner.config.attachment_root, &image.bytes, &cancel).await?;
+                attachments.push(json!({"type":"tau_attachment","message":{"role":"assistant","content":[{"type":"image","mimeType":"image/png"}],
+                    "details":staged["details"],"timestamp":now_ms()}}));
+            }
             {
                 let mut message = assistant_message(&completion.message, &selected, if completion.limited {"length"} else if calls.is_empty() {"stop"} else {"toolUse"});
                 message["tauModelMessage"] = completion.message.clone();
@@ -235,6 +243,7 @@ impl AgentManager {
                 }
                 runtime.content.lock().await.append(id, json!({"type":"message","message":result})).await?;
             }
+            for attachment in attachments { runtime.content.lock().await.append(id, attachment).await?; }
             self.set_runtime_state(id, runtime, SessionStatus::Running, None, Some(Some(ContextUsage { tokens:completion.tokens, context_window })));
         }
     }
@@ -258,7 +267,7 @@ impl AgentManager {
         settings.model(&selected)?;
         self.set_runtime_state(id, runtime, SessionStatus::Running, Some("Compacting context".into()), None);
         let native = settings.agent.compaction.native_codex && settings.providers[&selected.provider].api == crate::settings::Api::Codex;
-        let mut messages = prefix.messages(settings.system_prompt(&self.inner.config.cwd).await?, &selected)?;
+        let mut messages = prefix.messages(settings.system_prompt(&self.inner.config.cwd).await?, &selected, &self.inner.config.attachment_root).await?;
         if !native { messages.push(json!({"role":"user","content":format!("Summarize this conversation for another coding agent. Preserve goals, decisions, files changed, commands run, pending work, and important constraints. Do not continue the task. {instructions}")})); }
         else if !instructions.is_empty() { messages.push(json!({"role":"user","content":format!("Compaction instructions: {instructions}")})); }
         let (updates, _receiver) = mpsc::channel(1);

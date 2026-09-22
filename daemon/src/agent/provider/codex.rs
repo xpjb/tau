@@ -1,6 +1,9 @@
 use anyhow::{bail, Context as _, Result};
 use serde_json::{json, Value};
-use super::{Decoder, Stream};
+use super::{Decoder, Stream, GeneratedImage};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+const MAX_GENERATED_BYTES: usize = crate::transcript::IMAGE_LIMIT as usize;
+const MAX_GENERATED_FILES: usize = 4;
 use std::collections::HashSet;
 pub struct Codex;
 impl Decoder for Codex {
@@ -124,6 +127,9 @@ impl Decoder for Codex {
                 let mut annotations = Vec::new();
                 let mut calls = std::collections::BTreeMap::new();
                 let mut call_ids = HashSet::new();
+                let mut file_ids = HashSet::new();
+                let mut files = Vec::new();
+                let mut file_bytes = 0;
                 for (index, item) in output.iter_mut().enumerate() {
                     if item.get("status").and_then(Value::as_str)
                         .is_some_and(|status| status != "completed")
@@ -165,11 +171,34 @@ impl Decoder for Codex {
                                 "function": {"name": name, "arguments": arguments}}).as_object().unwrap().clone());
                         }
                         Some("web_search_call") => {},
+                        Some("image_generation_call") => {
+                            if item["status"] != "completed" { bail!("Codex image generation did not complete"); }
+                            let id = item["id"].as_str().filter(|id| !id.is_empty()).context("Codex image has no ID")?.to_owned();
+                            if !file_ids.insert(id) { bail!("Codex returned a duplicate generated image ID"); }
+                            if !matches!(item.get("output_format").and_then(Value::as_str), None | Some("png")) {
+                                bail!("Codex returned an unsupported image format");
+                            }
+                            let encoded = item["result"].take();
+                            let encoded = encoded.as_str().context("Codex image has no encoded data")?;
+                            if files.len() >= MAX_GENERATED_FILES || encoded.len() > (MAX_GENERATED_BYTES - file_bytes).div_ceil(3) * 4 {
+                                bail!("Codex generated images exceeded the size or count limit");
+                            }
+                            let bytes = STANDARD.decode(encoded).context("Codex image has invalid base64 data")?;
+                            file_bytes += bytes.len();
+                            if file_bytes > MAX_GENERATED_BYTES || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                                bail!("Codex image exceeded its size limit or was not PNG");
+                            }
+                            files.push(GeneratedImage { bytes });
+                            // Bytes and non-replayable image IDs must not enter model history,
+                            // live transcript snapshots, logs or the client protocol.
+                            *item = Value::Null;
+                        }
                         Some("reasoning" | "compaction") => {}
                         _ => bail!("unsupported Codex output item"),
                     }
                 }
                 output.retain(|item| !item.is_null());
+                stream.images = files;
                 stream.tool_calls = calls;
                 stream.message.insert("content".into(), Value::String(content));
                 stream.message.insert("annotations".into(), Value::Array(annotations));
@@ -187,5 +216,31 @@ impl Decoder for Codex {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn generated_images_enforce_encoding_format_individual_cumulative_and_count_bounds() {
+        let image = |id: &str, result: String| json!({"type":"image_generation_call","id":id,"status":"completed","result":result});
+        let png = STANDARD.encode(b"\x89PNG\r\n\x1a\n");
+        let mut half = b"\x89PNG\r\n\x1a\n".to_vec(); half.resize(MAX_GENERATED_BYTES / 2 + 1, 0);
+        let invalid = [
+            vec![image("big", "A".repeat(MAX_GENERATED_BYTES.div_ceil(3)*4+4))],
+            vec![image("half1", STANDARD.encode(&half)),image("half2", STANDARD.encode(&half))],
+            (0..=MAX_GENERATED_FILES).map(|i| image(&i.to_string(),png.clone())).collect(),
+            vec![image("not-png", STANDARD.encode(b"not a PNG"))],
+        ];
+        for output in invalid {
+            let mut stream = Stream::new(&Codex);
+            assert!(Codex.decode(&json!({"type":"response.completed","response":{"status":"completed","output":output}}),&mut stream).is_err());
+            assert!(stream.images.is_empty(), "Validation failure must not expose even the valid images in the same response");
+        }
+        let mut stream = Stream::new(&Codex);
+        Codex.decode(&json!({"type":"response.completed","response":{"status":"completed","output":(0..MAX_GENERATED_FILES).map(|i| image(&i.to_string(),png.clone())).collect::<Vec<_>>()}}),&mut stream).unwrap();
+        assert!(stream.done); assert_eq!(stream.images.len(),MAX_GENERATED_FILES);
+        assert!(!stream.assistant_message().to_string().contains(&png));
     }
 }

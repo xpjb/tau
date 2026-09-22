@@ -1,12 +1,14 @@
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::path::Path;
+use tokio_util::sync::CancellationToken;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::manager::{AgentManager, safe_file_name};
 use crate::protocol::{UploadedFile, MAX_UPLOAD_BYTES};
-use crate::transcript::{AttachmentKind, Event, attachment_request, FILE_LIMIT, IMAGE_LIMIT};
+use crate::transcript::{AttachmentKind, AttachmentRequest, Event, attachment_request, FILE_LIMIT, IMAGE_LIMIT};
 
 pub struct ResolvedAttachment {
     pub file: fs::File,
@@ -99,57 +101,101 @@ impl AgentManager {
                 .with_context(|| format!("attachment entry {entry_id} does not exist"))?;
             attachment_request(entry).context("entry has no Tau attachment")?
         };
-        let root = fs::canonicalize(&self.inner.config.attachment_root)
-            .await
-            .context("Tau attachment root is unavailable")?;
-        let path = fs::canonicalize(&request.path)
-            .await
-            .with_context(|| format!("attachment {} is unavailable", request.path.display()))?;
-        if !path.starts_with(&root) {
-            bail!("attachment is outside the Tau outbox");
-        }
-        let mut file = fs::File::open(&path).await?;
-        let metadata = file.metadata().await?;
-        if !metadata.is_file() {
-            bail!("attachment is not a regular file");
-        }
-        let limit = match request.kind {
-            AttachmentKind::Image => IMAGE_LIMIT,
-            AttachmentKind::File => FILE_LIMIT,
-        };
-        if metadata.len() > limit {
-            bail!("attachment exceeds the {} byte limit", limit);
-        }
-        let mime_type = match request.kind {
-            AttachmentKind::File => "application/octet-stream",
-            AttachmentKind::Image => {
-                let mut header = [0_u8; 12];
-                let length = file.read(&mut header).await?;
-                file.seek(std::io::SeekFrom::Start(0)).await?;
-                if length >= 8 && header[..8] == [137, 80, 78, 71, 13, 10, 26, 10] {
-                    "image/png"
-                } else if length >= 3 && header[..3] == [0xff, 0xd8, 0xff] {
-                    "image/jpeg"
-                } else if length >= 12
-                    && &header[..4] == b"RIFF"
-                    && &header[8..12] == b"WEBP"
-                {
-                    "image/webp"
-                } else {
-                    bail!("attachment is not a supported image");
-                }
-            }
-        };
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .context("attachment has no file name")?;
-        Ok(ResolvedAttachment {
-            file,
-            file_name,
-            mime_type,
-            size: metadata.len(),
-        })
+        open_attachment(&self.inner.config.attachment_root, &request).await
     }
+}
+
+pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some("image/png") }
+    else if bytes.starts_with(&[0xff,0xd8,0xff]) { Some("image/jpeg") }
+    else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" { Some("image/webp") }
+    else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some("image/gif") }
+    else if bytes.starts_with(b"BM") { Some("image/bmp") } else { None }
+}
+pub(crate) async fn regular_file(path: &Path) -> Result<fs::File> {
+    let mut options = fs::OpenOptions::new(); options.read(true);
+    #[cfg(unix)] options.custom_flags(libc::O_NONBLOCK);
+    let file = options.open(path).await?;
+    if !file.metadata().await?.is_file() { bail!("Path is not a regular file"); }
+    Ok(file)
+}
+async fn open_attachment(root: &Path, request: &AttachmentRequest) -> Result<ResolvedAttachment> {
+    let root = fs::canonicalize(root).await.context("Tau attachment root is unavailable")?;
+    let path = fs::canonicalize(&request.path).await.context("Attachment is unavailable")?;
+    if !path.starts_with(&root) || path == root { bail!("Attachment is outside the Tau outbox"); }
+    let mut file = regular_file(&path).await?;
+    let size = file.metadata().await?.len();
+    let limit = match request.kind { AttachmentKind::Image => IMAGE_LIMIT, AttachmentKind::File => FILE_LIMIT };
+    if size > limit { bail!("Attachment exceeds the {limit} byte limit"); }
+    let mime_type = if request.kind == AttachmentKind::Image {
+        let mut header = [0; 12]; let length = file.read(&mut header).await?;
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+        match image_mime(&header[..length]) {
+            Some(mime @ ("image/png" | "image/jpeg" | "image/webp")) => mime,
+            _ => bail!("Attachment is not a supported image"),
+        }
+    } else { "application/octet-stream" };
+    let file_name = path.file_name().context("Attachment has no file name")?.to_string_lossy().into_owned();
+    Ok(ResolvedAttachment { file, file_name, mime_type, size })
+}
+
+async fn attachment_result(path: &Path, file: &mut fs::File, caption: Option<&str>) -> Result<Value> {
+    let size = file.metadata().await?.len();
+    if size > FILE_LIMIT { bail!("Attachment exceeds the {FILE_LIMIT} byte limit"); }
+    file.seek(std::io::SeekFrom::Start(0)).await?;
+    let mut header = [0; 12]; let length = file.read(&mut header).await?;
+    let image = size <= IMAGE_LIMIT && matches!(image_mime(&header[..length]), Some("image/png" | "image/jpeg" | "image/webp"));
+    Ok(json!({"content":[{"type":"text","text":format!("{} queued for Tau: {}", if image {"Image"} else {"File"}, path.file_name().unwrap().to_string_lossy())}],
+        "details":{"tauAttachment":{"version":1,"kind":if image {"image"} else {"file"},"path":path,"caption":caption,"size":size}}}))
+}
+
+// Both local files and provider-generated bytes take this path. A partial/cancelled
+// copy is removed; a published attachment has its own private, durable file.
+async fn stage_attachment(root: &Path, name: &std::ffi::OsStr, source: impl tokio::io::AsyncRead + Unpin, caption: Option<&str>, cancel: &CancellationToken) -> Result<Value> {
+    let directory = tempfile::Builder::new().prefix(".tau-").tempdir_in(root)?;
+    let path = directory.path().join(name);
+    let mut options = fs::OpenOptions::new(); options.create_new(true).read(true).write(true);
+    #[cfg(unix)] options.mode(0o600);
+    let mut file = options.open(&path).await?;
+    let mut source = source.take(FILE_LIMIT + 1);
+    tokio::select! {
+        _ = cancel.cancelled() => bail!("Attachment staging cancelled"),
+        result = tokio::io::copy(&mut source, &mut file) => { result?; }
+    }
+    file.flush().await?;
+    let result = attachment_result(&path, &mut file, caption).await?;
+    file.sync_all().await?;
+    fs::File::open(directory.path()).await?.sync_all().await?;
+    fs::File::open(root).await?.sync_all().await?;
+    if cancel.is_cancelled() { bail!("Attachment staging cancelled"); }
+    let _ = directory.keep();
+    Ok(result)
+}
+
+pub(crate) async fn send_file(root: &Path, source: &Path, caption: Option<&str>, cancel: &CancellationToken) -> Result<Value> {
+    let caption = caption.map(str::trim).filter(|value| !value.is_empty());
+    if caption.is_some_and(|value| value.chars().count() > 1024) { bail!("Caption exceeds 1024 characters"); }
+    if cancel.is_cancelled() { bail!("Attachment staging cancelled"); }
+    let source = fs::canonicalize(source).await.context("Attachment does not exist")?;
+    let mut file = regular_file(&source).await?;
+    if file.metadata().await?.len() > FILE_LIMIT { bail!("Attachment exceeds the {FILE_LIMIT} byte limit"); }
+    let root = fs::canonicalize(root).await.context("Tau attachment root is unavailable")?;
+    if source.starts_with(&root) { attachment_result(&source, &mut file, caption).await }
+    else { stage_attachment(&root, source.file_name().context("Attachment has no file name")?, file, caption, cancel).await }
+}
+
+pub(crate) async fn generated_image(root: &Path, bytes: &[u8], cancel: &CancellationToken) -> Result<Value> {
+    let root = fs::canonicalize(root).await.context("Tau attachment root is unavailable")?;
+    let name = format!("generated-{}.png", uuid::Uuid::new_v4());
+    stage_attachment(&root, std::ffi::OsStr::new(&name), bytes, None, cancel).await
+}
+
+// store:false cannot replay a generated-image item by ID. Rehydrate the staged
+// image only when constructing provider context, never into history or the wire.
+pub(crate) async fn image_reference(root: &Path, request: &AttachmentRequest) -> Result<Value> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let resolved = open_attachment(root, request).await?;
+    let mut bytes = Vec::new(); resolved.file.take(IMAGE_LIMIT + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > IMAGE_LIMIT { bail!("Reference image exceeds 10 MB"); }
+    Ok(json!({"type":"image_url","image_url":{"url":format!("data:{};base64,{}", resolved.mime_type, STANDARD.encode(bytes))}}))
 }

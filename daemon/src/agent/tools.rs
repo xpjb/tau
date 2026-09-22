@@ -8,45 +8,30 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::settings::Settings;
 use crate::state::StateStore;
-use crate::transcript::{FILE_LIMIT, IMAGE_LIMIT};
+use crate::transcript::IMAGE_LIMIT;
+use crate::attachments::{image_mime, regular_file};
 
-pub fn definitions(config: &Config) -> Vec<Value> {
+pub fn definitions() -> Vec<Value> {
     [
         ("read", "Read text or an image. Text is bounded to 2000 lines / 50 KB; use offset/limit to continue.", json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}}), vec!["path"]),
         ("bash", "Execute bash in the working directory. Output is bounded; full output is saved to a file. Timeout is optional, in seconds.", json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1}}), vec!["command"]),
         ("write", "Write a file, creating parent directories. Replaces existing contents.", json!({"path":{"type":"string"},"content":{"type":"string"}}), vec!["path","content"]),
         ("edit", "Apply exact replacements against the original file. Each oldText must be unique; edits must not overlap.", json!({"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}}), vec!["path","edits"]),
-        ("send_image", "Send a PNG, JPEG or WebP file from the Tau outbox to the user.", json!({"path":{"type":"string"},"caption":{"type":"string"}}), vec!["path"]),
-        ("send_file", "Send a file from the Tau outbox to the user.", json!({"path":{"type":"string"},"caption":{"type":"string"}}), vec!["path"]),
+        ("send_file", "Send a local file to the user through Tau. Files are staged automatically; PNG, JPEG, and WebP files up to 10 MB appear inline.", json!({"path":{"type":"string","minLength":1},"caption":{"type":"string","maxLength":1024}}), vec!["path"]),
         ("flag_it", "Log an incidental finding outside the task. State location and impact, omit secrets, and continue the current task.", json!({"str":{"type":"string","minLength":1,"maxLength":4096}}), vec!["str"]),
         ("web_search", "Search the web.", json!({"query":{"type":"string"}}), vec!["query"]),
     ].into_iter().map(|(name, description, properties, required)| json!({"name":name,
-        "description":if name.starts_with("send_") { format!("{description} Stage the file under {} first.", config.attachment_root.display()) } else { description.to_owned() },
+        "description":description,
         "parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect()
 }
 
 pub fn text_result(text: impl Into<String>) -> Value { json!({"content":[{"type":"text","text":text.into()}]}) }
-pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some("image/png") }
-    else if bytes.starts_with(&[0xff,0xd8,0xff]) { Some("image/jpeg") }
-    else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" { Some("image/webp") }
-    else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some("image/gif") }
-    else if bytes.starts_with(b"BM") { Some("image/bmp") } else { None }
-}
 fn path(config: &Config, input: &str) -> PathBuf {
     let input = input.strip_prefix('@').unwrap_or(input);
     if let Some(rest) = input.strip_prefix("~/") { PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest) }
     else { config.cwd.join(input) }
 }
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> { value[field].as_str().with_context(|| format!("{field} must be a string")) }
-
-async fn regular_file(path: &Path) -> Result<tokio::fs::File> {
-    let mut options = tokio::fs::OpenOptions::new(); options.read(true);
-    #[cfg(unix)] options.custom_flags(libc::O_NONBLOCK);
-    let file = options.open(path).await?;
-    if !file.metadata().await?.is_file() { bail!("Path is not a regular file"); }
-    Ok(file)
-}
 
 pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, session: &str, name: &str, args: &Value, cancel: &CancellationToken) -> Result<Value> {
     if cancel.is_cancelled() { bail!("Tool cancelled"); }
@@ -151,23 +136,11 @@ pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, s
             if !truncated { tokio::fs::remove_file(&output_path).await?; }
             Ok(text_result(format!("{visible}\n\n{status}{}", if truncated { format!("\nOutput truncated. Full output: {}", output_path.display()) } else { String::new() })))
         }
-        "send_file" | "send_image" => {
-            let path = tokio::fs::canonicalize(path(config, string(args, "path")?)).await?;
-            let root = tokio::fs::canonicalize(&config.attachment_root).await?;
-            if !path.starts_with(&root) || path == root { bail!("Attachment is outside the Tau outbox"); }
-            let mut file = regular_file(&path).await?; let metadata = file.metadata().await?;
-            if !metadata.is_file() { bail!("Attachment must be a regular file"); }
-            let image = name == "send_image";
-            if metadata.len() > if image { IMAGE_LIMIT } else { FILE_LIMIT } { bail!("Attachment exceeds size limit"); }
-            if image {
-                let mut header = [0;12]; let length = file.read(&mut header).await?;
-                if !matches!(image_mime(&header[..length]), Some("image/png" | "image/jpeg" | "image/webp")) { bail!("send_image accepts PNG, JPEG or WebP"); }
-            }
-            let caption = args.get("caption").map(|_| string(args, "caption")).transpose()?.map(str::trim).filter(|v| !v.is_empty());
-            if caption.is_some_and(|v| v.chars().count() > 1024) { bail!("Caption exceeds 1024 characters"); }
-            let mut result = text_result(format!("Queued for Tau: {}", path.file_name().unwrap().to_string_lossy()));
-            result["details"] = json!({"tauAttachment":{"version":1,"kind":if image {"image"} else {"file"},"path":path,"caption":caption,"size":metadata.len()}});
-            Ok(result)
+        "send_file" => {
+            let input = string(args, "path")?;
+            if input.is_empty() { bail!("Attachment path must not be empty"); }
+            let caption = args.get("caption").map(|_| string(args, "caption")).transpose()?;
+            crate::attachments::send_file(&config.attachment_root, &path(config, input), caption, cancel).await
         }
         "flag_it" => {
             let saved = state.flag(session, string(args, "str")?).await?;

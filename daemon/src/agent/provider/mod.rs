@@ -33,6 +33,7 @@ pub struct Stream<'a> {
     pub data_events: u64,
     pub progress_events: u64,
     pub heartbeats: u64,
+    pub images: Vec<GeneratedImage>,
 }
 
 impl<'a> Stream<'a> {
@@ -54,6 +55,7 @@ impl<'a> Stream<'a> {
             data_events: 0,
             progress_events: 0,
             heartbeats: 0,
+            images: Vec::new(),
         }
     }
 
@@ -169,7 +171,8 @@ impl<'a> Stream<'a> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode { Chat, Compact, Search, Summary }
-pub struct Completion { pub message: Value, pub tokens: Option<u64>, pub account: Option<String>, pub limited: bool }
+pub struct GeneratedImage { pub bytes: Vec<u8> }
+pub struct Completion { pub message: Value, pub tokens: Option<u64>, pub account: Option<String>, pub limited: bool, pub images: Vec<GeneratedImage> }
 
 pub struct Request<'a> {
     pub settings: &'a Settings,
@@ -249,6 +252,7 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
                 if mode == Mode::Compact { input.push(json!({"type":"compaction_trigger"})); }
                 let mut tools = definitions.iter().map(|tool| { let mut tool = tool.clone(); tool["type"] = json!("function"); tool["strict"] = json!(false); tool }).collect::<Vec<_>>();
                 if mode != Mode::Summary && provider.web_search { tools.push(json!({"type":"web_search", "search_context_size":"medium"})); }
+                if mode == Mode::Chat { tools.push(json!({"type":"image_generation", "model":"gpt-image-2", "output_format":"png"})); }
                 let mut body = json!({"model":model.id, "store":false, "stream":true, "instructions":instructions.join("\n\n"), "input":input,
                     "tools":tools, "tool_choice":if mode == Mode::Search { json!({"type":"web_search"}) } else { json!("auto") },
                     "parallel_tool_calls":true, "include":["reasoning.encrypted_content"], "prompt_cache_key":session_id, "text":{"verbosity":"low"}});
@@ -286,6 +290,8 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
             attempt += 1; tokio::time::sleep(Duration::from_millis(delay)).await; continue;
         }
         if !status.is_success() { bail!("Model provider returned HTTP {}", status.as_u16()); }
+        // Never retry a started response, including image generation: provider-side
+        // effects/billing may already have happened even when no output was delivered.
         let mut chunks = response.bytes_stream();
         let mut stream = Stream::new(decoder);
         while let Some(chunk) = tokio::time::timeout(idle, chunks.next()).await.context("Model stream stalled")? {
@@ -306,7 +312,8 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
             let id = call["id"].as_str().filter(|id| !id.is_empty()).context("Tool call has no ID")?;
             if !ids.insert(id) || call["function"]["name"].as_str().is_none() || call["function"]["arguments"].as_str().is_none() { bail!("Invalid tool calls"); }
         }
-        return Ok(Completion { message, tokens: stream.usage.as_ref().and_then(|usage| usage["total_tokens"].as_u64()), account, limited:stream.finish_reason.as_deref() == Some("length") });
+        if mode != Mode::Chat && !stream.images.is_empty() { bail!("Unexpected image generation outside a chat response"); }
+        return Ok(Completion { message, tokens: stream.usage.as_ref().and_then(|usage| usage["total_tokens"].as_u64()), account, limited:stream.finish_reason.as_deref() == Some("length"), images:stream.images });
     }
 }
 

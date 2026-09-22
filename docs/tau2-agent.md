@@ -71,6 +71,7 @@ positions. Do not reintroduce a second event sequence to resolve the conflict.
   Existing version-3 JSONL branches remain readable. Native records use the same
   message/parent/origin shapes, plus `tau_queue` records for durable acceptance.
   Full history remains on disk after compaction. Clone/fork never inherits a queue.
+  Native `tau_attachment` entries refer to generated files, not inline image bytes.
 - `tool-output/` beside state: full oversized shell output; returned results point
   at the retained log. Short output logs are removed.
 
@@ -98,22 +99,80 @@ catalog discovery. Unported terminal commands are rejected, not acknowledged as
 if they ran. Current Tau media and flag tools are native; flags write directly to
 StateStore. Project AGENTS.md files are loaded root-to-working-directory.
 
+### Media
+
+`send_file` is the only local delivery tool, matching master's `9a38a50` behavior.
+It resolves paths relative to the working directory (including the existing `@`
+path prefix), accepts any accessible regular file up to 50,000,000 bytes, and
+copies files outside the outbox into a private per-send directory, preserving the
+basename. Already-staged files are reused. PNG/JPEG/WebP are identified by bytes,
+not extension; up to 10,000,000 bytes they appear inline, otherwise as files.
+Captions are trimmed and limited to 1,024 characters. The download endpoint still
+independently confines access to the outbox; the ability to stage a file is not
+an unauthenticated arbitrary-path download API.
+
+Codex chat requests offer native `image_generation` with `gpt-image-2` and PNG
+output, as in glmbot, using the existing Codex OAuth account. No second agent,
+image subprocess or separate image API credential. Search/summary/compaction
+requests and Chat Completions do not advertise this tool. All returned images
+must validate before any are staged: completed status, unique IDs, valid base64,
+PNG signature, at most four files and 10,000,000 decoded bytes **in total**.
+Partial images are never delivered. Started response streams are never retried.
+
+Generated output uses the same private staging and authenticated attachment
+transport as `send_file`; an image-only answer is a successful answer. The wire
+remains an ordinary assistant image event with an attachment and stable entry ID.
+The journal stores file references, not base64 bytes or non-replayable generation
+IDs. On the next turn (also after restart/fork), files are loaded as labeled
+reference-image inputs, because `store:false` cannot replay those IDs. Missing
+originals become explicit unavailable-reference notices, not automatic paid
+regeneration. Compaction includes references in the compacted context; it is not
+an archival image index. Staged files remain separate from chat history and may
+outlive a chat; automatic outbox garbage collection is not implemented.
+
+### Session storage: current choice and SQLite recommendation
+
+The current store is fsynced append-only JSONL per chat, parent-linked for legacy
+branch compatibility. Queue snapshots and request receipts share that log;
+identity/title/lineage live separately in `state.json`. Loaded chats retain their
+active history and transcript projection in memory. Client history paging does
+**not** yet mean indexed/paged disk reads. Forks copy selected history. Recovery
+repairs a torn final line and reconciles a consumed user request with its queue.
+These are per-record durability guarantees, not a transaction spanning metadata,
+message and queue writes.
+
+JSONL kept Pi migration small, but SQLite is the recommended durable session
+store for Tau 2: one database for sessions, entries, queue items and idempotency
+receipts, with transactions, unique `(session_id, request_id)` acceptance and
+indexed history reads. Use WAL plus `synchronous=FULL` for acknowledged writes;
+WAL alone is not a durability policy. Keep provider replay payloads as JSON and
+attachments as files; don't build a model-specific relational schema. Keep
+human-editable settings in the existing revisioned JSON document. Import legacy
+JSONL and retain export, rather than maintaining two writable stores.
+
+That schema/import migration is **not implemented in this media update**. It
+should be a separate change, with crash/restart, duplicate acceptance, queue and
+fork tests, before treating this branch as production-ready. SQLite also cannot
+make an external shell command exactly-once: interrupted tool effects still need
+the existing explicit unknown-effects recovery behavior.
+
 Tests use isolated state directories, local scripted HTTP providers, real
 WebSockets and real filesystem/shell tools. They do not use production credentials
 or send paid model requests. Live-provider acceptance remains a release check.
 
 ## Validation on this branch
 
-- `cargo nextest run --workspace`: 15 tests, including four native end-to-end
+- `cargo nextest run --workspace`: 18 tests, including six native end-to-end
   scenarios and the existing transfer tests. Provider fixtures split SSE into
   small byte fragments; the framer also checks every possible byte split.
 - Real WebSocket coverage includes failed disk writes before acceptance,
   duplicate IDs, queue edits/deletes/pause/prefix/cancel/resume and stale revisions,
   settings conflicts, delayed titles, reconnect, fork/clone and restart recovery.
 - Real tools cover exact writes/edits, overlapping-match rejection, shell output,
-  process-group cancellation, bounded image input, outbox confinement and flags.
+  process-group cancellation, bounded image input, automatic staging, inline/file classification, outbox confinement and flags.
 - Codex fixtures cover encrypted reasoning replay, native compaction and retained
-  history, without exposing encrypted/private provider payloads in client events.
+  history, plus generated image download/restart/fork/reference replay and failure/size limits,
+  without exposing image bytes or encrypted/private provider payloads in client events.
 - `cargo clippy -p taud --all-targets -- -D warnings` and shell syntax/diff checks.
 
 The actual Codex/OpenRouter services and interactive device login were **not**

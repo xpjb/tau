@@ -16,11 +16,11 @@ One-sentence responsibility per module. Read this before opening files.
 - `agent/journal.rs` — durable JSONL history/queue writes, legacy active-branch import
   and provider context reconstruction. Unknown tool effects are never auto-replayed.
 - `agent/provider/` — bounded SSE framing, Codex Responses and Chat Completions,
-  request construction and safe HTTP retries.
+  native image generation, request construction and safe HTTP retries.
 - `agent/auth.rs` — private provider credentials, serialized Codex OAuth refresh,
   and daemon-side device login.
 - `agent/tools.rs` — native filesystem, shell, media and incidental-flag tools.
-- `attachments.rs` — authenticated attachment resolution, upload storage and MIME checks.
+- `attachments.rs` — shared local/generated-file staging, authenticated attachment resolution, upload storage and MIME checks.
 - `commands.rs` — native command catalog and model/thinking/compact/name/fast settings.
 - `transcript.rs` — flat event projection, stable live-to-saved IDs and paging.
   There is only one generation/sequence: the client-facing transcript.
