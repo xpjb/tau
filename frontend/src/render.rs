@@ -672,15 +672,34 @@ impl Renderer {
         rect: Rect,
         color: u32,
     ) {
+        self.clipped_icon(ctx, layer, icon, rect, color, rect);
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn clipped_icon(
+        &mut self,
+        ctx: &impl RenderContext,
+        layer: &mut Layer,
+        icon: crate::icons::Icon,
+        rect: Rect,
+        color: u32,
+        clip: Rect,
+    ) {
         let size = rect.width.ceil().max(1.) as u32;
-        let key = PathBuf::from(format!("tau-icon/{}/{}", icon.name(), size));
         let stamp = icon.stamp(color);
+        // Multiple TTL rings in one frame must not alias the final row's texture.
+        // Lifetimes quantize to 61 minute-sized variants rather than caching per chat.
+        let variant = if matches!(icon, crate::icons::Icon::Lifetime(_)) {
+            stamp
+        } else {
+            0
+        };
+        let key = PathBuf::from(format!("tau-icon/{}/{size}/{variant}", icon.name()));
         if self.icons.get(&key).is_none_or(|(old, _)| *old != stamp) {
             let rgba = icon.pixels(size, color);
             let image = self.upload_image(ctx, &rgba, size, size);
             self.icons.insert(key.clone(), (stamp, image));
         }
-        layer.images.push((key, rect, rect));
+        layer.images.push((key, rect, intersect(rect, clip)));
     }
     pub fn draw(&mut self, ctx: &impl RenderContext, target: &wgpu::TextureView, layers: &[Layer]) {
         let (width, height) = ctx.size();

@@ -25,8 +25,12 @@ enum Action {
     Select(String),
     New,
     Settings,
+    ModelSettings,
+    ResetModels,
+    ToggleQuickModel(String),
+    ChooseModel(String, String),
     Usage,
-    ConnectionInfo,
+    Info(Info),
     Back,
     Send,
     Abort,
@@ -61,9 +65,15 @@ enum Action {
     Suggest(String),
     Extension(Option<String>, Option<bool>, bool),
 }
+#[derive(Clone, PartialEq, Eq)]
+enum Info {
+    Connection,
+    Lifetime(String),
+}
 #[derive(Clone)]
 enum ModalKind {
     Settings,
+    Models,
     Rename(String),
     Delete(String),
     TitlePrompt,
@@ -171,7 +181,9 @@ pub struct App {
     message_areas: Vec<MessageArea>,
     chat_areas: Vec<(Rect, String)>,
     usage: Tooltip,
-    connection_tip: Tooltip,
+    info_tip: Tooltip,
+    info_target: Info,
+    info_areas: Vec<(Rect, Info)>,
     composer_session: Option<String>,
     show_chats: bool,
     waiting_title: bool,
@@ -229,7 +241,9 @@ impl App {
             message_areas: vec![],
             chat_areas: vec![],
             usage: Tooltip::default(),
-            connection_tip: Tooltip::default(),
+            info_tip: Tooltip::default(),
+            info_target: Info::Connection,
+            info_areas: vec![],
             composer_session,
             show_chats,
             waiting_title: false,
@@ -281,14 +295,24 @@ impl App {
     #[cfg(not(target_os = "android"))]
     pub fn hover(&mut self, point: Option<Vec2>) {
         let enabled = self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none();
+        if enabled
+            && let Some((rect, target)) =
+                point.and_then(|p| self.info_areas.iter().find(|(r, _)| contains(*r, p)))
+        {
+            if self.info_target != *target {
+                self.info_tip = Tooltip::default();
+                self.info_target = target.clone();
+            }
+            self.info_tip.region = *rect;
+        }
         self.usage
             .hover(enabled && point.is_some_and(|p| self.usage.contains(p)));
-        self.connection_tip
-            .hover(enabled && point.is_some_and(|p| self.connection_tip.contains(p)));
-        if enabled && point.is_some_and(|p| contains(self.connection_tip.region, p)) {
+        self.info_tip
+            .hover(enabled && point.is_some_and(|p| self.info_tip.contains(p)));
+        if enabled && point.is_some_and(|p| contains(self.info_tip.region, p)) {
             self.usage.dismiss();
         } else if enabled && point.is_some_and(|p| contains(self.usage.region, p)) {
-            self.connection_tip.dismiss();
+            self.info_tip.dismiss();
         }
         let old = self
             .hover
@@ -337,7 +361,7 @@ impl App {
         if self.modal.is_none()
             && self.viewer.is_none()
             && self.context_menu.is_none()
-            && (self.connection_tip.contains_card(point) || self.usage.contains_card(point))
+            && (self.info_tip.contains_card(point) || self.usage.contains_card(point))
         {
             return CursorIcon::Default;
         }
@@ -376,7 +400,7 @@ impl App {
     pub fn tick(&mut self, dt: f32) -> bool {
         self.dirty |= self.controller.poll();
         self.dirty |= self.usage.tick();
-        self.dirty |= self.connection_tip.tick();
+        self.dirty |= self.info_tip.tick();
         if self.connecting && self.controller.epoch.is_some() {
             self.connecting = false;
             self.modal = None;
@@ -475,7 +499,7 @@ impl App {
         }
         if self.modal.is_some() || self.viewer.is_some() {
             self.usage.dismiss();
-            self.connection_tip.dismiss();
+            self.info_tip.dismiss();
             self.autoscroll = None;
             self.wheel = None;
         }
@@ -560,12 +584,12 @@ impl App {
         }
     }
     pub fn back(&mut self) {
-        if self.connection_tip.pinned
-            || self.connection_tip.progress > 0.
+        if self.info_tip.pinned
+            || self.info_tip.progress > 0.
             || self.usage.pinned
             || self.usage.progress > 0.
         {
-            self.connection_tip.dismiss();
+            self.info_tip.dismiss();
             self.usage.dismiss();
             self.dirty = true;
             return;
@@ -639,7 +663,7 @@ impl App {
     pub fn wheel(&mut self, amount: f32, horizontal: bool, point: Vec2) {
         self.context_menu = None;
         self.usage.dismiss();
-        self.connection_tip.dismiss();
+        self.info_tip.dismiss();
         self.cancel_autoscroll();
         self.expansion_pin = None;
         self.history_attempt = None;
@@ -718,7 +742,7 @@ impl App {
         if self.modal.is_none()
             && self.viewer.is_none()
             && self.context_menu.is_none()
-            && (self.connection_tip.contains_card(point) || self.usage.contains_card(point))
+            && (self.info_tip.contains_card(point) || self.usage.contains_card(point))
         {
             // Informational cards must not activate the list/message behind them.
             self.dirty = true;
@@ -727,8 +751,8 @@ impl App {
         if !contains(self.usage.region, point) {
             self.usage.dismiss();
         }
-        if !contains(self.connection_tip.region, point) {
-            self.connection_tip.dismiss();
+        if !contains(self.info_tip.region, point) {
+            self.info_tip.dismiss();
         }
         self.wheel = None;
         self.expansion_pin = None;
@@ -950,7 +974,7 @@ impl App {
     pub fn cancel_pointer(&mut self) {
         self.context_menu = None;
         self.usage.dismiss();
-        self.connection_tip.dismiss();
+        self.info_tip.dismiss();
         self.dirty = true;
         self.hover = None;
         self.autoscroll = None;
@@ -1011,7 +1035,7 @@ impl App {
     fn edited(&mut self) {
         if matches!(
             self.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Settings)
+            Some(ModalKind::Settings | ModalKind::Models)
         ) {
             self.controller.notice = None;
         }
@@ -1052,11 +1076,11 @@ impl App {
         if key == "Escape"
             && (self.usage.pinned
                 || self.usage.progress > 0.
-                || self.connection_tip.pinned
-                || self.connection_tip.progress > 0.)
+                || self.info_tip.pinned
+                || self.info_tip.progress > 0.)
         {
             self.usage.dismiss();
-            self.connection_tip.dismiss();
+            self.info_tip.dismiss();
             self.dirty = true;
             return;
         }
@@ -1168,13 +1192,24 @@ impl App {
                 self.scroll = 0.;
                 self.focus = Some(None);
             }
-            Action::ConnectionInfo => {
+            Action::Info(target) => {
                 self.usage.dismiss();
-                self.connection_tip.pinned = !self.connection_tip.pinned;
-                self.connection_tip.suppressed = !self.connection_tip.pinned;
+                if self.info_target != target {
+                    self.info_tip = Tooltip::default();
+                    self.info_target = target;
+                }
+                if let Some((rect, _)) = self
+                    .info_areas
+                    .iter()
+                    .find(|(_, target)| *target == self.info_target)
+                {
+                    self.info_tip.region = *rect;
+                }
+                self.info_tip.pinned = !self.info_tip.pinned;
+                self.info_tip.suppressed = !self.info_tip.pinned;
             }
             Action::Usage => {
-                self.connection_tip.dismiss();
+                self.info_tip.dismiss();
                 self.usage.pinned = !self.usage.pinned;
                 self.usage.suppressed = !self.usage.pinned;
             }
@@ -1183,6 +1218,63 @@ impl App {
                 self.show_chats = false;
             }
             Action::Back => self.back(),
+            Action::ModelSettings => {
+                self.controller.notice = None;
+                self.modal = Some(Modal {
+                    kind: ModalKind::Models,
+                    title: "Quick model selection".into(),
+                    fields: vec![
+                        (
+                            "Quick models".into(),
+                            Editor::new(self.controller.model_preferences.text()),
+                            false,
+                        ),
+                        (
+                            "Search daemon models".into(),
+                            Editor::line(String::new()),
+                            false,
+                        ),
+                    ],
+                    options: vec![],
+                });
+                self.focus = None;
+                if let Some(id) = selected
+                    && self.controller.epoch.is_some()
+                    && !self.controller.chats[&id].commands_loaded
+                {
+                    self.controller
+                        .request(ClientCommand::GetCommands { session_id: id })?;
+                }
+            }
+            Action::ResetModels => {
+                if let Some(modal) = &mut self.modal
+                    && matches!(modal.kind, ModalKind::Models)
+                {
+                    modal.fields[0].1 = Editor::new(crate::models::Preferences::default().text());
+                }
+            }
+            Action::ToggleQuickModel(slug) => {
+                if let Some(modal) = &mut self.modal
+                    && matches!(modal.kind, ModalKind::Models)
+                {
+                    let mut preferences =
+                        crate::models::Preferences::parse(&modal.fields[0].1.value)?;
+                    if preferences.slugs.contains(&slug) {
+                        preferences.slugs.retain(|s| s != &slug);
+                        if preferences.default.as_ref() == Some(&slug) {
+                            preferences.default = None;
+                        }
+                    } else {
+                        anyhow::ensure!(
+                            preferences.slugs.len() < 12,
+                            "Choose at most 12 quick models"
+                        );
+                        preferences.slugs.push(slug);
+                    }
+                    modal.fields[0].1 = Editor::new(preferences.text());
+                }
+            }
+            Action::ChooseModel(session, slug) => self.controller.choose_model(&session, &slug)?,
             Action::Settings => {
                 self.controller.notice = None;
                 self.connecting = false;
@@ -1253,6 +1345,11 @@ impl App {
                         self.connecting = true;
                         // Stay on the form until the authenticated protocol hello succeeds.
                         return Ok(());
+                    }
+                    ModalKind::Models => {
+                        self.controller.save_model_preferences(
+                            crate::models::Preferences::parse(&values[0])?,
+                        )?;
                     }
                     ModalKind::Rename(session_id) => {
                         self.controller.request(ClientCommand::RenameSession {
@@ -1551,14 +1648,16 @@ impl App {
         self.scrollbars.clear();
         self.message_areas.clear();
         self.chat_areas.clear();
+        self.info_areas.clear();
         self.usage.region = Rect::new(0., 0., 0., 0.);
-        self.connection_tip.region = Rect::new(0., 0., 0., 0.);
+        self.info_tip.region = Rect::new(0., 0., 0., 0.);
         self.renderer.clear_scenes();
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
         let side = if wide { 300. * s } else { 0. };
         if wide || self.show_chats {
             self.sidebar(
+                ctx,
                 &mut main,
                 Rect::new(
                     bounds.x,
@@ -1581,12 +1680,19 @@ impl App {
                 ),
             );
         }
-        if self.connection_tip.region.width <= 0. {
-            self.connection_tip.hover(false);
-            self.connection_tip.dismiss();
+        if let Some((rect, _)) = self
+            .info_areas
+            .iter()
+            .find(|(_, target)| *target == self.info_target)
+        {
+            self.info_tip.region = *rect;
+        }
+        if self.info_tip.region.width <= 0. {
+            self.info_tip.hover(false);
+            self.info_tip.dismiss();
         }
         self.usage_frame(&mut overlay, bounds);
-        self.connection_frame(&mut overlay, bounds);
+        self.info_frame(&mut overlay, bounds);
         self.context_frame(&mut overlay, bounds);
         if let Some(auto) = &self.autoscroll {
             let a = auto.anchor;
@@ -1689,12 +1795,17 @@ impl App {
             Some(ModalKind::Settings)
         ) {
             self.settings_frame(&mut overlay, bounds);
+        } else if matches!(
+            self.modal.as_ref().map(|m| &m.kind),
+            Some(ModalKind::Models)
+        ) {
+            self.model_settings_frame(&mut overlay, bounds);
         } else if self.modal.is_some() {
             self.modal_frame(&mut overlay, bounds);
         }
         if !matches!(
             self.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Settings)
+            Some(ModalKind::Settings | ModalKind::Models)
         ) {
             self.notice_frame(&mut overlay, bounds);
         }
@@ -1708,7 +1819,7 @@ impl App {
         self.renderer
             .draw(ctx, view, &[main, body, chrome, overlay]);
     }
-    fn sidebar(&mut self, layer: &mut Layer, b: Rect) {
+    fn sidebar(&mut self, ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
         let s = self.scale;
         layer.rect(b, color(0x0e141b));
         layer.rect(
@@ -1717,7 +1828,7 @@ impl App {
         );
         layer.rect(Rect::new(b.x, b.y + 140. * s, b.width, s), color(0x2a3541));
         let indicator = Rect::new(b.x + 72. * s, b.y + 22. * s, 28. * s, 34. * s);
-        self.connection_tip.region = indicator;
+        self.info_areas.push((indicator, Info::Connection));
         layer.rounded_rect(
             indicator,
             8. * s,
@@ -1730,7 +1841,7 @@ impl App {
         );
         self.hits.push(Hit {
             rect: indicator,
-            action: Action::ConnectionInfo,
+            action: Action::Info(Info::Connection),
         });
         self.renderer.label(
             layer,
@@ -1810,7 +1921,7 @@ impl App {
             self.renderer.clipped_label(
                 layer,
                 title,
-                Rect::new(rect.x + 12. * s, y + 10. * s, rect.width - 24. * s, 22. * s),
+                Rect::new(rect.x + 12. * s, y + 10. * s, rect.width - 56. * s, 22. * s),
                 16. * s,
                 color(0xe5eaf0),
                 unread || selected,
@@ -1855,6 +1966,26 @@ impl App {
                 rect,
                 action: Action::Select(session.id.clone()),
             });
+            let ring = Rect::new(rect.x + rect.width - 33. * s, y + 11. * s, 18. * s, 18. * s);
+            let (ratio, tint) = self.controller.lifetimes.meter(
+                &session.id,
+                session.status,
+                self.controller.epoch.is_some(),
+            );
+            self.renderer
+                .clipped_icon(ctx, layer, Icon::Lifetime(ratio), ring, tint, clip);
+            let target = crate::render::intersect(
+                Rect::new(ring.x - 7. * s, ring.y - 7. * s, 32. * s, 32. * s),
+                clip,
+            );
+            if target.height > 0. {
+                let info = Info::Lifetime(session.id.clone());
+                self.info_areas.push((target, info.clone()));
+                self.hits.push(Hit {
+                    rect: target,
+                    action: Action::Info(info),
+                });
+            }
         }
         self.scrollbar(layer, Lane::Sidebar, clip);
     }
@@ -2195,8 +2326,20 @@ impl App {
         let bubble_width = width * 0.9;
         let text_width = bubble_width - 28. * s;
         let rows = self.rows(&session);
+        let quick_models = self.controller.quick_start(&session)
+            && !self.controller.model_preferences.slugs.is_empty();
+        let quick_h = if quick_models {
+            self.quick_models_height(width)
+        } else {
+            0.
+        };
+        let quick_top = if quick_models && rows.is_empty() {
+            ((viewport.height - quick_h) / 2.).max(12. * s)
+        } else {
+            12. * s
+        };
         let mut placements = vec![];
-        let mut y = 12. * s;
+        let mut y = quick_top + quick_h;
 
         let mut keys = HashSet::new();
         let mut detail_layouts: HashMap<String, Vec<(f32, f32)>> = HashMap::new();
@@ -2317,7 +2460,9 @@ impl App {
                     .as_ref()
                     .is_none_or(|key| placements.iter().any(|p| &p.key == key))
                 || self.controller.chats[&session].feed.before.is_none());
-        if position.follow {
+        if quick_models {
+            self.scroll = self.scroll.clamp(0., self.max_scroll);
+        } else if position.follow {
             self.scroll = self.max_scroll;
         } else if let Some(key) = &position.key
             && let Some(p) = placements.iter().find(|p| &p.key == key)
@@ -2341,6 +2486,14 @@ impl App {
             self.remember_scroll();
         }
         self.history_near_top(&session);
+        if quick_models {
+            self.quick_models_frame(
+                layer,
+                &session,
+                Rect::new(x, viewport.y + quick_top - self.scroll, width, quick_h),
+                viewport,
+            );
+        }
         for (index, (row, p)) in rows.iter().zip(&self.placed).enumerate() {
             let top = viewport.y + p.top - self.scroll;
             if top + p.height < viewport.y || top > viewport.y + viewport.height {
@@ -2726,7 +2879,10 @@ impl App {
         {
             self.usage.text.push_str("\nLast known value");
         }
-        let can_send = connected && (!self.composer.value.trim().is_empty() || !files.is_empty());
+        let choosing = self.controller.chats[&session].default_pending
+            || self.controller.chats[&session].model_request.is_some();
+        let can_send =
+            connected && !choosing && (!self.composer.value.trim().is_empty() || !files.is_empty());
         self.icon_button(
             ctx,
             chrome,
@@ -2859,6 +3015,145 @@ impl App {
             }
         }
     }
+    fn quick_models_height(&self, width: f32) -> f32 {
+        let columns = if width / self.scale >= 520. { 2 } else { 1 };
+        (72. + self
+            .controller
+            .model_preferences
+            .slugs
+            .len()
+            .div_ceil(columns) as f32
+            * 84.
+            + 48.)
+            * self.scale
+    }
+    fn quick_models_frame(&mut self, layer: &mut Layer, session: &str, b: Rect, clip: Rect) {
+        let s = self.scale;
+        let chat = &self.controller.chats[session];
+        let connected = self.controller.epoch.is_some();
+        let busy = chat.default_pending || chat.model_request.is_some();
+        let hint = if !connected {
+            "Connect to choose a model"
+        } else if busy {
+            "Selecting model… your draft is kept"
+        } else if !chat.commands_loaded {
+            "Loading the daemon's model catalog…"
+        } else {
+            "Choose before your first message"
+        };
+        self.renderer.clipped_label(
+            layer,
+            "Choose a model",
+            Rect::new(b.x, b.y, b.width, 28. * s),
+            20. * s,
+            color(0xe5eaf0),
+            true,
+            clip,
+        );
+        self.renderer.clipped_label(
+            layer,
+            hint,
+            Rect::new(b.x, b.y + 32. * s, b.width, 34. * s),
+            12. * s,
+            color(0xb7c2ce),
+            false,
+            clip,
+        );
+        let columns = if b.width / s >= 520. { 2 } else { 1 };
+        let w = (b.width - (columns - 1) as f32 * 8. * s) / columns as f32;
+        let current = self
+            .controller
+            .account
+            .sessions
+            .iter()
+            .find(|c| c.id == session)
+            .and_then(|c| c.model.as_ref())
+            .map(|m| format!("{}/{}", m.provider, m.model_id));
+        for (i, selector) in self.controller.model_preferences.slugs.iter().enumerate() {
+            let r = Rect::new(
+                b.x + (i % columns) as f32 * (w + 8. * s),
+                b.y + (72. + (i / columns) as f32 * 84.) * s,
+                w,
+                76. * s,
+            );
+            let resolved = crate::models::resolve(selector, &chat.commands);
+            let selected = resolved.is_some() && resolved == current.as_deref();
+            let enabled = connected && chat.commands_loaded && !busy && resolved.is_some();
+            let base = color(if selected { 0x303a66 } else { 0x18212b });
+            layer.clipped_rounded_rect(
+                r,
+                12. * s,
+                if enabled {
+                    layer.control_color(r, base)
+                } else {
+                    base
+                },
+                clip,
+            );
+            self.renderer.clipped_label(
+                layer,
+                resolved.unwrap_or(selector),
+                Rect::new(r.x + 12. * s, r.y + 10. * s, w - 24. * s, 32. * s),
+                12. * s,
+                color(if enabled || selected {
+                    0xe5eaf0
+                } else {
+                    0x82909f
+                }),
+                false,
+                crate::render::intersect(r, clip),
+            );
+            let status = if !connected {
+                "Offline"
+            } else if !chat.commands_loaded {
+                "Catalog not loaded"
+            } else if resolved.is_none() {
+                "Not in daemon catalog"
+            } else if chat
+                .model_request
+                .as_ref()
+                .is_some_and(|(_, slug)| Some(slug.as_str()) == resolved)
+            {
+                "Selecting…"
+            } else if selected {
+                "Selected"
+            } else if self.controller.model_preferences.default.as_ref() == Some(selector) {
+                "New-chat default"
+            } else {
+                "Select"
+            };
+            self.renderer.clipped_label(
+                layer,
+                status,
+                Rect::new(r.x + 12. * s, r.y + 54. * s, w - 24. * s, 16. * s),
+                11. * s,
+                color(if selected { 0x67d4ff } else { 0xb7c2ce }),
+                false,
+                crate::render::intersect(r, clip),
+            );
+            if enabled {
+                self.hits.push(Hit {
+                    rect: crate::render::intersect(r, clip),
+                    action: Action::ChooseModel(session.into(), resolved.unwrap().into()),
+                });
+            }
+        }
+        let r = Rect::new(b.x, b.y + b.height - 40. * s, b.width, 32. * s);
+        layer.clipped_rounded_rect(r, 16. * s, layer.control_color(r, color(0x18212b)), clip);
+        self.renderer.clipped_label(
+            layer,
+            "Configure quick models…",
+            Rect::new(r.x + 12. * s, r.y + 7. * s, r.width - 24. * s, 20. * s),
+            12. * s,
+            color(0x67d4ff),
+            false,
+            crate::render::intersect(r, clip),
+        );
+        self.hits.push(Hit {
+            rect: crate::render::intersect(r, clip),
+            action: Action::ModelSettings,
+        });
+    }
     fn notice_frame(&mut self, layer: &mut Layer, b: Rect) {
         let s = self.scale;
         let width = (b.width - 32. * s).min(640. * s);
@@ -2890,7 +3185,7 @@ impl App {
         if self.modal.is_some()
             || self.viewer.is_some()
             || self.usage.contains_card(point)
-            || self.connection_tip.contains_card(point)
+            || self.info_tip.contains_card(point)
             || self.context_menu.is_some() && contains(self.context_rect, point)
         {
             return;
@@ -2910,7 +3205,7 @@ impl App {
         self.wheel = None;
         self.velocity = 0.;
         self.usage.dismiss();
-        self.connection_tip.dismiss();
+        self.info_tip.dismiss();
         let area = transcript
             .then(|| self.message_areas.iter().find(|a| a.contains(point)))
             .flatten();
@@ -3089,30 +3384,48 @@ impl App {
             animated,
         );
     }
-    fn connection_frame(&mut self, layer: &mut Layer, bounds: Rect) {
-        if self.connection_tip.progress <= 0.
-            || self.connection_tip.region.width <= 0.
+    fn info_frame(&mut self, layer: &mut Layer, bounds: Rect) {
+        if self.info_tip.progress <= 0.
+            || self.info_tip.region.width <= 0.
             || self.modal.is_some()
             || self.viewer.is_some()
             || self.context_menu.is_some()
         {
             return;
         }
-        self.connection_tip.text = self
-            .controller
-            .health
-            .details(&self.controller.settings, &self.controller.connection);
+        self.info_tip.text = match &self.info_target {
+            Info::Connection => self
+                .controller
+                .health
+                .details(&self.controller.settings, &self.controller.connection),
+            Info::Lifetime(id) => {
+                let Some(session) = self
+                    .controller
+                    .account
+                    .sessions
+                    .iter()
+                    .find(|session| &session.id == id)
+                else {
+                    return;
+                };
+                self.controller.lifetimes.details(
+                    id,
+                    session.status,
+                    self.controller.epoch.is_some(),
+                )
+            }
+        };
         let s = self.scale;
         let margin = 8. * s;
         let w = (360. * s).min((bounds.width - margin * 2.).max(1.));
         let h = (self.renderer.label_height(
-            &self.connection_tip.text,
+            &self.info_tip.text,
             (w - 20. * s).max(1.),
             12. * s,
             false,
         ) + 20. * s)
             .min((bounds.height - margin * 2.).max(1.));
-        let anchor = self.connection_tip.region;
+        let anchor = self.info_tip.region;
         let x = (anchor.x + anchor.width / 2. - w / 2.).clamp(
             bounds.x + margin,
             (bounds.x + bounds.width - margin - w).max(bounds.x + margin),
@@ -3122,8 +3435,8 @@ impl App {
             (bounds.y + bounds.height - margin - h).max(bounds.y + margin),
         );
         let full = Rect::new(x, y, w, h);
-        self.connection_tip.card = full;
-        let t = self.connection_tip.progress;
+        self.info_tip.card = full;
+        let t = self.info_tip.progress;
         let pivot = (anchor.x + anchor.width / 2.).clamp(full.x, full.x + full.width);
         let animated = Rect::new(pivot + (x - pivot) * t, y, w * t, h * t);
         layer.rounded_rect(animated, 6. * s, color(0xe5e1e6));
@@ -3136,7 +3449,7 @@ impl App {
         );
         self.renderer.clipped_label(
             layer,
-            &self.connection_tip.text,
+            &self.info_tip.text,
             Rect::new(
                 full.x + 10. * s,
                 full.y + 10. * s,
@@ -3168,7 +3481,7 @@ impl App {
         let width = (b.width - 48. * s).min(520. * s).max(240. * s);
         let inner_w = width - 48. * s;
         let height =
-            (372. + if configured { 92. } else { 0. } + if error.is_some() { 84. } else { 0. }) * s;
+            (416. + if configured { 92. } else { 0. } + if error.is_some() { 84. } else { 0. }) * s;
         let card = Rect::new(
             b.x + (b.width - width) / 2.,
             b.y + ((b.height - height) / 2.).max(12. * s),
@@ -3287,6 +3600,17 @@ impl App {
             false,
         );
         let mut y = buttons_y + 60. * s;
+        button(
+            &mut self.renderer,
+            layer,
+            &mut self.hits,
+            Rect::new(x, y, inner_w, 32. * s),
+            "Quick model selection",
+            Action::ModelSettings,
+            s,
+            false,
+        );
+        y += 44. * s;
         if configured {
             layer.rect(Rect::new(x, y, inner_w, s), color(0x526170));
             y += 12. * s;
@@ -3334,6 +3658,166 @@ impl App {
                 14. * s,
                 color(0xffb4ab),
                 false,
+            );
+        }
+    }
+    fn model_settings_frame(&mut self, layer: &mut Layer, b: Rect) {
+        let s = self.scale;
+        self.hits.clear();
+        layer.rect(b, color(0x0e141b));
+        let w = (b.width - 32. * s).min(680. * s).max(1.);
+        let x = b.x + (b.width - w) / 2.;
+        let top = b.y + 16. * s;
+        let footer = b.y + b.height - 56. * s;
+        let modal = self.modal.as_ref().unwrap();
+        self.renderer.label(
+            layer,
+            "Quick model selection",
+            Rect::new(x, top, w, 30. * s),
+            20. * s,
+            color(0xe5eaf0),
+            true,
+        );
+        let compact = b.height / s < 480.;
+        let show_catalog = b.height / s >= 320.;
+        let help_h = if compact { 32. } else { 58. } * s;
+        self.renderer.label(layer, if compact { "One slug per line; * marks the default. Empty disables tiles." }
+            else { "One provider/model per line (max 12). Prefix one with * for the new-chat default; no * keeps the daemon default. Empty disables tiles." },
+            Rect::new(x, top + 36. * s, w, help_h), 12. * s, color(0xb7c2ce), false);
+        let edit_y = top + 36. * s + help_h + 8. * s;
+        let edit_h = (b.height * 0.25)
+            .min(164. * s)
+            .min((footer - 48. * s - edit_y - if show_catalog { 56. * s } else { 0. }).max(0.));
+        let edit = Rect::new(x, edit_y, w, edit_h);
+        modal.fields[0].1.draw(
+            &mut self.renderer,
+            layer,
+            edit,
+            16. * s,
+            self.focus == Some(Some(0)),
+            false,
+            "provider/model",
+            true,
+        );
+        self.hits.push(Hit {
+            rect: edit,
+            action: Action::Focus(Some(0)),
+        });
+        let search = Rect::new(x, edit.y + edit.height + 12. * s, w, 36. * s);
+        if show_catalog {
+            modal.fields[1].1.draw(
+                &mut self.renderer,
+                layer,
+                search,
+                16. * s,
+                self.focus == Some(Some(1)),
+                false,
+                "Search daemon models to add/remove",
+                true,
+            );
+            self.hits.push(Hit {
+                rect: search,
+                action: Action::Focus(Some(1)),
+            });
+        }
+        let list_y = search.y + search.height + 8. * s;
+        let list_bottom = footer - 52. * s;
+        let query = modal.fields[1].1.value.to_lowercase();
+        let commands = self
+            .controller
+            .selected()
+            .map(|c| c.commands.as_slice())
+            .unwrap_or(&[]);
+        let preferences = crate::models::Preferences::parse(&modal.fields[0].1.value).ok();
+        let count = if show_catalog {
+            ((list_bottom - list_y) / (32. * s)).max(0.) as usize
+        } else {
+            0
+        };
+        let catalog = crate::models::catalog(commands);
+        let mut shown = 0;
+        for model in catalog
+            .iter()
+            .filter(|m| m.value.to_lowercase().contains(&query))
+            .take(count)
+        {
+            let existing = preferences.as_ref().and_then(|p| {
+                p.slugs.iter().find(|slug| {
+                    crate::models::resolve(slug, commands) == Some(model.value.as_str())
+                })
+            });
+            let r = Rect::new(x, list_y + shown as f32 * 32. * s, w, 30. * s);
+            layer.rounded_rect(r, 6. * s, layer.control_color(r, color(0x18212b)));
+            self.renderer.label(
+                layer,
+                &format!(
+                    "{} {}",
+                    if existing.is_some() { "−" } else { "+" },
+                    model.value
+                ),
+                Rect::new(r.x + 8. * s, r.y + 6. * s, w - 16. * s, 20. * s),
+                12. * s,
+                color(0x67d4ff),
+                false,
+            );
+            self.hits.push(Hit {
+                rect: r,
+                action: Action::ToggleQuickModel(existing.unwrap_or(&model.value).clone()),
+            });
+            shown += 1;
+        }
+        if shown == 0 && count > 0 {
+            self.renderer.label(
+                layer,
+                if catalog.is_empty() {
+                    "Open a connected chat to load available models."
+                } else {
+                    "No matching models."
+                },
+                Rect::new(x, list_y, w, 40. * s),
+                12. * s,
+                color(0x82909f),
+                false,
+            );
+        }
+        self.renderer.label(
+            layer,
+            self.controller
+                .notice
+                .as_deref()
+                .unwrap_or("Changes apply to future new chats. Search to narrow the catalog."),
+            Rect::new(x, footer - 44. * s, w, 36. * s),
+            12. * s,
+            color(if self.controller.notice.is_some() {
+                0xffb4ab
+            } else {
+                0x82909f
+            }),
+            false,
+        );
+        let button_w = (w - 16. * s) / 3.;
+        for (i, (label, action)) in [
+            ("Save", Action::Confirm),
+            ("Defaults", Action::ResetModels),
+            ("Cancel", Action::CancelModal),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            button(
+                &mut self.renderer,
+                layer,
+                &mut self.hits,
+                Rect::new(
+                    x + i as f32 * (button_w + 8. * s),
+                    footer,
+                    button_w,
+                    40. * s,
+                ),
+                label,
+                action,
+                s,
+                i == 0,
             );
         }
     }

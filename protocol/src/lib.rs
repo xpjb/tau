@@ -188,6 +188,9 @@ pub enum ServerMessage {
     SessionState {
         session_id: String,
         status: SessionStatus,
+        /// Remaining worker idle TTL, sampled by the daemon (not chat/history expiry).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle_remaining_ms: Option<u64>,
         context_usage: Option<ContextUsage>,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
@@ -333,6 +336,9 @@ pub struct SessionSummary {
     pub title: String,
     pub starter: bool,
     pub status: SessionStatus,
+    /// Optional for compatibility with older v10 daemons. Never derive from updatedAt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_remaining_ms: Option<u64>,
     pub detail: Option<String>,
     pub context_usage: Option<ContextUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]

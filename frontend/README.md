@@ -1,8 +1,9 @@
 # Tau 2 · native Rust frontend
 
-**Streaming QA: release on hold.** Unreleased section timestamps/grouping, hover
-and paragraph refinements are tracked in [QA.md](QA.md); 0.6.3 remains the shipped
-build until the user asks for another delivery.
+**Streaming QA: release on hold.** Unreleased transcript styling, connection
+health, contextual chat actions, worker TTL rings and new-chat model tiles are
+tracked in [QA.md](QA.md); 0.6.3 remains the shipped build until the user asks for
+another delivery.
 
 **QA build 0.6.3:** smaller Android/Windows packages using system fonts. See
 [PACKAGING.md](PACKAGING.md) for measured download/installed sizes and tradeoffs;
@@ -87,6 +88,23 @@ Enter to connect. Token paste trims surrounding whitespace. Validation and
 connection errors are visible on the form; it closes only after authenticated
 protocol negotiation succeeds. Title prompt loading requires the connected,
 unchanged account. Notices remain visible even without a selected chat.
+
+### Unreleased UI additions
+
+- Hover or tap the dot beside Tau for real heartbeat RTT and connection details;
+  there is no duplicate bottom-left connection label.
+- Right-click a sidebar chat or its header for chat actions (hold on touch).
+  Message context menus remain separate. Stop is a centered 40dp tonal circle.
+- Chat rings show the one-hour idle **worker** TTL; history is not deleted.
+  Exact countdown requires the updated daemon's optional `idleRemainingMs` field.
+  Older daemons still connect and show an unavailable countdown rather than a guess.
+- Empty starter chats offer quick model tiles. Settings → Quick model selection
+  manages up to 12 provider/model slugs; prefix one with `*` for the new-chat default.
+  The searchable catalog can add/remove choices; no `*` uses the daemon default,
+  and an empty list disables tiles. Preferences are local to this daemon/account.
+  Presets request Codex `gpt-6-luna`, `gpt-6-sol`, `gpt-6-astra` and OpenRouter
+  DeepSeek v4.1 Flash (preferred default). A model must actually appear in the
+  daemon's built-in catalog to be sent. Missing defaults leave its model unchanged.
 
 Desktop automation can explicitly set
 `TAU2_SERVER` and `TAU2_TOKEN`; these override and save the settings. Do not put
