@@ -29,7 +29,7 @@ New Chat reuses one daemon-owned starter and starts Pi before returning it, so t
 - Bump chats on assistant replies and stops; preserve unread markers across app restarts.
 - Detect failed connections and restore retained chat feeds without replaying sends or controls.
 - Fork from any visible user message.
-- Attach local files for Pi to inspect, view images from Pi inline, and download files produced through Pi's `send_image` and `send_file` tools.
+- Attach local files for Pi to inspect, view supported images from Pi inline, and download files produced through Pi's `send_file` tool. The tool stages files itself and identifies inline images by content.
 - Save viewed images privately for offline inline/full-screen viewing. Export a saved original without downloading it again.
 - Zoom and pan full-screen images with pinch or mouse wheel/drag, plus minus/plus/Fit controls.
 - Edit the entire shared title prompt in Settings, with exact whitespace and empty overrides.
@@ -102,7 +102,7 @@ The installer generates `/etc/tau.env` once with a random bearer token, binds `t
 
 The title helper needs both `scripts/title_gen.py` and its adjacent `scripts/title_prompt.txt`.
 
-Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat under `/root/.local/share/tau/uploads` and deleted with the chat. Pi stages outgoing files under `/root/.local/share/tau/outbox`; `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
+Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat under `/root/.local/share/tau/uploads` and deleted with the chat. Pi's `send_file` tool copies outgoing files into unique directories under `/root/.local/share/tau/outbox`, preserving their names; files already there are reused. `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
 
 ## Native file transfers
 

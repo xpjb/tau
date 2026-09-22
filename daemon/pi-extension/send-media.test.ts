@@ -1,9 +1,79 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, mkdir, open, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import register from "./send-media.ts";
+
+test("send_file stages local files and identifies inline images", async () => {
+  const previousRoot = process.env.TAU_ATTACHMENT_ROOT;
+  const previousUrl = process.env.TAU_FLAG_URL;
+  const previousToken = process.env.TAU_FLAG_TOKEN;
+  const directory = await mkdtemp(join(tmpdir(), "tau-send-file-"));
+  const outbox = join(directory, "outbox");
+  await mkdir(outbox);
+  try {
+    process.env.TAU_ATTACHMENT_ROOT = outbox;
+    delete process.env.TAU_FLAG_URL;
+    delete process.env.TAU_FLAG_TOKEN;
+    const tools: ToolDefinition[] = [];
+    const api = { registerTool: (tool: ToolDefinition) => { tools.push(tool); }, registerCommand: () => {} } as unknown as ExtensionAPI;
+    register(api);
+    assert.deepEqual(tools.map((tool) => tool.name), ["send_file"]);
+    const send = tools[0];
+    const context = { cwd: directory } as ExtensionContext;
+
+    const source = join(directory, "report.txt");
+    await writeFile(source, "original report");
+    const result = await send.execute("file", { path: "report.txt", caption: " Report " }, undefined, undefined, context);
+    const attachment = (result.details as { tauAttachment: { kind: string; path: string; caption?: string; size: number } }).tauAttachment;
+    assert.equal(attachment.kind, "file");
+    assert.equal(attachment.caption, "Report");
+    assert.equal(attachment.size, 15);
+    assert.equal(basename(attachment.path), "report.txt");
+    assert.notEqual(attachment.path, source);
+    assert(attachment.path.startsWith(`${await realpath(outbox)}/`));
+    assert.equal((await stat(attachment.path)).mode & 0o777, 0o600);
+    await writeFile(source, "changed");
+    assert.equal(await readFile(attachment.path, "utf8"), "original report");
+
+    const png = join(directory, "pixel.png");
+    await writeFile(png, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]));
+    const imageResult = await send.execute("image", { path: png }, undefined, undefined, context);
+    const image = (imageResult.details as { tauAttachment: { kind: string; path: string; size: number } }).tauAttachment;
+    assert.equal(image.kind, "image");
+    assert.equal(image.size, 9);
+    assert.equal(basename(image.path), "pixel.png");
+
+    const largePng = join(directory, "large.png");
+    const largePngHandle = await open(largePng, "w");
+    try {
+      await largePngHandle.write(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), 0, 8, 0);
+      await largePngHandle.truncate(10_000_001);
+    } finally {
+      await largePngHandle.close();
+    }
+    const largeImageResult = await send.execute("large-image", { path: largePng }, undefined, undefined, context);
+    const largeImage = (largeImageResult.details as { tauAttachment: { kind: string; size: number } }).tauAttachment;
+    assert.equal(largeImage.kind, "file");
+    assert.equal(largeImage.size, 10_000_001);
+
+    const staged = join(outbox, "ready.bin");
+    await writeFile(staged, "ready");
+    const stagedResult = await send.execute("staged", { path: staged }, undefined, undefined, context);
+    const reused = (stagedResult.details as { tauAttachment: { path: string } }).tauAttachment;
+    assert.equal(reused.path, await realpath(staged));
+    await assert.rejects(send.execute("caption", { path: staged, caption: "x".repeat(1_025) }, undefined, undefined, context), /Caption exceeds/);
+  } finally {
+    if (previousRoot === undefined) delete process.env.TAU_ATTACHMENT_ROOT; else process.env.TAU_ATTACHMENT_ROOT = previousRoot;
+    if (previousUrl === undefined) delete process.env.TAU_FLAG_URL; else process.env.TAU_FLAG_URL = previousUrl;
+    if (previousToken === undefined) delete process.env.TAU_FLAG_TOKEN; else process.env.TAU_FLAG_TOKEN = previousToken;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("flag_it waits for daemon confirmation and stays scoped to Tau", { timeout: 10_000 }, async () => {
   const previousUrl = process.env.TAU_FLAG_URL;
@@ -30,7 +100,7 @@ test("flag_it waits for daemon confirmation and stays scoped to Tau", { timeout:
     delete process.env.TAU_FLAG_URL;
     delete process.env.TAU_FLAG_TOKEN;
     register(api);
-    assert.deepEqual(tools.map((tool) => tool.name), ["send_image", "send_file"]);
+    assert.deepEqual(tools.map((tool) => tool.name), ["send_file"]);
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     const address = server.address();
