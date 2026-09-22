@@ -13,8 +13,8 @@ One-sentence responsibility per module. Read this before opening files.
   history feeds, fork/clone and deletion.
 - `agent/mod.rs` — cancellable model/tool loop, transcript publication, compaction
   and asynchronous title generation.
-- `agent/journal.rs` — durable JSONL history/queue writes, legacy active-branch import
-  and provider context reconstruction. Unknown tool effects are never auto-replayed.
+- `agent/history.rs` — provider context reconstruction from the retained SQLite
+  history suffix. Unknown tool effects are never auto-replayed.
 - `agent/provider/` — bounded SSE framing, Codex Responses and Chat Completions,
   native image generation, request construction and safe HTTP retries.
 - `agent/auth.rs` — private provider credentials, serialized Codex OAuth refresh,
@@ -22,10 +22,11 @@ One-sentence responsibility per module. Read this before opening files.
 - `agent/tools.rs` — native filesystem, shell, media and incidental-flag tools.
 - `attachments.rs` — shared local/generated-file staging, authenticated attachment resolution, upload storage and MIME checks.
 - `commands.rs` — native command catalog and model/thinking/compact/name/fast settings.
-- `transcript.rs` — flat event projection, stable live-to-saved IDs and paging.
+- `transcript.rs` — flat event projection, stable live-to-saved IDs and a bounded live tail.
   There is only one generation/sequence: the client-facing transcript.
 - `protocol.rs` — client↔daemon wire data (to move into the frontend branch's shared crate).
-- `state.rs` — session metadata and durable flags; no active agent settings.
+- `state.rs` / `schema.sql` — SQLite transactions for metadata, history, event pages,
+  queue and receipts, with an explicit read-only Tau 1 import; separate durable flag log.
 
 Dependencies point one way: `server → manager → {agent, transcript, state, settings}`.
 There is no Pi subprocess or internal RPC transport. See [Tau 2 integration and
@@ -74,8 +75,9 @@ migration](docs/tau2-agent.md) before merging the Rust frontend.
   client keep hints retain work. Idle sleep evicts the runtime, not the chat.
   Only the blank starter is labeled New chat. Untitled chats with data or kept
   outside that slot are Unnamed chats, with no count limit.
-- Daemon JSONL owns saved history and acknowledged pending work. Remote transcript events stay in client
-  memory only; SQLite preserves local work, files and preferences.
+- Daemon SQLite owns saved history and acknowledged pending work. Remote transcript
+  events stay in client memory only; the client's SQLite preserves local work, files
+  and preferences. Native conversation state is never dual-written to JSONL.
 - The daemon owns branch selection, event order, stream lifecycle and activity
   bumps. Recovery assigns order from the source, not discovery time.
   Transport pages do not define presentation groups.

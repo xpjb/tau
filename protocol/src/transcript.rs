@@ -117,6 +117,10 @@ pub struct QueueState {
     pub capabilities: Vec<String>,
     pub boundaries: Vec<String>,
 }
+impl QueueState {
+    pub fn native() -> Self { Self { available:true, capabilities:["queue_edit","queue_delete","queue_pause","queue_resume","queue_run_prefix","queue_cancel_control"].into_iter().map(str::to_owned).collect(), boundaries:vec!["turn".into()], ..Default::default() } }
+}
+
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -8,7 +8,9 @@ Do not deploy this daemon with the old protocol-10 clients.
 See [the backend contract, settings, migration and scope](docs/tau2-agent.md).
 The native backend uses protocol 11, durable prompt acknowledgement, one transcript
 sequence, native tools, Codex/OpenRouter streaming and unified `settings.json`.
-Old Pi JSONL histories are retained and readable. Transfers are unchanged here.
+Session metadata, history, queues and receipts live in SQLite (`TAU_DATABASE_PATH`,
+default `/var/lib/tau/tau.sqlite3`). Old Tau 1/Pi data has an explicit read-only
+import; no JSONL session writer remains. Transfers are unchanged here.
 
 ## Components
 
@@ -73,7 +75,7 @@ was observed, where, and why it matters. Omit secrets and continue the current
 task; flagging does not authorize extra work or start another agent.
 
 The daemon appends one JSON record to `flags.jsonl` beside its configured
-`state.json` (normally `/var/lib/tau/flags.jsonl`). Each record contains `id`,
+SQLite database (normally `/var/lib/tau/flags.jsonl`). Each record contains `id`,
 `timestampMs`, `sessionId`, `sessionTitle`, and the full `text`, limited to 4096
 characters. The daemon serializes and syncs the write before confirming it and
 broadcasting a **Flagged** notice through the existing client banner. The file

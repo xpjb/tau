@@ -1,8 +1,7 @@
 #![cfg(unix)]
-//! Production controller/transport/store against the real daemon and its existing
-//! deterministic Pi subprocess fixture. No GPU, mock controller, or live account.
+//! Production controller/transport/store against the real daemon and a
+//! local native-provider fixture. No GPU, Pi subprocess, or live account.
 use std::{
-    os::unix::fs::PermissionsExt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -21,22 +20,99 @@ async fn until(c: &mut Controller, condition: impl Fn(&Controller) -> bool) {
         }
         assert!(
             Instant::now() < deadline,
-            "Timed out: connection={}, notice={:?}",
+            "Timed out: connection={}, notice={:?}, feed={:?}",
             c.connection,
-            c.notice
+            c.notice,
+            c.selected().map(|chat| (
+                &chat.feed.queue,
+                &chat.local.pending,
+                chat.feed
+                    .events
+                    .values()
+                    .map(|e| (&e.kind, &e.text, &e.error_message))
+                    .collect::<Vec<_>>()
+            ))
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_daemon_chat_queue_upload_extension_fork_and_restart() {
+async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart() {
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Clone)]
+    struct Script {
+        calls: Arc<AtomicUsize>,
+        gate: Arc<tokio::sync::Notify>,
+        requests: tokio::sync::mpsc::UnboundedSender<Value>,
+    }
+    async fn model(State(script): State<Script>, Json(body): Json<Value>) -> impl IntoResponse {
+        let index = script.calls.fetch_add(1, Ordering::SeqCst);
+        script.requests.send(body).unwrap();
+        if index == 0 {
+            script.gate.notified().await;
+        }
+        assert!(index < 3, "Unexpected extra provider execution");
+        let delta = if index == 1 {
+            json!({"tool_calls":[{"index":0,"id":"inspect","type":"function","function":{"name":"bash","arguments":"{\"command\":\"find uploads -type f -exec cat {} \\\\; > inspected.txt\"}"}}]})
+        } else {
+            json!({"content":if index == 0 {"Aborted response must not appear"} else {"Native reply café 😀"}})
+        };
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"index":0,"delta":delta}]}),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":if index == 1 {"tool_calls"} else {"stop"}}],"usage":{"total_tokens":300}})
+        );
+        ([("content-type", "text/event-stream")], body)
+    }
     let server = tempfile::tempdir().unwrap();
     let root = server.path();
-    let pi = root.join("pi.py");
-    std::fs::write(&pi, include_str!("../../daemon/tests/fixtures/pi.py")).unwrap();
-    std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let extension = root.join("extension.ts");
-    std::fs::write(&extension, "").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let model_address = listener.local_addr().unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let script = Script {
+        calls: calls.clone(),
+        gate: gate.clone(),
+        requests,
+    };
+    let provider = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/{*path}", post(model))
+                .with_state(script),
+        )
+        .await
+        .unwrap()
+    });
+    let mut daemon_settings = tau_protocol::settings::Settings::default();
+    daemon_settings.daemon.idle_timeout_seconds = 0;
+    daemon_settings.agent.load_project_instructions = false;
+    let endpoint = daemon_settings.providers.get_mut("openai-codex").unwrap();
+    endpoint.api = tau_protocol::settings::Api::ChatCompletions;
+    endpoint.base_url = format!("http://{model_address}");
+    endpoint.web_search = false;
+    std::fs::write(
+        root.join("settings.json"),
+        serde_json::to_vec(&daemon_settings).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("auth.json"),
+        r#"{"openai-codex":{"type":"api_key","key":"local-fixture-only"}}"#,
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.join("auth.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -46,13 +122,11 @@ async fn real_daemon_chat_queue_upload_extension_fork_and_restart() {
         bind: port,
         transfer_bind: "127.0.0.1:0".parse().unwrap(),
         token: Arc::from(token),
-        pi_command: pi,
-        default_thinking_level: "high".into(),
+        settings_path: root.join("settings.json"),
+        import_pi_dir: None,
         cwd: root.into(),
-        state_path: root.join("state.json"),
-        session_dir: root.join("sessions"),
+        database_path: root.join("tau.sqlite3"),
         telemetry_path: root.join("crash.jsonl"),
-        pi_extension_path: extension,
         attachment_root: root.join("outbox"),
         upload_root: root.join("uploads"),
         title_command: None,
@@ -91,20 +165,24 @@ async fn real_daemon_chat_queue_upload_extension_fork_and_restart() {
             && c.selected().unwrap().local.pending.is_empty()
     })
     .await;
+    tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
     c.draft("queued café 😀".into()).unwrap();
     c.send_prompt().unwrap();
     until(&mut c, |c| {
         c.selected().unwrap().feed.queue.requests.len() == 1
     })
     .await;
-    let q = c.selected().unwrap().feed.queue.requests[0].clone();
+    let queued = c.selected().unwrap().feed.queue.requests[0].clone();
     let generation = c.selected().unwrap().feed.generation.clone();
     c.control(ClientCommand::QueueControl {
         session_id: session.clone(),
         generation: generation.clone(),
         operation: QueueOperation::Edit {
-            request_id: q.request_id.clone(),
-            revision: q.revision,
+            request_id: queued.request_id.clone(),
+            revision: queued.revision,
             text: "edited queue".into(),
         },
     })
@@ -113,13 +191,13 @@ async fn real_daemon_chat_queue_upload_extension_fork_and_restart() {
         c.selected().unwrap().feed.queue.requests[0].text == "edited queue"
     })
     .await;
-    let rev = c.selected().unwrap().feed.queue.requests[0].revision;
+    let revision = c.selected().unwrap().feed.queue.requests[0].revision;
     c.control(ClientCommand::QueueControl {
         session_id: session.clone(),
-        generation,
+        generation: generation.clone(),
         operation: QueueOperation::Delete {
-            request_id: q.request_id,
-            revision: rev,
+            request_id: queued.request_id,
+            revision,
         },
     })
     .unwrap();
@@ -135,45 +213,94 @@ async fn real_daemon_chat_queue_upload_extension_fork_and_restart() {
         c.selected().unwrap().feed.queue.run_id.is_none()
     })
     .await;
+    gate.notify_one();
     let file = local.path().join("résumé.txt");
     std::fs::write(&file, "locally attached contents\n").unwrap();
     c.attach(&file, None).unwrap();
     c.draft("Read this file".into()).unwrap();
     c.send_prompt().unwrap();
     until(&mut c, |c| {
-        c.selected().unwrap().feed.events.values().any(|e| {
-            e.role == EventRole::User && e.text.contains("Attached files are available at:")
-        })
+        c.selected().unwrap().feed.queue.requests.len() == 1
     })
     .await;
-    assert!(
-        std::fs::read_dir(root.join("uploads").join(&session))
-            .unwrap()
-            .next()
-            .is_some()
-    );
-    c.draft("/choose".into()).unwrap();
-    c.send_prompt().unwrap();
-    until(&mut c, |c| !c.dialogs.is_empty()).await;
-    let (_, dialog) = c.dialogs[0].clone();
-    c.extension_response(session.clone(), dialog.id, Some("Two".into()), None, false)
-        .unwrap();
-    until(&mut c, |c| c.selected().unwrap().local.pending.is_empty()).await;
-    assert_eq!(
-        std::fs::read_to_string(root.join("sessions").join("extension-response")).unwrap(),
-        "Two"
-    );
-    c.request(ClientCommand::SetTitlePrompt {
-        prompt: "\n  exact whitespace  \n".into(),
+    c.control(ClientCommand::QueueControl {
+        session_id: session.clone(),
+        generation,
+        operation: QueueOperation::Resume { run_id: None },
     })
     .unwrap();
-    c.request(ClientCommand::GetTitlePrompt).unwrap();
     until(&mut c, |c| {
-        c.title_prompt
-            .as_ref()
-            .is_some_and(|p| p.0 == "\n  exact whitespace  \n")
+        c.selected()
+            .unwrap()
+            .feed
+            .events
+            .values()
+            .any(|e| e.text == "Native reply café 😀" && e.phase == EventPhase::Saved)
     })
     .await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("inspected.txt")).unwrap(),
+        "locally attached contents\n"
+    );
+    let request = received.recv().await.unwrap();
+    assert!(request["messages"].as_array().unwrap().iter().any(|m| {
+        m["role"] == "user"
+            && m["content"]
+                .as_str()
+                .is_some_and(|t| t.contains("Attached files are available at:"))
+    }));
+    assert!(
+        !c.selected()
+            .unwrap()
+            .feed
+            .events
+            .values()
+            .any(|e| e.text.contains("Aborted response must not appear"))
+    );
+    c.request(ClientCommand::GetSettings).unwrap();
+    until(&mut c, |c| c.daemon_settings.is_some()).await;
+    let mut document = c.daemon_settings.as_ref().unwrap().0.clone();
+    document.daemon.title_prompt = "\n  exact whitespace  \n".into();
+    document.agent.system_prompt = Some(String::new());
+    c.request(ClientCommand::SetSettings {
+        revision: document.revision,
+        settings: Box::new(document.clone()),
+    })
+    .unwrap();
+    until(&mut c, |c| {
+        c.daemon_settings
+            .as_ref()
+            .is_some_and(|(s, _)| s.revision == 1)
+    })
+    .await;
+    assert_eq!(
+        c.daemon_settings
+            .as_ref()
+            .unwrap()
+            .0
+            .agent
+            .system_prompt
+            .as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        c.daemon_settings.as_ref().unwrap().0.daemon.title_prompt,
+        "\n  exact whitespace  \n"
+    );
+    c.notice = None;
+    c.request(ClientCommand::SetSettings {
+        revision: 0,
+        settings: Box::new(document),
+    })
+    .unwrap();
+    until(&mut c, |c| c.notice.is_some()).await;
+    assert!(
+        c.notice
+            .as_ref()
+            .unwrap()
+            .to_lowercase()
+            .contains("settings")
+    );
     c.draft("durable unsent draft 🦀".into()).unwrap();
     drop(c);
     let mut c =
@@ -181,7 +308,7 @@ async fn real_daemon_chat_queue_upload_extension_fork_and_restart() {
     assert_eq!(c.selected().unwrap().local.draft, "durable unsent draft 🦀");
     assert!(
         c.selected().unwrap().feed.events.is_empty(),
-        "remote history was not persisted"
+        "Remote history must not become a second writable local store"
     );
     until(&mut c, |c| {
         c.selected().unwrap().feed.synchronized && !c.selected().unwrap().feed.events.is_empty()
@@ -207,15 +334,12 @@ async fn real_daemon_chat_queue_upload_extension_fork_and_restart() {
     })
     .await;
     let child = c.account.selected.clone().unwrap();
-    // Deletion shuts down both fixture workers before ending the server task.
-    c.request(ClientCommand::DeleteSession {
-        session_id: child.clone(),
-    })
-    .unwrap();
-    c.request(ClientCommand::DeleteSession {
-        session_id: session.clone(),
-    })
-    .unwrap();
+    for id in [&child, &session] {
+        c.request(ClientCommand::DeleteSession {
+            session_id: id.clone(),
+        })
+        .unwrap();
+    }
     until(&mut c, |c| {
         !c.account
             .sessions
@@ -223,9 +347,12 @@ async fn real_daemon_chat_queue_upload_extension_fork_and_restart() {
             .any(|s| s.id == session || s.id == child)
     })
     .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(!root.join("state.json").exists() && !root.join("sessions").exists());
     drop(c);
     task.abort();
     let _ = task.await;
+    provider.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -285,7 +412,12 @@ async fn http_grant_to_native_quic_and_offline_cache() {
     async fn ws(ws: axum::extract::WebSocketUpgrade) -> impl axum::response::IntoResponse {
         ws.on_upgrade(|mut ws| async move {
             ws.send(axum::extract::ws::Message::Text(
-                r#"{"type":"hello","protocolVersion":10,"daemonVersion":"fixture"}"#.into(),
+                serde_json::to_string(&tau_protocol::ServerMessage::Hello {
+                    protocol_version: tau_protocol::PROTOCOL_VERSION,
+                    daemon_version: "fixture".into(),
+                })
+                .unwrap()
+                .into(),
             ))
             .await
             .unwrap();

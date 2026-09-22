@@ -108,7 +108,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     }
     async fn ws(State(peer): State<Peer>, ws: WebSocketUpgrade) -> impl IntoResponse {
         ws.on_upgrade(move|mut socket|async move {
-        socket.send(axum::extract::ws::Message::Text(r#"{"type":"hello","protocolVersion":10,"daemonVersion":"fixture"}"#.into())).await.unwrap();
+        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&tau_protocol::ServerMessage::Hello { protocol_version:tau_protocol::PROTOCOL_VERSION,daemon_version:"fixture".into() }).unwrap().into())).await.unwrap();
         while let Some(Ok(axum::extract::ws::Message::Text(text)))=socket.recv().await {
             let request:Value=serde_json::from_str(&text).unwrap();
             match request["type"].as_str().unwrap() {
@@ -247,7 +247,12 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         let (socket, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
         ws.send(tokio_tungstenite::tungstenite::Message::Text(
-            r#"{"type":"hello","protocolVersion":10,"daemonVersion":"fixture"}"#.into(),
+            serde_json::to_string(&tau_protocol::ServerMessage::Hello {
+                protocol_version: tau_protocol::PROTOCOL_VERSION,
+                daemon_version: "fixture".into(),
+            })
+            .unwrap()
+            .into(),
         ))
         .await
         .unwrap();

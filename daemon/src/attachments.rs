@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::manager::{AgentManager, safe_file_name};
 use crate::protocol::{UploadedFile, MAX_UPLOAD_BYTES};
-use crate::transcript::{AttachmentKind, AttachmentRequest, Event, attachment_request, FILE_LIMIT, IMAGE_LIMIT};
+use crate::transcript::{AttachmentKind, AttachmentRequest, attachment_request, FILE_LIMIT, IMAGE_LIMIT};
 
 pub struct ResolvedAttachment {
     pub file: fs::File,
@@ -32,7 +32,7 @@ impl AgentManager {
         }
         let runtime = self.runtime(id).await?;
         let _guard = runtime.operation.lock().await;
-        if self.inner.state.get(id).is_none() {
+        if self.inner.state.get(id).await?.is_none() {
             bail!("unknown session {id}");
         }
 
@@ -62,45 +62,13 @@ impl AgentManager {
         })
     }
 
-    pub(crate) async fn populate_attachment_sizes<'a>(&self, events: impl Iterator<Item = &'a mut Event> + Send) {
-        let Ok(root) = fs::canonicalize(&self.inner.config.attachment_root).await else { return; };
-        for event in events {
-            let Some(attachment) = event.attachment.as_mut() else { continue; };
-            if attachment.size.is_some() { continue; }
-            let Some(path) = &attachment.source_path else { continue; };
-            let Ok(path) = fs::canonicalize(path).await else { continue; };
-            if !path.starts_with(&root) { continue; }
-            let Ok(metadata) = fs::metadata(path).await else { continue; };
-            let limit = match attachment.kind { AttachmentKind::Image => IMAGE_LIMIT, AttachmentKind::File => FILE_LIMIT };
-            if metadata.is_file() && metadata.len() <= limit { attachment.size = Some(metadata.len()); }
-        }
-    }
-
     pub async fn resolve_attachment(
         &self,
         id: &str,
         entry_id: &str,
     ) -> Result<ResolvedAttachment> {
-        let runtime = self.runtime(id).await?;
-        let cached = {
-            let content = runtime.content.lock().await;
-            if let Some(transcript) = &content.transcript {
-                let attachment = transcript.attachment(entry_id)
-                    .context("entry has no Tau attachment")?;
-                Some(crate::transcript::AttachmentRequest {
-                    kind: attachment.kind,
-                    path: attachment.source_path.clone().context("attachment source is unavailable")?,
-                    caption: attachment.caption.clone(),
-                    size: attachment.size,
-                })
-            } else { None }
-        };
-        let request = if let Some(request) = cached { request } else {
-            let (entries, _) = self.entries_for_read(id).await?;
-            let entry = entries.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
-                .with_context(|| format!("attachment entry {entry_id} does not exist"))?;
-            attachment_request(entry).context("entry has no Tau attachment")?
-        };
+        let entry = self.inner.state.entry(id,entry_id).await?;
+        let request = attachment_request(&entry).context("Entry has no Tau attachment")?;
         open_attachment(&self.inner.config.attachment_root, &request).await
     }
 }

@@ -28,12 +28,9 @@ impl AgentManager {
                 let mut settings = self.inner.settings.get(); settings.model(&model)?;
                 settings.agent.model = model.clone();
                 self.set_settings(settings.revision, settings).await?;
-                content.append(id, json!({"type":"model_change","provider":provider,"modelId":model_id})).await?;
                 let settings = self.inner.settings.get();
                 let level = settings.agent.model_thinking_levels.get(arguments).unwrap_or(&settings.agent.thinking_level).clone();
-                content.append(id, json!({"type":"thinking_level_change","thinkingLevel":level})).await?;
-                let agent = content.agent.as_mut().unwrap(); agent.model = model.clone(); agent.thinking = level; agent.tokens = None;
-                self.inner.state.set_model(id, model).await?;
+                content.append(id,json!({"type":"model_change","provider":provider,"modelId":model_id,"thinkingLevel":level})).await?;
                 format!("Model set to {arguments}. New chats will use it too.")
             }
             "thinking" => {
@@ -43,7 +40,7 @@ impl AgentManager {
             }
             "name" => {
                 if arguments.trim().is_empty() || arguments.chars().count() > crate::protocol::MAX_TITLE_CHARS || arguments.contains(['\n','\r']) { bail!("Usage: /name <title>"); }
-                self.inner.state.rename(id, arguments.into()).await?; format!("Chat renamed to {arguments}.")
+                self.inner.state.rename(id, arguments.into(), false).await?; format!("Chat renamed to {arguments}.")
             }
             "fast" => {
                 let mut settings = self.inner.settings.get();
@@ -62,7 +59,7 @@ impl AgentManager {
             }
             _ => bail!("Unknown command /{name}"),
         };
-        drop(content); self.inner.state.touch(id).await?; self.broadcast_sessions().await;
+        drop(content); self.broadcast_sessions().await;
         Ok(PromptOutcome { disposition:PromptDisposition::Handled, notice:Some(notice) })
     }
 }

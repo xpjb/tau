@@ -12,8 +12,7 @@ pub struct Config {
     pub settings_path: PathBuf,
     pub import_pi_dir: Option<PathBuf>,
     pub cwd: PathBuf,
-    pub state_path: PathBuf,
-    pub session_dir: PathBuf,
+    pub database_path: PathBuf,
     pub telemetry_path: PathBuf,
     pub attachment_root: PathBuf,
     pub upload_root: PathBuf,
@@ -22,6 +21,9 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        if std::env::var_os("TAU_STATE_PATH").is_some() || std::env::var_os("TAU_SESSION_DIR").is_some() {
+            bail!("Tau 2 uses TAU_DATABASE_PATH, not TAU_STATE_PATH/TAU_SESSION_DIR. Remove those variables; use --import-state PATH for legacy Tau 1 history.");
+        }
         let token = std::env::var("TAU_TOKEN").context("TAU_TOKEN is required")?;
         if token.chars().count() < 32 {
             bail!("TAU_TOKEN must contain at least 32 characters");
@@ -45,12 +47,9 @@ impl Config {
         let cwd = std::env::var_os("TAU_CWD")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root".into());
-        let state_path = std::env::var_os("TAU_STATE_PATH")
+        let database_path = std::env::var_os("TAU_DATABASE_PATH")
             .map(PathBuf::from)
-            .unwrap_or_else(|| "/var/lib/tau/state.json".into());
-        let session_dir = std::env::var_os("TAU_SESSION_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| "/var/lib/tau/pi-sessions".into());
+            .unwrap_or_else(|| "/var/lib/tau/tau.sqlite3".into());
         let telemetry_path = std::env::var_os("TAU_TELEMETRY_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/var/lib/tau/client-crashes.jsonl".into());
@@ -63,8 +62,7 @@ impl Config {
         let title_command = std::env::var("TAU_TITLE_COMMAND").ok().filter(|c| !c.is_empty());
 
         if !cwd.is_absolute()
-            || !state_path.is_absolute()
-            || !session_dir.is_absolute()
+            || !database_path.is_absolute()
             || !telemetry_path.is_absolute()
             || !settings_path.is_absolute()
             || import_pi_dir.as_ref().is_some_and(|path| !path.is_absolute())
@@ -81,8 +79,7 @@ impl Config {
             settings_path,
             import_pi_dir,
             cwd,
-            state_path,
-            session_dir,
+            database_path,
             telemetry_path,
             attachment_root,
             upload_root,

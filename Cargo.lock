@@ -5710,6 +5710,7 @@ dependencies = [
  "futures-util",
  "libc",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tau-protocol",
