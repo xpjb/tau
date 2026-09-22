@@ -1,6 +1,10 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(windows)]
+#[path = "../../channel.rs"]
+mod channel;
+
+#[cfg(windows)]
 static PAYLOAD: &[u8] = include_bytes!(env!("TAU_PAYLOAD_ARCHIVE"));
 #[cfg(windows)]
 static LAUNCHER: &[u8] = include_bytes!(env!("TAU_LAUNCHER_EXE"));
@@ -9,18 +13,29 @@ const VERSION: &str = env!("TAU_VERSION");
 
 #[cfg(windows)]
 fn main() {
+    let quiet = std::env::args().any(|arg| arg == "--quiet");
+    let launch = !std::env::args().any(|arg| arg == "--no-launch");
     let result = install();
     match result {
         Ok(message) => {
-            show_message(&message, false);
-            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            if !quiet {
+                show_message(&message, false);
+            }
+            if launch && let Some(local) = std::env::var_os("LOCALAPPDATA") {
                 let _ = std::process::Command::new(
-                    std::path::PathBuf::from(local).join("Tau").join("Tau.exe"),
+                    std::path::PathBuf::from(local)
+                        .join(channel::NAME)
+                        .join(channel::EXE),
                 )
                 .spawn();
             }
         }
-        Err(error) => show_message(&format!("Tau setup failed.\n\n{error}"), true),
+        Err(error) => {
+            if !quiet {
+                show_message(&format!("{} setup failed.\n\n{error}", channel::NAME), true);
+            }
+            std::process::exit(1);
+        }
     }
 }
 
@@ -35,7 +50,7 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
 
     let bundled_version = Version::parse(VERSION)?;
     let local = std::env::var_os("LOCALAPPDATA").ok_or("Windows did not provide LOCALAPPDATA")?;
-    let root = PathBuf::from(local).join("Tau");
+    let root = PathBuf::from(local).join(channel::NAME);
     let versions = root.join("versions");
     fs::create_dir_all(&versions)?;
 
@@ -70,7 +85,8 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
         && current > &bundled_version
     {
         return Ok(format!(
-            "Tau {current} is already installed, which is newer than this {bundled_version} setup.",
+            "{} {current} is already installed, which is newer than this {bundled_version} setup.",
+            channel::NAME,
         ));
     }
 
@@ -80,12 +96,22 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
             .is_ok_and(|value| value.trim() == VERSION)
         && fs::read_to_string(target.join("payload.sha256"))
             .is_ok_and(|value| value.trim() == payload_hash);
-    let launcher_is_current = fs::read(root.join("Tau.exe")).is_ok_and(|bytes| bytes == LAUNCHER);
+    let launcher_is_current =
+        fs::read(root.join(channel::EXE)).is_ok_and(|bytes| bytes == LAUNCHER);
+    let menu_is_current = std::env::var_os("APPDATA").is_some_and(|roaming| {
+        fs::read(
+            PathBuf::from(roaming)
+                .join("Microsoft/Windows/Start Menu/Programs")
+                .join(channel::EXE),
+        )
+        .is_ok_and(|bytes| bytes == LAUNCHER)
+    });
     if current_key.as_deref() == Some(version_key.as_str())
         && target_is_complete
         && launcher_is_current
+        && menu_is_current
     {
-        return Ok(format!("Tau {VERSION} is already installed."));
+        return Ok(format!("{} {VERSION} is already installed.", channel::NAME));
     }
 
     if !target_is_complete {
@@ -147,19 +173,23 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
             }
             drop(archive);
             fs::remove_file(tar_path)?;
-            let library_directory = staging.join("app").join("lib");
-            if !fs::read_dir(&library_directory)?.any(|entry| {
-                entry
-                    .ok()
-                    .is_some_and(|entry| entry.path().extension().is_some_and(|value| value == "jar"))
-            }) {
-                return Err("Tau payload has no application libraries".into());
+            #[cfg(feature = "beta")]
+            if !staging.join("app").join(channel::EXE).is_file() {
+                return Err("Tau Beta payload has no native application".into());
+            }
+            #[cfg(not(feature = "beta"))]
+            {
+                let library_directory = staging.join("app").join("lib");
+                if !fs::read_dir(&library_directory)?.any(|entry| {
+                    entry.ok().is_some_and(|entry| {
+                        entry.path().extension().is_some_and(|value| value == "jar")
+                    })
+                }) {
+                    return Err("Tau payload has no application libraries".into());
+                }
             }
             fs::write(staging.join("version.txt"), format!("{VERSION}\n"))?;
-            fs::write(
-                staging.join("payload.sha256"),
-                format!("{payload_hash}\n"),
-            )?;
+            fs::write(staging.join("payload.sha256"), format!("{payload_hash}\n"))?;
             Ok::<_, Box<dyn std::error::Error>>(())
         })();
         if let Err(error) = extraction {
@@ -173,7 +203,7 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
     }
 
     fs::create_dir_all(&root)?;
-    write_atomic(&root.join("Tau.exe"), LAUNCHER)?;
+    write_atomic(&root.join(channel::EXE), LAUNCHER)?;
     if let Some(roaming) = std::env::var_os("APPDATA") {
         let programs = PathBuf::from(roaming)
             .join("Microsoft")
@@ -181,25 +211,31 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
             .join("Start Menu")
             .join("Programs");
         fs::create_dir_all(&programs)?;
-        write_atomic(&programs.join("Tau.exe"), LAUNCHER)?;
+        write_atomic(&programs.join(channel::EXE), LAUNCHER)?;
     }
-    write_atomic(&root.join("current.txt"), format!("{version_key}\n").as_bytes())?;
+    write_atomic(
+        &root.join("current.txt"),
+        format!("{version_key}\n").as_bytes(),
+    )?;
 
     let message = match current_version {
         Some(previous) if previous < bundled_version => {
-            format!("Tau was updated from {previous} to {bundled_version}.")
+            format!(
+                "{} was updated from {previous} to {bundled_version}.",
+                channel::NAME
+            )
         }
-        Some(_) => format!("Tau {bundled_version} was repaired and activated."),
-        None => format!("Tau {bundled_version} was installed."),
+        Some(_) => format!(
+            "{} {bundled_version} was repaired and activated.",
+            channel::NAME
+        ),
+        None => format!("{} {bundled_version} was installed.", channel::NAME),
     };
     Ok(message)
 }
 
 #[cfg(windows)]
-fn write_atomic(
-    path: &std::path::Path,
-    bytes: &[u8],
-) -> Result<(), Box<dyn std::error::Error>> {
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
     use std::os::windows::ffi::OsStrExt;
 
@@ -209,7 +245,9 @@ fn write_atomic(
 
     let temporary = path.with_file_name(format!(
         ".{}.tmp-{}",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("tau"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("tau"),
         std::process::id(),
     ));
     let mut file = std::fs::File::create(&temporary)?;
@@ -253,7 +291,7 @@ fn show_message(message: &str, error: bool) {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let title = "Tau Setup"
+    let title = format!("{} Setup", channel::NAME)
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
@@ -262,7 +300,12 @@ fn show_message(message: &str, error: bool) {
             null_mut(),
             message.as_ptr(),
             title.as_ptr(),
-            MB_OK | if error { MB_ICONERROR } else { MB_ICONINFORMATION },
+            MB_OK
+                | if error {
+                    MB_ICONERROR
+                } else {
+                    MB_ICONINFORMATION
+                },
         );
     }
 }

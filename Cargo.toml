@@ -1,4 +1,4 @@
 [workspace]
-members = ["daemon", "transfer"]
+members = ["daemon", "transfer", "protocol", "markdown", "frontend"]
 exclude = ["windows"]
 resolver = "2"

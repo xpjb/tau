@@ -1,3 +1,4 @@
+use crate::settings::SettingsExt;
 use std::sync::Arc;
 use anyhow::{Result, bail};
 use serde_json::json;

@@ -1,3 +1,4 @@
+use crate::protocol::ResponseError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,7 +128,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
         &outbound_tx,
         &ServerMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
-            daemon_version: env!("CARGO_PKG_VERSION"),
+            daemon_version: env!("CARGO_PKG_VERSION").into(),
         },
     )
     .await;
@@ -240,7 +241,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             };
                             match result {
                                 Ok(settings) => {
-                                    queue_server(&response_outbound, &ServerMessage::Settings { request_id:request_id.clone(), settings:Box::new(settings), default_system_prompt:crate::settings::DEFAULT_SYSTEM_PROMPT }).await;
+                                    queue_server(&response_outbound, &ServerMessage::Settings { request_id:request_id.clone(), settings:Box::new(settings), default_system_prompt:crate::settings::DEFAULT_SYSTEM_PROMPT.into() }).await;
                                     ServerMessage::success(request_id, None, None)
                                 }
                                 Err(error) => ServerMessage::command_failure(request_id, error),
@@ -262,7 +263,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Ok(prompt) => {
                                     queue_server(&response_outbound, &ServerMessage::TitlePrompt {
                                         request_id: request_id.clone(), prompt,
-                                        default_prompt: crate::state::DEFAULT_TITLE_PROMPT,
+                                        default_prompt: crate::state::DEFAULT_TITLE_PROMPT.into(),
                                     }).await;
                                     ServerMessage::success(request_id, None, None)
                                 }

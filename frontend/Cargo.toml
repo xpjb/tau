@@ -1,0 +1,55 @@
+[package]
+name = "tau-frontend"
+version = "0.6.3"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "tau"
+path = "src/main.rs"
+
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }
+
+[dependencies]
+tau-protocol = { path = "../protocol" }
+tau-markdown = { path = "../markdown" }
+tau-transfer = { path = "../transfer", default-features = false }
+chad = { git = "https://github.com/xpjb/chad", rev = "a0f465e06eeb5e498bd45b0b4b23305a69778a40" }
+sanscale = { git = "https://github.com/xpjb/sanscale", rev = "2be4f316c3870d8cd9ba6e12b5e10b2af385bf2c" }
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "fs"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+url = "2"
+log = "0.4"
+unicode-segmentation = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.15"
+arboard = "3"
+open = "5"
+png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+
+[dev-dependencies]
+tempfile = "3"
+axum = { version = "0.8", features = ["ws"] }
+taud = { path = "../daemon" }

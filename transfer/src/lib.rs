@@ -27,6 +27,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "ffi")]
 uniffi::setup_scaffolding!();
 
 const GRANT_LIFETIME: Duration = Duration::from_secs(3600);
@@ -207,7 +208,8 @@ fn transport_config() -> TransportConfig {
     config
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct TransferStatus {
     pub transferred: u64,
     pub total: u64,
@@ -222,13 +224,14 @@ struct DownloadState {
     last_data: Instant,
 }
 
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Error))]
 pub enum TransferError {
     #[error("{reason}")]
     Failed { reason: String },
 }
 
-#[derive(uniffi::Object)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct TransferDownload {
     key: SecretKey,
     state: Arc<Mutex<DownloadState>>,
@@ -236,9 +239,9 @@ pub struct TransferDownload {
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl TransferDownload {
-    #[uniffi::constructor]
+    #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new() -> Self {
         Self {
             key: SecretKey::generate(rand::rngs::OsRng),

@@ -4,6 +4,7 @@ version = "0.5.14"
 edition = "2024"
 
 [dependencies]
+tau-protocol = { path = "../protocol" }
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

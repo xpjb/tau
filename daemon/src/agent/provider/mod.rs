@@ -1,3 +1,4 @@
+use crate::settings::SettingsExt;
 // SSE framing and provider decoding adapted from the user's glmbot.
 use std::collections::BTreeMap;
 use anyhow::{bail, Context as _, Result};

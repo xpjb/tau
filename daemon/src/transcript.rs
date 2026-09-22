@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -16,24 +15,8 @@ pub const PAGE_BYTES: usize = 256 * 1024;
 pub const IMAGE_LIMIT: u64 = 10_000_000;
 pub const FILE_LIMIT: u64 = 50_000_000;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatAttachment {
-    #[serde(skip)]
-    pub source_path: Option<PathBuf>,
-    pub kind: AttachmentKind,
-    pub file_name: String,
-    pub caption: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttachmentKind {
-    Image,
-    File,
-}
+pub use tau_protocol::{ChatAttachment, AttachmentKind, Event, EventPhase, EventRole, Origin,
+    EventKind, QueuedRequest, QueueControl, QueueState, TranscriptSnapshot, HistoryPage, TextDelta};
 
 pub struct AttachmentRequest {
     pub kind: AttachmentKind,
@@ -77,129 +60,20 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Event {
-    pub id: String,
-    pub order: u64,
-    pub entry_id: String,
-    pub phase: EventPhase,
-    pub origin: Origin,
-    pub role: EventRole,
-    pub kind: EventKind,
-    pub text: String,
-    pub timestamp: Option<String>,
-    pub timestamp_ms: Option<u64>,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub stop_reason: Option<String>,
-    pub error_message: Option<String>,
-    pub is_error: bool,
-    pub attachment: Option<ChatAttachment>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventPhase { Saved, Live, Interrupted }
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventRole { User, Assistant, Tool, System }
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Origin {
-    pub request_id: Option<String>,
-    pub request_revision: Option<u64>,
-    pub stream_id: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventKind { Text, Thinking, Tool, Image, Hidden }
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueRef {
-    pub request_id: String,
-    pub revision: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueuedRequest {
-    pub request_id: String,
-    pub revision: u64,
-    pub kind: String,
-    pub text: String,
-    pub images: usize,
-    pub timestamp_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueControl {
-    pub command_id: String,
-    pub run_id: Option<String>,
-    pub action: String,
-    pub boundary: Option<String>,
-    pub requests: Vec<QueueRef>,
-    pub status: String,
-    pub detail: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueState {
-    pub available: bool,
-    pub requests: Vec<QueuedRequest>,
-    pub run_id: Option<String>,
-    pub paused: bool,
-    pub control: Option<QueueControl>,
-    pub capabilities: Vec<String>,
-    pub boundaries: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptSnapshot {
-    pub generation: String,
-    pub sequence: u64,
-    pub events: Vec<Event>,
-    pub queue: QueueState,
-    pub before: Option<u64>,
-    pub delivered: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryPage {
-    pub events: Vec<Event>,
-    pub before: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
+// Projection-only state is not another wire contract or sequence.
+#[derive(Clone, Debug, Default)]
 pub struct TranscriptChange {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub events: Vec<Event>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub removed: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<TextDelta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue: Option<QueueState>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub delivered: Vec<String>,
-    #[serde(skip)]
+    pub wire: tau_protocol::TranscriptChange,
     head: Option<String>,
-    #[serde(skip)]
     pub bumps_chat: bool,
 }
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TextDelta { pub event_id: String, pub text: String }
+impl std::ops::Deref for TranscriptChange {
+    type Target = tau_protocol::TranscriptChange;
+    fn deref(&self) -> &Self::Target { &self.wire }
+}
+impl std::ops::DerefMut for TranscriptChange {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.wire }
+}
 
 pub struct Transcript {
     pub generation: String,
@@ -212,14 +86,12 @@ pub struct Transcript {
     pub queue: QueueState,
 }
 
-impl Event {
-    pub fn source_key(&self) -> String {
-        if let Some(id) = &self.origin.stream_id { format!("stream:{id}") }
-        else if let Some(id) = &self.origin.request_id && self.role == EventRole::User { format!("request:{id}") }
-        else { format!("entry:{}", self.entry_id) }
-    }
-
-    pub fn from_entry(raw: &Value, live: bool) -> Result<Vec<Self>> {
+pub trait EventProjection: Sized {
+    fn from_entry(raw: &Value, live: bool) -> Result<Vec<Self>>;
+    fn set_content(&mut self, block: &Value);
+}
+impl EventProjection for Event {
+    fn from_entry(raw: &Value, live: bool) -> Result<Vec<Self>> {
         let message = raw.get("message").unwrap_or(&Value::Null);
         let entry_type = raw.get("type").and_then(Value::as_str).unwrap_or("message");
         let role = match message.get("role").and_then(Value::as_str) {

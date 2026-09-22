@@ -54,12 +54,7 @@ impl Default for PersistedState {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionModel {
-    pub provider: String,
-    pub model_id: String,
-}
+pub use tau_protocol::SessionModel;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredSession {

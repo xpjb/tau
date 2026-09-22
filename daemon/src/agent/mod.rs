@@ -13,7 +13,7 @@ use crate::manager::{AgentManager, SessionContent, SessionRuntime, bounded};
 use crate::protocol::{ContextUsage, ServerMessage, SessionStatus};
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, TranscriptChange};
-use crate::settings::SteeringMode;
+use crate::settings::{SteeringMode, SettingsExt};
 use journal::Journal;
 
 pub struct AgentSession {
@@ -41,7 +41,7 @@ impl SessionContent {
     pub fn publish(&mut self, id: &str, change: TranscriptChange) -> Result<()> {
         let transcript = self.transcript.as_mut().unwrap();
         transcript.apply(&change)?;
-        let _ = self.events.send(Arc::new(ServerMessage::TranscriptUpdate { session_id:id.into(), generation:transcript.generation.clone(), sequence:transcript.sequence, change }));
+        let _ = self.events.send(Arc::new(ServerMessage::TranscriptUpdate { session_id:id.into(), generation:transcript.generation.clone(), sequence:transcript.sequence, change: change.wire }));
         Ok(())
     }
     pub async fn save_queue(&mut self, id: &str, queue: QueueState, accepted: Option<Value>) -> Result<()> {
