@@ -1,83 +1,79 @@
-# Tau architecture map
+# Tau 2 architecture
 
-One-sentence responsibility per module. Read this before opening files.
+## One native runtime path
 
-## Daemon (`daemon/`, Rust, single binary `taud`)
+The `tau2` release combines the native backend and Rust frontend with the completed
+SQLite storage agent's implementation. The old Kotlin client, UniFFI/CDylib transfer
+bridge, Pi/Node agent subprocess, desktop JVM bootstrap and Python title helper are
+not alternate runtime paths on this branch.
 
-- `main.rs` / `lib.rs` — entrypoint and composition root.
-- `config.rs` — deployment paths, listener addresses and bearer-token validation.
-- `settings.rs` — unified, revision-checked daemon/agent settings and one-time Pi import.
-- `server.rs` — authenticated HTTP/WebSocket routing, uploads, attachment grants,
-  crash ingest and heartbeat deadlines. No model or session logic.
-- `manager.rs` — native session lifecycle, durable prompt acceptance, queue controls,
-  history feeds, fork/clone and deletion.
-- `agent/mod.rs` — cancellable model/tool loop, transcript publication, compaction
-  and asynchronous title generation.
-- `agent/history.rs` — provider context reconstruction from the retained SQLite
-  history suffix. Unknown tool effects are never auto-replayed.
-- `agent/provider/` — bounded SSE framing, Codex Responses and Chat Completions,
-  native image generation, request construction and safe HTTP retries.
-- `agent/auth.rs` — private provider credentials, serialized Codex OAuth refresh,
-  and daemon-side device login.
-- `agent/tools.rs` — native filesystem, shell, media and incidental-flag tools.
-- `attachments.rs` — shared local/generated-file staging, authenticated attachment resolution, upload storage and MIME checks.
-- `commands.rs` — native command catalog and model/thinking/compact/name/fast settings.
-- `transcript.rs` — flat event projection, stable live-to-saved IDs and a bounded live tail.
-  There is only one generation/sequence: the client-facing transcript.
-- `protocol.rs` — client↔daemon wire data (to move into the frontend branch's shared crate).
-- `state.rs` / `schema.sql` — SQLite transactions for metadata, history, event pages,
-  queue and receipts, with an explicit read-only Tau 1 import; separate durable flag log.
+`protocol` owns both sides of protocol 12, including settings, receipts, canonical
+transcript changes, history cuts, queues and transfer offers. `daemon` adds internal
+projection/head/activity bookkeeping around those wire types. Frontend snapshots,
+live suffixes and durable replacements use one sequence/cursor model, not separate
+hand-written DTO dialects or a preview bridge.
 
-Dependencies point one way: `server → manager → {agent, transcript, state, settings}`.
-There is no Pi subprocess or internal RPC transport. See [Tau 2 integration and
-migration](docs/tau2-agent.md) before merging the Rust frontend.
+## Daemon and agent
 
-## Legacy client (`app/composeApp/`, Kotlin, Android + desktop)
+The authenticated HTTP/WebSocket router delegates per-chat operations to the manager.
+A per-chat operation/content boundary orders snapshots against acceptance and controls.
+The native runtime streams Codex Responses or OpenRouter Chat Completions, executes
+Rust read/bash/edit/write/send/flag tools, and persists provider replay data privately.
+Bash runs in a cancellable process group. Incomplete external effects are not retried
+on restart. Compaction is a hidden summary turn followed by a durable checkpoint;
+failure or cancellation does not destroy prior context.
 
-- `TauApp.kt` — app screens and transcript UI. Long-lived state is owned by `TauController`.
-- `LocalImage.kt` — bounded image loading, fitted previews and full-screen zoom/pan controls; zoom state stays in the open viewer.
-- `TauController.kt` — connection, per-chat feeds, bounded history warming,
-  unread state and receive loop.
-- `AttachmentDownloads.kt` — attachment transfer lifecycle (extensions on
-  `TauController`).
-- `TauClient.kt` — WebSocket/HTTP transport to the daemon.
-- `LocalStore.kt` — durable local work and session metadata in SQLite;
-  snapshot, page and update application to memory-only transcripts.
-- `RetainedTranscript.kt` — flat event types, stable rows and their ordered
-  in-memory collection, plus pending-work and chat-position types.
-- `TranscriptPresentation.kt` — collapsible groups across loaded events,
-  tool-call/result matching, presentation-key reuse and model-failure status.
-- `Protocol.kt` — mirrors `daemon/src/protocol.rs` wire types.
-- `TranscriptText.kt` — text utilities: markdown rendering, suggestion
-  scoring, byte formatting.
-- `Platform.kt` + actuals — the only OS seam (per-platform services and
-  image decoding).
-- `CrashLog.kt` (`jvmMain`) — the platform seam's shared JVM crash writer:
-  bounded full local traces, safe pending reports and durable file replacement.
+Codex image generation is native. Other configured providers can call the native
+`generate_image` bridge when a real Codex model is configured. This does not switch
+the chat/default model. Generated bytes are validated and staged once, not retained
+as base64 in history or the UI protocol. Later turns use labeled local image references.
 
-## Title helper (`scripts/`)
+Titles use the first nonempty prompt line by default. Optional `generateTitles`
+uses a bounded native no-tools provider request and configured template; it cannot
+overwrite a later manual rename. It adds a provider request when enabled.
 
-- `title_gen.py` — one-shot local title inference from daemon JSON input.
-- `title_prompt.txt` — the default full title prompt, shared with daemon state.
-  Settings edits live in the daemon section of `settings.json`.
+## Persistence boundaries
 
-## Rules the codebase keeps
+SQLite is the sole authoritative native transcript/queue/receipt store. WAL/FULL
+transactions atomically accept prompts, advance metadata and queue generations,
+consume queued users, commit saved projections, and record request outcomes. Events
+are published only after commit. SQL indexes serve history and applicable checkpoint
+plus suffix replay. Runtime memory retains a bounded hot tail, not every old turn.
+Forks copy the selected prefix and relevant consumed-user receipts; deletion cascades
+without destroying the independent copied child prefix.
 
-- Acknowledge user actions in local UI state immediately, before network work.
-  Remote confirmation determines completion or failure, not whether a click
-  received visible feedback.
-- No single-caller functions unless they are UI composables, axum route
-  handlers, or platform-interface implementations.
-- Wire changes are versioned. The Rust frontend merge must carry protocol 11
-  in its shared crate; this backend cannot be deployed with protocol-10 clients.
-- The daemon owns one reusable starter in session metadata. New Chat loads the native session
-  before replying and shows its real model. Sent messages, explicit renames or
-  client keep hints retain work. Idle sleep evicts the runtime, not the chat.
-  Only the blank starter is labeled New chat. Untitled chats with data or kept
-  outside that slot are Unnamed chats, with no count limit.
-- Daemon SQLite owns saved history and acknowledged pending work. Remote transcript
-  events stay in client memory only; the client's SQLite preserves local work, files
-  and preferences. Native conversation state is never dual-written to JSONL.
-- The daemon owns branch selection, event order, stream lifecycle and activity
-  bumps. Recovery assigns order from the source, not discovery time.
-  Transport pages do not define presentation groups.
+Run one daemon per database. The beta systemd unit, directories and port are separate
+from stable. Per-session revisions reject stale snapshots; they are not permission
+to run competing tool-executing daemons on one database. The abandoned reconciliation
+store is not part of the release ancestry.
+
+Settings and auth are separate private, atomic files. Settings CAS preserves exact
+prompt text and distinguishes missing/inherited (`null`) from intentionally empty
+replacements. Secrets never enter settings responses. Native OAuth refresh is
+serialized; optional read-only shared Codex credentials never initiate refresh and
+are superseded by beta's own independent login.
+
+## Client
+
+Chad owns platform events and GPU lifecycle. Sanscale handles text; incremental
+Markdown retains paragraph/layout state. Android's thin Java bridge supplies IME,
+clipboard, picker and document APIs; it is not a Kotlin UI or agent runtime.
+
+The client owns drafts, account-scoped local views and uncertain-send presentation.
+The daemon owns sessions, queued prompts, durable receipts, tools and history. On
+reconnect, native receipts reconcile accepted work; unknown requests are not replayed
+automatically. Context actions retain their target session rather than silently
+acting on whichever chat is selected later.
+
+Client settings include server/token and quick favorites; daemon settings are fetched
+and saved as one typed, revisioned document. Cache TTL gauges are explicitly estimated
+provider cache age from existing timestamps. Runtime idle eviction is independent: idle runtimes can be released with paused
+work, and the durable queue is restored on reopening.
+
+Transfers use authenticated offers and QUIC grants bound to client identity, verify
+hash and size, and finish downloads with writable-handle sync on Windows. Desktop
+export similarly syncs a writable destination handle. Inline images are resolved to
+local verified files, not arbitrary network URLs supplied by a model.
+
+See [storage/protocol details](docs/tau2-agent.md), [transcript invariants](TRANSCRIPT.md)
+and [release evidence](INTEGRATION.md).

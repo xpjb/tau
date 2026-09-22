@@ -1,47 +1,42 @@
 #!/usr/bin/env bash
+# Beta-only deployment. Never replace stable Tau's executable, unit, state or route.
 set -euo pipefail
-
 root=$(cd "$(dirname "$0")/.." && pwd)
-binary="$root/target/release/taud"
-if [[ ! -x "$binary" ]]; then
-    echo "Build taud with: cargo build --release --package taud" >&2
-    exit 1
+binary=${TAU_BETA_BINARY:-$root/target/release/taud}
+[[ -x "$binary" ]] || { echo 'Build: cargo build --release --locked -p taud' >&2; exit 1; }
+install -d -m 0700 /var/lib/tau2-beta /root/.local/share/tau2-beta/outbox /root/.local/share/tau2-beta/uploads
+install -d -m 0755 /usr/local/lib/tau2-beta
+if [[ ! -f /etc/tau2-beta.env ]]; then
+    # Reuse the user's connection token, not the stable daemon's OAuth credentials.
+    python3 - <<'PY'
+import os, secrets, shlex
+from pathlib import Path
+source=Path('/etc/tau.env')
+token=None
+if source.is_file():
+    for line in source.read_text().splitlines():
+        if line.startswith('TAU_TOKEN='):
+            values=shlex.split(line.split('=',1)[1]); token=values[0] if len(values)==1 else None
+if not token: token=secrets.token_hex(32)
+assert len(token)>=32 and not any(c.isspace() for c in token)
+fd=os.open('/etc/tau2-beta.env',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as f: f.write('TAU_TOKEN='+shlex.quote(token)+'\n')
+PY
 fi
-
-if [[ -f /var/lib/tau/state.json && ${TAU2_INSTALL_CONFIRMED:-} != yes ]]; then
-    echo "This replaces Tau 1. Stop its workers, back up data, import history with --import-state, and remove old path variables. See docs/tau2-agent.md; rerun with TAU2_INSTALL_CONFIRMED=yes after review." >&2
-    exit 1
-fi
-
-install -d -m 0700 /var/lib/tau
-install -d -m 0700 /root/.local/share/tau/outbox /root/.local/share/tau/uploads
-install -m 0755 "$binary" /usr/local/bin/taud
-install -m 0644 "$root/deploy/tau.service" /etc/systemd/system/tau.service
-
-if [[ ! -f /etc/tau.env ]]; then
-    token=$(openssl rand -hex 32)
-    umask 077
-    cat > /etc/tau.env <<EOF
-TAU_BIND=127.0.0.1:8787
-TAU_TOKEN=$token
-EOF
-fi
-chmod 0600 /etc/tau.env
-
+chmod 0600 /etc/tau2-beta.env
+# Atomic executable replacement leaves an already-running beta mapped to its old inode.
+install -m 0755 "$binary" /usr/local/lib/tau2-beta/taud.new
+mv -f /usr/local/lib/tau2-beta/taud.new /usr/local/lib/tau2-beta/taud
+install -m 0644 "$root/deploy/tau2-beta.service" /etc/systemd/system/tau2-beta.service
 systemctl daemon-reload
-systemctl enable tau.service
-systemctl restart tau.service
-for _ in $(seq 1 50); do
-    if curl --fail --silent http://127.0.0.1:8787/v1/health >/dev/null; then
-        break
-    fi
+systemctl enable tau2-beta.service
+systemctl restart tau2-beta.service
+for _ in $(seq 1 100); do
+    if curl --fail --silent http://127.0.0.1:8791/v1/health >/dev/null; then break; fi
     sleep 0.1
 done
-curl --fail --silent http://127.0.0.1:8787/v1/health >/dev/null
-tailscale serve --bg --yes --http=8787 http://127.0.0.1:8787 >/dev/null
-systemctl --no-pager --full status tau.service | sed -n '1,16p'
-host_name=$(tailscale status --json | python -c 'import json,sys; print(json.load(sys.stdin)["Self"]["HostName"])')
-echo
-echo "Tau connection settings:"
-echo "  URL: http://$host_name:8787"
-echo "  Token: $(sed -n 's/^TAU_TOKEN=//p' /etc/tau.env)"
+curl --fail --silent http://127.0.0.1:8791/v1/health >/dev/null
+tailscale serve --bg --yes --http=8789 http://127.0.0.1:8791 >/dev/null
+systemctl --no-pager --full status tau2-beta.service | sed -n '1,12p'
+echo 'Beta URL: http://vibe:8789 (Tailnet only). Token: /etc/tau2-beta.env.'
+echo 'Stable Tau and its existing Tailnet routes were not modified.'

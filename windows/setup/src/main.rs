@@ -173,20 +173,8 @@ fn install() -> Result<String, Box<dyn std::error::Error>> {
             }
             drop(archive);
             fs::remove_file(tar_path)?;
-            #[cfg(feature = "beta")]
             if !staging.join("app").join(channel::EXE).is_file() {
                 return Err("Tau Beta payload has no native application".into());
-            }
-            #[cfg(not(feature = "beta"))]
-            {
-                let library_directory = staging.join("app").join("lib");
-                if !fs::read_dir(&library_directory)?.any(|entry| {
-                    entry.ok().is_some_and(|entry| {
-                        entry.path().extension().is_some_and(|value| value == "jar")
-                    })
-                }) {
-                    return Err("Tau payload has no application libraries".into());
-                }
             }
             fs::write(staging.join("version.txt"), format!("{VERSION}\n"))?;
             fs::write(staging.join("payload.sha256"), format!("{payload_hash}\n"))?;

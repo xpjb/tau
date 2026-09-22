@@ -251,29 +251,6 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
-                        ClientCommand::SetTitlePrompt { prompt } if prompt.chars().count() > MAX_PROMPT_CHARS => {
-                            ServerMessage::failure(request_id, "Title prompt is too long")
-                        }
-                        command @ (ClientCommand::GetTitlePrompt | ClientCommand::SetTitlePrompt { .. }) => {
-                            let replacement = match command {
-                                ClientCommand::SetTitlePrompt { prompt } => Some(prompt),
-                                _ => None,
-                            };
-                            match async {
-                                let mut settings = manager.inner.settings.get();
-                                if let Some(prompt) = replacement { settings.daemon.title_prompt = prompt; settings = manager.set_settings(settings.revision, settings).await?; }
-                                Ok::<_, anyhow::Error>(settings.daemon.title_prompt)
-                            }.await {
-                                Ok(prompt) => {
-                                    queue_server(&response_outbound, &ServerMessage::TitlePrompt {
-                                        request_id: request_id.clone(), prompt,
-                                        default_prompt: crate::state::DEFAULT_TITLE_PROMPT.into(),
-                                    }).await;
-                                    ServerMessage::success(request_id, None, None)
-                                }
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
                         ClientCommand::CreateSession { keep_session_id } => match manager.create_session(keep_session_id.as_deref()).await {
                             Ok(session_id) => ServerMessage::success(
                                 request_id,
@@ -336,17 +313,6 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 }
                             }
                         }
-                        ClientCommand::ExtensionUiResponse {
-                            session_id,
-                            request_id: extension_request_id,
-                            value,
-                            confirmed,
-                            cancelled,
-                        } => {
-                            let _ = (session_id, extension_request_id, value, confirmed, cancelled);
-                            ServerMessage::failure(request_id, "Pi extension dialogs are not supported by the integrated agent")
-                        }
-
                         ClientCommand::QueueControl { session_id, generation, operation } => {
                             match manager.queue_control(&session_id, &generation, &request_id, operation).await {
                                 Ok(outcome) => {
@@ -358,7 +324,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             }
                         }
                         ClientCommand::Abort { session_id } => {
-                            match manager.abort(&session_id).await {
+                            match manager.abort(&session_id, &request_id).await {
                                 Ok(()) => ServerMessage::success(
                                     request_id,
                                     Some(session_id),
@@ -692,8 +658,8 @@ mod tests {
         let log = root.join("crashes.jsonl");
         let config = Config {
             transfer_bind: "127.0.0.1:0".parse().unwrap(),
-            bind: address, token: Arc::from("test-token"), settings_path: root.join("settings.json"), import_pi_dir: None, cwd: root.clone(), database_path: root.join("tau.sqlite3"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
-            upload_root: root.join("uploads"), title_command: None,
+            bind: address, token: Arc::from("test-token"), settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None, cwd: root.clone(), database_path: root.join("tau.sqlite3"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
+            upload_root: root.join("uploads"),
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
         let app = Router::new().route("/v1/telemetry/crash", post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)))
@@ -768,11 +734,11 @@ mod tests {
         let config = Config {
             transfer_bind: "127.0.0.1:0".parse().unwrap(),
             bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
-            settings_path: root.join("settings.json"), import_pi_dir: None,
+            settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None,
             cwd: root.clone(), database_path: root.join("tau.sqlite3"),
             telemetry_path: root.join("crashes.jsonl"),
             attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
-        title_command: None,
+
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
         let id = manager.create_session(None).await.unwrap();

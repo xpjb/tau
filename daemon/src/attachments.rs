@@ -153,9 +153,12 @@ pub(crate) async fn send_file(root: &Path, source: &Path, caption: Option<&str>,
 }
 
 pub(crate) async fn generated_image(root: &Path, bytes: &[u8], cancel: &CancellationToken) -> Result<Value> {
-    let root = fs::canonicalize(root).await.context("Tau attachment root is unavailable")?;
-    let name = format!("generated-{}.png", uuid::Uuid::new_v4());
-    stage_attachment(&root, std::ffi::OsStr::new(&name), bytes, None, cancel).await
+    let result:Result<Value>=async {
+        let root = fs::canonicalize(root).await.context("Tau attachment root is unavailable")?;
+        let name = format!("generated-{}.png", uuid::Uuid::new_v4());
+        stage_attachment(&root, std::ffi::OsStr::new(&name), bytes, None, cancel).await
+    }.await;
+    result.map_err(|error|anyhow::anyhow!("OpenAI generated the image, but Tau could not stage it. Do not retry automatically; ask the user before another generation request. {error:#}"))
 }
 
 // store:false cannot replay a generated-image item by ID. Rehydrate the staged

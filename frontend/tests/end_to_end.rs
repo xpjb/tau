@@ -123,13 +123,12 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
         transfer_bind: "127.0.0.1:0".parse().unwrap(),
         token: Arc::from(token),
         settings_path: root.join("settings.json"),
-        import_pi_dir: None,
+        import_pi_dir: None, codex_auth_source:None,
         cwd: root.into(),
         database_path: root.join("tau.sqlite3"),
         telemetry_path: root.join("crash.jsonl"),
         attachment_root: root.join("outbox"),
         upload_root: root.join("uploads"),
-        title_command: None,
     };
     let task = tokio::spawn(taud::run(config));
     let local = tempfile::tempdir().unwrap();

@@ -68,3 +68,8 @@ pub async fn import_state(config: Config, path: std::path::PathBuf) -> Result<us
     let settings = settings::SettingsStore::load(&config,legacy["title_prompt"].as_str().unwrap_or(state::DEFAULT_TITLE_PROMPT).into()).await?;
     StateStore::load(config.database_path).await?.import_legacy(legacy,settings.get()).await
 }
+
+pub async fn export_history(config: Config, session: &str, destination: &std::path::Path) -> Result<()> {
+    if !config.database_path.is_file() { bail!("Database does not exist"); }
+    StateStore::load(config.database_path).await?.export_history(session,destination).await
+}

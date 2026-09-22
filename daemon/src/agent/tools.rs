@@ -11,7 +11,7 @@ use crate::state::StateStore;
 use crate::transcript::IMAGE_LIMIT;
 use crate::attachments::{image_mime, regular_file};
 
-pub fn definitions() -> Vec<Value> {
+pub fn definitions(image_bridge: bool) -> Vec<Value> {
     [
         ("read", "Read text or an image. Text is bounded to 2000 lines / 50 KB; use offset/limit to continue.", json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}}), vec!["path"]),
         ("bash", "Execute bash in the working directory. Output is bounded; full output is saved to a file. Timeout is optional, in seconds.", json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1}}), vec!["command"]),
@@ -19,8 +19,9 @@ pub fn definitions() -> Vec<Value> {
         ("edit", "Apply exact replacements against the original file. Each oldText must be unique; edits must not overlap.", json!({"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}}), vec!["path","edits"]),
         ("send_file", "Send a local file to the user through Tau. Files are staged automatically; PNG, JPEG, and WebP files up to 10 MB appear inline.", json!({"path":{"type":"string","minLength":1},"caption":{"type":"string","maxLength":1024}}), vec!["path"]),
         ("flag_it", "Log an incidental finding outside the task. State location and impact, omit secrets, and continue the current task.", json!({"str":{"type":"string","minLength":1,"maxLength":4096}}), vec!["str"]),
+        ("generate_image", "Generate or edit one image through the configured Codex account (gpt-image-2). It is delivered automatically. Optional imagePaths are local PNG/JPEG/WebP references, at most four, 10 MB each.", json!({"prompt":{"type":"string","minLength":1,"maxLength":32000},"imagePaths":{"type":"array","maxItems":4,"items":{"type":"string"}}}), vec!["prompt"]),
         ("web_search", "Search the web.", json!({"query":{"type":"string"}}), vec!["query"]),
-    ].into_iter().map(|(name, description, properties, required)| json!({"name":name,
+    ].into_iter().filter(|(name,_,_,_)| *name != "generate_image" || image_bridge).map(|(name, description, properties, required)| json!({"name":name,
         "description":description,
         "parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect()
 }

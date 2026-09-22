@@ -45,8 +45,8 @@ fn call(id: &str, name: &str, arguments: Value) -> Value { json!({"id":id,"type"
 async fn fixture(model: &ModelServer, api: Api) -> (tempfile::TempDir, AgentManager, String, tokio::task::JoinHandle<()>) {
     let root = tempfile::tempdir().unwrap(); let root_path = root.path().to_owned();
     let config = Config { bind:"127.0.0.1:0".parse().unwrap(), transfer_bind:"127.0.0.1:0".parse().unwrap(), token:Arc::from("isolated-test-token"),
-        settings_path:root_path.join("settings.json"), import_pi_dir:None, cwd:root_path.clone(), database_path:root_path.join("tau.sqlite3"),
-        telemetry_path:root_path.join("crashes.jsonl"), attachment_root:root_path.join("outbox"), upload_root:root_path.join("uploads"), title_command:Some("sleep 1; printf '{\"title\":\"Generated title\"}'".into()) };
+        settings_path:root_path.join("settings.json"), import_pi_dir:None, codex_auth_source:None, cwd:root_path.clone(), database_path:root_path.join("tau.sqlite3"),
+        telemetry_path:root_path.join("crashes.jsonl"), attachment_root:root_path.join("outbox"), upload_root:root_path.join("uploads") };
     tokio::fs::create_dir_all(&config.attachment_root).await.unwrap();
     let mut settings = Settings::default();
     settings.agent.load_project_instructions = false; settings.agent.retry.base_delay_ms = 1; settings.daemon.idle_timeout_seconds = 0;
@@ -155,15 +155,13 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
         ("pause", json!({"type":"pause","runId":run,"boundary":"turn"})),
     ] { assert_eq!(client.request(json!({"id":id_cmd,"type":"queue_control","sessionId":id,"generation":generation,"operation":operation})).await["ok"], true); }
     assert_eq!(client.request(json!({"id":"stale","type":"queue_control","sessionId":id,"generation":generation,"operation":{"type":"edit","requestId":"queued","revision":0,"text":"Stale"}})).await["ok"], false);
-    // Full settings, title alias, stale revisions, and secrets stay on the same real wire.
+    // Full settings, stale revisions, and secrets stay on the same real wire.
     client.request(json!({"id":"get","type":"get_settings"})).await;
     let mut settings = client.seen.iter().rev().find(|m| m["type"] == "settings").unwrap()["settings"].clone();
     settings["agent"]["systemPrompt"] = json!("Custom system prompt"); settings["daemon"]["titlePrompt"] = json!("Custom title {text}");
     settings["daemon"]["idleTimeoutSeconds"] = json!(2);
     assert_eq!(client.request(json!({"id":"save","type":"set_settings","revision":0,"settings":settings})).await["ok"], true);
     assert_eq!(client.request(json!({"id":"stale-settings","type":"set_settings","revision":0,"settings":settings})).await["ok"], false);
-    client.request(json!({"id":"title","type":"get_title_prompt"})).await;
-    assert_eq!(client.seen.iter().rev().find(|m| m["type"] == "title_prompt").unwrap()["prompt"], "Custom title {text}");
     assert_eq!(client.request(json!({"id":"unsupported-boundary","type":"queue_control","sessionId":id,"generation":generation,"operation":{"type":"pause","runId":run,"boundary":"reasoning_checkpoint"}})).await["ok"], false);
     assert_eq!(client.request(json!({"id":"cancel-pause","type":"queue_control","sessionId":id,"generation":generation,"operation":{"type":"cancel","controlId":"pause"}})).await["ok"], true);
     assert_eq!(client.request(json!({"id":"prefix","type":"queue_control","sessionId":id,"generation":generation,"operation":{"type":"prefix","runId":run,"boundary":"turn","requests":[{"requestId":"queued","revision":1}]}})).await["ok"], true);
@@ -600,5 +598,68 @@ async fn sqlite_transactions_roll_back_consumption_and_forks_while_history_pages
         assert_eq!(db.query_row("PRAGMA integrity_check",[],|row| row.get::<_,String>(0))?,"ok");
         assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?); Ok(())
     }).await.unwrap();
+    manager.shutdown().await; server.abort();
+}
+
+#[tokio::test]
+async fn cross_provider_image_tool_uses_codex_without_changing_the_chat_model_or_saving_image_bytes() {
+    let gate=Arc::new(Notify::new()); let mut second=codex("",vec![generated("bridge-image-two")]); second.gate=Some(gate.clone());
+    let mut images=ModelServer::start(vec![codex("",vec![generated("bridge-image")]),second]).await;
+    let mut chat=ModelServer::start(vec![completion("",vec![call("draw","generate_image",json!({"prompt":"A tiny red square"}))]),completion("Image delivered",vec![]),
+        completion("",vec![call("draw-two","generate_image",json!({"prompt":"A tiny blue square"}))]),completion("Delivery failed; ask before generating again",vec![])]).await;
+    let (root,manager,url,server)=fixture(&chat,Api::ChatCompletions).await;
+    let mut settings=manager.inner.settings.get();
+    let main=settings.providers["openai-codex"].clone();
+    settings.providers.insert("openrouter".into(),main);
+    let image_provider=settings.providers.get_mut("openai-codex").unwrap(); image_provider.api=Api::Codex; image_provider.base_url=images.url.clone();
+    let mut model=settings.models[0].clone(); model.provider="openrouter".into(); model.id="fixture-chat".into();
+    settings.models.push(model); settings.agent.model=crate::state::SessionModel {provider:"openrouter".into(),model_id:"fixture-chat".into()};
+    manager.set_settings(settings.revision,settings).await.unwrap();
+    crate::settings::atomic_write(&root.path().join("auth.json"),json!({"openrouter":{"type":"api_key","key":"local-only"},"openai-codex":{"type":"oauth","access":"fixture-access","refresh":"unused","accountId":"fixture-account","expires":u64::MAX}}).to_string().as_bytes()).await.unwrap();
+    let mut client=Client::connect(&url).await;
+    let id=client.request(json!({"id":"new","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned(); client.open(&id).await;
+    assert_eq!(client.request(json!({"id":"draw","type":"prompt","sessionId":id,"text":"Draw a square"})).await["ok"],true);
+    let main=chat.request().await;
+    assert!(main["tools"].as_array().unwrap().iter().any(|tool|tool["function"]["name"] == "generate_image"));
+    let image=images.request().await;
+    assert_eq!(image["tool_choice"]["type"],"image_generation");
+    assert_eq!(image["tools"].as_array().unwrap(),&vec![json!({"type":"image_generation","model":"gpt-image-2","output_format":"png"})]);
+    let continuation=chat.request().await;
+    assert!(continuation.to_string().contains(GENERATED_PNG),"Generated references must also replay into the non-Codex chat");
+    client.until(|m|m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
+    let snapshot=client.open(&id).await;
+    let image=snapshot["events"].as_array().unwrap().iter().find(|e|e["attachment"]["kind"] == "image").unwrap();
+    assert_eq!(image["role"],"assistant"); manager.resolve_attachment(&id,image["entryId"].as_str().unwrap()).await.unwrap();
+    assert_eq!(manager.inner.settings.get().agent.model.provider,"openrouter");
+    let export=root.path().join("history.json"); manager.inner.state.export_history(&id,&export).await.unwrap();
+    let exported=tokio::fs::read_to_string(export).await.unwrap();
+    assert!(!exported.contains(GENERATED_PNG) && exported.contains("tau-history") && exported.contains("tau_attachment"));
+    assert!(!client.seen.iter().any(|message|message.to_string().contains(GENERATED_PNG)));
+    // Lose the outbox after the provider accepted the paid operation, before delivery.
+    assert_eq!(client.request(json!({"id":"draw-again","type":"prompt","sessionId":id,"text":"Now blue"})).await["ok"],true);
+    chat.request().await; images.request().await;
+    tokio::fs::rename(&manager.inner.config.attachment_root,root.path().join("outbox-offline")).await.unwrap(); gate.notify_one();
+    let failed=chat.request().await;
+    assert!(failed.to_string().contains("OpenAI generated the image, but Tau could not stage it"));
+    assert!(failed.to_string().contains("Do not retry automatically; ask the user"));
+    client.until(|m|m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
+    assert!(images.requests.try_recv().is_err(),"Failed image delivery must not trigger another generation request");
+    manager.shutdown().await; server.abort();
+}
+
+#[tokio::test]
+async fn native_title_request_uses_configured_prompt_and_never_overwrites_a_manual_name() {
+    let gate=Arc::new(Notify::new()); let mut reply=completion("Generated title",vec![]); reply.gate=Some(gate.clone());
+    let mut model=ModelServer::start(vec![reply]).await;
+    let (_root,manager,_url,server)=fixture(&model,Api::ChatCompletions).await;
+    let mut settings=manager.inner.settings.get(); settings.daemon.generate_titles=true; settings.daemon.title_prompt="Exact template: {text}\n".into();
+    manager.set_settings(settings.revision,settings).await.unwrap();
+    let id=manager.create_session(None).await.unwrap(); let task_manager=manager.clone(); let task_id=id.clone();
+    let title=tokio::spawn(async move { task_manager.title_after_prompt(&task_id,"Example task").await; });
+    let request=model.request().await;
+    assert_eq!(request["messages"][1]["content"],"Exact template: Example task\n");
+    assert!(request["tools"].as_array().is_none_or(|tools|tools.is_empty()));
+    manager.rename_session(&id,"Manually named").await.unwrap(); gate.notify_one(); title.await.unwrap();
+    assert_eq!(manager.inner.state.get(&id).await.unwrap().unwrap().title,"Manually named");
     manager.shutdown().await; server.abort();
 }

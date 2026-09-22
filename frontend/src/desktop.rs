@@ -309,7 +309,7 @@ impl Desktop {
                             .unwrap_or_else(|| "download".into());
                         if let Some(path) = rfd::FileDialog::new().set_file_name(safe).save_file() {
                             let result = std::fs::copy(&source, &path)
-                                .and_then(|_| std::fs::File::open(&path)?.sync_all());
+                                .and_then(|_| std::fs::OpenOptions::new().write(true).open(&path)?.sync_all());
                             if let Err(e) = result {
                                 let _ = tx.send(Err(e.to_string()));
                                 waker.wake();

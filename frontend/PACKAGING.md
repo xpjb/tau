@@ -1,5 +1,26 @@
 # Beta packaging sizes
 
+## 0.7.0 integrated beta
+
+| Measured component | MiB |
+|---|---:|
+| Windows x64 installer | **9.38** |
+| Windows native app | **30.69** |
+| Android ARM64 APK | **11.23** |
+| Android extracted native library | **26.33** |
+
+Both targets built sequentially with one managed Cargo job. Installer archive bytes
+match the fresh native EXE and contain no JVM/JAR, bundled fonts or PDBs. Only OS
+DLLs are imported. Android v3 signature matches 0.6.3, package `app.tau.rust`,
+versionCode 5 / 0.7.0-beta, non-debuggable, extracted/compressed native library.
+CRC, native payload identity, ZIP alignment and 16 KiB ELF load alignment passed.
+The APK is development-key signed for beta updates, not a Play release.
+
+APK + extracted library totals 37.56 MiB before OS-generated code/cache and data.
+These are package measurements, not physical-device footprint or rendering claims.
+
+## Historical 0.6.3 baseline
+
 Measured from 0.6.3 ARM64 Android / x64 Windows artifacts. Sizes are MiB (2^20 bytes),
 not estimates from a debug build.
 

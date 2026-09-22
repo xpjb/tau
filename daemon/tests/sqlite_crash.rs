@@ -26,7 +26,7 @@ impl Client {
         self.until(|event| event["type"] == "response" && event["requestId"] == value["id"]).await
     }
     async fn open(&mut self, id: &str) -> Value {
-        assert_eq!(self.request(json!({"id":"open","type":"open_session","sessionId":id,"requests":["first","second","deleted"]})).await["ok"],true);
+        assert_eq!(self.request(json!({"id":"open","type":"open_session","sessionId":id,"requests":["first","second","deleted","edit","delete"]})).await["ok"],true);
         self.seen.iter().rev().find(|event| event["type"] == "transcript_snapshot").unwrap()["snapshot"].clone()
     }
 }
@@ -86,6 +86,7 @@ async fn sigkill_after_ack_recovers_wal_queue_receipts_and_unfinished_turn_witho
         assert_eq!(client.request(json!({"id":id_request,"type":"prompt","sessionId":id,"text":text})).await["disposition"],"queued");
     }
     let snapshot = client.open(&id).await;
+    let original_generation=snapshot["generation"].clone();
     for (command,operation) in [("edit",json!({"type":"edit","requestId":"second","revision":0,"text":"Edited second task"})),
         ("delete",json!({"type":"delete","requestId":"deleted","revision":0}))] {
         assert_eq!(client.request(json!({"id":command,"type":"queue_control","sessionId":id,"generation":snapshot["generation"],"operation":operation})).await["ok"],true);
@@ -99,11 +100,12 @@ async fn sigkill_after_ack_recovers_wal_queue_receipts_and_unfinished_turn_witho
     assert_eq!(snapshot["queue"]["requests"].as_array().unwrap().len(),1);
     assert_eq!(snapshot["queue"]["requests"][0]["text"],"Edited second task");
     assert_eq!(snapshot["queue"]["requests"][0]["revision"],1);
-    assert_eq!(snapshot["delivered"].as_array().unwrap().len(),3,"Deleted requests remain durably acknowledged");
+    assert_eq!(snapshot["delivered"].as_array().unwrap().len(),5,"Deleted prompts and queue controls remain durably acknowledged");
     assert_eq!(snapshot["events"].as_array().unwrap().iter().filter(|event| event["origin"]["requestId"] == "first").count(),1);
     for (request,text) in [("first","First task"),("second","Second task"),("deleted","Do not run this")] {
         assert_eq!(client.request(json!({"id":request,"type":"prompt","sessionId":id,"text":text})).await["ok"],true);
     }
+    assert_eq!(client.request(json!({"id":"edit","type":"queue_control","sessionId":id,"generation":original_generation,"operation":{"type":"edit","requestId":"second","revision":0,"text":"Edited second task"}})).await["ok"],true,"A lost control response must reconcile before stale-generation/revision checks");
     assert!(requests.try_recv().is_err(),"Restart/retry must not start a provider turn");
     client.request(json!({"id":"resume","type":"queue_control","sessionId":id,"generation":snapshot["generation"],"operation":{"type":"resume","runId":null}})).await;
     let request = tokio::time::timeout(Duration::from_secs(10),requests.recv()).await.unwrap().unwrap();

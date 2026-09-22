@@ -4,7 +4,7 @@ pub mod settings;
 mod transcript;
 pub use transcript::*;
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -28,10 +28,6 @@ pub enum ClientCommand {
     ListSessions,
     GetSettings,
     SetSettings { revision: u64, settings: Box<settings::Settings> },
-    GetTitlePrompt,
-    SetTitlePrompt {
-        prompt: String,
-    },
     CreateSession {
         #[serde(default)]
         keep_session_id: Option<String>,
@@ -52,16 +48,6 @@ pub enum ClientCommand {
     Prompt {
         session_id: String,
         text: String,
-    },
-    ExtensionUiResponse {
-        session_id: String,
-        request_id: String,
-        #[serde(default)]
-        value: Option<String>,
-        #[serde(default)]
-        confirmed: Option<bool>,
-        #[serde(default)]
-        cancelled: bool,
     },
     QueueControl {
         session_id: String,
@@ -152,19 +138,11 @@ pub enum ServerMessage {
         error: Option<String>,
     },
     Settings { request_id: String, settings: Box<settings::Settings>, default_system_prompt: String },
-    TitlePrompt {
-        request_id: String,
-        prompt: String,
-        default_prompt: String,
-    },
     Commands {
         session_id: String,
         commands: Vec<SlashCommand>,
     },
-    ExtensionUi {
-        session_id: String,
-        request: Box<ExtensionUiRequest>,
-    },
+    Notice { session_id: String, message: String },
     Sessions {
         sessions: Vec<SessionSummary>,
     },
@@ -273,39 +251,6 @@ pub struct SlashCommand {
     pub argument_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<SlashCommandArgument>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExtensionUiRequest {
-    pub id: String,
-    pub method: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placeholder: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notify_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub widget_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub widget_lines: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub widget_placement: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]

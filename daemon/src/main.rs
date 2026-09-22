@@ -17,7 +17,12 @@ async fn main() -> ExitCode {
     if args == ["--login-codex"] {
         return match taud::login_codex().await { Ok(()) => ExitCode::SUCCESS, Err(error) => { error!(%error, "Codex login failed"); ExitCode::FAILURE } };
     }
-    if !args.is_empty() && !(args.len() == 2 && args[0] == "--import-state") { error!("Usage: taud [--login-codex | --import-state PATH]"); return ExitCode::FAILURE; }
+    if args.len() == 3 && args[0] == "--export-session" {
+        return match async { taud::export_history(taud::Config::from_env()?,&args[1],std::path::Path::new(&args[2])).await }.await {
+            Ok(()) => ExitCode::SUCCESS, Err(error) => { error!(%error,"History export failed"); ExitCode::FAILURE }
+        };
+    }
+    if !args.is_empty() && !(args.len() == 2 && args[0] == "--import-state") { error!("Usage: taud [--login-codex | --import-state PATH | --export-session ID PATH]"); return ExitCode::FAILURE; }
 
     let config = match taud::Config::from_env() {
         Ok(config) => config,

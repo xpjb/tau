@@ -183,7 +183,7 @@ impl AgentManager {
             let (updates, mut receiver) = mpsc::channel(8);
             let generation = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
                 settings:&settings, selected:&selected, thinking:&thinking, messages:&messages, session_id:id,
-                definitions:tools::definitions(), mode:provider::Mode::Chat,
+                definitions:tools::definitions(settings.providers[&selected.provider].api != crate::settings::Api::Codex && settings.models.iter().any(|m|settings.providers[&m.provider].api == crate::settings::Api::Codex)), mode:provider::Mode::Chat,
             }, updates);
             tokio::pin!(generation);
             let mut partial = json!({"role":"assistant","content":""});
@@ -234,6 +234,17 @@ impl AgentManager {
                 let args = serde_json::from_str::<Value>(call["function"]["arguments"].as_str().context("Tool call has no arguments")?);
                 let result: Result<Value> = match args {
                     Err(error) => Err(error).context("Tool arguments are invalid JSON"),
+                    Ok(args) if name == "generate_image" => {
+                        match self.generate_image(id,&settings,&args,&cancel).await {
+                            Ok(staged) => {
+                                let path=staged["details"]["tauAttachment"]["path"].as_str().unwrap_or_default();
+                                let result=tools::text_result(format!("Generated image delivered to the user. Local reference: {path}"));
+                                attachments.push(json!({"type":"tau_attachment","message":{"role":"assistant","content":[{"type":"image","mimeType":"image/png"}],"details":staged["details"],"timestamp":now_ms()}}));
+                                Ok(result)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
                     Ok(args) if name == "web_search" => {
                         let query = args["query"].as_str().unwrap_or_default();
                         let messages = vec![json!({"role":"system","content":"Search the web and return concise findings with source URLs."}),json!({"role":"user","content":query})];
@@ -251,15 +262,45 @@ impl AgentManager {
                 let mut result = match result { Ok(result) => result, Err(error) => { let mut result = tools::text_result(bounded(&error.to_string(), 2000)); result["isError"] = json!(true); result } };
                 result["role"] = json!("toolResult"); result["toolCallId"] = call["id"].clone(); result["toolName"] = json!(name); result["timestamp"] = json!(now_ms());
                 if name == "flag_it" && result["isError"] != true {
-                    let _ = self.inner.events.send(ServerMessage::ExtensionUi { session_id:id.into(), request:Box::new(crate::protocol::ExtensionUiRequest {
-                        id:uuid::Uuid::new_v4().to_string(), method:"notify".into(), notify_type:Some("info".into()), message:result["content"][0]["text"].as_str().map(str::to_owned), ..Default::default()
-                    }) });
+                    let _ = self.inner.events.send(ServerMessage::Notice { session_id:id.into(), message:result["content"][0]["text"].as_str().unwrap_or("Flag recorded").into() });
                 }
                 runtime.content.lock().await.append(id, json!({"type":"message","message":result})).await?;
             }
             for attachment in attachments { runtime.content.lock().await.append(id, attachment).await?; }
             self.set_runtime_state(id, runtime, SessionStatus::Running, None, Some(Some(ContextUsage { tokens:completion.tokens, context_window })));
         }
+    }
+
+    async fn generate_image(&self, id: &str, settings: &crate::settings::Settings, args: &Value, cancel: &CancellationToken) -> Result<Value> {
+        use tokio::io::AsyncReadExt;
+        use base64::Engine as _;
+        let prompt=args["prompt"].as_str().filter(|p|!p.trim().is_empty() && p.chars().count()<=32000).context("Image prompt must contain 1–32000 characters")?;
+        let selected=settings.models.iter().find(|m|m.provider == settings.agent.model.provider && m.id == settings.agent.model.model_id && settings.providers[&m.provider].api == crate::settings::Api::Codex)
+            .or_else(||settings.models.iter().find(|m|settings.providers[&m.provider].api == crate::settings::Api::Codex)).context("Configure a Codex model/account for image generation")?;
+        let selected=SessionModel { provider:selected.provider.clone(),model_id:selected.id.clone() };
+        let mut parts=vec![json!({"type":"text","text":prompt})];
+        if let Some(paths)=args.get("imagePaths") {
+            let paths=paths.as_array().filter(|paths|paths.len()<=4).context("imagePaths must be an array of at most four paths")?;
+            for path in paths {
+                let path=path.as_str().context("Image path must be text")?;
+                let file=crate::attachments::regular_file(&self.inner.config.cwd.join(path)).await?;
+                let mut bytes=vec![]; file.take(crate::transcript::IMAGE_LIMIT+1).read_to_end(&mut bytes).await?;
+                if bytes.len() as u64>crate::transcript::IMAGE_LIMIT { bail!("Reference image exceeds 10 MB"); }
+                let mime=crate::attachments::image_mime(&bytes).filter(|mime|matches!(*mime,"image/png" | "image/jpeg" | "image/webp")).context("Reference must be PNG, JPEG or WebP")?;
+                parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes))}}));
+            }
+        }
+        let messages=vec![json!({"role":"system","content":"Generate exactly one image using the image generation tool. Do not call other tools."}),json!({"role":"user","content":parts})];
+        let (updates,_receiver)=mpsc::channel(1);
+        let result=tokio::select! {
+            _=cancel.cancelled() => bail!("Image generation cancelled; do not assume no billing or automatically retry"),
+            result=tokio::time::timeout(std::time::Duration::from_secs(600),provider::generate(&self.inner.http,&self.inner.auth,provider::Request {
+                settings,selected:&selected,thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Image,
+            },updates)) => result.context("Image generation timed out; outcome may be unknown, do not automatically retry")?
+                .context("Image request failed; billing/outcome may be unknown. Do not automatically retry; ask the user before another generation request")?,
+        };
+        if result.images.len()!=1 || result.message["tool_calls"].as_array().is_some_and(|calls|!calls.is_empty()) { bail!("Image generation did not return exactly one image; do not automatically retry"); }
+        crate::attachments::generated_image(&self.inner.config.attachment_root,&result.images[0].bytes,cancel).await
     }
 
     pub(crate) async fn compact(&self, id: &str, runtime: &Arc<SessionRuntime>, instructions: &str) -> Result<()> {
@@ -312,22 +353,18 @@ impl AgentManager {
     pub(crate) async fn title_after_prompt(&self, id: &str, text: &str) {
         let Ok(Some(stored)) = self.inner.state.get(id).await else { return; };
         if stored.title != "New chat" { self.broadcast_sessions().await; return; }
-        let title = async {
-            use tokio::io::AsyncWriteExt;
-            let command = self.inner.config.title_command.as_ref()?;
-            let template = self.inner.settings.get().daemon.title_prompt;
-            tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                let mut child = tokio::process::Command::new("sh").arg("-c").arg(command)
-                    .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true).spawn().ok()?;
-                let mut stdin = child.stdin.take()?;
-                stdin.write_all(json!({"text":text,"promptTemplate":template}).to_string().as_bytes()).await.ok()?;
-                stdin.write_all(b"\n").await.ok()?; drop(stdin);
-                let output = child.wait_with_output().await.ok()?;
-                let raw: Value = serde_json::from_slice(&output.stdout).ok()?;
-                let title = raw["title"].as_str()?.trim();
-                (title.chars().count() > 1 && title.chars().count() <= crate::protocol::MAX_TITLE_CHARS && !title.contains(['\n','\r'])).then(|| title.to_owned())
-            }).await.ok().flatten()
-        }.await.unwrap_or_else(|| bounded(text.lines().find(|line| !line.trim().is_empty()).unwrap_or("Unnamed chat").trim(), crate::protocol::MAX_TITLE_CHARS));
+        let settings=self.inner.settings.get();
+        let generated=if settings.daemon.generate_titles {
+            let text=bounded(text,8000);
+            let messages=vec![json!({"role":"system","content":"Return only a short literal session title, no quotes or commentary."}),
+                json!({"role":"user","content":settings.daemon.title_prompt.replace("{text}",&text)})];
+            let (updates,_receiver)=mpsc::channel(1);
+            tokio::time::timeout(std::time::Duration::from_secs(30),provider::generate(&self.inner.http,&self.inner.auth,provider::Request {
+                settings:&settings,selected:&stored.model,thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Summary,
+            },updates)).await.ok().and_then(Result::ok).and_then(|completion|completion.message["content"].as_str().map(str::to_owned))
+                .map(|title|title.trim().to_owned()).filter(|title|title.chars().count()>1 && title.chars().count()<=crate::protocol::MAX_TITLE_CHARS && !title.contains(['\n','\r']))
+        } else { None };
+        let title=generated.unwrap_or_else(|| bounded(text.lines().find(|line| !line.trim().is_empty()).unwrap_or("Unnamed chat").trim(), crate::protocol::MAX_TITLE_CHARS));
         if let Err(error) = self.inner.state.rename(id, title, true).await { tracing::warn!(%error, "Could not save generated title"); }
         self.broadcast_sessions().await;
     }

@@ -1,225 +1,42 @@
-# Tau 2 · native Rust frontend
+# Native Tau frontend — 0.7.0 beta
 
-**Streaming QA: release on hold.** Unreleased transcript styling, connection
-health, contextual chat actions, estimated cache TTL rings and new-chat model tiles are
-tracked in [QA.md](QA.md); 0.6.3 remains the shipped build until the user asks for
-another delivery.
+Chad + Sanscale + incremental Markdown, speaking shared protocol 12 directly to the
+native Rust/SQLite daemon. Integrated on `tau2`; `tau2-rust-frontend` preserves the
+pre-integration snapshot. There is no preview protocol bridge in the release path.
 
-**QA build 0.6.3:** smaller Android/Windows packages using system fonts. See
-[PACKAGING.md](PACKAGING.md) for measured download/installed sizes and tradeoffs;
-[QA.md](QA.md) records checks completed and deferred. Builds remain sequential and
-low-concurrency while the system is under load.
-
-Branch: `tau2/rust-frontend`. **Tau Beta** is a parallel-install Rust preview,
-not the production cutover. `app/` remains the Kotlin reference. The beta installer
-does not replace stable Tau, migrate its data, or deploy over the daemon.
-
-The UI, retained transcript, local work, protocol, HTTP/WebSocket transport,
-Markdown and file transfer are Rust. Chad owns the window/surface lifecycle;
-Sanscale owns text. Android has a small Java **OS bridge**, not Kotlin/Compose:
-IME editing, clipboard, document grants, insets and task Back.
-
-<p>
-  <img src="gallery/desktop.png" alt="Offline desktop rendering of a live Markdown reply" width="65%">
-  <img src="gallery/android-emulator.png" alt="Native Android connected to an isolated test daemon" width="25%">
-</p>
-
-## Run / build
-
-The beta uses a red-trim Tau icon and the desktop title/executable **Tau Beta**;
-the in-app styling follows the Kotlin reference. It runs alongside stable Tau: Windows uses a
-separate taskbar identity (`app.tau.beta`) and portable executable, and Android
-keeps its separate package (`app.tau.rust`). No stable installer, updater or
-registration is touched. Local state remains in `%LOCALAPPDATA%\Tau2` (or
-`$XDG_DATA_HOME/Tau2`), preserving settings from the earlier Rust preview but
-not sharing stable Tau's data. Both clients still operate on the **same remote
-chats** when configured for the same daemon.
-
-From the repository root, using the host's normal managed Cargo wrapper:
+Windows uses the native per-user **Tau Beta installer**, not a bare EXE/ZIP or JVM.
+Android uses `app.tau.rust`, a thin Java OS bridge, and a signed ARM64 APK; the same
+beta key/package identity permits updates. Stable Tau remains separately installed.
 
 ```sh
-cargo run --locked -p tau-frontend --bin tau
+# Managed Cargo, one job/rayon thread; run builds sequentially.
+cargo check --locked --workspace --all-targets
+cargo nextest run --locked --workspace
+scripts/build-windows-sfx.sh
 ANDROID_ABI=arm64-v8a frontend/android/build.sh
-ANDROID_ABI=x86_64 frontend/android/build.sh   # emulator
-scripts/build-windows-sfx.sh --beta           # native beta installer, Linux + cargo-xwin
-scripts/build-rust-windows.sh                # alias for the beta installer
-scripts/build-windows-sfx.sh                 # existing stable Kotlin installer
 ```
 
-Android: SDK 35, build tools 35.0.0, NDK 27.2.12479018, Java, Python 3 and the
-corresponding Rust target. API 29+, Vulkan 1.1. APKs are development-signed but not
-debuggable, under `target/android/<abi>/tau-frontend-<abi>.apk`. The native library
-is stripped and ZIP-compressed; Android automatically extracts it during ordinary
-APK installation. ELF load segments retain 16KiB alignment. The separate
-package `app.tau.rust` is labeled **Tau Beta**. Only Internet permission is
-requested; files use the system document picker. Plain HTTP is supported for
-Tailnet/loopback setups, just as in the existing client—not for public networks.
+Desktop development can seed connection settings with `TAU2_SERVER` and `TAU2_TOKEN`;
+`TAU2_DATA_DIR` isolates local data. `target/debug/tau --screenshot PATH [--phone]`
+renders the explicitly offline demo through the real GPU shader path.
 
-Windows: ship **`dist/Tau-Beta-0.6.3-windows-x64.exe`**, a per-user installer using
-the normal Tau setup path with a `beta` feature/channel. It installs a small native
-launcher to `%LOCALAPPDATA%\Tau Beta\Tau Beta.exe`, a distinct **Tau Beta** Start
-Menu entry, and hash-keyed versions under `%LOCALAPPDATA%\Tau Beta\versions`.
-Updates switch `current.txt` atomically; repair also restores a missing Start Menu
-entry. Local work stays in `%LOCALAPPDATA%\Tau2`, so existing beta settings/drafts
-survive updates. Stable `%LOCALAPPDATA%\Tau`, its data and its Start Menu launcher
-are not touched. Close an earlier beta window to use the newly installed version.
-`--quiet --no-launch` is available for installer automation. No JVM or UniFFI
-runtime is needed. Windows and Android load fonts from the OS, with no bundled
-font files. The installer uses balanced LZMA compression (preset 6); this reduces
-download size, not the expanded executable's size. Old version directories remain
-available for rollback and are not counted in the clean-install measurement. Native startup errors use a Windows message box, not a hidden
-console. Static CRT is selected in `.cargo/config.toml`. Resource embedding uses
-`llvm-rc` when cross-building, or the Windows SDK on Windows.
+## UI and ownership
 
-The scripts still leave a bare executable under `dist/tau-beta-windows-x64` for
-development, but the installer above is the shipping artifact.
+- Exact saved/live replacement and history cuts; local drafts survive restart.
+- Unknown sends remain visible and are never automatically replayed.
+- Per-section first-observed timestamps; Details copies only its own content.
+- Estimated provider cache TTL rings, independent of runtime idle policy.
+- Actual heartbeat RTT/endpoint health; contextual, target-bound chat controls.
+- New chats use the last explicit model choice. Quick favorites never set that default.
+- Settings → Daemon / agent settings edits the full revisioned document. Save uses
+  CAS, keeps edits on conflict, distinguishes built-in/null from custom empty prompts,
+  and never exposes provider secrets.
+- Native model/thinking/compact/priority commands; no extension dialog protocol.
+- Verified native transfers, attachment viewing/export and native clipboard/IME.
 
-Desktop input explicitly calls `ctx.request_redraw()` after UI mutations;
-Chad's desktop on-demand runner does not implicitly redraw on input. Network
-and picker completions use its `Waker`. Hover/press state and native cursors
-are updated without switching to continuous rendering.
+Default quick favorites: Codex `gpt-6-luna`, `gpt-6-sol`, `gpt-6-astra`, and OpenRouter
+`deepseek/deepseek-v4.1-flash`. They are checked against the real catalog; unavailable
+entries are disabled, not invented capabilities or fallback model choices.
 
-Icon source: `frontend/assets/tau-beta.svg`. Regenerate its PNG/ICO launcher
-assets with `python3 frontend/assets/generate-icons.py` (`rsvg-convert` required).
-
-Use Settings to enter the URL and token. These are real single-line fields with
-horizontal scrolling, matching caret/hit/selection layout, Tab/Shift+Tab and
-Enter to connect. Token paste trims surrounding whitespace. Validation and
-connection errors are visible on the form; it closes only after authenticated
-protocol negotiation succeeds. Title prompt loading requires the connected,
-unchanged account. Notices remain visible even without a selected chat.
-
-### Unreleased UI additions
-
-- Hover or tap the dot beside Tau for real heartbeat RTT and connection details;
-  there is no duplicate bottom-left connection label.
-- Right-click a sidebar chat or its header for chat actions (hold on touch).
-  Message context menus remain separate. Stop is a centered 40dp tonal circle.
-- Chat rings show a **one-hour cache TTL estimate**, using existing reply
-  timestamps. No daemon/protocol update is needed. For unloaded history, chat
-  activity is a clearly labeled, weaker proxy; actual provider retention is unknown.
-- Empty starter chats offer quick model tiles. Settings → Quick model selection
-  manages up to 12 provider/model slugs with a searchable catalog and add/remove
-  choices; an empty list disables tiles. Preferences are local to this daemon/account.
-  Presets include Codex `gpt-6-luna`, `gpt-6-sol`, `gpt-6-astra` and OpenRouter
-  DeepSeek v4.1 Flash. **New chats keep the last chosen model**, using the existing
-  daemon behavior; the tile list never forces a default. A model must actually
-  appear in the daemon's built-in catalog to be sent.
-
-Desktop automation can explicitly set
-`TAU2_SERVER` and `TAU2_TOKEN`; these override and save the settings. Do not put
-credentials in command-line arguments or screenshots. `TAU2_DATA_DIR` overrides
-private desktop storage (default `$XDG_DATA_HOME/Tau2`, `~/.local/share/Tau2`, or
-`%LOCALAPPDATA%\Tau2`). Android uses its own private files directory. Tokens and
-local drafts are in private SQLite, not an OS credential vault.
-
-## Included
-
-- Responsive chat list / transcript / composer, familiar dark Tau palette.
-- Create/reuse starter, real model/context counts, rename, clone, fork at a user
-  message, sleep worker, confirmed permanent deletion, unread metadata.
-- Streaming text and Markdown on every update, not on completion; tables, code,
-  inline styles; collapsible thinking/tools across history-page boundaries.
-- Mouse text selection within a message; projected-text copy and whole-message
-  source copy. Authored Markdown links require confirmation and allow only
-  HTTP, HTTPS and mailto. Android long-press selects a whole message for copy.
-- Enter to send, Shift+Enter newline, Escape to interrupt, composer selection,
-  clipboard text/images, undo/redo, dropped files and system file pickers on
-  desktop. Android uses a native **editing dialog** for robust IME composition,
-  selection, autocorrection and paste; Done returns to the Rust composer.
-- Daemon slash-command and argument completion, extension dialogs, notices,
-  status and widgets, and exact shared title-prompt editing (including empty).
-- Durable pending sends/controls; edit/delete queued requests, inclusive prefix
-  execution, resume and control cancellation. No reconnect/restart replay.
-- Account/chat-scoped verified, resumable Iroh downloads, progress/cancellation,
-  inline saved images, full-screen pan/pinch/wheel/fit, export of saved originals.
-  No TCP fallback or Kotlin transfer bindings in native builds.
-- Memory-only remote history; SQLite WAL/FULL local work and private file copies.
-  Loads older pages without starting a worker; bounded recent-chat warming;
-  stable scroll anchors/follow-tail across stream changes and chat switches.
-- On-demand rendering with network wakeups; bounded queues and transfer concurrency.
-
-## Code map
-
-- `controller.rs`: local-first actions, receipt reconciliation and session feeds.
-- `feed.rs`: transactional generation/sequence/order validation and history windows.
-- `store.rs`: local-only SQLite state and private attachment paths.
-- `transport.rs`: authenticated, epoch-scoped sockets, heartbeat/reconnect, HTTP
-  grants/uploads and direct `tau-transfer` calls. No token-bearing error logging.
-- `app.rs`: screens, presentation grouping, hit targets, scroll/selection, actions.
-- `editor.rs`, `render.rs`: input state, Sanscale, incremental Markdown and GPU media.
-- `desktop.rs`, `android.rs`, `android/java/`: platform services and event adapters.
-- `../protocol/`: single Rust wire definition consumed by client and daemon.
-- `../markdown/`: extracted companion component, with upstream provenance/licenses.
-
-See [MERGE.md](MERGE.md) before combining the independent backend conversion.
-
-## Verification
-
-```sh
-cargo nextest run --workspace
-cargo clippy -p tau-frontend --no-deps --all-targets -- -D warnings
-cargo run --locked -p tau-frontend --bin tau -- --screenshot /tmp/tau-desktop.png
-cargo run --locked -p tau-frontend --bin tau -- --screenshot /tmp/tau-phone.png --phone
-```
-
-Screenshot mode is an explicit offline fixture with an isolated temporary store;
-it never connects to or reads the user's account.
-
-Verified: **51 workspace tests passed**, client Clippy passed, both APKs built and
-signature/alignment-verified, and the Windows static-CRT cross-build succeeded.
-The Windows linker reports missing optional Microsoft debug PDBs (LNK4099); its
-imports were checked and do not require `VCRUNTIME140.dll`.
-
-The small frontend suite exercises the **production controller and transport**:
-real `taud` + its existing deterministic Pi subprocess fixture for chat creation,
-queue edit/delete, abort, upload, extension response, title settings, fork and
-restart; an authenticated HTTP-grant → native QUIC → offline-cache round trip;
-a socket dropped after receiving a prompt but before acknowledging it, durable
-restart without replay and reconciliation by request ID; incompatible protocol,
-stale socket epoch, malformed/gapped updates and stale/colliding history pages.
-The inherited daemon/transfer tests remain; the Markdown suite retains the useful
-prefix/edit differential and incremental-work regressions. One added Markdown
-regression covers link-destination edits and projected selection/copy.
-
-### Manual acceptance recorded for this branch
-
-- Linux Vulkan headless desktop/phone rendering inspected.
-- Android ARM64 and x86_64 release libraries/APKs built; signatures/alignment checked.
-- Dedicated API 36 x86_64 Vulkan emulator: installed alongside the old app, entered
-  connection settings via IME, created chat, sent to the isolated fixture daemon,
-  received transcript, force-stopped **while editing before Done**, reopened and
-  verified the draft plus fetched history survived. No production daemon touched.
-- Windows setup + installed launcher/client exercised under an isolated Wine prefix:
-  fresh install, hash-keyed update with draft retained, Start Menu repair, stable Tau
-  sentinel files untouched, typed/pasted settings, invalid URL, rejected token,
-  correction/retry, create chat, send/receive, restart, and title-prompt save/reload.
-  Wine used Vulkan; physical Windows/DirectX/DPI acceptance is still needed.
-- Kotlin and Rust settings/list/chat screens compared directly using the same
-  isolated daemon. See [UI-ACCEPTANCE.md](UI-ACCEPTANCE.md) and the reference images.
-  Existing 51 workspace + 4 legacy Windows tests pass; no new trivial UI test scaffold.
-
-## Remaining release gates / deliberate preview differences
-
-This branch is **not** a claim of complete production parity:
-
-1. Merge the backend and settle its durable-ack contract. Do not remove uncertain
-   delivery state before that guarantee exists. Re-run the end-to-end suite.
-2. Keep the old app until explicit migration of its SQLite drafts/pending work and
-   cached files and production Android package/signing are done. The Windows beta
-   installer intentionally uses separate identity/storage; it is not a stable migration.
-3. Chad's documented winit Activity Destroy/recreation bugs remain. Root Back
-   backgrounds; ordinary resume is not evidence that actual Activity destruction
-   and same-process recreation work. Do not mask this with `process::exit`.
-4. Native accessibility/semantic trees, cross-message selection, Android selection
-   handles, and fully inline Android IME editing remain follow-up work. Modal
-   input is functional but is a visible sidegrade from Compose.
-5. Very large extension menus, extension timeout presentation, keyboard-navigation
-   polish, and model-failure/tool-call presentation beyond the current grouping
-   need further parity/physical-device acceptance. The context display is counts,
-   not the original circular indicator. Sanitized remote crash uploads have not
-   been ported; Android retains a bounded private local panic trace.
-6. Long-session memory/performance and large-image/file-picker/export behavior need
-   device soak testing. The Markdown dialect is explicitly not full CommonMark;
-   see the companion's dialect notes. Image decoding is bounded but currently
-   happens on the UI thread on first view. This is not a zero-copy UI claim.
+[QA](QA.md) · [Packaging](PACKAGING.md) · [Architecture](../ARCHITECTURE.md) ·
+[Daemon/storage](../docs/tau2-agent.md)

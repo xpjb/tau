@@ -3,14 +3,6 @@ name = "tau-transfer"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-crate-type = ["rlib", "cdylib"]
-
-[features]
-default = ["ffi"]
-ffi = ["dep:uniffi"]
-bindgen = ["ffi", "uniffi/cli"]
-
 [dependencies]
 anyhow = "1"
 bao-tree = { version = "0.15.1", default-features = false, features = ["tokio_fsm", "validate"] }
@@ -25,12 +17,6 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
-uniffi = { version = "=0.31.0", optional = true, default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
-
-[[bin]]
-name = "tau-transfer-bindgen"
-path = "src/bin/bindgen.rs"
-required-features = ["bindgen"]

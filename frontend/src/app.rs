@@ -39,8 +39,13 @@ enum Action {
     Focus(Option<usize>),
     Confirm,
     CancelModal,
-    TitlePrompt,
-    ResetTitlePrompt,
+    DaemonSettings,
+    SettingsSection(usize),
+    SettingsField(bool),
+    SettingToggle,
+    SettingReset,
+    AgentSetting(String, String),
+    AgentCommand(String, String),
     Rename(String),
     Delete(String),
     Clone(String),
@@ -63,7 +68,6 @@ enum Action {
     Zoom(f32),
     Fit,
     Suggest(String),
-    Extension(Option<String>, Option<bool>, bool),
 }
 #[derive(Clone, PartialEq, Eq)]
 enum Info {
@@ -76,9 +80,9 @@ enum ModalKind {
     Models,
     Rename(String),
     Delete(String),
-    TitlePrompt,
+    Daemon,
+    AgentCommand(String, String),
     QueueEdit(String, u64),
-    Extension(String, Box<ExtensionUiRequest>),
     ConfirmLink(String),
 }
 struct Modal {
@@ -186,7 +190,9 @@ pub struct App {
     info_areas: Vec<(Rect, Info)>,
     composer_session: Option<String>,
     show_chats: bool,
-    waiting_title: bool,
+    waiting_settings: bool,
+    daemon_draft: Option<crate::daemon_settings::Draft>,
+    saving_settings: Option<String>,
     connecting: bool,
     scroll: f32,
     max_scroll: f32,
@@ -246,7 +252,9 @@ impl App {
             info_areas: vec![],
             composer_session,
             show_chats,
-            waiting_title: false,
+            waiting_settings: false,
+            daemon_draft: None,
+            saving_settings: None,
             connecting: false,
             scroll: 0.,
             max_scroll: 0.,
@@ -431,71 +439,47 @@ impl App {
             self.composer = Editor::new(chat.local.draft.clone());
             self.dirty = true;
         }
-        if self.waiting_title && self.controller.notice.is_some() {
-            self.waiting_title = false;
-        }
-        if self.waiting_title
-            && let Some((prompt, _)) = &self.controller.title_prompt
+        if self.waiting_settings
+            && let Some((document, default)) = self.controller.daemon_settings.clone()
         {
-            self.waiting_title = false;
-            self.modal = Some(Modal {
-                kind: ModalKind::TitlePrompt,
-                title: "Shared title prompt".into(),
-                fields: vec![(
-                    "Exact prompt (empty is allowed)".into(),
-                    Editor::new(prompt.clone()),
-                    false,
-                )],
-                options: vec![
-                    ("Default".into(), Action::ResetTitlePrompt),
-                    ("Save".into(), Action::Confirm),
-                    ("Cancel".into(), Action::CancelModal),
-                ],
-            });
-            self.dirty = true;
+            self.waiting_settings = false;
+            let result = crate::daemon_settings::Draft::new(
+                &document,
+                default,
+                self.controller.identity.clone(),
+            );
+            match result {
+                Ok(draft) => {
+                    self.daemon_draft = Some(draft);
+                    let result = self.load_setting_field();
+                    self.report(result);
+                }
+                Err(error) => self.report(Err(error)),
+            }
         }
-        if self.modal.is_none()
-            && let Some((session, r)) = self.controller.dialogs.first().cloned()
-        {
-            let options = match r.method.as_str() {
-                "select" => r
-                    .options
-                    .iter()
-                    .map(|o| (o.clone(), Action::Extension(Some(o.clone()), None, false)))
-                    .chain(std::iter::once((
-                        "Cancel".into(),
-                        Action::Extension(None, None, true),
-                    )))
-                    .collect(),
-                "confirm" => vec![
-                    ("Confirm".into(), Action::Extension(None, Some(true), false)),
-                    ("Cancel".into(), Action::Extension(None, Some(false), true)),
-                ],
-                _ => vec![
-                    ("Submit".into(), Action::Confirm),
-                    ("Cancel".into(), Action::Extension(None, None, true)),
-                ],
-            };
-            let fields = if matches!(r.method.as_str(), "input" | "editor") {
-                vec![(
-                    r.placeholder.clone().unwrap_or_default(),
-                    Editor::new(r.prefill.clone().unwrap_or_default()),
-                    false,
-                )]
-            } else {
-                vec![]
-            };
-            self.modal = Some(Modal {
-                title: r
-                    .title
-                    .clone()
-                    .or(r.message.clone())
-                    .unwrap_or_else(|| "Agent request".into()),
-                kind: ModalKind::Extension(session, Box::new(r)),
-                fields,
-                options,
-            });
-            self.dirty = true;
+        if let Some(request) = &self.saving_settings {
+            if self
+                .controller
+                .settings_result
+                .as_ref()
+                .is_some_and(|(id, _)| id == request)
+            {
+                let ok = self.controller.settings_result.take().unwrap().1;
+                self.saving_settings = None;
+                if ok
+                    && let (Some(draft), Some((document, _))) =
+                        (&mut self.daemon_draft, &self.controller.daemon_settings)
+                {
+                    draft.revision = document.revision;
+                    self.controller.notice = Some("Settings saved".into());
+                }
+                self.dirty = true;
+            } else if self.controller.epoch.is_none() {
+                self.saving_settings = None;
+                self.controller.notice =
+                    Some("Save unconfirmed. Reload before saving again; it was not resent.".into());
+                self.dirty = true;
+            }
         }
         if self.modal.is_some() || self.viewer.is_some() {
             self.usage.dismiss();
@@ -1035,7 +1019,7 @@ impl App {
     fn edited(&mut self) {
         if matches!(
             self.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Settings | ModalKind::Models)
+            Some(ModalKind::Settings | ModalKind::Models | ModalKind::Daemon)
         ) {
             self.controller.notice = None;
         }
@@ -1292,7 +1276,7 @@ impl App {
                     ],
                     options: vec![
                         ("Connect".into(), Action::Confirm),
-                        ("Title prompt".into(), Action::TitlePrompt),
+                        ("Daemon / agent settings".into(), Action::DaemonSettings),
                         ("Cancel".into(), Action::CancelModal),
                     ],
                 });
@@ -1358,10 +1342,34 @@ impl App {
                         self.controller
                             .request(ClientCommand::DeleteSession { session_id })?;
                     }
-                    ModalKind::TitlePrompt => {
-                        self.controller.request(ClientCommand::SetTitlePrompt {
-                            prompt: values[0].clone(),
-                        })?;
+                    ModalKind::Daemon => {
+                        if self.saving_settings.is_some() {
+                            return Ok(());
+                        }
+                        self.apply_setting_field()?;
+                        let draft = self
+                            .daemon_draft
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("Load settings first"))?;
+                        anyhow::ensure!(
+                            draft.identity == self.controller.identity,
+                            "Server changed; reload settings first"
+                        );
+                        self.controller.notice = None;
+                        self.controller.settings_result = None;
+                        self.saving_settings =
+                            Some(self.controller.request(ClientCommand::SetSettings {
+                                revision: draft.revision,
+                                settings: Box::new(draft.document()?),
+                            })?);
+                        self.focus = None;
+                        return Ok(());
+                    }
+                    ModalKind::AgentCommand(session, command) => {
+                        self.apply(Action::AgentCommand(
+                            session,
+                            format!("/{command} {}", values[0]),
+                        ))?;
                     }
                     ModalKind::QueueEdit(request_id, revision) => {
                         self.apply(Action::Queue(QueueOperation::Edit {
@@ -1370,13 +1378,6 @@ impl App {
                             text: values[0].clone(),
                         }))?;
                     }
-                    ModalKind::Extension(session, r) => self.controller.extension_response(
-                        session,
-                        r.id,
-                        values.first().cloned(),
-                        None,
-                        false,
-                    )?,
                     ModalKind::ConfirmLink(url) => self.platform.push(PlatformAction::OpenUrl(url)),
                 }
                 self.modal = None;
@@ -1384,34 +1385,102 @@ impl App {
             }
             Action::CancelModal => {
                 self.connecting = false;
-                self.waiting_title = false;
-                if let Some(Modal {
-                    kind: ModalKind::Extension(session, r),
-                    ..
-                }) = self.modal.as_ref()
-                {
-                    self.controller.extension_response(
-                        session.clone(),
-                        r.id.clone(),
-                        None,
-                        None,
-                        true,
-                    )?;
-                }
+                self.waiting_settings = false;
+                self.daemon_draft = None;
+                self.saving_settings = None;
                 self.modal = None;
                 self.focus = None;
             }
-            Action::TitlePrompt => {
-                self.controller.title_prompt = None;
-                self.controller.request(ClientCommand::GetTitlePrompt)?;
-                self.waiting_title = true;
+            Action::DaemonSettings => {
+                self.controller.notice = None;
+                self.controller.daemon_settings = None;
+                self.controller.request(ClientCommand::GetSettings)?;
+                self.waiting_settings = true;
+                self.daemon_draft = None;
+                self.saving_settings = None;
+                self.modal = Some(Modal {
+                    kind: ModalKind::Daemon,
+                    title: "Daemon settings".into(),
+                    fields: vec![],
+                    options: vec![],
+                });
+                self.focus = None;
             }
-            Action::ResetTitlePrompt => {
-                if let (Some(modal), Some((_, default))) =
-                    (&mut self.modal, &self.controller.title_prompt)
-                {
-                    modal.fields[0].1 = Editor::new(default.clone());
+            Action::SettingsSection(section) => {
+                self.apply_setting_field()?;
+                if let Some(draft) = &mut self.daemon_draft {
+                    draft.section = section;
+                    draft.field = 0;
                 }
+                self.load_setting_field()?;
+            }
+            Action::SettingsField(next) => {
+                self.apply_setting_field()?;
+                if let Some(draft) = &mut self.daemon_draft {
+                    let count = crate::daemon_settings::fields(draft.section).len();
+                    draft.field = (draft.field + if next { 1 } else { count - 1 }) % count;
+                }
+                self.load_setting_field()?;
+            }
+            Action::SettingToggle => {
+                if let (Some(draft), Some(modal)) = (&mut self.daemon_draft, &mut self.modal) {
+                    if draft.definition().kind == crate::daemon_settings::Kind::Nullable {
+                        draft.builtin = !draft.builtin;
+                        if draft.builtin {
+                            modal.fields[0].1 = Editor::new(draft.builtin_text().into());
+                        }
+                    } else {
+                        modal.fields[0].1 =
+                            Editor::line((modal.fields[0].1.value != "true").to_string());
+                    }
+                    self.focus = None;
+                }
+            }
+            Action::SettingReset => {
+                if let (Some(draft), Some(modal)) = (&mut self.daemon_draft, &mut self.modal) {
+                    modal.fields[0].1 = Editor::new(draft.reset()?);
+                }
+                self.focus = None;
+            }
+            Action::AgentSetting(session, command) => {
+                let (label, value) = match command.as_str() {
+                    "model" => (
+                        "provider/model",
+                        self.controller
+                            .account
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == session)
+                            .and_then(|s| s.model.as_ref())
+                            .map(|m| format!("{}/{}", m.provider, m.model_id))
+                            .unwrap_or_default(),
+                    ),
+                    "thinking" => (
+                        "off / minimal / low / medium / high / xhigh / max",
+                        String::new(),
+                    ),
+                    "fast" => ("on / off / status", String::new()),
+                    _ => ("Optional compaction instructions", String::new()),
+                };
+                self.modal = Some(Modal {
+                    title: format!("Chat {command}"),
+                    kind: ModalKind::AgentCommand(session, command),
+                    fields: vec![(label.into(), Editor::line(value), false)],
+                    options: vec![
+                        ("Apply".into(), Action::Confirm),
+                        ("Cancel".into(), Action::CancelModal),
+                    ],
+                });
+                self.focus = Some(Some(0));
+            }
+            Action::AgentCommand(session, text) => {
+                self.controller.ensure_chat(&session)?;
+                self.controller.control(ClientCommand::Prompt {
+                    session_id: session,
+                    text,
+                })?;
+                self.modal = None;
+                self.focus = None;
             }
             Action::Rename(id) => {
                 let title = self
@@ -1594,22 +1663,6 @@ impl App {
             Action::Suggest(text) => {
                 self.composer = Editor::new(text.clone());
                 self.controller.draft(text)?;
-            }
-            Action::Extension(value, confirmed, cancelled) => {
-                if let Some(Modal {
-                    kind: ModalKind::Extension(session, r),
-                    ..
-                }) = &self.modal
-                {
-                    self.controller.extension_response(
-                        session.clone(),
-                        r.id.clone(),
-                        value,
-                        confirmed,
-                        cancelled,
-                    )?;
-                }
-                self.modal = None;
             }
         }
         Ok(())
@@ -1797,12 +1850,17 @@ impl App {
             Some(ModalKind::Models)
         ) {
             self.model_settings_frame(&mut overlay, bounds);
+        } else if matches!(
+            self.modal.as_ref().map(|m| &m.kind),
+            Some(ModalKind::Daemon)
+        ) {
+            self.daemon_settings_frame(&mut overlay, bounds);
         } else if self.modal.is_some() {
             self.modal_frame(&mut overlay, bounds);
         }
         if !matches!(
             self.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Settings | ModalKind::Models)
+            Some(ModalKind::Settings | ModalKind::Models | ModalKind::Daemon)
         ) {
             self.notice_frame(&mut overlay, bounds);
         }
@@ -2084,38 +2142,6 @@ impl App {
                 attachment: e.attachment.clone().map(|a| (e.entry_id.clone(), a)),
             });
             i += 1;
-        }
-        for (key, value) in &chat.statuses {
-            rows.push(Row {
-                details: vec![],
-                header: true,
-                key: format!("status:{key}"),
-                title: "Extension status".into(),
-                timestamp: clock::label(chat.status_times.get(key).copied().flatten()),
-                sender: EventRole::System,
-                source: literal(value),
-                user: false,
-                error: false,
-                actions: vec![("Copy message".into(), Action::Copy(value.clone()))],
-                attachment: None,
-            });
-        }
-        for (key, lines) in &chat.widgets {
-            if !lines.is_empty() {
-                rows.push(Row {
-                    details: vec![],
-                    header: true,
-                    key: format!("widget:{key}"),
-                    title: key.clone(),
-                    timestamp: clock::label(chat.widget_times.get(key).copied().flatten()),
-                    sender: EventRole::System,
-                    source: literal(&lines.join("\n")),
-                    user: false,
-                    error: false,
-                    actions: vec![("Copy message".into(), Action::Copy(lines.join("\n")))],
-                    attachment: None,
-                });
-            }
         }
         for p in &chat.local.pending {
             rows.push(Row {
@@ -3216,9 +3242,25 @@ impl App {
         }
         if let Some(id) = &chat {
             options = vec![
+                (
+                    "Model…".into(),
+                    Action::AgentSetting(id.clone(), "model".into()),
+                ),
+                (
+                    "Thinking…".into(),
+                    Action::AgentSetting(id.clone(), "thinking".into()),
+                ),
+                (
+                    "Compact context…".into(),
+                    Action::AgentSetting(id.clone(), "compact".into()),
+                ),
+                (
+                    "Codex priority…".into(),
+                    Action::AgentSetting(id.clone(), "fast".into()),
+                ),
                 ("Rename…".into(), Action::Rename(id.clone())),
                 ("Clone chat".into(), Action::Clone(id.clone())),
-                ("Sleep worker".into(), Action::Sleep(id.clone())),
+                ("Release idle runtime".into(), Action::Sleep(id.clone())),
                 ("Delete chat…".into(), Action::Delete(id.clone())),
             ];
         }
@@ -3603,31 +3645,31 @@ impl App {
             y += 12. * s;
             self.renderer.label(
                 layer,
-                "Title system prompt",
+                "Daemon / agent settings",
                 Rect::new(x, y, inner_w, 26. * s),
                 16. * s,
                 color(0xe5eaf0),
                 true,
             );
             y += 28. * s;
-            if connected && !self.waiting_title {
+            if connected && !self.waiting_settings {
                 button(
                     &mut self.renderer,
                     layer,
                     &mut self.hits,
                     Rect::new(x, y, 168. * s, 32. * s),
-                    "Load title prompt",
-                    Action::TitlePrompt,
+                    "Open settings",
+                    Action::DaemonSettings,
                     s,
                     false,
                 );
             } else {
                 self.renderer.label(
                     layer,
-                    if self.waiting_title {
-                        "Loading title prompt…"
+                    if self.waiting_settings {
+                        "Loading settings…"
                     } else {
-                        "Connect to edit this daemon's title prompt."
+                        "Connect to edit daemon, agent and prompt settings."
                     },
                     Rect::new(x, y, inner_w, 36. * s),
                     14. * s,
@@ -3808,15 +3850,266 @@ impl App {
             );
         }
     }
+    fn apply_setting_field(&mut self) -> Result<()> {
+        if let (Some(draft), Some(modal)) = (&mut self.daemon_draft, &self.modal) {
+            if let Some((_, editor, _)) = modal.fields.first() {
+                draft.apply(&editor.value)?;
+            }
+        }
+        Ok(())
+    }
+    fn load_setting_field(&mut self) -> Result<()> {
+        use crate::daemon_settings::Kind;
+        if let (Some(draft), Some(modal)) = (&mut self.daemon_draft, &mut self.modal) {
+            let text = draft.text()?;
+            let definition = draft.definition();
+            let editor = if matches!(
+                definition.kind,
+                Kind::Line | Kind::Number | Kind::Bool | Kind::Model
+            ) {
+                Editor::line(text)
+            } else {
+                Editor::new(text)
+            };
+            modal.fields = vec![(definition.name.into(), editor, false)];
+        }
+        self.focus = None;
+        Ok(())
+    }
+    fn daemon_settings_frame(&mut self, layer: &mut Layer, b: Rect) {
+        use crate::daemon_settings::{Kind, SECTIONS, fields};
+        let s = self.scale;
+        self.hits.clear();
+        layer.rect(b, color(0x0e141b));
+        let w = (b.width - 32. * s).min(900. * s).max(1.);
+        let x = b.x + (b.width - w) / 2.;
+        let top = b.y + 12. * s;
+        let footer = b.y + b.height - 52. * s;
+        let title = self
+            .daemon_draft
+            .as_ref()
+            .map(|d| format!("Daemon settings · revision {}", d.revision))
+            .unwrap_or_else(|| "Daemon settings".into());
+        self.renderer.label(
+            layer,
+            &title,
+            Rect::new(x, top, w, 28. * s),
+            20. * s,
+            color(0xe5eaf0),
+            true,
+        );
+        let busy = self.saving_settings.is_some();
+        if let Some(draft) = &self.daemon_draft {
+            let columns = if w / s >= 600. { 6 } else { 3 };
+            let tab_w = (w - 8. * s * (columns - 1) as f32) / columns as f32;
+            let mut y = top + 36. * s;
+            for (i, label) in SECTIONS.iter().enumerate() {
+                let r = Rect::new(
+                    x + (i % columns) as f32 * (tab_w + 8. * s),
+                    y + (i / columns) as f32 * 36. * s,
+                    tab_w,
+                    30. * s,
+                );
+                button(
+                    &mut self.renderer,
+                    layer,
+                    &mut self.hits,
+                    r,
+                    label,
+                    Action::SettingsSection(i),
+                    s,
+                    i == draft.section,
+                );
+            }
+            y += SECTIONS.len().div_ceil(columns) as f32 * 36. * s + 8. * s;
+            let definition = draft.definition();
+            let count = fields(draft.section).len();
+            if count > 1 {
+                button(
+                    &mut self.renderer,
+                    layer,
+                    &mut self.hits,
+                    Rect::new(x, y, 36. * s, 32. * s),
+                    "‹",
+                    Action::SettingsField(false),
+                    s,
+                    false,
+                );
+                button(
+                    &mut self.renderer,
+                    layer,
+                    &mut self.hits,
+                    Rect::new(x + w - 36. * s, y, 36. * s, 32. * s),
+                    "›",
+                    Action::SettingsField(true),
+                    s,
+                    false,
+                );
+            }
+            self.renderer.label(
+                layer,
+                &format!(
+                    "{}{}",
+                    definition.name,
+                    if count > 1 {
+                        format!("  ({}/{count})", draft.field + 1)
+                    } else {
+                        String::new()
+                    }
+                ),
+                Rect::new(
+                    x + if count > 1 { 44. * s } else { 0. },
+                    y,
+                    w - if count > 1 { 88. * s } else { 0. },
+                    32. * s,
+                ),
+                15. * s,
+                color(0xe5eaf0),
+                true,
+            );
+            y += 40. * s;
+            let help_h = if b.height / s < 480. { 32. } else { 58. } * s;
+            self.renderer.label(
+                layer,
+                definition.help,
+                Rect::new(x, y, w, help_h),
+                12. * s,
+                color(0xb7c2ce),
+                false,
+            );
+            y += help_h + 8. * s;
+            let modal = self.modal.as_ref().unwrap();
+            if let Some((_, editor, _)) = modal.fields.first() {
+                if definition.kind == Kind::Bool {
+                    button(
+                        &mut self.renderer,
+                        layer,
+                        &mut self.hits,
+                        Rect::new(x, y, w, 42. * s),
+                        if editor.value == "true" {
+                            "✓ Enabled — tap to disable"
+                        } else {
+                            "Disabled — tap to enable"
+                        },
+                        Action::SettingToggle,
+                        s,
+                        editor.value == "true",
+                    );
+                } else {
+                    let readonly = definition.kind == Kind::Nullable && draft.builtin;
+                    if definition.kind == Kind::Nullable {
+                        button(
+                            &mut self.renderer,
+                            layer,
+                            &mut self.hits,
+                            Rect::new(x, y, w, 32. * s),
+                            if draft.builtin {
+                                "✓ Built-in default — switch to custom"
+                            } else {
+                                "Custom replacement — switch to built-in"
+                            },
+                            Action::SettingToggle,
+                            s,
+                            draft.builtin,
+                        );
+                        y += 40. * s;
+                    }
+                    let available = (footer - 88. * s - y).max(1.);
+                    let h = if editor.single_line {
+                        available.min(48. * s)
+                    } else {
+                        available
+                    };
+                    let rect = Rect::new(x, y, w, h);
+                    editor.draw(
+                        &mut self.renderer,
+                        layer,
+                        rect,
+                        15. * s,
+                        !readonly && self.focus == Some(Some(0)),
+                        false,
+                        "",
+                        true,
+                    );
+                    if !readonly {
+                        self.hits.push(Hit {
+                            rect,
+                            action: Action::Focus(Some(0)),
+                        });
+                    }
+                }
+            }
+            button(
+                &mut self.renderer,
+                layer,
+                &mut self.hits,
+                Rect::new(x, footer - 80. * s, 120. * s, 28. * s),
+                "Reset field",
+                Action::SettingReset,
+                s,
+                false,
+            );
+            self.renderer.label(
+                layer,
+                "Edits are staged until Save. Reload discards them.",
+                Rect::new(
+                    x + 132. * s,
+                    footer - 78. * s,
+                    (w - 132. * s).max(1.),
+                    28. * s,
+                ),
+                11. * s,
+                color(0x82909f),
+                false,
+            );
+        } else {
+            self.renderer.label(
+                layer,
+                if self.waiting_settings {
+                    "Loading the daemon's settings…"
+                } else {
+                    "Connect and reload to edit settings."
+                },
+                Rect::new(x, top + 60. * s, w, 60. * s),
+                15. * s,
+                color(0xb7c2ce),
+                false,
+            );
+        }
+        self.renderer.label(layer,self.controller.notice.as_deref().unwrap_or(if busy {"Saving…"} else {"Credentials remain private on the daemon. Conflicts never overwrite newer settings."}),Rect::new(x,footer-42.*s,w,36.*s),12.*s,color(if self.controller.notice.as_deref() == Some("Settings saved") {0x67d4ff} else if self.controller.notice.is_some() {0xffb4ab} else {0x82909f}),false);
+        if busy {
+            self.hits.clear();
+        }
+        let bw = (w - 16. * s) / 3.;
+        for (i, (label, action)) in [
+            (if busy { "Saving…" } else { "Save" }, Action::Confirm),
+            ("Reload", Action::DaemonSettings),
+            ("Close", Action::CancelModal),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if busy && i < 2 {
+                continue;
+            }
+            button(
+                &mut self.renderer,
+                layer,
+                &mut self.hits,
+                Rect::new(x + i as f32 * (bw + 8. * s), footer, bw, 40. * s),
+                label,
+                action,
+                s,
+                i == 0,
+            );
+        }
+    }
     fn modal_frame(&mut self, layer: &mut Layer, b: Rect) {
         let s = self.scale;
         self.hits.clear();
         layer.rect(b, sanscale::Color([0., 0., 0., 0.8]));
         let modal = self.modal.as_ref().unwrap();
-        let long = matches!(
-            modal.kind,
-            ModalKind::TitlePrompt | ModalKind::QueueEdit(..) | ModalKind::Extension(..)
-        );
+        let long = matches!(modal.kind, ModalKind::QueueEdit(..));
         let field_h = if long { 180. } else { 60. };
         let width = (b.width - 24. * s).min(620. * s);
         let height = ((96.

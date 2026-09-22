@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 use tau_protocol::*;
@@ -20,10 +20,6 @@ pub struct Chat {
     pub commands: Vec<SlashCommand>,
     pub commands_loaded: bool,
     pub model_request: Option<(String, String)>,
-    pub statuses: BTreeMap<String, String>,
-    pub status_times: BTreeMap<String, Option<u64>>,
-    pub widgets: BTreeMap<String, Vec<String>>,
-    pub widget_times: BTreeMap<String, Option<u64>>,
 }
 pub struct Controller {
     pub store: Store,
@@ -33,8 +29,7 @@ pub struct Controller {
     pub model_preferences: crate::models::Preferences,
     pub chats: HashMap<String, Chat>,
     pub downloads: HashMap<String, Download>,
-    pub dialogs: Vec<(String, ExtensionUiRequest)>,
-    pub title_prompt: Option<(String, String)>,
+    pub settings_result: Option<(String, bool)>,
     pub daemon_settings: Option<(tau_protocol::settings::Settings, String)>,
     pub connection: String,
     pub health: crate::connection::Health,
@@ -58,8 +53,7 @@ impl Controller {
             model_preferences,
             chats: HashMap::new(),
             downloads: HashMap::new(),
-            dialogs: vec![],
-            title_prompt: None,
+            settings_result: None,
             daemon_settings: None,
             connection: "Not connected".into(),
             health: crate::connection::Health::default(),
@@ -94,9 +88,9 @@ impl Controller {
         self.model_preferences = self.store.get(&self.identity, "quick-models")?;
         self.chats.clear();
         self.downloads.clear();
-        self.dialogs.clear();
         self.requests.clear();
-        self.title_prompt = None;
+        self.daemon_settings = None;
+        self.settings_result = None;
         self.notice = None;
         if let Some(id) = self.account.selected.clone() {
             self.ensure_chat(&id)?;
@@ -121,10 +115,6 @@ impl Controller {
                     commands: vec![],
                     commands_loaded: false,
                     model_request: None,
-                    statuses: BTreeMap::new(),
-                    status_times: BTreeMap::new(),
-                    widgets: BTreeMap::new(),
-                    widget_times: BTreeMap::new(),
                 },
             );
         }
@@ -311,6 +301,9 @@ impl Controller {
     pub fn control(&mut self, command: ClientCommand) -> Result<()> {
         let epoch = self.epoch.ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let session = match &command {
+            ClientCommand::Prompt { session_id, text } if text.starts_with('/') => {
+                session_id.clone()
+            }
             ClientCommand::QueueControl { session_id, .. }
             | ClientCommand::Abort { session_id } => session_id.clone(),
             _ => anyhow::bail!("Not a durable control"),
@@ -327,7 +320,10 @@ impl Controller {
         local.pending.push(Pending {
             request: request.clone(),
             started_at_ms: crate::clock::now_ms(),
-            text: "Control requested".into(),
+            text: match &request.command {
+                ClientCommand::Prompt { text, .. } => text.clone(),
+                _ => "Control requested".into(),
+            },
             files: vec![],
             status: Delivery::Sending,
             detail: None,
@@ -414,7 +410,7 @@ impl Controller {
         let slug = crate::models::resolve(selector, &chat.commands)
             .ok_or_else(|| anyhow::anyhow!("That model is not offered by this daemon"))?
             .to_owned();
-        // /model already persists the last chosen model in the daemon/Pi.
+        // /model already persists the last chosen model in the daemon.
         // Send even when it matches this chat: another chat may have changed
         // the remembered default. Only an explicit tile click reaches here.
         // Preserve drafts/attachments and never replay after reconnect.
@@ -519,25 +515,6 @@ impl Controller {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not connected"))?
             .send(Command::CancelDownload(key.into()))
-    }
-    pub fn extension_response(
-        &mut self,
-        session: String,
-        request_id: String,
-        value: Option<String>,
-        confirmed: Option<bool>,
-        cancelled: bool,
-    ) -> Result<()> {
-        self.request(ClientCommand::ExtensionUiResponse {
-            session_id: session.clone(),
-            request_id: request_id.clone(),
-            value,
-            confirmed,
-            cancelled,
-        })?;
-        self.dialogs
-            .retain(|(s, r)| *s != session || r.id != request_id);
-        Ok(())
     }
     fn not_sent(&mut self, id: &str, detail: &str) -> Result<()> {
         for (session, chat) in &mut self.chats {
@@ -784,59 +761,14 @@ impl Controller {
                 chat.commands = commands;
                 chat.commands_loaded = true;
             }
-            ServerMessage::TitlePrompt {
-                prompt,
-                default_prompt,
+            ServerMessage::Settings {
+                settings,
+                default_system_prompt,
                 ..
-            } => self.title_prompt = Some((prompt, default_prompt)),
-            ServerMessage::Settings { settings, default_system_prompt, .. } => {
+            } => {
                 self.daemon_settings = Some((*settings, default_system_prompt));
             }
-            ServerMessage::ExtensionUi {
-                session_id,
-                request,
-            } => {
-                self.ensure_chat(&session_id)?;
-                let chat = self.chats.get_mut(&session_id).unwrap();
-                match request.method.as_str() {
-                    "notify" => self.notice = request.message.or(request.text),
-                    "setStatus" => {
-                        if let Some(key) = request.status_key {
-                            if let Some(text) = request.status_text {
-                                chat.status_times
-                                    .entry(key.clone())
-                                    .or_insert_with(crate::clock::now_ms);
-                                chat.statuses.insert(key, text);
-                            } else {
-                                chat.statuses.remove(&key);
-                                chat.status_times.remove(&key);
-                            }
-                        }
-                    }
-                    "setWidget" => {
-                        if let Some(key) = request.widget_key {
-                            if request.widget_lines.is_empty() {
-                                chat.widget_times.remove(&key);
-                            } else {
-                                chat.widget_times
-                                    .entry(key.clone())
-                                    .or_insert_with(crate::clock::now_ms);
-                            }
-                            chat.widgets.insert(key, request.widget_lines);
-                        }
-                    }
-                    "setEditorText" => {
-                        chat.local.draft = request.text.unwrap_or_default();
-                        self.save_chat(&session_id)?;
-                    }
-                    "select" | "confirm" | "input" | "editor" => {
-                        self.dialogs
-                            .retain(|(s, r)| *s != session_id || r.id != request.id);
-                        self.dialogs.push((session_id, *request));
-                    }
-                    _ => {}
-                }
-            }
+            ServerMessage::Notice { message, .. } => self.notice = Some(message),
             ServerMessage::ResyncRequired { session_id } => {
                 if self.epoch.is_some() {
                     if let Some(id) = session_id {
@@ -906,6 +838,12 @@ impl Controller {
                     }
                 }
                 let command = self.requests.remove(&request_id);
+                if matches!(
+                    command,
+                    Some(ClientCommand::SetSettings { .. } | ClientCommand::GetSettings)
+                ) {
+                    self.settings_result = Some((request_id.clone(), ok && !uncertain));
+                }
                 if model_changed {
                     self.request(ClientCommand::ListSessions)?;
                 }

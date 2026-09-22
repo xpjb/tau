@@ -35,6 +35,7 @@ pub struct StoredSession {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Receipt {
     pub id: String,
+    #[serde(default)] pub command: Option<String>,
     pub text: String,
     pub disposition: PromptDisposition,
     pub finished: bool,
@@ -142,7 +143,7 @@ impl StateStore {
             if session.revision != revision { bail!("Session changed in another writer; close and reopen it"); }
             if let Some(receipt) = receipt {
                 tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,receipt.id,serde_json::to_string(&receipt)?])?;
-                session.starter = false;
+                if !matches!(receipt.disposition, PromptDisposition::Handled) { session.starter = false; }
             }
             if let Some(mut queue) = queue {
                 if queue.requests.len() > 256 || queue.requests.iter().map(|r| r.text.len()).sum::<usize>() > 4 * 1024 * 1024 { bail!("Pending queue exceeds its limit"); }
@@ -334,7 +335,7 @@ impl StateStore {
                         tx.execute("INSERT INTO events(session_id,position,id,entry_id,data) VALUES(?1,?2,?3,?4,?5)",params![id,event.order,event.id,event.entry_id,serde_json::to_string(&event)?])?;
                     }
                     if entry["message"]["role"] == "user" && let Some(request) = entry["origin"]["requestId"].as_str() {
-                        let receipt = Receipt { id:request.into(),text:entry["message"]["content"].as_str().unwrap_or_default().into(),disposition:PromptDisposition::Submitted,finished:true,notice:None,error:None };
+                        let receipt = Receipt { id:request.into(),command:None,text:entry["message"]["content"].as_str().unwrap_or_default().into(),disposition:PromptDisposition::Submitted,finished:true,notice:None,error:None };
                         tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
                     }
                 }
@@ -342,6 +343,18 @@ impl StateStore {
             }
             tx.commit()?; Ok(sessions.len())
         }).await
+    }
+    /// Portable conversation export, not a backup of pending jobs or receipts.
+    pub async fn export_history(&self, id: &str, destination: &std::path::Path) -> Result<()> {
+        let id=id.to_owned();
+        let bytes=self.access(move |db| {
+            let tx=db.transaction()?;
+            let session:String=tx.query_row("SELECT data FROM sessions WHERE id=?1",[&id],|row|row.get(0)).context("Unknown session")?;
+            let mut query=tx.prepare("SELECT data FROM entries WHERE session_id=?1 ORDER BY position")?;
+            let entries=query.query_map([&id],|row|row.get::<_,String>(0))?.map(|raw|Ok(serde_json::from_str::<Value>(&raw?)?)).collect::<Result<Vec<_>>>()?;
+            Ok(serde_json::to_vec_pretty(&json!({"format":"tau-history","version":1,"sessionId":id,"session":serde_json::from_str::<Value>(&session)?,"entries":entries}))?)
+        }).await?;
+        crate::settings::atomic_write(destination,&bytes).await
     }
     pub async fn flag(&self, id: &str, text: &str) -> Result<Flag> {
         use tokio::io::AsyncWriteExt;

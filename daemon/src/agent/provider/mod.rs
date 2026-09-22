@@ -171,7 +171,7 @@ impl<'a> Stream<'a> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Mode { Chat, Compact, Search, Summary }
+pub enum Mode { Chat, Compact, Search, Summary, Image }
 pub struct GeneratedImage { pub bytes: Vec<u8> }
 pub struct Completion { pub message: Value, pub tokens: Option<u64>, pub account: Option<String>, pub limited: bool, pub images: Vec<GeneratedImage> }
 
@@ -195,7 +195,8 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
         other => Some(other.into()),
     });
     let idle = Duration::from_secs(settings.agent.http_idle_timeout_seconds);
-    let attempts = if settings.agent.retry.enabled { settings.agent.retry.max_retries } else { 0 };
+    // An image-only request may be billed even if its response headers are lost.
+    let attempts = if mode != Mode::Image && settings.agent.retry.enabled { settings.agent.retry.max_retries } else { 0 };
     let mut rejected = None;
     let mut refreshed = false;
     let mut attempt = 0;
@@ -203,7 +204,7 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
         let (key, account) = auth.authorization(&selected.provider, provider.api_key_env.as_deref(), rejected.as_deref()).await?;
         let (route, mut body) = match provider.api {
             Api::ChatCompletions => {
-                if mode == Mode::Compact { bail!("Native compaction requires Codex"); }
+                if matches!(mode,Mode::Compact | Mode::Image) { bail!("Native compaction/image generation requires Codex"); }
                 let mut tools = definitions.iter().map(|tool| json!({"type":"function", "function":tool})).collect::<Vec<_>>();
                 if mode != Mode::Summary && provider.web_search && selected.provider == "openrouter" {
                     tools.push(json!({"type":"openrouter:web_search", "parameters":{"engine":"exa", "max_results":5}}));
@@ -252,10 +253,10 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
                 }
                 if mode == Mode::Compact { input.push(json!({"type":"compaction_trigger"})); }
                 let mut tools = definitions.iter().map(|tool| { let mut tool = tool.clone(); tool["type"] = json!("function"); tool["strict"] = json!(false); tool }).collect::<Vec<_>>();
-                if mode != Mode::Summary && provider.web_search { tools.push(json!({"type":"web_search", "search_context_size":"medium"})); }
-                if mode == Mode::Chat { tools.push(json!({"type":"image_generation", "model":"gpt-image-2", "output_format":"png"})); }
+                if matches!(mode,Mode::Chat | Mode::Search) && provider.web_search { tools.push(json!({"type":"web_search", "search_context_size":"medium"})); }
+                if matches!(mode,Mode::Chat | Mode::Image) { tools.push(json!({"type":"image_generation", "model":"gpt-image-2", "output_format":"png"})); }
                 let mut body = json!({"model":model.id, "store":false, "stream":true, "instructions":instructions.join("\n\n"), "input":input,
-                    "tools":tools, "tool_choice":if mode == Mode::Search { json!({"type":"web_search"}) } else { json!("auto") },
+                    "tools":tools, "tool_choice":if mode == Mode::Search { json!({"type":"web_search"}) } else if mode == Mode::Image { json!({"type":"image_generation"}) } else { json!("auto") },
                     "parallel_tool_calls":true, "include":["reasoning.encrypted_content"], "prompt_cache_key":session_id, "text":{"verbosity":"low"}});
                 if let Some(effort) = &effort { body["reasoning"] = json!({"effort":effort, "summary":"auto"}); }
                 if settings.agent.fast_mode { body["service_tier"] = json!("priority"); }
@@ -313,7 +314,7 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
             let id = call["id"].as_str().filter(|id| !id.is_empty()).context("Tool call has no ID")?;
             if !ids.insert(id) || call["function"]["name"].as_str().is_none() || call["function"]["arguments"].as_str().is_none() { bail!("Invalid tool calls"); }
         }
-        if mode != Mode::Chat && !stream.images.is_empty() { bail!("Unexpected image generation outside a chat response"); }
+        if !matches!(mode,Mode::Chat | Mode::Image) && !stream.images.is_empty() { bail!("Unexpected image generation outside a chat response"); }
         return Ok(Completion { message, tokens: stream.usage.as_ref().and_then(|usage| usage["total_tokens"].as_u64()), account, limited:stream.finish_reason.as_deref() == Some("length"), images:stream.images });
     }
 }

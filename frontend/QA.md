@@ -1,16 +1,49 @@
-# Streaming section QA — release on hold
+# 0.7.0 integrated beta acceptance
 
-Unreleased work after `eacaab4` / the shipped 0.6.3 packages. User resumed
-streaming notes; no new packaging, version bump or artifact delivery until their
-next signal. Continue keeping build/test/verification resource use low.
+The user explicitly authorized native integration, cleanup, remote `tau2`, a separate
+beta daemon port and Windows/Android builds. Earlier release holds below are history,
+not the current authorization. Stable service/data/routes remain separate.
+
+## Current evidence
+
+- Managed workspace all-target check passed; nextest **49/49 passed**, one Cargo job,
+  wrapper-limited test concurrency. No new trivial UI/API-wrapper tests.
+- Real frontend controller/transport ↔ native daemon ↔ gated local provider, tools,
+  SQLite, upload/transfer, settings CAS, history/fork and restart acceptance passed.
+- SIGKILL/WAL recovery preserves queue edits/deletes/control receipts and does not
+  automatically repeat interrupted tools or billed compaction. Native title and
+  cross-provider image/reference/export paths have deterministic provider coverage.
+- Real desktop GPU render exercised the per-corner WGSL pipeline successfully.
+- A private Xvfb/native-client/native-daemon run edited the actual settings UI:
+  built-in/null → custom intentionally empty prompt saved correctly; another native
+  client advanced the document revision; the stale UI save was rejected without
+  overwriting the newer document. Desktop and narrow settings layouts were captured.
+  That review caught and fixed a duplicate global notice overlay in this modal.
+- All fixture processes were this task's own and were stopped. No production history
+  was imported or changed; no paid provider completion was used for these checks.
+- Release packaging/deployment evidence is recorded in `INTEGRATION.md` and
+  `PACKAGING.md`, not inferred from debug binaries.
+
+## Device acceptance still required
+
+Physical Windows/DirectX/DPI and Android touch/IME/font acceptance remain device QA;
+Linux/Vulkan or previous Wine checks do not establish those. In particular exercise
+clipped hover/long-press boundaries, DST formatting, clipboard selection, scroll
+anchors on older pages, cache proxy labels, model tile scrolling/landscape, rapid
+send during model selection, and drafts/files across connection loss. Real provider
+completions were not billed just to claim a live smoke test.
+
+New native sections persist their first observation timestamps. Imported historical
+Pi sections retain the timestamps actually available; no historical sub-block times
+are fabricated. The variable-font/synthetic-style limitation recorded below remains.
 
 ## Implemented
 
 - Independent top timestamps on each logical bubble, including Details, text,
-  pending/queued sends and extension sections. Local time, date + seconds, using
+  pending/queued sends and native sections. Local time, date + seconds, using
   source event milliseconds/RFC3339 (first contributing event for Details).
   Local pending creation times are saved once; old local records remain readable.
-  Extension section times stay fixed while their content changes. Missing source
+  Section times stay fixed while their content changes. Missing source
   time says “Time unavailable”; history is never dated with its arrival/render time.
 - Same-sender neighbors touch with a faint inset divider, instead of a 12dp gap.
   Only the outside of the visual group is rounded; logical IDs, disclosure state,
@@ -62,9 +95,8 @@ next signal. Continue keeping build/test/verification resource use low.
   requests, probes or render timer. Minute-sized rings use bounded, distinct
   texture variants and clip to the list. The one-hour assumption is **not** a
   confirmed OpenAI/ChatGPT/OpenRouter cache lifetime.
-- Removed the mistaken daemon/protocol worker-TTL additions completely; the
-  existing daemon is sufficient. The unrelated worker-sleep retry flag remains
-  a separate backend follow-up, not a requirement for these rings.
+- No worker-TTL protocol was added. Native runtime idle eviction is independent;
+  it releases idle runtimes with paused work without losing the durable queue.
 - Untouched starter chats expose responsive, scrollable model tiles until the
   first pending/queued/actual conversation turn. Draft text/files are preserved.
   Settings → Quick model selection edits only the per-account tile list, searches
@@ -80,39 +112,6 @@ next signal. Continue keeping build/test/verification resource use low.
   Only unambiguous real built-in catalog entries can be sent; missing choices are
   disabled. Editing/resetting the tile list alone never changes the selected model.
 
-## Checks / limits
-
-Managed `cargo check --locked -p tau-frontend --lib` passed with one Cargo job;
-formatting/diff checks passed. No GUI/emulator session, release build, full suite
-or new trivial API test was started. Per-corner WGSL pipeline/rendering, hover at
-clipped group ends, timestamps/DST, clipboard boundaries and scroll anchoring still
-need device acceptance before delivery. Connection hover/tap, timeout/reconnect
-and RTT display also await device acceptance; the incremental library check for
-this change took 1.28s (one managed Cargo job). Header/context-menu library check
-also passed (0.78s); GUI/touch acceptance remains deferred.
-The earlier TTL/model iteration passed frontend and daemon library checks
-(1.18s / 8.00s, then 0.71s frontend); its worker-TTL backend wiring is now removed.
-One Cargo attempt exited 75 (shared build busy); work continued on source rather
-than contending. The corrected frontend passed a managed single-job library check
-(1.64s; final check 0.67s). No full suites, GUI/emulators, release binaries or new
-trivial API tests.
-
-**Before delivery:** verify header centering and right-click/long-press targets;
-cache-ring aging across worker state changes, reconnect, offline, old history and
-missing timestamps; proxy-vs-reply tooltip labels; model tile scrolling/settings on
-narrow/landscape screens; last-chosen model reuse, unchanged choice after editing
-presets, preserved drafts/files, rapid send during selection, no replay after
-connection loss, and hiding after first turn. Model availability must come from
-the user's daemon catalog, not be assumed from preset text.
-
-No daemon deployment, protocol change, version bump or package delivery is needed
-for this correction or was performed. Releases remain on hold.
-
-**Timing source limitation (user accepted; deferred to backend integration):** Pi/daemon currently clones an entry/message timestamp
-onto its content blocks. Details and text within that same entry can therefore
-show the same source time; exact distinct historical block-start times need
-upstream capture/persistence. Do not claim those times were reconstructed or
-fabricate them from receipt time. Follow-up: `d9fa2e39-2f9f-4ce8-a55e-e91a27b6b0d3`.
 
 ---
 

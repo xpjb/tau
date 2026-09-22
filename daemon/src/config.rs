@@ -11,12 +11,13 @@ pub struct Config {
     pub token: Arc<str>,
     pub settings_path: PathBuf,
     pub import_pi_dir: Option<PathBuf>,
+    /// Optional read-only Codex credential source for side-by-side operation.
+    pub codex_auth_source: Option<PathBuf>,
     pub cwd: PathBuf,
     pub database_path: PathBuf,
     pub telemetry_path: PathBuf,
     pub attachment_root: PathBuf,
     pub upload_root: PathBuf,
-    pub title_command: Option<String>,
 }
 
 impl Config {
@@ -44,6 +45,7 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| "/var/lib/tau/settings.json".into());
         let import_pi_dir = std::env::var_os("TAU_IMPORT_PI_DIR").map(PathBuf::from);
+        let codex_auth_source = std::env::var_os("TAU_CODEX_AUTH_SOURCE").map(PathBuf::from);
         let cwd = std::env::var_os("TAU_CWD")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root".into());
@@ -59,13 +61,13 @@ impl Config {
         let upload_root = std::env::var_os("TAU_UPLOAD_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root/.local/share/tau/uploads".into());
-        let title_command = std::env::var("TAU_TITLE_COMMAND").ok().filter(|c| !c.is_empty());
 
         if !cwd.is_absolute()
             || !database_path.is_absolute()
             || !telemetry_path.is_absolute()
             || !settings_path.is_absolute()
             || import_pi_dir.as_ref().is_some_and(|path| !path.is_absolute())
+            || codex_auth_source.as_ref().is_some_and(|path| !path.is_absolute())
             || !attachment_root.is_absolute()
             || !upload_root.is_absolute()
         {
@@ -78,12 +80,12 @@ impl Config {
             token: Arc::from(token),
             settings_path,
             import_pi_dir,
+            codex_auth_source,
             cwd,
             database_path,
             telemetry_path,
             attachment_root,
             upload_root,
-            title_command,
         })
     }
 }

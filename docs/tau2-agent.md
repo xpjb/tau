@@ -1,25 +1,28 @@
 # Tau 2 integrated agent
 
-Branch: `tau2/integrated-agent`. This is a backend branch, not a deployment.
+Integrated release branch: `tau2`. The completed SQLite backend originated at
+`cddb8b7` on `tau2/integrated-agent`; this release uses that single implementation.
 
 ## Ownership
 
 `taud` owns acceptance, the durable queue, model HTTP streams, tools, history,
 compaction and cancellation. No Node/Pi worker, pipes, worker capability HTTP
 endpoint, RPC correlation, second transcript sequence, or process recovery.
-The optional existing title helper remains separate from the conversation agent;
-it runs **after** prompt acknowledgement.
+Titles are native and run after prompt acknowledgement. The default uses the first
+nonempty prompt line without a provider call. Optional `daemon.generateTitles`
+uses a bounded, no-tools native request with `titlePrompt`, falls back on failure,
+and cannot overwrite a later manual rename. There is no external title helper.
 
 The conversation tools run with the daemon's OS permissions, just as Pi did.
 This is not a sandbox. Keep the daemon behind authenticated access.
 
-## Frontend merge contract
+## Shared native protocol
 
-Protocol **11** keeps flat transcript, paging, session, upload and attachment
+Protocol **12** keeps flat transcript, paging, session, upload and attachment
 shapes. The transfer crate and iroh routes are unchanged.
 
 - `prompt` success means its queue item, receipt and session metadata have committed to SQLite. It does not
-  wait for a provider or title helper. `uncertain` is always false. A lost network
+  wait for a provider or title generation. `uncertain` is always false. A lost network
   response is still possible: reopen with request IDs, or resend the **same ID
   and original text**. Duplicate acceptance never executes a second turn.
 - Pending requests, revisions and deleted-request receipts survive restart.
@@ -34,32 +37,27 @@ shapes. The transfer crate and iroh routes are unchanged.
 - Only `turn` is advertised as a queue boundary. Pause and prefix requests check
   the run ID; edits/deletes check revisions. No reasoning-checkpoint emulation.
 - The daemon does not emit `starting` or interactive Pi extension dialogs.
-  `starting` and `extension_error` are removed; old dialog responses receive an explicit error.
+  Extension request/response types and title-only settings aliases are removed.
+  Native flag notifications use `notice`, not a fake extension dialog.
 - `get_settings {id}` returns `settings {requestId, settings,
   defaultSystemPrompt}`, then the usual success response.
 - `set_settings {id, revision, settings}` replaces the complete document with a
   compare-and-swap revision check. It returns the new document. Reload on conflict;
   do not silently overwrite another client's changes.
-- `get_title_prompt`/`set_title_prompt` remain aliases into the same daemon section.
-  The new frontend should use the unified settings API.
+- Queue controls and abort commit their own durable receipts. Duplicate receipt
+  lookup precedes stale generation checks; replaying an old abort cannot cancel a
+  newer run. Aborts cancel promptly but acknowledge success only after persistence.
 
-Frontend settings menu: a **Daemon** section for title prompt and idle timeout;
-an **Agent** section for model, thinking, queue mode, priority service, retry,
-compaction, shell and output limits; a multiline **System prompt** editor with
-an explicit “use default” (`null`) action and a separate append editor; and
-project-path overrides with the same two editors. Empty strings are intentional,
-not reset-to-default. Expose model/thinking/compact/fast as convenient chat menu
-commands as well. Provider URLs and model catalog belong in an advanced section.
-Settings contain no keys or tokens.
+The Rust settings UI has Daemon, Agent, System, Projects, Providers and Models
+sections. It edits one complete CAS document, preserves edits on conflict, distinguishes
+built-in/null from intentionally empty prompts, and has staged per-field reset.
+Advanced maps/catalogs use JSON editors. Secrets are never sent to the frontend.
+Chat context actions expose native model/thinking/compact/priority commands and keep
+their target chat ID. Shared settings/DTOs live in `tau-protocol`; filesystem loading,
+validation and prompt composition remain daemon-only through `SettingsExt`.
 
-The frontend branch extracts `tau-protocol`. At merge, move Settings and its
-nested wire structs into that crate along with the new protocol variants.
-Keep filesystem loading, validation and prompt composition in the daemon (free
-functions or an extension trait after moving the structs). Keep
-its transfer changes. Keep this branch's native manager and removal of Pi source
-positions. Do not reintroduce a second event sequence to resolve the conflict.
-The native fixture uses `Config.database_path`, not `state_path` / `session_dir`;
-the frontend's old Pi-based fixture must still be replaced at merge.
+The real frontend integration fixture uses the native daemon, local provider, tools,
+SQLite, uploads and restart—not Pi or a hand-written substitute WebSocket server.
 
 ### Backend follow-ups from frontend notes
 
@@ -89,7 +87,11 @@ field is added.
   refreshed in-process, serialized across all chats. With the daemon stopped,
   `TAU_SETTINGS_PATH=/path/settings.json taud --login-codex` signs in without Pi
   using the Codex device-code flow. API-key environment variable
-  names are configured per provider.
+  names are configured per provider. For side-by-side beta operation,
+  `TAU_CODEX_AUTH_SOURCE` optionally reads a primary auth file without copying,
+  refreshing or writing it. Beta's own Codex record takes precedence. An expired or
+  rejected shared token reports that its primary owner must refresh, or that beta
+  needs its own login; it never races the primary refresh credential.
 - `TAU_DATABASE_PATH`: `/var/lib/tau/tau.sqlite3` by default. SQLite schema 1,
   WAL, `synchronous=FULL`, foreign keys enabled. The database is private (0600).
   It replaces both native `state.json` and per-chat JSONL files. Old
@@ -115,9 +117,9 @@ For existing **Tau 1/Pi** data only, there is an explicit offline import:
    transaction. Original files, including malformed/torn lines, are never modified.
    Malformed legacy lines are skipped; abandoned Pi branches remain only in the
    untouched originals. Pending Pi worker commands are not imported.
-4. Remove the one-time import environment variable before normal startup. The
-   installer requires `TAU2_INSTALL_CONFIRMED=yes` when old state is present, so it
-   cannot silently replace a working Tau 1 installation.
+4. Remove the one-time import environment variable before normal startup.
+   `scripts/install-daemon.sh` installs only the separate beta unit/data/ports;
+   it cannot silently replace the stable Tau 1 executable or service.
 
 Only when settings do not yet exist, `TAU_IMPORT_PI_DIR` imports the provider/model
 catalog, selected model, thinking defaults, steering, compaction/retry, shell
@@ -135,7 +137,9 @@ to new chats. `/model` and `/thinking` change a stopped chat explicitly.
 Codex Responses SSE and OpenAI-compatible Chat Completions (including OpenRouter).
 Supports streamed text/reasoning/tools, encrypted Codex replay, bounded responses,
 HTTP retry before output, OAuth renewal, native Codex checkpoints, and text
-summaries for other providers. No third-party JavaScript extension loader, TUI,
+summaries for other providers. Non-Codex chats can use the native `generate_image`
+bridge when an actual Codex model is configured, without changing their active or
+default model. No third-party JavaScript extension loader, TUI,
 provider WebSocket transport, Anthropic adapter, npm packages, or Pi skill/prompt
 catalog discovery. Unported terminal commands are rejected, not acknowledged as
 if they ran. Current Tau media and flag tools are native; flags write directly to
@@ -172,6 +176,15 @@ regeneration. Compaction includes references in the compacted context; it is not
 an archival image index. Staged files remain separate from chat history and may
 outlive a chat; automatic outbox garbage collection is not implemented.
 
+For the cross-provider `generate_image` tool, prompts are bounded, optional local
+reference inputs are limited to four PNG/JPEG/WebP files of at most 10 MB each,
+and the forced Codex image-only turn must produce exactly one complete image with
+no function calls. It shares native validation, staging and reference replay; a
+started response is not automatically retried. Image-only requests also disable
+pre-header HTTP retries because billing may already have happened; delivery failure
+explicitly asks for user approval before another generation. This replaces master's TypeScript
+image-generation path, including its later hardening, rather than retaining it.
+
 ### SQLite session storage
 
 One database owns sessions, immutable history entries, saved display events,
@@ -202,6 +215,11 @@ lose only the parent link. External tool effects and attachment files are not
 transactional with SQLite: interrupted tools still get explicit unknown-effects
 recovery, never automatic re-execution.
 
+`taud --export-session ID PATH` writes a private, consistent `tau-history` version-1
+JSON snapshot containing metadata/entries and private replay fields, but no pending
+work, receipts, auth or duplicated generated-image bytes. It is a portable history
+export, not a complete operational backup.
+
 Back up with SQLite's backup API / `.backup`, or stop the daemon before copying
 data. Do not copy only a running database's main file and omit its WAL. Back up
 settings, auth and attachment/upload files separately as well.
@@ -212,12 +230,12 @@ or send paid model requests. Live-provider acceptance remains a release check.
 
 ## Validation on this branch
 
-- `cargo nextest run --workspace`: 16 tests, including eight native end-to-end
-  scenarios and the existing transfer tests. Provider fixtures split SSE into
+- Managed `cargo nextest run --locked --workspace`: **49/49 passed** across native
+  daemon, shared protocol, frontend, Markdown and transfer binaries. Provider fixtures split SSE into
   small byte fragments; the framer also checks every possible byte split.
 - Real WebSocket coverage includes injected transaction failures before acceptance,
   duplicate IDs, queue edits/deletes/pause/prefix/cancel/resume and stale revisions,
-  settings conflicts, delayed titles, reconnect, fork/clone, paused-work idle eviction
+  settings conflicts, native titles, reconnect, fork/clone, paused-work idle eviction
   and restart recovery. A gated stream checks distinct section timestamps and their
   persistence through compaction/reopening.
 - SQLite coverage includes rollback after receipt insertion / queue removal / fork
@@ -232,10 +250,14 @@ or send paid model requests. Live-provider acceptance remains a release check.
 - Codex fixtures cover encrypted reasoning replay, native compaction and retained
   history, plus generated image download/restart/fork/reference replay and failure/size limits,
   without exposing image bytes or encrypted/private provider payloads in client events.
-- `cargo clippy -p taud --all-targets -- -D warnings` and shell syntax/diff checks.
+- Native cross-provider image delivery/export preserves the current/default model;
+  shared-auth tests read rotations without refreshing or rewriting the primary.
+- Workspace all-target check and shell syntax/diff checks; storage branch also ran
+  `cargo clippy -p taud --all-targets -- -D warnings` before integration.
 
-The actual Codex/OpenRouter services and interactive device login were **not**
-called in testing. Their live acceptance, the shared-protocol merge and the Rust
-settings/menu UI remain release/integration work. An account/endpoint mismatch
+Provider fixtures do not call paid Codex/OpenRouter completions. Beta device login
+is an explicit deployment step, not a mocked test. Shared-protocol integration and
+native settings/menu UI are implemented; the real GPU/settings path has been
+exercised locally. Physical Windows/Android acceptance remains device QA. An account/endpoint mismatch
 on an encrypted checkpoint fails explicitly; use the original account or fork
 before that checkpoint. There is no silent lossy fallback.

@@ -1,6 +1,0 @@
-[bindings.kotlin]
-package_name = "app.tau.transfer"
-cdylib_name = "tau_transfer"
-generate_immutable_records = true
-disable_java_cleaner = true
-kotlin_target_version = "2.4.10"

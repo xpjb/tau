@@ -3,11 +3,7 @@
 mod channel;
 fn main() {
     println!("cargo:rerun-if-env-changed=TAU_VERSION");
-    let icon = if cfg!(feature = "beta") {
-        "../../frontend/assets/tau-beta.ico"
-    } else {
-        "../../assets/tau.ico"
-    };
+    let icon = "../../frontend/assets/tau-beta.ico";
     println!("cargo:rerun-if-changed={icon}");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;

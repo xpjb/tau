@@ -3,17 +3,9 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-case "${1:-}" in
-    "") beta=false; features=(); channel=Tau; ;;
-    --beta) beta=true; features=(--features beta); channel=Tau-Beta; ;;
-    *) echo "Usage: $0 [--beta]" >&2; exit 1 ;;
-esac
-(( $# <= 1 )) || { echo "Usage: $0 [--beta]" >&2; exit 1; }
-if $beta; then
-    version=$(python3 -c 'import tomllib; print(tomllib.load(open("frontend/Cargo.toml", "rb"))["package"]["version"])')
-else
-    version=$(awk -F '"' '/^const val TauClientVersion = / { print $2 }' "$root/app/composeApp/src/commonMain/kotlin/app/tau/Platform.kt")
-fi
+[[ $# == 0 || $# == 1 && $1 == --beta ]] || { echo "Usage: $0 [--beta]" >&2; exit 1; }
+channel=Tau-Beta
+version=$(python3 -c 'import tomllib; print(tomllib.load(open("frontend/Cargo.toml", "rb"))["package"]["version"])')
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid application version" >&2; exit 1; }
 work="$root/target/windows-sfx-$channel-$version"
 bundle="$work/bundle"
@@ -24,23 +16,12 @@ mkdir -p "$root/dist"
 rm -rf "$work"
 mkdir -p "$bundle/app"
 
-if $beta; then
-    native_target=$(realpath -m "${CARGO_TARGET_DIR:-$root/target}")
-    cargo xwin build --locked --release --target x86_64-pc-windows-msvc --target-dir "$native_target" -p tau-frontend --bin tau
-    cp "$native_target/x86_64-pc-windows-msvc/release/tau.exe" "$bundle/app/Tau Beta.exe"
-    mkdir -p dist/tau-beta-windows-x64
-    rm -f dist/tau-beta-windows-x64/DejaVu-LICENSE.txt
-    cp "$bundle/app/"* dist/tau-beta-windows-x64/
-    TAU_VERSION="$version" cargo xwin build --locked --manifest-path "$root/windows/Cargo.toml" --release \
-        --target x86_64-pc-windows-msvc --target-dir "$windows_target" -p tau-launcher --features beta --bin tau-beta-launcher
-    launcher="$windows_target/x86_64-pc-windows-msvc/release/tau-beta-launcher.exe"
-else
-    "$root/app/gradlew" -p "$root/app" -PtauNativeTarget=windows :composeApp:prepareWindowsApp
-    cp -a "$root/app/composeApp/build/windows/app/lib" "$bundle/app/lib"
-    TAU_VERSION="$version" cargo xwin build --locked --manifest-path "$root/windows/Cargo.toml" --release \
-        --target x86_64-pc-windows-msvc --target-dir "$windows_target" -p tau-launcher --bin tau-launcher
-    launcher="$windows_target/x86_64-pc-windows-msvc/release/tau-launcher.exe"
-fi
+native_target=$(realpath -m "${CARGO_TARGET_DIR:-$root/target}")
+cargo xwin build --locked --release --target x86_64-pc-windows-msvc --target-dir "$native_target" -p tau-frontend --bin tau
+cp "$native_target/x86_64-pc-windows-msvc/release/tau.exe" "$bundle/app/Tau Beta.exe"
+TAU_VERSION="$version" cargo xwin build --locked --manifest-path "$root/windows/Cargo.toml" --release \
+    --target x86_64-pc-windows-msvc --target-dir "$windows_target" -p tau-launcher --bin tau-launcher
+launcher="$windows_target/x86_64-pc-windows-msvc/release/tau-launcher.exe"
 
 BUNDLE="$bundle" PAYLOAD="$payload" python3 -I - <<'PY'
 import lzma
@@ -82,7 +63,7 @@ cargo xwin build \
     --target-dir "$windows_target" \
     --release \
     --target x86_64-pc-windows-msvc \
-    -p tau-setup "${features[@]}"
+    -p tau-setup
 
 cp "$windows_target/x86_64-pc-windows-msvc/release/tau-setup.exe" "$output"
 sha256sum "$output" > "$output.sha256"

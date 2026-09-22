@@ -9,13 +9,15 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 const ISSUER: &str = "https://auth.openai.com";
 const CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 #[derive(Clone)]
-pub struct AuthStore { path: PathBuf, gate: Arc<Mutex<()>>, http: reqwest::Client }
+pub struct AuthStore { path: PathBuf, shared_codex:Option<PathBuf>, gate: Arc<Mutex<()>>, http: reqwest::Client }
 impl AuthStore {
-    pub fn new(path: PathBuf, http: reqwest::Client) -> Self { Self { path, gate:Arc::new(Mutex::new(())), http } }
-    async fn read(&self) -> Result<Value> {
+    pub fn new(path: PathBuf, http: reqwest::Client) -> Self { Self { path, shared_codex:None, gate:Arc::new(Mutex::new(())), http } }
+    pub fn shared_codex(mut self, path: Option<PathBuf>) -> Self { self.shared_codex=path; self }
+    async fn read(&self) -> Result<Value> { Self::read_path(&self.path).await }
+    async fn read_path(path: &std::path::Path) -> Result<Value> {
         let mut options = tokio::fs::OpenOptions::new(); options.read(true);
         #[cfg(unix)] options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let file = options.open(&self.path).await.context("No daemon credentials; use taud --login-codex, import Pi auth.json, or configure an API key environment variable")?;
+        let file = options.open(path).await.context("No daemon credentials; use taud --login-codex, import Pi auth.json, or configure an API key environment variable")?;
         let metadata = file.metadata().await?;
         if !metadata.is_file() { bail!("Credentials must be a regular file"); }
         #[cfg(unix)] {
@@ -32,8 +34,20 @@ impl AuthStore {
         // A cancelled model call must not interrupt a rotating refresh-token write.
         tokio::spawn(async move {
             let _guard = this.gate.lock().await;
-            let mut root = this.read().await?;
-            let record = root.get_mut(&provider).context("Provider has no daemon credentials")?;
+            let mut root = if this.path.try_exists()? { this.read().await? } else { json!({}) };
+            if provider == "openai-codex" && root.get(&provider).is_none() && let Some(source)=&this.shared_codex {
+                // Never rotate or copy the primary daemon's refresh token. Native
+                // beta login creates its own record and takes precedence here.
+                let shared=Self::read_path(source).await?;
+                let record=&shared[&provider];
+                if record["type"] != "oauth" { bail!("Shared Codex source has no OAuth credentials"); }
+                let access=record["access"].as_str().filter(|v|!v.is_empty()).context("Shared Codex source has no access token")?;
+                if record["expires"].as_u64().unwrap_or(0)<=super::now_ms().saturating_add(30_000) || rejected.as_deref() == Some(access) {
+                    bail!("Shared Codex access needs its primary owner's refresh. Retry after that refresh, or sign into this beta independently with taud --login-codex");
+                }
+                return Ok((access.to_owned(),Some(record["accountId"].as_str().filter(|v|!v.is_empty()).context("Shared Codex source has no account ID")?.into())));
+            }
+            let record = root.get_mut(&provider).context("Provider has no daemon credentials; use taud --login-codex or configure an API key")?;
             if record["type"] == "api_key" {
                 return Ok((record["key"].as_str().filter(|v| !v.is_empty()).context("API key is empty")?.to_owned(), None));
             }
@@ -101,4 +115,26 @@ fn credentials(value: &Value, previous_refresh: Option<&str>) -> Result<Value> {
     let account = claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id").and_then(Value::as_str).filter(|v| !v.is_empty()).context("Token has no account ID")?;
     Ok(json!({"type":"oauth", "access":access, "refresh":value["refresh_token"].as_str().or(previous_refresh).filter(|v| !v.is_empty()).context("OAuth returned no refresh token")?,
         "expires":super::now_ms().saturating_add(value["expires_in"].as_u64().filter(|v| *v > 0).context("OAuth returned no lifetime")?.saturating_mul(1000)), "accountId":account}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn side_by_side_auth_reads_rotations_but_never_rotates_or_rewrites_the_primary() {
+        let root=tempfile::tempdir().unwrap(); let primary=root.path().join("primary.json"); let own=root.path().join("beta.json");
+        let record=|access:&str,expiry:u64|json!({"openai-codex":{"type":"oauth","access":access,"refresh":"never-submit-this-refresh","accountId":"fixture-account","expires":expiry}}).to_string();
+        crate::settings::atomic_write(&primary,record("first",u64::MAX).as_bytes()).await.unwrap();
+        let auth=AuthStore::new(own.clone(),reqwest::Client::new()).shared_codex(Some(primary.clone()));
+        assert_eq!(auth.authorization("openai-codex",None,None).await.unwrap().0,"first");
+        crate::settings::atomic_write(&primary,record("rotated",u64::MAX).as_bytes()).await.unwrap();
+        assert_eq!(auth.authorization("openai-codex",None,Some("first")).await.unwrap().0,"rotated");
+        assert!(auth.authorization("openai-codex",None,Some("rotated")).await.is_err());
+        crate::settings::atomic_write(&primary,record("expired",0).as_bytes()).await.unwrap();
+        assert!(auth.authorization("openai-codex",None,None).await.is_err());
+        assert_eq!(tokio::fs::read_to_string(&primary).await.unwrap(),record("expired",0));
+        assert!(!own.exists(),"Reading a shared account must not copy its rotating refresh credential");
+        crate::settings::atomic_write(&own,record("independent-beta",u64::MAX).as_bytes()).await.unwrap();
+        assert_eq!(auth.authorization("openai-codex",None,None).await.unwrap().0,"independent-beta");
+    }
 }

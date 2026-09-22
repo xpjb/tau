@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
+use serde_json::json;
 use tokio::fs;
 use tokio::sync::{Mutex, broadcast};
 use tracing::warn;
@@ -53,7 +54,7 @@ impl AgentManager {
     pub async fn new(config: Config, state: StateStore) -> Result<Self> {
         let settings = SettingsStore::load(&config, crate::state::DEFAULT_TITLE_PROMPT.into()).await?;
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
-        let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone());
+        let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
         Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
             runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false) }) })
     }
@@ -70,10 +71,18 @@ impl AgentManager {
         if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
         let settings = self.inner.settings.get(); let model = settings.agent.model.clone();
         let thinking = settings.agent.model_thinking_levels.get(&format!("{}/{}",model.provider,model.model_id)).unwrap_or(&settings.agent.thinking_level).clone();
-        let id = self.inner.state.create(model,thinking,keep_session_id.map(str::to_owned)).await?;
-        let runtime = self.runtime(&id).await?; let _guard = runtime.operation.lock().await;
-        self.ensure_loaded(&id,&runtime,&mut *runtime.content.lock().await).await?;
-        self.broadcast_sessions().await; Ok(id)
+        let mut keep=keep_session_id.map(str::to_owned);
+        loop {
+            let id = self.inner.state.create(model.clone(),thinking.clone(),keep.take()).await?;
+            let runtime = self.runtime(&id).await?; let _guard = runtime.operation.lock().await;
+            let mut content=runtime.content.lock().await;
+            self.ensure_loaded(&id,&runtime,&mut content).await?;
+            if !self.inner.state.get(&id).await?.is_some_and(|s|s.starter) { continue; }
+            if content.agent.as_ref().is_some_and(|agent|agent.model != model || agent.thinking != thinking) {
+                content.append(&id,json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":thinking})).await?;
+            }
+            drop(content); self.broadcast_sessions().await; return Ok(id);
+        }
     }
     pub async fn open_session(&self, id: &str, requests: &[String]) -> Result<SessionFeed> {
         let runtime = self.runtime(id).await?;
@@ -99,6 +108,7 @@ impl AgentManager {
         let mut content = runtime.content.lock().await;
         self.ensure_loaded(id, &runtime, &mut content).await?;
         if let Some(receipt) = self.inner.state.receipt(id,request_id).await? {
+            if receipt.command.as_deref().is_some_and(|kind|kind != "builtin") { bail!("Request ID was already used for another operation"); }
             if receipt.text != text { bail!("Request ID was already used for different text"); }
             if !receipt.finished { bail!("This command was interrupted; inspect its effects before issuing a new request ID"); }
             if let Some(error) = receipt.error { bail!("{error}"); }
@@ -107,7 +117,7 @@ impl AgentManager {
         if let Some(rest) = text.strip_prefix('/') {
             let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             if ["compact", "model", "thinking", "name", "fast"].contains(&name) {
-                let receipt = Receipt { id:request_id.into(),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
+                let receipt = Receipt { id:request_id.into(),command:Some("builtin".into()),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
                 content.commit(id,Vec::new(),None,Some(receipt.clone())).await?;
                 drop(content);
                 let result = self.run_builtin_command(id, &runtime, name, args.trim()).await;
@@ -122,7 +132,7 @@ impl AgentManager {
         let mut queue = content.transcript.as_ref().unwrap().queue.clone();
         if queue.requests.len() >= 256 { bail!("Queue is full (256 messages)"); }
         queue.requests.push(QueuedRequest { request_id:request_id.into(), revision:0, kind:"steer".into(), text:text.into(), images:0, timestamp_ms:Some(crate::agent::now_ms()) });
-        content.save_queue(id,queue,Some(Receipt { id:request_id.into(),text:text.into(),disposition,finished:true,notice:None,error:None })).await?;
+        content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:None,text:text.into(),disposition,finished:true,notice:None,error:None })).await?;
         // Queue, receipt and retained session metadata commit together before acknowledgement.
         self.start_run(id, &runtime, &mut content);
         drop(content);
@@ -134,6 +144,11 @@ impl AgentManager {
         let runtime = self.runtime(id).await?; let _guard = runtime.operation.lock().await;
         let mut content = runtime.content.lock().await;
         self.ensure_loaded(id, &runtime, &mut content).await?;
+        let payload=json!({"generation":generation,"operation":operation}).to_string();
+        if let Some(receipt)=self.inner.state.receipt(id,command_id).await? {
+            if receipt.command.as_deref() != Some("queue_control") || receipt.text != payload { bail!("Request ID was already used for another control"); }
+            return Ok("accepted".into());
+        }
         let transcript = content.transcript.as_ref().unwrap();
         if transcript.generation != generation { bail!("Queue changed; reopen this chat"); }
         let mut queue = transcript.queue.clone();
@@ -174,15 +189,24 @@ impl AgentManager {
             && (control.requests.len() > queue.requests.len() || control.requests.iter().zip(&queue.requests).any(|(a,b)| a.request_id != b.request_id || a.revision != b.revision)) {
             bail!("Cancel the pending prefix before editing its messages");
         }
-        content.save_queue(id, queue, None).await?;
+        content.save_queue(id, queue, Some(Receipt { id:command_id.into(),command:Some("queue_control".into()),text:payload,disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
         self.start_run(id, &runtime, &mut content);
         Ok("accepted".into())
     }
-    pub async fn abort(&self, id: &str) -> Result<()> {
+    pub async fn abort(&self, id: &str, request_id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
-        let content = runtime.content.lock().await;
-        if let Some(agent) = &content.agent { agent.cancel.cancel(); }
-        Ok(())
+        let mut content = runtime.content.lock().await;
+        self.ensure_loaded(id,&runtime,&mut content).await?;
+        if let Some(receipt)=self.inner.state.receipt(id,request_id).await? {
+            if receipt.command.as_deref() != Some("abort") { bail!("Request ID was already used for another operation"); }
+            return Ok(());
+        }
+        let mut queue=content.transcript.as_ref().unwrap().queue.clone();
+        if let Some(agent)=&content.agent {
+            agent.cancel.cancel();
+            if agent.running || !queue.requests.is_empty() { queue.paused=true; }
+        }
+        content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:Some("abort".into()),text:String::new(),disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await
     }
     pub async fn close_session(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
