@@ -101,7 +101,23 @@ impl Editor {
         secret: bool,
         placeholder: &str,
     ) {
-        layer.rect(rect, color(if focused { 0x1c2936 } else { 0x18212b }));
+        let radius = size * 0.55;
+        let edge = if focused { size * 0.1 } else { size * 0.07 };
+        layer.rounded_rect(
+            rect,
+            radius,
+            color(if focused { 0x67d4ff } else { 0x2a3541 }),
+        );
+        layer.rounded_rect(
+            Rect::new(
+                rect.x + edge,
+                rect.y + edge,
+                rect.width - 2. * edge,
+                rect.height - 2. * edge,
+            ),
+            (radius - edge).max(0.),
+            layer.control_color(rect, color(if focused { 0x1c2936 } else { 0x18212b })),
+        );
         let inner = Rect::new(
             rect.x + 10.,
             rect.y + 8.,

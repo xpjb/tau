@@ -1,7 +1,7 @@
 use crate::{
     controller::Controller,
     editor::Editor,
-    render::{Layer, Renderer, color, contains},
+    render::{Interaction, Layer, Renderer, color, contains},
     store::{Settings, Store},
     transport::Wake,
 };
@@ -138,6 +138,7 @@ pub struct App {
     transcript: Rect,
     placed: Vec<Placed>,
     pointer: Option<Pointer>,
+    hover: Option<Vec2>,
     pinch: Option<(u64, Vec2)>,
     velocity: f32,
     viewer: Option<Viewer>,
@@ -179,6 +180,7 @@ impl App {
             transcript: Rect::new(0., 0., 0., 0.),
             placed: vec![],
             pointer: None,
+            hover: None,
             pinch: None,
             velocity: 0.,
             viewer: None,
@@ -196,6 +198,45 @@ impl App {
             self.origin = origin;
             self.dirty = true;
         }
+    }
+    #[cfg(not(target_os = "android"))]
+    pub fn needs_redraw(&self) -> bool {
+        self.dirty
+    }
+    #[cfg(not(target_os = "android"))]
+    pub fn hover(&mut self, point: Option<Vec2>) {
+        let old = self
+            .hover
+            .and_then(|p| self.hits.iter().rev().find(|h| contains(h.rect, p)))
+            .map(|h| h.rect);
+        let new = point
+            .and_then(|p| self.hits.iter().rev().find(|h| contains(h.rect, p)))
+            .map(|h| h.rect);
+        self.hover = point;
+        self.dirty |= old != new;
+    }
+    #[cfg(not(target_os = "android"))]
+    pub fn cursor(&self) -> chad::winit::window::CursorIcon {
+        use chad::winit::window::CursorIcon;
+        let Some(point) = self.hover else {
+            return CursorIcon::Default;
+        };
+        if let Some(hit) = self.hits.iter().rev().find(|h| contains(h.rect, point)) {
+            return if matches!(hit.action, Action::Focus(_)) {
+                CursorIcon::Text
+            } else {
+                CursorIcon::Pointer
+            };
+        }
+        if self.modal.is_none() && self.viewer.is_none() {
+            if self.renderer.hit_link(point).is_some() {
+                return CursorIcon::Pointer;
+            }
+            if self.renderer.hit_text(point).is_some() {
+                return CursorIcon::Text;
+            }
+        }
+        CursorIcon::Default
     }
     pub fn actions(&mut self) -> Vec<PlatformAction> {
         std::mem::take(&mut self.platform)
@@ -363,14 +404,13 @@ impl App {
         self.selecting = false;
         self.field_selection = None;
         if !touch && self.viewer.is_none() {
-            if let Some(Hit {
-                rect,
-                action: Action::Focus(field),
-            }) = self.hits.iter().rev().find(|h| contains(h.rect, point))
-            {
-                self.focus = Some(*field);
-                self.field_selection = Some(*rect);
-                self.field_hit(*rect, point, false);
+            if let Some(hit) = self.hits.iter().rev().find(|h| contains(h.rect, point)) {
+                // Controls take priority over transcript selection beneath them.
+                if let Action::Focus(field) = hit.action {
+                    self.focus = Some(field);
+                    self.field_selection = Some(hit.rect);
+                    self.field_hit(hit.rect, point, false);
+                }
             } else if self.modal.is_none()
                 && let Some((key, byte)) = self.renderer.hit_text(point)
             {
@@ -501,6 +541,8 @@ impl App {
         self.report(result);
     }
     pub fn cancel_pointer(&mut self) {
+        self.dirty = true;
+        self.hover = None;
         self.pointer = None;
         self.pinch = None;
         self.velocity = 0.;
@@ -637,6 +679,7 @@ impl App {
                 },
                 shift,
             ),
+            "Space" if !ctrl => e.replace(" "),
             "Enter" => e.replace("\n"),
             "Tab" => e.replace("    "),
             _ => {}
@@ -998,10 +1041,24 @@ impl App {
             self.size.0 as f32,
             self.size.1 as f32,
         );
-        let mut main = Layer::default();
-        let mut body = Layer::default();
-        let mut chrome = Layer::default();
-        let mut overlay = Layer::default();
+        let input = Interaction {
+            hover: self.pointer.as_ref().map(|p| p.last).or(self.hover),
+            pressed: self
+                .pointer
+                .as_ref()
+                .filter(|p| !p.dragged)
+                .map(|p| p.start),
+            held: self.pointer.is_some(),
+        };
+        let background_input = if self.modal.is_none() && self.viewer.is_none() {
+            input
+        } else {
+            Interaction::default()
+        };
+        let mut main = Layer::new(background_input);
+        let mut body = Layer::new(background_input);
+        let mut chrome = Layer::new(background_input);
+        let mut overlay = Layer::new(input);
         self.hits.clear();
         self.renderer.clear_scenes();
         main.rect(bounds, color(0x090d12));
@@ -1170,11 +1227,14 @@ impl App {
             if y + rect.height < clip.y || y > clip.y + clip.height {
                 continue;
             }
-            let rect = crate::render::intersect(rect, clip);
             let selected = self.controller.account.selected.as_ref() == Some(&session.id);
-            if selected {
-                layer.rect(rect, color(0x182b38));
-            }
+            layer.clipped_rounded_rect(
+                rect,
+                12. * s,
+                layer.control_color(rect, color(if selected { 0x182b38 } else { 0x0e141b })),
+                clip,
+            );
+            let rect = crate::render::intersect(rect, clip);
             let unread = self
                 .controller
                 .account
@@ -1465,24 +1525,6 @@ impl App {
         let s = self.scale;
         let wide = self.size.0 as f32 / s >= 840.;
         let Some(session) = self.controller.account.selected.clone() else {
-            self.renderer.label(
-                layer,
-                "A place to think and build.",
-                Rect::new(b.x + 32. * s, b.y + 100. * s, b.width - 64. * s, 60. * s),
-                24. * s,
-                color(0xe5eaf0),
-                true,
-            );
-            button(
-                &mut self.renderer,
-                layer,
-                &mut self.hits,
-                Rect::new(b.x + 32. * s, b.y + 174. * s, 180. * s, 44. * s),
-                "+  New chat",
-                Action::New,
-                s,
-                true,
-            );
             return;
         };
         if !self.controller.chats.contains_key(&session) {
@@ -1658,9 +1700,12 @@ impl App {
                 continue;
             }
             let rect = Rect::new(x, top, width, p.height);
-            if row.user {
-                layer.clipped_rect(rect, color(0x13232f), viewport);
-            }
+            layer.clipped_rounded_rect(
+                rect,
+                12. * s,
+                color(if row.user { 0x13232f } else { 0x18212b }),
+                viewport,
+            );
             let label_rect = crate::render::intersect(
                 Rect::new(x + 14. * s, top + 10. * s, text_width, 24. * s),
                 viewport,
@@ -1992,7 +2037,7 @@ impl App {
         }
         if let Some(notice) = &self.controller.notice {
             let rect = Rect::new(x, b.y + 70. * s, width, 68. * s);
-            chrome.rect(rect, color(0x452c2a));
+            chrome.rounded_rect(rect, 12. * s, color(0x452c2a));
             self.renderer.label(
                 chrome,
                 notice,
@@ -2035,7 +2080,7 @@ impl App {
             width,
             height,
         );
-        layer.rect(rect, color(0x111b25));
+        layer.rounded_rect(rect, 16. * s, color(0x111b25));
         self.renderer.label(
             layer,
             &modal.title,
@@ -2100,7 +2145,11 @@ fn button(
     if rect.width <= 0. || rect.height <= 0. {
         return;
     }
-    layer.rect(rect, color(if primary { 0x164e63 } else { 0x18212b }));
+    layer.rounded_rect(
+        rect,
+        rect.height * 0.5,
+        layer.control_color(rect, color(if primary { 0x164e63 } else { 0x18212b })),
+    );
     let style = sanscale::Style {
         chain: renderer.faces.prose[0],
         wrap_em: None,

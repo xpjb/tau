@@ -42,21 +42,71 @@ pub fn intersect(a: Rect, b: Rect) -> Rect {
 struct Vertex {
     position: [f32; 2],
     color: [f32; 4],
+    local: [f32; 2],
+    half_size: [f32; 2],
+    radius: f32,
+}
+#[derive(Clone, Copy, Default)]
+pub struct Interaction {
+    pub hover: Option<Vec2>,
+    pub pressed: Option<Vec2>,
+    pub held: bool,
+}
+struct Shape {
+    rect: Rect,
+    clip: Rect,
+    color: Color,
+    radius: f32,
 }
 #[derive(Default)]
 pub struct Layer {
-    rects: Vec<(Rect, Color)>,
+    rects: Vec<Shape>,
+    pub interaction: Interaction,
     pub draws: Vec<Draw>,
     pub images: Vec<(PathBuf, Rect, Rect)>,
 }
 impl Layer {
-    pub fn rect(&mut self, rect: Rect, color: Color) {
-        if rect.width > 0. && rect.height > 0. {
-            self.rects.push((rect, color));
+    pub fn new(interaction: Interaction) -> Self {
+        Self {
+            interaction,
+            ..Default::default()
         }
     }
+    pub fn rect(&mut self, rect: Rect, color: Color) {
+        self.rounded_rect(rect, 0., color);
+    }
+    pub fn rounded_rect(&mut self, rect: Rect, radius: f32, color: Color) {
+        self.clipped_rounded_rect(rect, radius, color, rect);
+    }
     pub fn clipped_rect(&mut self, rect: Rect, color: Color, clip: Rect) {
-        self.rect(intersect(rect, clip), color);
+        self.clipped_rounded_rect(rect, 0., color, clip);
+    }
+    pub fn clipped_rounded_rect(&mut self, rect: Rect, radius: f32, color: Color, clip: Rect) {
+        let clip = intersect(rect, clip);
+        if clip.width > 0. && clip.height > 0. {
+            self.rects.push(Shape {
+                rect,
+                clip,
+                color,
+                radius: radius.clamp(0., rect.width.min(rect.height) * 0.5),
+            });
+        }
+    }
+    pub fn control_color(&self, rect: Rect, mut base: Color) -> Color {
+        let input = self.interaction;
+        if input.hover.is_some_and(|p| contains(rect, p)) {
+            let mix = if input.pressed.is_some_and(|p| contains(rect, p)) {
+                0.09
+            } else if !input.held {
+                0.035
+            } else {
+                0.
+            };
+            for c in &mut base.0[..3] {
+                *c += (1. - *c) * mix;
+            }
+        }
+        base
     }
 }
 pub struct MessageView {
@@ -170,7 +220,7 @@ impl Renderer {
                     buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32x2, 4 => Float32],
                     })],
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -491,7 +541,9 @@ impl Renderer {
         for layer in layers {
             batches.push(self.text.prepare(ctx.device(), ctx.queue(), &layer.draws));
             let mut vertices = vec![];
-            for (r, c) in &layer.rects {
+            for shape in &layer.rects {
+                let r = shape.clip;
+                let full = shape.rect;
                 for [x, y] in [
                     [r.x, r.y],
                     [r.x + r.width, r.y],
@@ -502,7 +554,13 @@ impl Renderer {
                 ] {
                     vertices.push(Vertex {
                         position: ndc(x, y),
-                        color: c.0,
+                        color: shape.color.0,
+                        local: [
+                            x - full.x - full.width * 0.5,
+                            y - full.y - full.height * 0.5,
+                        ],
+                        half_size: [full.width * 0.5, full.height * 0.5],
+                        radius: shape.radius,
                     });
                 }
             }
@@ -607,9 +665,24 @@ fn scissor(r: Rect, width: u32, height: u32) -> Option<[u32; 4]> {
     (w > 0 && h > 0).then_some([x, y, w, h])
 }
 const SHADER: &str = r#"
-struct Out { @builtin(position) position: vec4<f32>, @location(0) color: vec4<f32> }
-@vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> Out { return Out(vec4<f32>(pos,0.,1.),color); }
-@fragment fn fs(in: Out) -> @location(0) vec4<f32> { return in.color; }
+struct Out {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) local: vec2<f32>,
+    @location(2) half_size: vec2<f32>,
+    @location(3) radius: f32,
+}
+@vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>,
+              @location(2) local: vec2<f32>, @location(3) half_size: vec2<f32>,
+              @location(4) radius: f32) -> Out {
+    return Out(vec4<f32>(pos,0.,1.), color, local, half_size, radius);
+}
+@fragment fn fs(in: Out) -> @location(0) vec4<f32> {
+    let q = abs(in.local) - in.half_size + in.radius;
+    let distance = length(max(q, vec2<f32>(0.))) + min(max(q.x, q.y), 0.) - in.radius;
+    let coverage = clamp(0.5 - distance / max(fwidth(distance), 1.), 0., 1.);
+    return vec4<f32>(in.color.rgb, in.color.a * select(1., coverage, in.radius > 0.));
+}
 "#;
 const IMAGE_SHADER: &str = r#"
 struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> }

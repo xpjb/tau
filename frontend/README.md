@@ -46,6 +46,11 @@ runtime. Static CRT is selected in `.cargo/config.toml`; Windows system librarie
 are still required. The old Compose self-extractor is deliberately unchanged. Windows resource
 embedding uses `llvm-rc` when cross-building, or the Windows SDK on Windows.
 
+Desktop input explicitly calls `ctx.request_redraw()` after UI mutations;
+Chad's desktop on-demand runner does not implicitly redraw on input. Network
+and picker completions use its `Waker`. Hover/press state and native cursors
+are updated without switching to continuous rendering.
+
 Icon source: `frontend/assets/tau-beta.svg`. Regenerate its PNG/ICO launcher
 assets with `python3 frontend/assets/generate-icons.py` (`rsvg-convert` required).
 

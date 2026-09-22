@@ -6,6 +6,7 @@ use chad::winit::{
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     keyboard::{Key, ModifiersState},
+    window::CursorIcon,
 };
 use chad::{ChadApp, Config, Ctx, wgpu};
 use sanscale::Vec2;
@@ -19,6 +20,7 @@ type PickResult = Result<(String, String, Vec<PathBuf>), String>;
 struct Desktop {
     app: App,
     cursor: Vec2,
+    cursor_icon: CursorIcon,
     modifiers: ModifiersState,
     clipboard: Option<arboard::Clipboard>,
     rx: mpsc::Receiver<PickResult>,
@@ -62,6 +64,7 @@ impl ChadApp for Desktop {
         Ok(Self {
             app,
             cursor: Vec2::new(0., 0.),
+            cursor_icon: CursorIcon::Default,
             modifiers: ModifiersState::empty(),
             clipboard: arboard::Clipboard::new().ok(),
             rx,
@@ -80,7 +83,12 @@ impl ChadApp for Desktop {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Vec2::new(position.x as f32, position.y as f32);
+                self.app.hover(Some(self.cursor));
                 self.app.motion(0, self.cursor);
+            }
+            WindowEvent::CursorLeft { .. } => self.app.hover(None),
+            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Focused(true) => {
+                ctx.request_redraw()
             }
             WindowEvent::MouseInput {
                 state,
@@ -129,6 +137,12 @@ impl ChadApp for Desktop {
             _ => {}
         }
         self.actions(ctx);
+        self.sync_cursor(ctx);
+        // Desktop OnDemand forwards input but does not schedule a frame for it.
+        // Waiting until update() to request redraw deadlocks visible input feedback.
+        if self.app.needs_redraw() {
+            ctx.request_redraw();
+        }
     }
     fn update(&mut self, ctx: &mut Ctx) {
         self.app
@@ -158,9 +172,17 @@ impl ChadApp for Desktop {
     }
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
         self.app.frame(ctx, view);
+        self.sync_cursor(ctx);
     }
 }
 impl Desktop {
+    fn sync_cursor(&mut self, ctx: &Ctx) {
+        let icon = self.app.cursor();
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            ctx.window.set_cursor(icon);
+        }
+    }
     fn actions(&mut self, ctx: &mut Ctx) {
         for action in self.app.actions() {
             match action {
