@@ -99,7 +99,7 @@ pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, s
         "bash" => {
             let command = string(args, "command")?;
             let seconds = args.get("timeout").map(|value| value.as_u64().filter(|v| *v > 0).context("timeout must be positive seconds")).transpose()?;
-            let directory = config.state_path.parent().unwrap_or(Path::new(".")).join("tool-output");
+            let directory = config.database_path.parent().unwrap_or(Path::new(".")).join("tool-output");
             tokio::fs::create_dir_all(&directory).await?;
             let output_path = directory.join(format!("{}.log", uuid::Uuid::new_v4()));
             let mut options = std::fs::OpenOptions::new(); options.write(true).create_new(true);

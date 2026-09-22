@@ -1,5 +1,5 @@
 pub mod auth;
-pub mod journal;
+pub mod history;
 mod provider;
 mod tools;
 
@@ -14,13 +14,13 @@ use crate::protocol::{ContextUsage, ServerMessage, SessionStatus};
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, TranscriptChange};
 use crate::settings::SteeringMode;
-use journal::Journal;
+use crate::state::{StateStore, Receipt};
 
 pub struct AgentSession {
-    pub journal: Journal,
+    pub store: StateStore,
+    pub revision: u64,
     pub model: SessionModel,
     pub thinking: String,
-    pub receipts: journal::Receipts,
     pub running: bool,
     pub cancel: CancellationToken,
     pub task: Option<tokio::task::JoinHandle<()>>,
@@ -30,13 +30,23 @@ pub struct AgentSession {
 pub fn now_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().try_into().unwrap_or(u64::MAX) }
 
 impl SessionContent {
-    pub async fn append(&mut self, id: &str, value: Value) -> Result<()> {
+    pub async fn append(&mut self, id: &str, value: Value) -> Result<()> { self.commit(id, vec![value], None, None).await }
+    pub async fn commit(&mut self, id: &str, values: Vec<Value>, queue: Option<QueueState>, receipt: Option<Receipt>) -> Result<()> {
         let agent = self.agent.as_mut().context("Session is not loaded")?;
-        let entry = agent.journal.entry(value);
-        let transcript = self.transcript.as_mut().unwrap();
-        let change = transcript.project(&entry, false)?;
-        agent.journal.append(entry).await?;
-        self.publish(id, change)
+        let mut projected = self.transcript.as_ref().unwrap().clone();
+        let mut change = TranscriptChange::default(); let mut entries = Vec::new();
+        for mut entry in values {
+            entry["id"] = json!(uuid::Uuid::new_v4().to_string()); entry["parentId"] = json!(projected.head);
+            entry["timestamp"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true));
+            let next = projected.project(&entry,false)?; projected.apply(&next)?;
+            change.events.extend(next.events); change.removed.extend(next.removed); change.delivered.extend(next.delivered);
+            change.head = next.head; change.bumps_chat |= next.bumps_chat; entries.push(entry);
+        }
+        change.queue = queue.clone();
+        let saved = agent.store.commit(id,agent.revision,entries,change.events.clone(),queue,receipt).await?;
+        agent.revision = saved.revision; agent.model = saved.model; agent.thinking = saved.thinking;
+        agent.tokens = saved.tokens; agent.needs_turn = saved.needs_turn;
+        self.publish(id,change)
     }
     pub fn publish(&mut self, id: &str, change: TranscriptChange) -> Result<()> {
         let transcript = self.transcript.as_mut().unwrap();
@@ -44,11 +54,8 @@ impl SessionContent {
         let _ = self.events.send(Arc::new(ServerMessage::TranscriptUpdate { session_id:id.into(), generation:transcript.generation.clone(), sequence:transcript.sequence, change }));
         Ok(())
     }
-    pub async fn save_queue(&mut self, id: &str, queue: QueueState, accepted: Option<Value>) -> Result<()> {
-        if queue.requests.iter().map(|r| r.text.len()).sum::<usize>() > 4 * 1024 * 1024 { bail!("Pending messages exceed the 4 MB queue limit"); }
-        self.append(id, json!({"type":"tau_queue","queue":queue,"accepted":accepted})).await?;
-        let mut change = TranscriptChange::default(); change.queue = Some(queue);
-        self.publish(id, change)
+    pub async fn save_queue(&mut self, id: &str, queue: QueueState, receipt: Option<Receipt>) -> Result<()> {
+        self.commit(id,Vec::new(),Some(queue),receipt).await
     }
     pub fn live(&mut self, id: &str, stream: &str, message: Value) -> Result<()> {
         let transcript = self.transcript.as_mut().unwrap();
@@ -122,7 +129,6 @@ impl AgentManager {
             manager.set_runtime_state(&id, &runtime, if result.is_err() && !cancelled { SessionStatus::Error } else { SessionStatus::Idle },
                 result.err().map(|e| bounded(&e.to_string(), 480)), Some(usage));
             drop(content);
-            if let Err(error) = manager.inner.state.touch(&id).await { tracing::warn!(%error, "Could not record agent activity"); }
             manager.broadcast_sessions().await;
             break;
             }
@@ -151,23 +157,21 @@ impl AgentManager {
                     control.requests.len()
                 } else if settings.agent.steering_mode == SteeringMode::All { queue.requests.len() } else { queue.requests.len().min(1) };
                 let requests = queue.requests.drain(..count).collect::<Vec<_>>();
-                if !requests.is_empty() {
-                    for request in requests {
-                        content.append(id, json!({"type":"message","origin":{"requestId":request.request_id,"requestRevision":request.revision},
-                            "message":{"role":"user","content":request.text,"timestamp":request.timestamp_ms}})).await?;
-                    }
-                    content.agent.as_mut().unwrap().needs_turn = true;
+                let entries = requests.into_iter().map(|request| json!({"type":"message","origin":{"requestId":request.request_id,"requestRevision":request.revision},
+                    "message":{"role":"user","content":request.text,"timestamp":request.timestamp_ms}})).collect::<Vec<_>>();
+                if !entries.is_empty() {
                     if let Some(control) = &mut queue.control && control.action == "prefix" && control.status == "waiting" { control.status = "applied".into(); queue.paused = true; }
-                }
-                if !content.agent.as_ref().unwrap().needs_turn { return Ok(()); }
+                } else if !content.agent.as_ref().unwrap().needs_turn { return Ok(()); }
                 queue.run_id.get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
-                content.save_queue(id, queue, None).await?;
+                // Consuming queued messages and saving their user entries is one transaction.
+                content.commit(id,entries,Some(queue),None).await?;
                 let agent = content.agent.as_ref().unwrap();
-                let messages = agent.journal.messages(settings.system_prompt(&self.inner.config.cwd).await?, &agent.model, &self.inner.config.attachment_root).await?;
+                let entries = agent.store.context(id,&agent.model).await?;
+                let messages = history::messages(&entries,settings.system_prompt(&self.inner.config.cwd).await?, &agent.model, &self.inner.config.attachment_root).await?;
                 (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), messages, agent.tokens)
             };
             let context_window = settings.model(&selected)?.context_window;
-            let estimated = messages.iter().map(journal::estimate_tokens).sum::<u64>();
+            let estimated = messages.iter().map(history::estimate_tokens).sum::<u64>();
             if settings.agent.compaction.enabled && tokens.unwrap_or(estimated).max(estimated) > context_window.saturating_sub(settings.agent.compaction.reserve_tokens) {
                 if compacted { bail!("Context is still too large after compaction; reduce the queued input or fork an earlier turn"); }
                 self.compact(id, runtime, "").await?;
@@ -261,22 +265,24 @@ impl AgentManager {
         let settings = self.inner.settings.get();
         let (selected, thinking, cancel, first_kept, prefix, before_tokens) = {
             let content = runtime.content.lock().await; let agent = content.agent.as_ref().unwrap();
-            let entries = &agent.journal.entries;
+            let entries = agent.store.context(id,&agent.model).await?;
             let users = entries.iter().enumerate().filter(|(_, entry)| entry["message"]["role"] == "user").map(|(index,_)| index).collect::<Vec<_>>();
             if users.len() < 2 { bail!("Not enough completed turns to compact safely"); }
             let mut cut = *users.last().unwrap(); let mut size = 0;
             for (index, entry) in entries.iter().enumerate().rev() {
-                if matches!(entry["type"].as_str(), Some("message" | "tau_attachment")) { size += journal::estimate_tokens(&entry["message"]); }
+                if matches!(entry["type"].as_str(), Some("message" | "tau_attachment")) { size += history::estimate_tokens(&entry["message"]); }
                 if entry["message"]["role"] == "user" && size <= settings.agent.compaction.keep_recent_tokens { cut = index; }
             }
             if cut <= users[0] { cut = users[1]; }
-            let prefix = Journal { path:agent.journal.path.clone(), entries:entries[..cut].to_vec() };
+            let mut prefix = entries[..cut].to_vec();
+            // An earlier checkpoint can sit after its retained boundary in append order.
+            prefix.extend(entries[cut..].iter().filter(|entry| entry["type"] == "compaction").cloned());
             (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), entries[cut]["id"].clone(), prefix, agent.tokens)
         };
         settings.model(&selected)?;
         self.set_runtime_state(id, runtime, SessionStatus::Running, Some("Compacting context".into()), None);
         let native = settings.agent.compaction.native_codex && settings.providers[&selected.provider].api == crate::settings::Api::Codex;
-        let mut messages = prefix.messages(settings.system_prompt(&self.inner.config.cwd).await?, &selected, &self.inner.config.attachment_root).await?;
+        let mut messages = history::messages(&prefix,settings.system_prompt(&self.inner.config.cwd).await?, &selected, &self.inner.config.attachment_root).await?;
         if !native { messages.push(json!({"role":"user","content":format!("Summarize this conversation for another coding agent. Preserve goals, decisions, files changed, commands run, pending work, and important constraints. Do not continue the task. {instructions}")})); }
         else if !instructions.is_empty() { messages.push(json!({"role":"user","content":format!("Compaction instructions: {instructions}")})); }
         let (updates, _receiver) = mpsc::channel(1);
@@ -303,8 +309,8 @@ impl AgentManager {
     }
 
     pub(crate) async fn title_after_prompt(&self, id: &str, text: &str) {
-        let Some(stored) = self.inner.state.get(id) else { return; };
-        if stored.title != "New chat" { let _ = self.inner.state.touch(id).await; self.broadcast_sessions().await; return; }
+        let Ok(Some(stored)) = self.inner.state.get(id).await else { return; };
+        if stored.title != "New chat" { self.broadcast_sessions().await; return; }
         let title = async {
             use tokio::io::AsyncWriteExt;
             let command = self.inner.config.title_command.as_ref()?;
@@ -321,7 +327,7 @@ impl AgentManager {
                 (title.chars().count() > 1 && title.chars().count() <= crate::protocol::MAX_TITLE_CHARS && !title.contains(['\n','\r'])).then(|| title.to_owned())
             }).await.ok().flatten()
         }.await.unwrap_or_else(|| bounded(text.lines().find(|line| !line.trim().is_empty()).unwrap_or("Unnamed chat").trim(), crate::protocol::MAX_TITLE_CHARS));
-        if let Err(error) = self.inner.state.rename_if_untitled(id, title).await { tracing::warn!(%error, "Could not save generated title"); }
+        if let Err(error) = self.inner.state.rename(id, title, true).await { tracing::warn!(%error, "Could not save generated title"); }
         self.broadcast_sessions().await;
     }
 }

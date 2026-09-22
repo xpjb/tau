@@ -45,7 +45,7 @@ fn call(id: &str, name: &str, arguments: Value) -> Value { json!({"id":id,"type"
 async fn fixture(model: &ModelServer, api: Api) -> (tempfile::TempDir, AgentManager, String, tokio::task::JoinHandle<()>) {
     let root = tempfile::tempdir().unwrap(); let root_path = root.path().to_owned();
     let config = Config { bind:"127.0.0.1:0".parse().unwrap(), transfer_bind:"127.0.0.1:0".parse().unwrap(), token:Arc::from("isolated-test-token"),
-        settings_path:root_path.join("settings.json"), import_pi_dir:None, cwd:root_path.clone(), state_path:root_path.join("state.json"), session_dir:root_path.join("sessions"),
+        settings_path:root_path.join("settings.json"), import_pi_dir:None, cwd:root_path.clone(), database_path:root_path.join("tau.sqlite3"),
         telemetry_path:root_path.join("crashes.jsonl"), attachment_root:root_path.join("outbox"), upload_root:root_path.join("uploads"), title_command:Some("sleep 1; printf '{\"title\":\"Generated title\"}'".into()) };
     tokio::fs::create_dir_all(&config.attachment_root).await.unwrap();
     let mut settings = Settings::default();
@@ -54,7 +54,7 @@ async fn fixture(model: &ModelServer, api: Api) -> (tempfile::TempDir, AgentMana
     tokio::fs::write(&config.settings_path, serde_json::to_vec(&settings).unwrap()).await.unwrap();
     let auth = if api == Api::Codex { json!({"type":"oauth","access":"fixture-access","refresh":"unused","accountId":"fixture-account","expires":u64::MAX}) } else { json!({"type":"api_key","key":"fixture-key"}) };
     crate::settings::atomic_write(&root_path.join("auth.json"), json!({"openai-codex":auth}).to_string().as_bytes()).await.unwrap();
-    let manager = AgentManager::new(config, StateStore::load(root_path.join("state.json")).await.unwrap()).await.unwrap();
+    let manager = AgentManager::new(config, StateStore::load(root_path.join("tau.sqlite3")).await.unwrap()).await.unwrap();
     let (url, task) = serve(&manager).await;
     (root, manager, url, task)
 }
@@ -132,12 +132,12 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
     assert_eq!(client.request(json!({"id":"create2","type":"create_session"})).await["sessionId"], id);
     client.open(&id).await;
-    let journal = manager.inner.state.get(&id).unwrap().session_file.unwrap();
-    let backup = format!("{journal}.backup");
-    tokio::fs::rename(&journal, &backup).await.unwrap(); tokio::fs::create_dir(&journal).await.unwrap();
-    assert_eq!(client.request(json!({"id":"first","type":"prompt","sessionId":id,"text":"Make an artifact"})).await["ok"], false, "Failed persistence must not acknowledge or run a prompt");
+    manager.inner.state.access(|db| { db.execute_batch("CREATE TRIGGER reject_queue BEFORE INSERT ON queue BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END;")?; Ok(()) }).await.unwrap();
+    assert_eq!(client.request(json!({"id":"first","type":"prompt","sessionId":id,"text":"Make an artifact"})).await["ok"], false, "Failed transaction must not acknowledge or run a prompt");
     assert!(client.open(&id).await["queue"]["requests"].as_array().unwrap().is_empty());
-    tokio::fs::remove_dir(&journal).await.unwrap(); tokio::fs::rename(&backup, &journal).await.unwrap();
+    assert!(manager.inner.state.receipt(&id,"first").await.unwrap().is_none());
+    assert!(manager.inner.state.get(&id).await.unwrap().unwrap().starter, "Receipt, queue and retention must roll back together");
+    manager.inner.state.access(|db| { db.execute_batch("DROP TRIGGER reject_queue")?; Ok(()) }).await.unwrap();
     let response = tokio::time::timeout(Duration::from_millis(700), client.request(json!({"id":"first","type":"prompt","sessionId":id,"text":"Make an artifact"}))).await.unwrap();
     assert_eq!(response["ok"], true); assert_eq!(response["uncertain"], false);
     let first = model.request().await;
@@ -204,7 +204,7 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     assert_eq!(restored["queue"]["paused"], true); assert_eq!(restored["queue"]["requests"][0]["text"], "Edited queued text");
     let config = manager.inner.config.clone();
     client.socket.close(None).await.unwrap(); manager.shutdown().await; server.abort();
-    let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
+    let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
     let (url, server) = serve(&manager).await; let mut client = Client::connect(&url).await;
     let snapshot = client.open(&id).await;
     assert_eq!(snapshot["queue"]["paused"], true); assert_eq!(snapshot["queue"]["requests"][0]["revision"], 1);
@@ -293,9 +293,9 @@ async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposin
     assert!(!payload["input"].to_string().contains("First task"));
     client.until(|m| m["type"] == "session_state" && m["status"] == "idle").await;
     for message in &client.seen { assert!(!message.to_string().contains("private-")); }
-    let file = manager.inner.state.get(&id).unwrap().session_file.unwrap();
-    let journal = tokio::fs::read_to_string(file).await.unwrap();
-    assert!(journal.contains("private-compaction-cipher") && journal.contains("private-reasoning-cipher"));
+    let journal = manager.inner.state.context(&id,&manager.inner.settings.get().agent.model).await.unwrap().iter().map(Value::to_string).collect::<String>();
+    assert!(journal.contains("private-compaction-cipher") && !journal.contains("private-reasoning-cipher"), "Only retained context is loaded");
+    assert!(manager.inner.state.entry(&id,answer["entryId"].as_str().unwrap()).await.unwrap().to_string().contains("private-reasoning-cipher"), "Compaction must not erase saved history");
     assert!(tokio::fs::read_to_string(root.path().join("auth.json")).await.unwrap().contains("fixture-access"));
     manager.shutdown().await; server.abort();
 }
@@ -346,7 +346,7 @@ async fn incomplete_stream_never_executes_tools_abort_kills_shell_group_and_retr
 }
 
 #[tokio::test]
-async fn imports_settings_and_active_pi_history_then_recovers_a_torn_tail_without_rerunning_tools() {
+async fn imports_deployed_pi_history_read_only_into_sqlite_without_rerunning_tools() {
     let mut model = ModelServer::start(vec![codex("Migrated safely",vec![])]).await;
     let (root, manager, _, server) = fixture(&model, Api::Codex).await;
     let mut config = manager.inner.config.clone(); manager.shutdown().await; server.abort();
@@ -366,8 +366,7 @@ async fn imports_settings_and_active_pi_history_then_recovers_a_torn_tail_withou
     let legacy_auth = json!({"openai-codex":{"type":"oauth","access":"fixture-access","refresh":"unused","accountId":"fixture-account","expires":u64::MAX}}).to_string();
     tokio::fs::write(pi.join("auth.json"), &legacy_auth).await.unwrap();
     config.import_pi_dir = Some(pi.clone());
-    tokio::fs::create_dir_all(&config.session_dir).await.unwrap();
-    let path = config.session_dir.join("legacy.jsonl");
+    let path = root.path().join("legacy.jsonl");
     let saved = concat!(
         "{\"type\":\"session\",\"version\":3}\n",
         "{\"id\":\"root\",\"type\":\"model_change\",\"provider\":\"openai-codex\",\"modelId\":\"gpt-6-astra\",\"parentId\":null}\n",
@@ -378,11 +377,14 @@ async fn imports_settings_and_active_pi_history_then_recovers_a_torn_tail_withou
         "{\"id\":\"active\",\"type\":\"thinking_level_change\",\"parentId\":\"tool\",\"thinkingLevel\":\"max\"}\n"
     );
     tokio::fs::write(&path, format!("{saved}{{\"torn\":" )).await.unwrap();
-    let state = StateStore::load(config.state_path.clone()).await.unwrap();
-    let id = state.create("Legacy chat".into(),None,Some(path.to_string_lossy().into_owned()),None,false).await.unwrap();
-    let mut state_json: Value = serde_json::from_slice(&tokio::fs::read(&config.state_path).await.unwrap()).unwrap();
-    state_json["title_prompt"] = json!("Legacy title template"); tokio::fs::write(&config.state_path,state_json.to_string()).await.unwrap();
-    let manager = AgentManager::new(config.clone(),StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let legacy_path = root.path().join("old-state.json");
+    let legacy_state = json!({"schema":1,"title_prompt":"Legacy title template","sessions":{&id:{"title":"Legacy chat","session_file":path,"created_at_ms":1,"updated_at_ms":1}}}).to_string();
+    tokio::fs::write(&legacy_path,&legacy_state).await.unwrap();
+    assert_eq!(crate::import_state(config.clone(),legacy_path.clone()).await.unwrap(),1);
+    assert!(crate::import_state(config.clone(),legacy_path.clone()).await.is_err(), "Import must not overwrite a populated database");
+    assert_eq!(tokio::fs::read_to_string(legacy_path).await.unwrap(),legacy_state);
+    let manager = AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
     let mut settings = manager.inner.settings.get();
     assert_eq!(settings.daemon.title_prompt, "Legacy title template"); assert!(settings.agent.fast_mode && settings.agent.compaction.native_codex);
     assert_eq!(settings.agent.thinking_level, "high"); assert_eq!(settings.agent.retry.max_retries,2);
@@ -392,7 +394,7 @@ async fn imports_settings_and_active_pi_history_then_recovers_a_torn_tail_withou
     let (url,server) = serve(&manager).await; let mut client = Client::connect(&url).await;
     let snapshot = client.open(&id).await;
     assert_eq!(snapshot["events"].as_array().unwrap().len(),2);
-    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), saved, "Only the torn tail is repaired");
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), format!("{saved}{{\"torn\":"), "The legacy source is read-only, including its torn tail");
     assert_eq!(snapshot["queue"]["paused"], true, "A saved unfinished turn needs an explicit recovery action");
     assert_eq!(client.request(json!({"id":"continue","type":"prompt","sessionId":id,"text":"Continue carefully"})).await["disposition"], "queued");
     client.request(json!({"id":"resume-migrated","type":"queue_control","sessionId":id,"generation":snapshot["generation"],"operation":{"type":"resume","runId":null}})).await;
@@ -408,7 +410,7 @@ async fn imports_settings_and_active_pi_history_then_recovers_a_torn_tail_withou
     assert_eq!(tokio::fs::read_to_string(pi.join("auth.json")).await.unwrap(),legacy_auth);
     manager.shutdown().await; server.abort();
     tokio::fs::write(pi.join("settings.json"),"deliberately invalid after import").await.unwrap();
-    let restarted = AgentManager::new(config.clone(),StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
+    let restarted = AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
     assert_eq!(restarted.inner.settings.get().revision,1); restarted.shutdown().await;
 }
 
@@ -440,13 +442,13 @@ async fn native_images_are_delivered_reopened_and_replayed_as_references_without
     assert_eq!(response.status(),reqwest::StatusCode::OK); assert_eq!(response.headers()["content-type"],"image/png");
     use base64::Engine as _;
     assert_eq!(response.bytes().await.unwrap().as_ref(),base64::engine::general_purpose::STANDARD.decode(GENERATED_PNG).unwrap());
-    let journal = manager.inner.state.get(&id).unwrap().session_file.unwrap();
-    assert!(!tokio::fs::read_to_string(&journal).await.unwrap().contains(GENERATED_PNG));
+    let journal = manager.inner.state.context(&id,&manager.inner.settings.get().agent.model).await.unwrap();
+    assert!(!serde_json::to_string(&journal).unwrap().contains(GENERATED_PNG));
     assert!(!client.seen.iter().any(|message| message.to_string().contains(GENERATED_PNG)));
     let config = manager.inner.config.clone();
     client.socket.close(None).await.unwrap(); manager.shutdown().await; server.abort();
 
-    let manager = AgentManager::new(config.clone(),StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
+    let manager = AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
     let (url,server) = serve(&manager).await; let mut client = Client::connect(&url).await;
     let after = client.open(&id).await;
     assert!(after["events"].as_array().unwrap().contains(&image));
@@ -478,10 +480,11 @@ async fn native_images_are_delivered_reopened_and_replayed_as_references_without
     assert!(client.open(fork_id).await["events"].as_array().unwrap().contains(&image));
     manager.resolve_attachment(fork_id,image["entryId"].as_str().unwrap()).await.unwrap();
     for message in &client.seen { assert!(!message.to_string().contains(GENERATED_PNG)); }
-    let history = tokio::fs::read_to_string(&journal).await.unwrap();
-    assert!(!history.contains(GENERATED_PNG) && !history.contains("image_generation_call"));
+    let history = manager.inner.state.context(&id,&manager.inner.settings.get().agent.model).await.unwrap();
+    let encoded = serde_json::to_string(&history).unwrap();
+    assert!(!encoded.contains(GENERATED_PNG) && !encoded.contains("image_generation_call"));
     // A deleted original is an explicit missing reference, not a silently repeated paid generation.
-    let entry: Value = history.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).find(|entry| entry["type"] == "tau_attachment").unwrap();
+    let entry = history.iter().find(|entry| entry["type"] == "tau_attachment").unwrap();
     tokio::fs::remove_file(entry["message"]["details"]["tauAttachment"]["path"].as_str().unwrap()).await.unwrap();
     client.open(&id).await;
     client.request(json!({"id":"missing","type":"prompt","sessionId":id,"text":"Discuss the original"})).await;
@@ -515,10 +518,87 @@ async fn failed_native_images_never_publish_bytes_or_retry_a_started_generation(
         assert_eq!(snapshot["queue"]["paused"],true);
         assert!(!snapshot["events"].as_array().unwrap().iter().any(|event| event["attachment"].is_object()));
         assert!(model.requests.try_recv().is_err());
-        let file = manager.inner.state.get(&id).unwrap().session_file.unwrap();
-        assert!(!tokio::fs::read_to_string(file).await.unwrap().contains(GENERATED_PNG));
+        let history = manager.inner.state.context(&id,&manager.inner.settings.get().agent.model).await.unwrap();
+        assert!(!serde_json::to_string(&history).unwrap().contains(GENERATED_PNG));
     }
     assert!(tokio::fs::read_dir(root.path().join("outbox")).await.unwrap().next_entry().await.unwrap().is_none());
     assert!(!client.seen.iter().any(|message| message.to_string().contains(GENERATED_PNG)));
+    manager.shutdown().await; server.abort();
+}
+
+#[tokio::test]
+async fn sqlite_transactions_roll_back_consumption_and_forks_while_history_pages_stay_bounded() {
+    let mut model = ModelServer::start(vec![completion("Recovered transaction",vec![])]).await;
+    let (_root, manager, url, server) = fixture(&model,Api::ChatCompletions).await;
+    let mut client = Client::connect(&url).await;
+    let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+    let snapshot = client.open(&id).await;
+    assert_eq!(client.request(json!({"id":"pause","type":"queue_control","sessionId":id,"generation":snapshot["generation"],"operation":{"type":"pause","runId":null,"boundary":"turn"}})).await["ok"],true);
+    for request in ["one","two"] {
+        assert_eq!(client.request(json!({"id":request,"type":"prompt","sessionId":id,"text":request})).await["disposition"],"queued");
+    }
+    manager.inner.state.access(|db| {
+        assert_eq!(db.pragma_query_value(None,"journal_mode",|row| row.get::<_,String>(0))?,"wal");
+        assert_eq!(db.pragma_query_value(None,"synchronous",|row| row.get::<_,u32>(0))?,2);
+        db.execute_batch("CREATE TRIGGER reject_user BEFORE INSERT ON entries WHEN NEW.kind='message' BEGIN SELECT RAISE(ABORT,'fixture failed history insert'); END;")?; Ok(())
+    }).await.unwrap();
+    client.request(json!({"id":"resume-fails","type":"queue_control","sessionId":id,"generation":snapshot["generation"],"operation":{"type":"resume","runId":null}})).await;
+    client.until(|m| m["type"] == "session_state" && m["status"] == "error").await;
+    let snapshot = client.open(&id).await;
+    assert_eq!(snapshot["queue"]["requests"].as_array().unwrap().len(),2,"A failed user-entry insert must roll back removal of both queued requests");
+    assert!(snapshot["events"].as_array().unwrap().is_empty());
+    assert!(model.requests.try_recv().is_err());
+    manager.inner.state.access(|db| { db.execute_batch("DROP TRIGGER reject_user")?; Ok(()) }).await.unwrap();
+    client.request(json!({"id":"resume","type":"queue_control","sessionId":id,"generation":snapshot["generation"],"operation":{"type":"resume","runId":null}})).await;
+    let request = model.request().await;
+    assert_eq!(request["messages"][1]["content"],"one"); assert_eq!(request["messages"][2]["content"],"two");
+    client.until(|m| m["type"] == "session_state" && m["status"] == "idle").await;
+    // Seed a long completed history through the production commit/projection path.
+    // Display reads must remain bounded independently of the provider payload size.
+    let runtime = manager.runtime(&id).await.unwrap();
+    let mut entries = Vec::new();
+    for index in 0..80 {
+        entries.push(json!({"type":"message","message":{"role":"user","content":format!("History question {index}")}}));
+        entries.push(json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":format!("History answer {index}")}],"stopReason":"stop",
+            "tauModelMessage":{"role":"assistant","content":format!("History answer {index}"),"codex_output":[{"type":"reasoning","encrypted_content":"x".repeat(16384)}]}}}));
+    }
+    runtime.content.lock().await.commit(&id,entries,None,None).await.unwrap();
+    manager.close_session(&id).await.unwrap();
+    let snapshot = client.open(&id).await;
+    assert_eq!(snapshot["events"].as_array().unwrap().len(),crate::transcript::PAGE_EVENTS);
+    assert!(runtime.content.lock().await.transcript.as_mut().unwrap().events_mut().count() <= crate::transcript::PAGE_EVENTS);
+    let mut all = snapshot["events"].as_array().unwrap().clone();
+    let mut before = snapshot["before"].clone();
+    while let Some(order) = before.as_u64() {
+        assert_eq!(client.request(json!({"id":format!("page-{order}"),"type":"get_history","sessionId":id,"generation":snapshot["generation"],"before":order})).await["ok"],true);
+        let page = &client.seen.iter().rev().find(|m| m["type"] == "transcript_page").unwrap()["page"];
+        let older = page["events"].as_array().unwrap();
+        assert!(older.len() <= crate::transcript::PAGE_EVENTS);
+        assert!(older.iter().all(|e| e["order"].as_u64().unwrap() < order));
+        all.extend(older.iter().cloned()); before = page["before"].clone();
+    }
+    all.sort_by_key(|e| e["order"].as_u64().unwrap());
+    assert_eq!(all.len(),163); assert!(all.windows(2).all(|pair| pair[0]["order"].as_u64() < pair[1]["order"].as_u64()));
+    let source = id.clone();
+    manager.inner.state.access(move |db| {
+        db.execute_batch(&format!("CREATE TRIGGER reject_branch BEFORE INSERT ON events WHEN NEW.session_id!='{source}' BEGIN SELECT RAISE(ABORT,'fixture failed branch copy'); END;"))?; Ok(())
+    }).await.unwrap();
+    assert_eq!(client.request(json!({"id":"bad-clone","type":"clone_session","sessionId":id})).await["ok"],false);
+    assert_eq!(manager.inner.state.list().await.unwrap().len(),1,"A failed fork must not leave an orphan session or partial history");
+    manager.inner.state.access(|db| { db.execute_batch("DROP TRIGGER reject_branch")?; Ok(()) }).await.unwrap();
+    let clone = client.request(json!({"id":"clone","type":"clone_session","sessionId":id})).await;
+    assert_eq!(clone["ok"],true); let clone_id = clone["sessionId"].as_str().unwrap();
+    assert_eq!(client.open(clone_id).await["events"],snapshot["events"]);
+    let fork = client.request(json!({"id":"fork-old","type":"fork_session","sessionId":id,"entryId":all[0]["entryId"]})).await;
+    assert_eq!(fork["draft"],"one");
+    assert!(client.open(fork["sessionId"].as_str().unwrap()).await["events"].as_array().unwrap().is_empty());
+    assert_eq!(client.request(json!({"id":"delete","type":"delete_session","sessionId":id})).await["ok"],true);
+    assert!(manager.inner.state.get(&id).await.unwrap().is_none());
+    assert!(manager.inner.state.get(clone_id).await.unwrap().unwrap().parent_id.is_none());
+    assert_eq!(client.open(clone_id).await["events"],snapshot["events"],"Deleting the parent must leave copied history intact");
+    manager.inner.state.access(|db| {
+        assert_eq!(db.query_row("PRAGMA integrity_check",[],|row| row.get::<_,String>(0))?,"ok");
+        assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?); Ok(())
+    }).await.unwrap();
     manager.shutdown().await; server.abort();
 }

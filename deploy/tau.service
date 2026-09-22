@@ -11,8 +11,7 @@ WorkingDirectory=/root
 Environment=HOME=/root
 Environment=RUST_LOG=info
 Environment=TAU_CWD=/root
-Environment=TAU_STATE_PATH=/var/lib/tau/state.json
-Environment=TAU_SESSION_DIR=/var/lib/tau/pi-sessions
+Environment=TAU_DATABASE_PATH=/var/lib/tau/tau.sqlite3
 Environment=TAU_TELEMETRY_PATH=/var/lib/tau/client-crashes.jsonl
 Environment=TAU_SETTINGS_PATH=/var/lib/tau/settings.json
 Environment=TAU_ATTACHMENT_ROOT=/root/.local/share/tau/outbox

@@ -1,14 +1,11 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::fs;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use uuid::Uuid;
 
-use crate::state::SessionModel;
 
 pub const PAGE_EVENTS: usize = 50;
 pub const PAGE_BYTES: usize = 256 * 1024;
@@ -77,7 +74,7 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
     pub id: String,
@@ -160,6 +157,10 @@ pub struct QueueState {
     pub boundaries: Vec<String>,
 }
 
+impl QueueState {
+    pub fn native() -> Self { Self { available:true, capabilities:vec!["queue_edit".into(),"queue_delete".into(),"queue_pause".into(),"queue_resume".into(),"queue_run_prefix".into(),"queue_cancel_control".into()], boundaries:vec!["turn".into()], ..Default::default() } }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSnapshot {
@@ -192,7 +193,7 @@ pub struct TranscriptChange {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub delivered: Vec<String>,
     #[serde(skip)]
-    head: Option<String>,
+    pub(crate) head: Option<String>,
     #[serde(skip)]
     pub bumps_chat: bool,
 }
@@ -201,12 +202,13 @@ pub struct TranscriptChange {
 #[serde(rename_all = "camelCase")]
 pub struct TextDelta { pub event_id: String, pub text: String }
 
+#[derive(Clone)]
 pub struct Transcript {
     pub generation: String,
     pub sequence: u64,
     events: BTreeMap<u64, Event>,
     by_id: BTreeMap<String, u64>,
-    attachments: HashMap<String, u64>,
+    has_older: bool,
     next_order: u64,
     pub(crate) head: Option<String>,
     pub queue: QueueState,
@@ -299,42 +301,13 @@ impl Event {
 }
 
 impl Transcript {
-    pub fn new(raw: &[Value], head: Option<String>, queue: QueueState) -> Result<Self> {
-        let mut by_entry = HashMap::new();
-        for entry in raw {
-            let id = entry.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("History entry has no ID")?;
-            if by_entry.insert(id, entry).is_some() { bail!("History has duplicate entry IDs"); }
-        }
-        let mut branch = Vec::new();
-        let mut seen = HashSet::new();
-        let mut cursor = head.as_deref();
-        while let Some(id) = cursor {
-            if !seen.insert(id) { bail!("History branch contains a cycle"); }
-            let Some(entry) = by_entry.get(id) else { break; };
-            branch.push(*entry);
-            cursor = entry.get("parentId").and_then(Value::as_str);
-        }
-        if head.as_ref().is_some_and(|id| !by_entry.contains_key(id.as_str())) { bail!("History head is missing"); }
-        let mut transcript = Self {
-            generation: Uuid::new_v4().to_string(), sequence: 0,
-            events: BTreeMap::new(), by_id: BTreeMap::new(), attachments: HashMap::new(), next_order: 0, head, queue,
-        };
-        for raw in branch.into_iter().rev() {
-            for mut event in Event::from_entry(raw, false)? {
-                if transcript.by_id.contains_key(&event.id) { bail!("History has duplicate event identities"); }
-                event.order = transcript.next_order; transcript.next_order += 1;
-                if event.attachment.is_some() { transcript.attachments.insert(event.entry_id.clone(), event.order); }
-                transcript.by_id.insert(event.id.clone(), event.order);
-                transcript.events.insert(event.order, event);
-            }
-        }
-        Ok(transcript)
+    pub fn new(page: HistoryPage, head: Option<String>, next_order: u64, queue: QueueState) -> Self {
+        Self { generation:Uuid::new_v4().to_string(),sequence:0,
+            by_id:page.events.iter().map(|event| (event.id.clone(),event.order)).collect(),
+            events:page.events.into_iter().map(|event| (event.order,event)).collect(),
+            has_older:page.before.is_some(), next_order, head, queue }
     }
-
     pub fn event(&self, id: &str) -> Option<&Event> { self.by_id.get(id).and_then(|order| self.events.get(order)) }
-    pub fn attachment(&self, entry_id: &str) -> Option<&ChatAttachment> {
-        self.attachments.get(entry_id).and_then(|order| self.events.get(order)).and_then(|event| event.attachment.as_ref())
-    }
     pub fn events_mut(&mut self) -> impl Iterator<Item = &mut Event> { self.events.values_mut() }
 
     pub fn page(&self, before: Option<u64>) -> HistoryPage {
@@ -347,20 +320,17 @@ impl Transcript {
             bytes += size; events.push(event.clone());
         }
         events.reverse();
-        HistoryPage { before: if more { events.first().map(|event| event.order) } else { None }, events }
+        HistoryPage { before: if more || self.has_older { events.first().map(|event| event.order) } else { None }, events }
     }
 
-    pub fn snapshot(&self, requests: &[String]) -> TranscriptSnapshot {
+    pub fn snapshot(&self) -> TranscriptSnapshot {
         let mut page = self.page(None);
         for event in self.events.values().filter(|event| event.phase == EventPhase::Live) {
             if page.before.is_some_and(|before| event.order < before) { page.events.push(event.clone()); }
         }
         page.events.sort_by_key(|event| event.order);
-        let requests = requests.iter().collect::<HashSet<_>>();
-        let delivered = self.events.values().filter(|event| event.phase == EventPhase::Saved)
-            .filter_map(|event| event.origin.request_id.as_ref()).filter(|id| requests.contains(id)).cloned().collect::<HashSet<_>>();
-        TranscriptSnapshot { generation: self.generation.clone(), sequence: self.sequence, events: page.events,
-            queue: self.queue.clone(), before: page.before, delivered: delivered.into_iter().collect() }
+        TranscriptSnapshot { generation:self.generation.clone(),sequence:self.sequence,events:page.events,
+            queue:self.queue.clone(),before:page.before,delivered:Vec::new() }
     }
 
     pub fn project(&self, entry: &Value, live: bool) -> Result<TranscriptChange> {
@@ -402,90 +372,22 @@ impl Transcript {
             event.text.push_str(&delta.text);
         }
         for id in &change.removed {
-            if let Some(order) = self.by_id.remove(id) && let Some(event) = self.events.remove(&order)
-                && event.attachment.is_some() { self.attachments.remove(&event.entry_id); }
+            if let Some(order) = self.by_id.remove(id) { self.events.remove(&order); }
         }
         for event in &change.events {
             self.next_order = self.next_order.max(event.order + 1);
             self.by_id.insert(event.id.clone(), event.order);
-            if event.attachment.is_some() { self.attachments.insert(event.entry_id.clone(), event.order); }
             self.events.insert(event.order, event.clone());
         }
         if let Some(head) = &change.head { self.head = Some(head.clone()); }
         if let Some(queue) = &change.queue { self.queue = queue.clone(); }
         self.sequence += 1;
+        if let Some(first) = self.page(None).events.first().map(|event| event.order) {
+            self.events.retain(|order,event| {
+                if *order >= first || event.phase == EventPhase::Live { true }
+                else { self.by_id.remove(&event.id); self.has_older = true; false }
+            });
+        }
         Ok(())
     }
 }
-
-pub(crate) async fn session_model_from_file(path: &Path) -> Result<Option<SessionModel>> {
-    let file = fs::File::open(path).await?;
-    let mut lines = BufReader::new(file).lines();
-    let mut parents = HashMap::<String, Option<String>>::new();
-    let mut models = HashMap::<String, SessionModel>::new();
-    let mut leaf_id = None;
-    while let Some(line) = lines.next_line().await? {
-        let entry = match serde_json::from_str::<serde_json::Value>(&line) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let parent_id = entry
-            .get("parentId")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        parents.insert(id.to_owned(), parent_id);
-        leaf_id = Some(id.to_owned());
-
-        let model = if entry.get("type").and_then(serde_json::Value::as_str)
-            == Some("model_change")
-        {
-            entry
-                .get("provider")
-                .and_then(serde_json::Value::as_str)
-                .zip(entry.get("modelId").and_then(serde_json::Value::as_str))
-        } else {
-            entry
-                .get("message")
-                .filter(|message| {
-                    message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
-                })
-                .and_then(|message| {
-                    message
-                        .get("provider")
-                        .and_then(serde_json::Value::as_str)
-                        .zip(message.get("model").and_then(serde_json::Value::as_str))
-                })
-        };
-        if let Some((provider, model_id)) = model
-            && !provider.is_empty()
-            && !model_id.is_empty()
-        {
-            models.insert(
-                id.to_owned(),
-                SessionModel {
-                    provider: provider.to_owned(),
-                    model_id: model_id.to_owned(),
-                },
-            );
-        }
-    }
-
-    let mut current = leaf_id;
-    for _ in 0..=parents.len() {
-        let Some(id) = current else {
-            break;
-        };
-        if let Some(model) = models.get(&id) {
-            return Ok(Some(model.clone()));
-        }
-        current = parents.get(&id).cloned().flatten();
-    }
-    Ok(None)
-}
-
-#[cfg(test)]
-#[path = "transcript_test.rs"]
-mod tests;

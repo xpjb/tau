@@ -131,7 +131,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
         },
     )
     .await;
-    queue_server(&outbound_tx, &state.manager.sessions_message().await).await;
+    match state.manager.sessions_message().await {
+        Ok(message) => { queue_server(&outbound_tx,&message).await; }
+        Err(error) => { warn!(%error,"Could not read session list"); writer.abort(); return; }
+    }
 
     let mut events = state.manager.subscribe();
     let event_outbound = outbound_tx.clone();
@@ -227,11 +230,12 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 tokio::spawn(async move {
                     let request_id = request.id;
                     let response = match request.command {
-                        ClientCommand::ListSessions => {
-                            if !queue_server(&response_outbound, &manager.sessions_message().await).await {
-                                return;
+                        ClientCommand::ListSessions => match manager.sessions_message().await {
+                            Ok(message) => {
+                                if !queue_server(&response_outbound,&message).await { return; }
+                                ServerMessage::success(request_id,None,None)
                             }
-                            ServerMessage::success(request_id, None, None)
+                            Err(error) => ServerMessage::command_failure(request_id,error),
                         }
                         command @ (ClientCommand::GetSettings | ClientCommand::SetSettings { .. }) => {
                             let result = match command {
@@ -687,11 +691,10 @@ mod tests {
         let log = root.join("crashes.jsonl");
         let config = Config {
             transfer_bind: "127.0.0.1:0".parse().unwrap(),
-            bind: address, token: Arc::from("test-token"), settings_path: root.join("settings.json"), import_pi_dir: None, cwd: root.clone(), state_path: root.join("state.json"),
-            session_dir: root.join("pi-sessions"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
+            bind: address, token: Arc::from("test-token"), settings_path: root.join("settings.json"), import_pi_dir: None, cwd: root.clone(), database_path: root.join("tau.sqlite3"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
             upload_root: root.join("uploads"), title_command: None,
         };
-        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
         let app = Router::new().route("/v1/telemetry/crash", post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)))
             .with_state(AppState { config, manager, telemetry_gate: Arc::new(Mutex::new(())),
             transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) });
@@ -765,14 +768,14 @@ mod tests {
             transfer_bind: "127.0.0.1:0".parse().unwrap(),
             bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
             settings_path: root.join("settings.json"), import_pi_dir: None,
-            cwd: root.clone(), state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
+            cwd: root.clone(), database_path: root.join("tau.sqlite3"),
             telemetry_path: root.join("crashes.jsonl"),
             attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
         title_command: None,
         };
-        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
-        let id = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
-        let other = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
+        let id = manager.create_session(None).await.unwrap();
+        let other = manager.create_session(Some(&id)).await.unwrap();
         let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
             transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
