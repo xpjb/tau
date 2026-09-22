@@ -232,9 +232,12 @@ export default function (pi: ExtensionAPI) {
             if (item?.type !== "image_generation_call") continue;
             if (item.status !== "completed") throw new Error("OpenAI did not complete the generated image");
             if (typeof item.id !== "string" || !item.id) throw new Error("OpenAI returned an image without an ID");
-            if (imageId === item.id) continue;
-            if (imageId) throw new Error("OpenAI returned more than one generated image");
             if (typeof item.result !== "string" || !item.result) throw new Error("OpenAI returned no generated image data");
+            if (imageId === item.id) {
+              if (encoded !== item.result) throw new Error("OpenAI returned inconsistent generated image data");
+              continue;
+            }
+            if (imageId) throw new Error("OpenAI returned more than one generated image");
             imageId = item.id;
             encoded = item.result;
           }
@@ -257,9 +260,10 @@ export default function (pi: ExtensionAPI) {
       }
 
       signal?.throwIfAborted();
-      const stagedDirectory = await mkdtemp(join(root, ".tau-image-"));
-      const path = join(stagedDirectory, "generated-image.png");
+      let stagedDirectory: string | undefined;
       try {
+        stagedDirectory = await mkdtemp(join(root, ".tau-image-"));
+        const path = join(stagedDirectory, "generated-image.png");
         await writeFile(path, image, { flag: "wx", mode: 0o600 });
         await chmod(path, 0o600);
         signal?.throwIfAborted();
@@ -270,8 +274,10 @@ export default function (pi: ExtensionAPI) {
           },
         };
       } catch (error) {
-        await rm(stagedDirectory, { recursive: true, force: true }).catch(() => {});
-        throw error;
+        if (stagedDirectory) await rm(stagedDirectory, { recursive: true, force: true }).catch(() => {});
+        if (signal?.aborted) signal.throwIfAborted();
+        const reason = error instanceof Error ? error.message : "The file write failed.";
+        throw new Error(`OpenAI generated the image, but Tau could not stage it. Do not retry automatically; ask the user before another generation request. ${reason}`);
       }
     },
   });
