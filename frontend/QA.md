@@ -1,3 +1,46 @@
+# QA build 0.6.3 — packaging
+
+The user requested optimized, directly installable Android/Windows packages.
+0.6.3 uses system fonts on both shipped targets, compresses and strips Android's
+native library, and omits unneeded font assets/licenses from these packages.
+Windows uses GDI to select/read Segoe UI and Consolas (OS substitutions allowed).
+Android prefers installed static Roboto style files, otherwise uses the API-29
+font matcher for sans/monospace and script fallback, honoring collection indices.
+Font-file bytes are shared across chains instead of re-reading TTC collections.
+Linux development builds retain bundled fallbacks for machines without fonts.
+
+## Packaging checks completed
+
+- Windows x64 and Android ARM64 release builds succeeded, sequentially, one Cargo
+  job each. APK Java tools used one active processor. No GUI/emulator was started.
+- Android v3 signing verified, with the same certificate as 0.6.2. versionCode 4,
+  versionName 0.6.3-beta; not debuggable; extractNativeLibs=true.
+- Verified ZIP compression/CRC, stripped static symbol tables, unchanged dynamic
+  symbols, and 16KiB ELF load alignment. The original unstripped library remains
+  local for symbolication; the shared Cargo artifact is never modified in place.
+- Verified all eight previously bundled TTF payloads are absent from both native
+  binaries. Windows payload contains only the expected application executable;
+  its hash matches the fresh build. No PDBs, JVM or font assets in the installer.
+- Windows PE has no COFF symbol table to remove. Preset-6 LZMA reduces the download
+  without a large extreme-compression dictionary or an executable runtime packer.
+- See [PACKAGING.md](PACKAGING.md) for actual sizes and installed-footprint caveats.
+
+## Deferred
+
+The extra native Clippy invocation was blocked by the shared build lock (exit 75);
+it was not bypassed or retried while the host was busy. No full suite, Android
+x86_64 build, or new physical-device/font rendering check was run.
+
+The pinned Sanscale API has no variation-axis or synthetic-style controls. Static
+Roboto style files are preferred where present; devices with only variable faces
+or regular-only monospace fonts still need typography QA. Follow-up recorded as
+`df089cfc-e80f-4801-875a-b722173408e8`.
+
+Further builds/deliveries remain on request; this does not authorize a stable
+cutover, daemon deployment, or GitHub release.
+
+---
+
 # QA build 0.6.2
 
 The user explicitly requested both Windows and Android builds after `773e002`,

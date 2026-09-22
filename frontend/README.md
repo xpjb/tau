@@ -1,8 +1,9 @@
 # Tau 2 · native Rust frontend
 
-**QA build 0.6.2:** the user authorized Windows and Android builds of the latest
-interaction changes. See [QA.md](QA.md) for checks completed and deferred. Builds
-are kept sequential and low-concurrency while the system is under load.
+**QA build 0.6.3:** smaller Android/Windows packages using system fonts. See
+[PACKAGING.md](PACKAGING.md) for measured download/installed sizes and tradeoffs;
+[QA.md](QA.md) records checks completed and deferred. Builds remain sequential and
+low-concurrency while the system is under load.
 
 Branch: `tau2/rust-frontend`. **Tau Beta** is a parallel-install Rust preview,
 not the production cutover. `app/` remains the Kotlin reference. The beta installer
@@ -41,13 +42,15 @@ scripts/build-windows-sfx.sh                 # existing stable Kotlin installer
 ```
 
 Android: SDK 35, build tools 35.0.0, NDK 27.2.12479018, Java, Python 3 and the
-corresponding Rust target. API 29+, Vulkan 1.1. APKs are development-signed and
-16 KB aligned, under `target/android/<abi>/tau-frontend-<abi>.apk`. The separate
+corresponding Rust target. API 29+, Vulkan 1.1. APKs are development-signed but not
+debuggable, under `target/android/<abi>/tau-frontend-<abi>.apk`. The native library
+is stripped and ZIP-compressed; Android automatically extracts it during ordinary
+APK installation. ELF load segments retain 16KiB alignment. The separate
 package `app.tau.rust` is labeled **Tau Beta**. Only Internet permission is
 requested; files use the system document picker. Plain HTTP is supported for
 Tailnet/loopback setups, just as in the existing client—not for public networks.
 
-Windows: ship **`dist/Tau-Beta-0.6.2-windows-x64.exe`**, a per-user installer using
+Windows: ship **`dist/Tau-Beta-0.6.3-windows-x64.exe`**, a per-user installer using
 the normal Tau setup path with a `beta` feature/channel. It installs a small native
 launcher to `%LOCALAPPDATA%\Tau Beta\Tau Beta.exe`, a distinct **Tau Beta** Start
 Menu entry, and hash-keyed versions under `%LOCALAPPDATA%\Tau Beta\versions`.
@@ -56,7 +59,10 @@ entry. Local work stays in `%LOCALAPPDATA%\Tau2`, so existing beta settings/draf
 survive updates. Stable `%LOCALAPPDATA%\Tau`, its data and its Start Menu launcher
 are not touched. Close an earlier beta window to use the newly installed version.
 `--quiet --no-launch` is available for installer automation. No JVM or UniFFI
-runtime is needed. Native startup errors use a Windows message box, not a hidden
+runtime is needed. Windows and Android load fonts from the OS, with no bundled
+font files. The installer uses balanced LZMA compression (preset 6); this reduces
+download size, not the expanded executable's size. Old version directories remain
+available for rollback and are not counted in the clean-install measurement. Native startup errors use a Windows message box, not a hidden
 console. Static CRT is selected in `.cargo/config.toml`. Resource embedding uses
 `llvm-rc` when cross-building, or the Windows SDK on Windows.
 

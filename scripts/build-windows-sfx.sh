@@ -28,8 +28,8 @@ if $beta; then
     native_target=$(realpath -m "${CARGO_TARGET_DIR:-$root/target}")
     cargo xwin build --locked --release --target x86_64-pc-windows-msvc --target-dir "$native_target" -p tau-frontend --bin tau
     cp "$native_target/x86_64-pc-windows-msvc/release/tau.exe" "$bundle/app/Tau Beta.exe"
-    cp frontend/assets/DejaVu-LICENSE.txt "$bundle/app/"
     mkdir -p dist/tau-beta-windows-x64
+    rm -f dist/tau-beta-windows-x64/DejaVu-LICENSE.txt
     cp "$bundle/app/"* dist/tau-beta-windows-x64/
     TAU_VERSION="$version" cargo xwin build --locked --manifest-path "$root/windows/Cargo.toml" --release \
         --target x86_64-pc-windows-msvc --target-dir "$windows_target" -p tau-launcher --features beta --bin tau-beta-launcher
@@ -54,8 +54,8 @@ with lzma.open(
     payload,
     "wb",
     format=lzma.FORMAT_ALONE,
-    # An explicit 0..9 preset trades a little installer size for lower memory/CPU.
-    preset=int(os.environ["TAU_LZMA_PRESET"]) if "TAU_LZMA_PRESET" in os.environ else 9 | lzma.PRESET_EXTREME,
+    # Good compression without preset 9's large dictionary and extreme CPU cost.
+    preset=int(os.environ.get("TAU_LZMA_PRESET", "6")),
 ) as compressed:
     with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.USTAR_FORMAT) as archive:
         for path in sorted(bundle.rglob("*")):

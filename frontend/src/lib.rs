@@ -12,6 +12,7 @@ mod demo;
 mod desktop;
 mod details;
 mod editor;
+mod fonts;
 mod icons;
 mod render;
 mod scroll;

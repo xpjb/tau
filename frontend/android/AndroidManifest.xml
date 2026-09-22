@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.tau.rust" android:versionCode="3" android:versionName="0.6.2-beta">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.tau.rust" android:versionCode="4" android:versionName="0.6.3-beta">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
-    <application android:label="Tau Beta" android:icon="@drawable/icon" android:theme="@style/AppTheme" android:debuggable="true" android:allowBackup="false" android:extractNativeLibs="false" android:usesCleartextTraffic="true" android:enableOnBackInvokedCallback="false">
+    <application android:label="Tau Beta" android:icon="@drawable/icon" android:theme="@style/AppTheme" android:debuggable="false" android:allowBackup="false" android:extractNativeLibs="true" android:usesCleartextTraffic="true" android:enableOnBackInvokedCallback="false">
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask" android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">
             <meta-data android:name="android.app.lib_name" android:value="tau_frontend" />
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>

@@ -3,7 +3,6 @@ use sanscale::{Align, Color, Draw, Rect, Style, TextService, Vec2};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use tau_markdown::{Document, Faces, Preview, Theme};
 use wgpu::util::DeviceExt;
@@ -176,81 +175,7 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(ctx: &impl RenderContext) -> Result<Self, String> {
         let mut text = TextService::new();
-        let mut fallback = vec![];
-        let mut font_paths = vec![
-            PathBuf::from("/system/fonts/NotoSansCJK-Regular.ttc"),
-            PathBuf::from("/system/fonts/NotoColorEmoji.ttf"),
-            PathBuf::from("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
-            PathBuf::from("/usr/share/fonts/noto/NotoColorEmoji.ttf"),
-        ];
-        if let Some(windows) = std::env::var_os("WINDIR") {
-            let fonts = PathBuf::from(windows).join("Fonts");
-            font_paths
-                .extend(["msyh.ttc", "malgun.ttf", "seguiemj.ttf"].map(|name| fonts.join(name)));
-        }
-        for path in font_paths {
-            if let Ok(bytes) = sanscale::read_font_file(&path.to_string_lossy())
-                && let Ok(font) = text.map_font(bytes, 0)
-            {
-                fallback.push(font);
-            }
-        }
-        let fonts: [&'static [u8]; 8] = [
-            include_bytes!("../assets/DejaVuSans.ttf"),
-            include_bytes!("../assets/DejaVuSans-Bold.ttf"),
-            include_bytes!("../assets/DejaVuSans-Oblique.ttf"),
-            include_bytes!("../assets/DejaVuSans-BoldOblique.ttf"),
-            include_bytes!("../assets/DejaVuSansMono.ttf"),
-            include_bytes!("../assets/DejaVuSansMono-Bold.ttf"),
-            include_bytes!("../assets/DejaVuSansMono-Oblique.ttf"),
-            include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf"),
-        ];
-        let mut chains = vec![];
-        for (index, bytes) in fonts.into_iter().enumerate() {
-            let system = if index < 4 {
-                let path = if let Some(windows) = std::env::var_os("WINDIR") {
-                    PathBuf::from(windows).join("Fonts").join(
-                        [
-                            "segoeui.ttf",
-                            "segoeuib.ttf",
-                            "segoeuii.ttf",
-                            "segoeuiz.ttf",
-                        ][index],
-                    )
-                } else if cfg!(target_os = "android") {
-                    PathBuf::from("/system/fonts").join(
-                        [
-                            "Roboto-Regular.ttf",
-                            "Roboto-Bold.ttf",
-                            "Roboto-Italic.ttf",
-                            "Roboto-BoldItalic.ttf",
-                        ][index],
-                    )
-                } else {
-                    PathBuf::from("/usr/share/fonts/noto").join(
-                        [
-                            "NotoSans-Regular.ttf",
-                            "NotoSans-Bold.ttf",
-                            "NotoSans-Italic.ttf",
-                            "NotoSans-BoldItalic.ttf",
-                        ][index],
-                    )
-                };
-                sanscale::read_font_file(&path.to_string_lossy()).ok()
-            } else {
-                None
-            };
-            let f = text
-                .map_font(system.unwrap_or_else(|| Arc::new(bytes)), 0)
-                .map_err(|e| e.to_string())?;
-            let mut chain = vec![f];
-            chain.extend(&fallback);
-            chains.push(text.register_chain(&chain));
-        }
-        let faces = Faces {
-            prose: chains[..4].try_into().unwrap(),
-            mono: chains[4..].try_into().unwrap(),
-        };
+        let faces = crate::fonts::load(&mut text)?;
         text.set_target(ctx.device(), ctx.format());
         let shader = ctx
             .device()

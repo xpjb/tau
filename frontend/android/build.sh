@@ -16,7 +16,7 @@ target=$(realpath -m "${CARGO_TARGET_DIR:-$root/target}")
 out=$target/android/$abi
 keystore=${ANDROID_KEYSTORE:-$HOME/.android/debug.keystore}
 jar=$sdk/platforms/android-35/android.jar
-for tool in "$llvm/$clang" "$tools/aapt2" "$tools/d8" "$tools/zipalign" "$tools/apksigner"; do
+for tool in "$llvm/llvm-strip" "$llvm/$clang" "$tools/aapt2" "$tools/d8" "$tools/zipalign" "$tools/apksigner"; do
     test -x "$tool" || { echo "Missing Android build tool: $tool" >&2; exit 1; }
 done
 test -f "$jar" || { echo "Install Android SDK platform 35" >&2; exit 1; }
@@ -28,6 +28,9 @@ cargo build --release --locked --target "$triple" -p tau-frontend --lib --target
     --config "target.$triple.linker=\"$llvm/$clang\"" \
     --config "target.$triple.rustflags=[\"-C\", \"link-arg=-Wl,-z,max-page-size=16384\", \"-C\", \"link-arg=-Wl,-z,common-page-size=16384\"]"
 mkdir -p "$out/classes" "$out/dex"
+# Keep Cargo's original for symbolication; never strip shared cache artifacts.
+cp "$target/$triple/release/libtau_frontend.so" "$out/libtau_frontend.so"
+"$llvm/llvm-strip" --strip-unneeded "$out/libtau_frontend.so"
 find "$out/classes" "$out/dex" -type f -delete
 javac -encoding UTF-8 -source 8 -target 8 -Xlint:-options -classpath "$jar" \
     -d "$out/classes" "$app/android/java/app/tau/rust/MainActivity.java"
@@ -38,14 +41,14 @@ rm -f "$out/resources.zip" "$out/unsigned.apk" "$out/aligned.apk" \
 "$tools/aapt2" compile --dir "$app/android/res" -o "$out/resources.zip"
 "$tools/aapt2" link -I "$jar" --manifest "$app/android/AndroidManifest.xml" \
     -o "$out/unsigned.apk" "$out/resources.zip"
-python3 - "$out/unsigned.apk" "$target/$triple/release/libtau_frontend.so" "$abi" \
-    "$out/dex/classes.dex" "$app/assets/DejaVu-LICENSE.txt" <<'PY'
+python3 - "$out/unsigned.apk" "$out/libtau_frontend.so" "$abi" \
+    "$out/dex/classes.dex" <<'PY'
 import sys
 import zipfile
-with zipfile.ZipFile(sys.argv[1], 'a') as apk:
-    apk.write(sys.argv[2], 'lib/' + sys.argv[3] + '/libtau_frontend.so', compress_type=zipfile.ZIP_STORED)
+with zipfile.ZipFile(sys.argv[1], 'a', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as apk:
+    # A standard, directly installable APK: PackageManager extracts this library.
+    apk.write(sys.argv[2], 'lib/' + sys.argv[3] + '/libtau_frontend.so')
     apk.write(sys.argv[4], 'classes.dex', compress_type=zipfile.ZIP_DEFLATED)
-    apk.write(sys.argv[5], 'assets/DejaVu-LICENSE.txt', compress_type=zipfile.ZIP_DEFLATED)
 PY
 "$tools/zipalign" -f -P 16 4 "$out/unsigned.apk" "$out/aligned.apk"
 if ! test -f "$keystore"; then
