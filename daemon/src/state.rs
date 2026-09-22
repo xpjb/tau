@@ -101,16 +101,15 @@ impl StateStore {
         Ok(store)
     }
 
-    pub async fn title_prompt(&self, replacement: Option<String>) -> Result<String> {
-        if let Some(prompt) = replacement {
-            let _guard = self.inner.write_gate.lock().await;
-            let mut state = self.read_state().clone();
-            if state.title_prompt.as_ref() != Some(&prompt) {
-                state.title_prompt = Some(prompt);
-                self.commit(state).await?;
-            }
-        }
-        Ok(self.read_state().title_prompt.as_deref().unwrap_or(DEFAULT_TITLE_PROMPT).to_owned())
+    pub fn legacy_title_prompt(&self) -> String {
+        self.read_state().title_prompt.as_deref().unwrap_or(DEFAULT_TITLE_PROMPT).to_owned()
+    }
+
+    pub async fn clear_legacy_title_prompt(&self) -> Result<()> {
+        let _guard = self.inner.write_gate.lock().await;
+        let mut state = self.read_state().clone();
+        if state.title_prompt.take().is_some() { self.commit(state).await?; }
+        Ok(())
     }
 
     pub fn list(&self) -> Vec<(String, StoredSession)> {

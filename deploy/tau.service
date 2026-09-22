@@ -1,5 +1,5 @@
 [Unit]
-Description=Tau Tailnet gateway for Pi coding agents
+Description=Tau daemon with integrated Rust coding agent
 Wants=network-online.target
 After=network-online.target
 
@@ -11,13 +11,10 @@ WorkingDirectory=/root
 Environment=HOME=/root
 Environment=RUST_LOG=info
 Environment=TAU_CWD=/root
-Environment=TAU_PI_COMMAND=/usr/bin/pi
-Environment=TAU_DEFAULT_MODEL=openai-codex/gpt-5.6-sol
-Environment=TAU_DEFAULT_THINKING_LEVEL=max
 Environment=TAU_STATE_PATH=/var/lib/tau/state.json
 Environment=TAU_SESSION_DIR=/var/lib/tau/pi-sessions
 Environment=TAU_TELEMETRY_PATH=/var/lib/tau/client-crashes.jsonl
-Environment=TAU_PI_EXTENSION=/usr/local/lib/tau/send-media.ts
+Environment=TAU_SETTINGS_PATH=/var/lib/tau/settings.json
 Environment=TAU_ATTACHMENT_ROOT=/root/.local/share/tau/outbox
 Environment=TAU_UPLOAD_ROOT=/root/.local/share/tau/uploads
 EnvironmentFile=/etc/tau.env

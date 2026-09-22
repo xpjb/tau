@@ -8,10 +8,13 @@ if [[ ! -x "$binary" ]]; then
     exit 1
 fi
 
+if [[ -f /var/lib/tau/state.json && ! -f /var/lib/tau/settings.json ]] && ! grep -q '^TAU_IMPORT_PI_DIR=' /etc/tau.env 2>/dev/null; then
+    echo "Tau 2 migration requires a backup, stopped Pi workers, and TAU_IMPORT_PI_DIR in /etc/tau.env. See docs/tau2-agent.md." >&2
+    exit 1
+fi
+
 install -d -m 0700 /var/lib/tau /var/lib/tau/pi-sessions
 install -d -m 0700 /root/.local/share/tau/outbox /root/.local/share/tau/uploads
-install -d -m 0755 /usr/local/lib/tau
-install -m 0644 "$root/daemon/pi-extension/send-media.ts" /usr/local/lib/tau/send-media.ts
 install -m 0755 "$binary" /usr/local/bin/taud
 install -m 0644 "$root/deploy/tau.service" /etc/systemd/system/tau.service
 

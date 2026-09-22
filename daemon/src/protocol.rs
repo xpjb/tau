@@ -98,10 +98,6 @@ pub enum ServerMessage {
         session_id: String,
         request: Box<ExtensionUiRequest>,
     },
-    ExtensionError {
-        session_id: String,
-        error: String,
-    },
     Sessions {
         sessions: Vec<SessionSummary>,
     },
@@ -251,7 +247,6 @@ pub struct ExtensionUiRequest {
 pub enum SessionStatus {
     #[default]
     Sleeping,
-    Starting,
     Idle,
     Running,
     Error,

@@ -13,6 +13,12 @@ async fn main() -> ExitCode {
         .compact()
         .init();
 
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args == ["--login-codex"] {
+        return match taud::login_codex().await { Ok(()) => ExitCode::SUCCESS, Err(error) => { error!(%error, "Codex login failed"); ExitCode::FAILURE } };
+    }
+    if !args.is_empty() { error!("Usage: taud [--login-codex]"); return ExitCode::FAILURE; }
+
     let config = match taud::Config::from_env() {
         Ok(config) => config,
         Err(error) => {

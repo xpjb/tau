@@ -238,7 +238,9 @@ impl SettingsStore {
                             for model in raw.get(provider).and_then(|v| v.get("models")).and_then(Value::as_array).into_iter().flatten() {
                                 models.push(ModelSettings { provider: provider.clone(), id: model["id"].as_str().context("Legacy model has no ID")?.into(),
                                     name: model["name"].as_str().unwrap_or_default().into(), context_window: model["contextWindow"].as_u64().unwrap_or(128000),
-                                    thinking_level_map: model.get("thinkingLevelMap").map(|v| serde_json::from_value(v.clone())).transpose()?.unwrap_or_default() });
+                                    thinking_level_map: if model.get("reasoning").and_then(Value::as_bool) == Some(false) {
+                                        LEVELS.iter().map(|level| ((*level).to_owned(), None)).collect()
+                                    } else { model.get("thinkingLevelMap").map(|v| serde_json::from_value(v.clone())).transpose()?.unwrap_or_default() } });
                             }
                         }
                         if !models.is_empty() { settings.models = models; }

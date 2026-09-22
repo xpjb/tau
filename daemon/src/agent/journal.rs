@@ -7,6 +7,8 @@ use crate::settings::Settings;
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, Transcript};
 
+pub type Receipts = HashMap<String, (String, crate::protocol::PromptDisposition)>;
+
 pub struct Journal { pub path: PathBuf, pub entries: Vec<Value> }
 impl Journal {
     pub async fn open(root: &Path, path: Option<&str>, settings: &Settings) -> Result<Self> {
@@ -60,7 +62,7 @@ impl Journal {
     pub fn head(&self) -> Option<String> { self.entries.last().and_then(|entry| entry["id"].as_str()).map(str::to_owned) }
     pub fn entry(&self, mut value: Value) -> Value {
         value["id"] = json!(uuid::Uuid::new_v4().to_string()); value["parentId"] = json!(self.head());
-        value["timestamp"] = json!(super::now_ms().to_string()); value
+        value["timestamp"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)); value
     }
     pub async fn append(&mut self, entry: Value) -> Result<()> {
         let mut file = tokio::fs::OpenOptions::new().append(true).write(true).open(&self.path).await?;
@@ -72,7 +74,7 @@ impl Journal {
         }
         self.entries.push(entry); Ok(())
     }
-    pub fn restored(&self, settings: &Settings) -> Result<(SessionModel, String, QueueState, HashMap<String, (String, crate::protocol::PromptDisposition)>)> {
+    pub fn restored(&self, settings: &Settings) -> Result<(SessionModel, String, QueueState, Receipts)> {
         let mut model = settings.agent.model.clone(); let mut thinking = None;
         let mut queue = QueueState { available: true, capabilities: vec!["queue_edit".into(), "queue_delete".into(), "queue_pause".into(), "queue_resume".into(), "queue_run_prefix".into(), "queue_cancel_control".into()], boundaries: vec!["turn".into()], ..Default::default() };
         let mut receipts = HashMap::new();
@@ -101,7 +103,7 @@ impl Journal {
         Ok((model, level, queue, receipts))
     }
     pub fn transcript(&self, queue: QueueState) -> Result<Transcript> {
-        Transcript::new(&self.entries, &[], self.head(), queue, None)
+        Transcript::new(&self.entries, self.head(), queue)
     }
     pub fn messages(&self, system: String, selected: &SessionModel) -> Result<Vec<Value>> {
         let mut output = vec![json!({"role":"system", "content":system})];
@@ -160,5 +162,19 @@ impl Journal {
             for id in missing { repaired.push(json!({"role":"tool","tool_call_id":id,"content":"Execution was interrupted. Its effects are unknown; inspect the filesystem before retrying."})); }
         }
         Ok(repaired)
+    }
+}
+
+// Images/checkpoints are opaque provider inputs, not millions of base64 text tokens.
+pub fn estimate_tokens(value: &Value) -> u64 {
+    match value {
+        Value::String(text) => (text.len() as u64).div_ceil(4),
+        Value::Array(items) => items.iter().map(estimate_tokens).sum(),
+        Value::Object(fields) => {
+            if matches!(fields.get("type").and_then(Value::as_str), Some("image" | "image_url" | "input_image" | "compaction")) { return 2048; }
+            fields.iter().filter(|(key,_)| !matches!(key.as_str(), "encrypted_content" | "tauModelMessage" | "codex_output" | "usage"))
+                .map(|(_,value)| estimate_tokens(value)).sum()
+        }
+        _ => 0,
     }
 }

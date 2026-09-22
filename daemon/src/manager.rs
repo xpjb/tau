@@ -51,7 +51,8 @@ impl SessionRuntime {
 }
 impl AgentManager {
     pub async fn new(config: Config, state: StateStore) -> Result<Self> {
-        let settings = SettingsStore::load(&config, state.title_prompt(None).await?).await?;
+        let settings = SettingsStore::load(&config, state.legacy_title_prompt()).await?;
+        state.clear_legacy_title_prompt().await?;
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone());
         Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
@@ -113,9 +114,14 @@ impl AgentManager {
             let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             if ["compact", "model", "thinking", "name", "fast"].contains(&name) {
                 drop(content);
-                return self.run_builtin_command(id, &runtime, name, args.trim()).await;
+                let outcome = self.run_builtin_command(id, &runtime, name, args.trim()).await?;
+                let mut content = runtime.content.lock().await;
+                let queue = content.transcript.as_ref().unwrap().queue.clone();
+                content.save_queue(id, queue, Some(json!({"id":request_id,"text":text,"disposition":outcome.disposition}))).await?;
+                content.agent.as_mut().unwrap().receipts.insert(request_id.into(), (text.into(), outcome.disposition));
+                return Ok(outcome);
             }
-            if ["settings", "login", "logout", "reload", "tau-fork-at", "tree", "new", "resume", "fork", "clone"].contains(&name) {
+            if ["settings", "login", "logout", "reload", "tau-fork-at", "tree", "new", "resume", "fork", "clone", "scoped-models", "export", "import", "share", "copy", "session", "changelog", "hotkeys", "trust", "quit"].contains(&name) {
                 bail!("Use Tau's menu for /{name}; Pi terminal extensions are not loaded");
             }
         }
@@ -140,6 +146,8 @@ impl AgentManager {
         let transcript = content.transcript.as_ref().unwrap();
         if transcript.generation != generation { bail!("Queue changed; reopen this chat"); }
         let mut queue = transcript.queue.clone();
+        if matches!(operation, QueueOperation::Pause { .. } | QueueOperation::Prefix { .. } | QueueOperation::Resume { .. })
+            && queue.control.as_ref().is_some_and(|control| control.status == "waiting") { bail!("Cancel the pending queue control first"); }
         match operation {
             QueueOperation::Edit { request_id, revision, text } => {
                 if text.trim().is_empty() || text.chars().count() > MAX_PROMPT_CHARS { bail!("Invalid queue text"); }
@@ -172,7 +180,7 @@ impl AgentManager {
             }
         }
         if let Some(control) = &queue.control && control.action == "prefix" && control.status == "waiting"
-            && control.requests.iter().zip(&queue.requests).any(|(a,b)| a.request_id != b.request_id || a.revision != b.revision) {
+            && (control.requests.len() > queue.requests.len() || control.requests.iter().zip(&queue.requests).any(|(a,b)| a.request_id != b.request_id || a.revision != b.revision)) {
             bail!("Cancel the pending prefix before editing its messages");
         }
         content.save_queue(id, queue, None).await?;
@@ -186,7 +194,9 @@ impl AgentManager {
         Ok(())
     }
     pub async fn close_session(&self, id: &str) -> Result<()> {
-        let runtime = self.runtime(id).await?; let _guard = runtime.operation.lock().await;
+        let runtime = self.runtime(id).await?;
+        if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); }
+        let _guard = runtime.operation.lock().await;
         self.retire_session(id, &runtime).await;
         self.broadcast_sessions().await; Ok(())
     }
@@ -195,14 +205,16 @@ impl AgentManager {
             let mut content = runtime.content.lock().await;
             content.agent.as_mut().and_then(|agent| { agent.cancel.cancel(); agent.task.take() })
         };
-        if let Some(task) = task { if let Err(error) = task.await { warn!(%error, "Agent task stopped unexpectedly"); } }
+        if let Some(task) = task && let Err(error) = task.await { warn!(%error, "Agent task stopped unexpectedly"); }
         let mut content = runtime.content.lock().await;
         content.agent = None; content.transcript = None;
         let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id:Some(id.into()) }));
         self.set_runtime_state(id, runtime, SessionStatus::Sleeping, None, Some(None));
     }
     pub async fn delete_session(&self, id: &str) -> Result<()> {
-        let runtime = self.runtime(id).await?; let _guard = runtime.operation.lock().await;
+        let runtime = self.runtime(id).await?;
+        if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); }
+        let _guard = runtime.operation.lock().await;
         self.retire_session(id, &runtime).await;
         let stored = self.inner.state.get(id).context("Unknown session")?;
         let path = if let Some(path) = &stored.session_file {
@@ -256,6 +268,7 @@ impl AgentManager {
     pub async fn shutdown(&self) {
         if self.inner.shutting_down.swap(true, Ordering::AcqRel) { return; }
         let runtimes = self.inner.runtimes.lock().await.iter().map(|(id,r)| (id.clone(),r.clone())).collect::<Vec<_>>();
+        for (_,runtime) in &runtimes { if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); } }
         for (id,runtime) in runtimes { let _guard = runtime.operation.lock().await; self.retire_session(&id, &runtime).await; }
     }
     pub(crate) async fn runtime(&self, id: &str) -> Result<Arc<SessionRuntime>> {
@@ -264,21 +277,38 @@ impl AgentManager {
         Ok(self.inner.runtimes.lock().await.entry(id.into()).or_insert_with(|| Arc::new(SessionRuntime::new())).clone())
     }
     pub(crate) async fn ensure_loaded(&self, id: &str, runtime: &Arc<SessionRuntime>, content: &mut SessionContent) -> Result<()> {
+        if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        let stored = self.inner.state.get(id).context("Unknown session")?;
         if content.agent.is_some() { return Ok(()); }
         let settings = self.inner.settings.get();
-        let stored = self.inner.state.get(id).context("Unknown session")?;
         let journal = Journal::open(&self.inner.config.session_dir, stored.session_file.as_deref(), &settings).await?;
-        let (model, thinking, queue, receipts) = journal.restored(&settings)?;
-        let needs_turn = journal.entries.iter().rev().find(|entry| entry["type"] == "message")
-            .is_some_and(|entry| matches!(entry["message"]["role"].as_str(), Some("user" | "toolResult")));
+        let (model, thinking, mut queue, receipts) = journal.restored(&settings)?;
+        let mut tokens = None;
+        for entry in journal.entries.iter().rev() {
+            if entry["type"] == "compaction" || entry["type"] == "model_change" { break; }
+            if entry["message"]["role"] == "assistant" {
+                let usage = &entry["message"]["tauModelMessage"]["usage"];
+                tokens = usage["total_tokens"].as_u64();
+                break;
+            }
+        }
+        let context_usage = settings.model(&model).ok().map(|model| ContextUsage { tokens, context_window:model.context_window });
+        let needs_turn = journal.entries.iter().rev().find(|entry| entry["type"] == "message").is_some_and(|entry| {
+            let message = &entry["message"];
+            matches!(message["role"].as_str(), Some("user" | "toolResult"))
+                || message["role"] == "assistant" && (matches!(message["stopReason"].as_str(), Some("error" | "aborted" | "toolUse"))
+                    || message["content"].as_array().is_some_and(|parts| parts.iter().any(|part| part["type"] == "toolCall")))
+        });
+        if needs_turn { queue.paused = true; }
+        let detail = (queue.paused && (needs_turn || !queue.requests.is_empty())).then(|| "Pending work is paused; resume when ready".to_owned());
         self.inner.state.set_session_file(id, journal.path.to_string_lossy().into_owned()).await?;
         self.inner.state.set_model(id, model.clone()).await?;
         let mut transcript = journal.transcript(queue)?;
         self.populate_attachment_sizes(transcript.events_mut()).await;
         content.transcript = Some(transcript);
-        content.agent = Some(AgentSession { journal, model, thinking, receipts, running:false, cancel:tokio_util::sync::CancellationToken::new(), task:None, tokens:None, needs_turn });
+        content.agent = Some(AgentSession { journal, model, thinking, receipts, running:false, cancel:tokio_util::sync::CancellationToken::new(), task:None, tokens, needs_turn });
         let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id:Some(id.into()) }));
-        self.set_runtime_state(id, runtime, SessionStatus::Idle, None, None); Ok(())
+        self.set_runtime_state(id, runtime, SessionStatus::Idle, detail, Some(context_usage)); Ok(())
     }
     pub(crate) async fn entries_for_read(&self, id: &str) -> Result<(Vec<Value>, Option<String>)> {
         let runtime = self.runtime(id).await?; let mut content = runtime.content.lock().await;

@@ -1,20 +1,23 @@
 # Tau
 
-Tau is a private, Tailnet-native client for independent Pi coding-agent sessions. It runs beside the existing Telegram gateway without sharing processes or chat history. Both use Pi's global settings. A model chosen in Tau becomes Pi's default for new chats; existing chats keep their saved model. Tau does not override Pi with a separate model default.
+This branch implements the **Tau 2 Rust backend**: the coding agent runs inside
+`taud`, without Pi or Node. The Rust frontend is developed separately on
+`tau2/rust-frontend`; the Kotlin client below remains legacy release documentation.
+Do not deploy this daemon with the old protocol-10 clients.
+
+See [the backend contract, settings, migration and scope](docs/tau2-agent.md).
+The native backend uses protocol 11, durable prompt acknowledgement, one transcript
+sequence, native tools, Codex/OpenRouter streaming and unified `settings.json`.
+Old Pi JSONL histories are retained and readable. Transfers are unchanged here.
 
 ## Components
 
-- `daemon/`: `taud`, the Linux service that owns Tau's Pi RPC processes and session files.
-- `app/`: one Compose Multiplatform client for Android and desktop JVM targets.
-- `windows/`: the portable launcher and version-aware self-extracting Windows setup.
+- `daemon/`: the Rust daemon and in-process agent.
+- `app/`: legacy Compose client; replaced on the frontend branch.
+- `transfer/`: shared Rust transfer engine.
+- `windows/`: existing Windows launcher/installer.
 
-Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects ordered content events; clients keep remote history in memory only. SQLite preserves drafts, pending sends/controls, attached files, preferences and session metadata across client restarts. Cold chats can be read without starting Pi. Loaded history and chat feeds stay in memory across selection changes. Running, unread and recent chats warm in the background; older events also load on demand. Reconnect checks the retained event windows. Thinking and tools remain collapsible across fetch boundaries. New chats use `/root` as their working directory.
-
-Tau 0.5.14 clients and daemon use protocol 10 and must be updated together. This release adds shared Rust QUIC downloads with verified resume, the reusable New Chat starter with its actual model, and clear New/Unnamed chat labels. The Android streamed-viewport hotfix uses versionCode 36. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client cache schema 5 preserves local work while remote history remains memory-only. Pi JSONL history and the existing Pi installation remain intact.
-
-New Chat reuses one daemon-owned starter and starts Pi before returning it, so the real model appears above the composer before the first message. A client with a draft, files or a pending send/control keeps that chat and gets a fresh starter. The existing one-hour idle timeout stops workers without deleting chats. Existing chats remain intact.
-
-## Current client operations
+## Legacy 0.5.14 client operations
 
 - List, create, rename, and permanently delete chats.
 - Stream assistant text and tool activity.
@@ -78,20 +81,15 @@ is created with owner-only permissions. Accepted writes and their notifications
 finish even if the calling connection closes. If the tool reports an unconfirmed
 save, inspect the log before retrying; it never automatically retries.
 
-The tool is registered only in Tau workers. The daemon supplies a worker-scoped,
-flag-only capability; it does not expose the full client bearer token. A worker
-cannot flag another chat, and its capability expires when it stops. The new
-`POST /v1/sessions/{session_id}/flags` endpoint accepts only that capability.
-Temporary fork workers do not receive it. This feature keeps the existing client
-notification messages. Notifications reach connected clients; this adds
-no offline push service, issue tracker, or automatic investigation.
+The native tool writes directly to the current chat's StateStore. No worker
+capability, loopback flag endpoint or TypeScript extension is needed. Notifications
+reach connected clients; this adds no offline push service or issue tracker.
 
-Later, ask an agent to read the log and investigate a flag by ID. Deployment must
-include both the updated daemon and Tau extension.
+Later, ask an agent to read the log and investigate a flag by ID.
 
 ## Daemon installation
 
-Build and install the independent systemd service:
+After the matched Rust frontend is merged and the migration is accepted, build and install the service:
 
 ```bash
 cargo build --release --package taud
@@ -102,7 +100,7 @@ The installer generates `/etc/tau.env` once with a random bearer token, binds `t
 
 The title helper needs both `scripts/title_gen.py` and its adjacent `scripts/title_prompt.txt`.
 
-Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat under `/root/.local/share/tau/uploads` and deleted with the chat. Pi stages outgoing files under `/root/.local/share/tau/outbox`; `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
+Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat under `/root/.local/share/tau/uploads` and deleted with the chat. The agent stages outgoing files under `/root/.local/share/tau/outbox`; `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
 
 ## Native file transfers
 

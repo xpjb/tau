@@ -40,12 +40,20 @@ fn path(config: &Config, input: &str) -> PathBuf {
 }
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> { value[field].as_str().with_context(|| format!("{field} must be a string")) }
 
+async fn regular_file(path: &Path) -> Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new(); options.read(true);
+    #[cfg(unix)] options.custom_flags(libc::O_NONBLOCK);
+    let file = options.open(path).await?;
+    if !file.metadata().await?.is_file() { bail!("Path is not a regular file"); }
+    Ok(file)
+}
+
 pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, session: &str, name: &str, args: &Value, cancel: &CancellationToken) -> Result<Value> {
     if cancel.is_cancelled() { bail!("Tool cancelled"); }
     match name {
         "read" => {
             let path = path(config, string(args, "path")?);
-            let mut file = tokio::fs::File::open(&path).await?;
+            let mut file = regular_file(&path).await?;
             if !file.metadata().await?.is_file() { bail!("Path is not a regular file"); }
             let mut header = [0; 12]; let length = file.read(&mut header).await?;
             file.seek(std::io::SeekFrom::Start(0)).await?;
@@ -77,15 +85,17 @@ pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, s
             let input = path(config, string(args, "path")?);
             let path = match tokio::fs::canonicalize(&input).await { Ok(path) => path, Err(e) if e.kind() == std::io::ErrorKind::NotFound && name == "write" => input, Err(e) => return Err(e.into()) };
             let text = if name == "write" { string(args, "content")?.to_owned() } else {
-                let original = tokio::fs::read_to_string(&path).await?;
+                let file = regular_file(&path).await?;
+                if !file.metadata().await?.is_file() { bail!("Edit requires a regular file"); }
+                let mut original = String::new(); file.take(16 * 1024 * 1024 + 1).read_to_string(&mut original).await?;
+                if original.len() > 16 * 1024 * 1024 { bail!("Edit is limited to 16 MB files; use bash for larger files"); }
                 let edits = args["edits"].as_array().filter(|v| !v.is_empty()).context("edits must be a nonempty array")?;
                 let mut ranges = Vec::new();
                 for edit in edits {
                     let old = string(edit, "oldText")?; let new = string(edit, "newText")?;
                     if old.is_empty() { bail!("oldText cannot be empty"); }
-                    let mut matches = original.match_indices(old);
-                    let (start, _) = matches.next().context("oldText was not found")?;
-                    if matches.next().is_some() { bail!("oldText must match exactly once"); }
+                    let start = original.find(old).context("oldText was not found")?;
+                    if original.rfind(old) != Some(start) { bail!("oldText must match exactly once"); }
                     ranges.push((start, start + old.len(), new));
                 }
                 ranges.sort_by_key(|range| range.0);
@@ -107,7 +117,9 @@ pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, s
             let directory = config.state_path.parent().unwrap_or(Path::new(".")).join("tool-output");
             tokio::fs::create_dir_all(&directory).await?;
             let output_path = directory.join(format!("{}.log", uuid::Uuid::new_v4()));
-            let output = std::fs::OpenOptions::new().write(true).create_new(true).open(&output_path)?;
+            let mut options = std::fs::OpenOptions::new(); options.write(true).create_new(true);
+            #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+            let output = options.open(&output_path)?;
             let mut process = tokio::process::Command::new(&settings.agent.shell_path);
             process.arg("-c").arg(format!("{}\n{command}", settings.agent.shell_command_prefix)).current_dir(&config.cwd)
                 .stdin(Stdio::null()).stdout(output.try_clone()?).stderr(output).kill_on_drop(true)
@@ -116,12 +128,12 @@ pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, s
             let mut child = process.spawn().context("Could not start bash")?;
             struct Group(u32);
             impl Drop for Group {
-                fn drop(&mut self) { #[cfg(unix)] unsafe { libc::kill(-(self.0 as i32), libc::SIGKILL); } }
+                fn drop(&mut self) { #[cfg(unix)] if self.0 != 0 { unsafe { libc::kill(-(self.0 as i32), libc::SIGKILL); } } }
             }
-            let group = Group(child.id().context("Shell has no process ID")?);
+            let mut group = Group(child.id().context("Shell has no process ID")?);
             let timeout = async { match seconds { Some(seconds) => tokio::time::sleep(std::time::Duration::from_secs(seconds)).await, None => std::future::pending::<()>().await } };
             let status = tokio::select! {
-                result = child.wait() => result.map(|status| format!("Exit status: {status}"))?,
+                result = child.wait() => { let status = result?; group.0 = 0; format!("Exit status: {status}") },
                 _ = cancel.cancelled() => "Cancelled".into(),
                 _ = timeout => "Timed out".into(),
             };
@@ -143,7 +155,7 @@ pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, s
             let path = tokio::fs::canonicalize(path(config, string(args, "path")?)).await?;
             let root = tokio::fs::canonicalize(&config.attachment_root).await?;
             if !path.starts_with(&root) || path == root { bail!("Attachment is outside the Tau outbox"); }
-            let mut file = tokio::fs::File::open(&path).await?; let metadata = file.metadata().await?;
+            let mut file = regular_file(&path).await?; let metadata = file.metadata().await?;
             if !metadata.is_file() { bail!("Attachment must be a regular file"); }
             let image = name == "send_image";
             if metadata.len() > if image { IMAGE_LIMIT } else { FILE_LIMIT } { bail!("Attachment exceeds size limit"); }

@@ -5,31 +5,33 @@ One-sentence responsibility per module. Read this before opening files.
 ## Daemon (`daemon/`, Rust, single binary `taud`)
 
 - `main.rs` / `lib.rs` — entrypoint and composition root.
-- `config.rs` — environment configuration, validated once at startup.
-- `server.rs` — HTTP/WebSocket transport: auth, request routing, upload
-  and attachment serving, crash ingest, client ping deadlines. No Pi or
-  session logic.
-- `manager.rs` — session lifecycle: per-chat runtime, Pi process
-  supervision, transcript projection, idle sleep, fork/clone, deletion.
-- `attachments.rs` — attachment media: resolution, upload storage, MIME
-  sniffing.
-- `commands.rs` — slash commands: the builtin interpreter and the Pi
-  command catalog.
-- `pi.rs` — one Pi subprocess and its RPC pipe: request correlation,
-  event broadcast, shutdown.
-- `transcript.rs` — Pi data formats and the transcript state machine:
-  branch projection into flat events, ordered updates, recovery, paging,
-  queue state and model backfill walks.
-- `protocol.rs` — the client↔daemon wire contract. Pure data.
-- `state.rs` — Tau-owned session metadata and the serialized, durable flag log.
-- `pi-extension/send-media.ts` — Tau agent tools for sending media and flagging
-  incidental findings; flag writes use a capability scoped to the current worker.
+- `config.rs` — deployment paths, listener addresses and bearer-token validation.
+- `settings.rs` — unified, revision-checked daemon/agent settings and one-time Pi import.
+- `server.rs` — authenticated HTTP/WebSocket routing, uploads, attachment grants,
+  crash ingest and heartbeat deadlines. No model or session logic.
+- `manager.rs` — native session lifecycle, durable prompt acceptance, queue controls,
+  history feeds, fork/clone and deletion.
+- `agent/mod.rs` — cancellable model/tool loop, transcript publication, compaction
+  and asynchronous title generation.
+- `agent/journal.rs` — durable JSONL history/queue writes, legacy active-branch import
+  and provider context reconstruction. Unknown tool effects are never auto-replayed.
+- `agent/provider/` — bounded SSE framing, Codex Responses and Chat Completions,
+  request construction and safe HTTP retries.
+- `agent/auth.rs` — private provider credentials, serialized Codex OAuth refresh,
+  and daemon-side device login.
+- `agent/tools.rs` — native filesystem, shell, media and incidental-flag tools.
+- `attachments.rs` — authenticated attachment resolution, upload storage and MIME checks.
+- `commands.rs` — native command catalog and model/thinking/compact/name/fast settings.
+- `transcript.rs` — flat event projection, stable live-to-saved IDs and paging.
+  There is only one generation/sequence: the client-facing transcript.
+- `protocol.rs` — client↔daemon wire data (to move into the frontend branch's shared crate).
+- `state.rs` — session metadata and durable flags; no active agent settings.
 
-Dependencies point one way: `server → manager → {pi, transcript, state}`,
-with `transcript` owning Pi formats and `state.rs` owning Tau's own
-`state.json` and `flags.jsonl`. Events flow back up via broadcast channels, never calls.
+Dependencies point one way: `server → manager → {agent, transcript, state, settings}`.
+There is no Pi subprocess or internal RPC transport. See [Tau 2 integration and
+migration](docs/tau2-agent.md) before merging the Rust frontend.
 
-## Client (`app/composeApp/`, Kotlin, Android + desktop)
+## Legacy client (`app/composeApp/`, Kotlin, Android + desktop)
 
 - `TauApp.kt` — app screens and transcript UI. Long-lived state is owned by `TauController`.
 - `LocalImage.kt` — bounded image loading, fitted previews and full-screen zoom/pan controls; zoom state stays in the open viewer.
@@ -56,7 +58,7 @@ with `transcript` owning Pi formats and `state.rs` owning Tau's own
 
 - `title_gen.py` — one-shot local title inference from daemon JSON input.
 - `title_prompt.txt` — the default full title prompt, shared with daemon state.
-  Settings edits are stored in the existing daemon `state.json`.
+  Settings edits live in the daemon section of `settings.json`.
 
 ## Rules the codebase keeps
 
@@ -65,14 +67,14 @@ with `transcript` owning Pi formats and `state.rs` owning Tau's own
   received visible feedback.
 - No single-caller functions unless they are UI composables, axum route
   handlers, or platform-interface implementations.
-- Wire changes are versioned: `PROTOCOL_VERSION` in `protocol.rs` and
-  `Protocol.kt` move together with matched client releases.
-- The daemon owns one reusable starter in session metadata. New Chat starts Pi
+- Wire changes are versioned. The Rust frontend merge must carry protocol 11
+  in its shared crate; this backend cannot be deployed with protocol-10 clients.
+- The daemon owns one reusable starter in session metadata. New Chat loads the native session
   before replying and shows its real model. Sent messages, explicit renames or
-  client keep hints retain work. Idle sleep stops the worker, not the chat.
+  client keep hints retain work. Idle sleep evicts the runtime, not the chat.
   Only the blank starter is labeled New chat. Untitled chats with data or kept
   outside that slot are Unnamed chats, with no count limit.
-- Pi JSONL owns saved history. Remote transcript events stay in client
+- Daemon JSONL owns saved history and acknowledged pending work. Remote transcript events stay in client
   memory only; SQLite preserves local work, files and preferences.
 - The daemon owns branch selection, event order, stream lifecycle and activity
   bumps. Recovery assigns order from the source, not discovery time.

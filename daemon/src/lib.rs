@@ -62,3 +62,10 @@ pub async fn run(mut config: Config) -> Result<()> {
 
 #[cfg(test)]
 mod agent_test;
+
+pub async fn login_codex() -> Result<()> {
+    let settings_path = std::env::var_os("TAU_SETTINGS_PATH").map(std::path::PathBuf::from).unwrap_or_else(|| "/var/lib/tau/settings.json".into());
+    if !settings_path.is_absolute() { bail!("TAU_SETTINGS_PATH must be absolute"); }
+    let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+    agent::auth::AuthStore::new(settings_path.with_file_name("auth.json"), http).login().await
+}

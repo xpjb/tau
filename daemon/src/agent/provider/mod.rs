@@ -149,9 +149,7 @@ impl<'a> Stream<'a> {
 
     pub fn assistant_message(&self) -> Value {
         let mut message = self.message.clone();
-        message
-            .entry("role")
-            .or_insert_with(|| Value::String("assistant".into()));
+        message.insert("role".into(), Value::String("assistant".into()));
         message.entry("content").or_insert(Value::Null);
         if !self.tool_calls.is_empty() {
             message.insert(
@@ -171,17 +169,26 @@ impl<'a> Stream<'a> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode { Chat, Compact, Search, Summary }
-pub struct Completion { pub message: Value, pub tokens: Option<u64>, pub account: Option<String> }
+pub struct Completion { pub message: Value, pub tokens: Option<u64>, pub account: Option<String>, pub limited: bool }
 
-pub async fn generate(
-    http: &reqwest::Client, auth: &AuthStore, settings: &Settings, selected: &SessionModel, thinking: &str,
-    messages: &[Value], session_id: &str, definitions: Vec<Value>, mode: Mode, updates: mpsc::Sender<Value>,
-) -> Result<Completion> {
+pub struct Request<'a> {
+    pub settings: &'a Settings,
+    pub selected: &'a SessionModel,
+    pub thinking: &'a str,
+    pub messages: &'a [Value],
+    pub session_id: &'a str,
+    pub definitions: Vec<Value>,
+    pub mode: Mode,
+}
+pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request<'_>, updates: mpsc::Sender<Value>) -> Result<Completion> {
+    let Request { settings, selected, thinking, messages, session_id, definitions, mode } = request;
     let model: &ModelSettings = settings.model(selected)?;
     let provider = &settings.providers[&selected.provider];
     let decoder: &dyn Decoder = match provider.api { Api::Codex => &codex::Codex, Api::ChatCompletions => &completions::Completions };
     let effort = model.thinking_level_map.get(thinking).cloned().unwrap_or_else(|| match thinking {
-        "off" => None, "minimal" => Some("low".into()), other => Some(other.into()),
+        "off" => None, "minimal" => Some("low".into()),
+        "max" | "xhigh" if provider.api == Api::ChatCompletions => Some("high".into()),
+        other => Some(other.into()),
     });
     let idle = Duration::from_secs(settings.agent.http_idle_timeout_seconds);
     let attempts = if settings.agent.retry.enabled { settings.agent.retry.max_retries } else { 0 };
@@ -259,11 +266,15 @@ pub async fn generate(
                 .header("session-id", session_id).header("x-codex-beta-features", "remote_compaction_v2");
             if settings.agent.fast_mode { request = request.header("x-codex-routing-hint", format!("model={};tier=priority", model.id)); }
         }
-        let response = tokio::time::timeout(idle, request.json(&body).send()).await.context("Model response headers timed out")?;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) if attempt >= attempts => return Err(error).context("Model request failed"),
-            Err(_) => { attempt += 1; tokio::time::sleep(Duration::from_millis(settings.agent.retry.base_delay_ms.saturating_mul(1 << (attempt - 1)))).await; continue; }
+        let response = match tokio::time::timeout(idle, request.json(&body).send()).await {
+            Ok(Ok(response)) => response,
+            failure if attempt < attempts => {
+                drop(failure); attempt += 1;
+                tokio::time::sleep(Duration::from_millis(settings.agent.retry.base_delay_ms.saturating_mul(1 << (attempt - 1)))).await;
+                continue;
+            }
+            Ok(Err(error)) => return Err(error).context("Model request failed"),
+            Err(_) => bail!("Model response headers timed out"),
         };
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED && provider.api == Api::Codex && !refreshed {
@@ -289,11 +300,35 @@ pub async fn generate(
         }
         let mut message = stream.assistant_message();
         message["usage"] = json!(stream.usage);
+        if stream.finish_reason.as_deref() == Some("length") && !stream.tool_calls.is_empty() { bail!("Model response was truncated; tools were not executed"); }
         let mut ids = std::collections::HashSet::new();
         for call in message["tool_calls"].as_array().into_iter().flatten() {
             let id = call["id"].as_str().filter(|id| !id.is_empty()).context("Tool call has no ID")?;
             if !ids.insert(id) || call["function"]["name"].as_str().is_none() || call["function"]["arguments"].as_str().is_none() { bail!("Invalid tool calls"); }
         }
-        return Ok(Completion { message, tokens: stream.usage.as_ref().and_then(|usage| usage["total_tokens"].as_u64()), account });
+        return Ok(Completion { message, tokens: stream.usage.as_ref().and_then(|usage| usage["total_tokens"].as_u64()), account, limited:stream.finish_reason.as_deref() == Some("length") });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn frames_sse_at_every_byte_boundary_and_rejects_invalid_or_oversized_input() {
+        for separator in ["\n\n", "\r\n\r\n", "\r\r"] {
+            let wire = format!(": heartbeat{separator}data: {}{separator}data: [DONE]{separator}data: ignored{separator}",
+                json!({"choices":[{"index":0,"delta":{"content":"Hello π🧠"},"finish_reason":"stop"}]}));
+            for cut in 0..wire.len() {
+                let mut stream = Stream::new(&completions::Completions);
+                stream.push(&wire.as_bytes()[..cut]).unwrap(); stream.push(&wire.as_bytes()[cut..]).unwrap();
+                assert!(stream.done); assert_eq!(stream.message["content"], "Hello π🧠");
+            }
+        }
+        let mut malformed = Stream::new(&completions::Completions);
+        assert!(malformed.push(b"data: nope\n\n").is_err());
+        let mut large = Stream::new(&completions::Completions);
+        assert!(large.push(&vec![b'x'; MAX_RESPONSE_BYTES + 1]).is_err());
+        let mut codex = Stream::new(&codex::Codex);
+        assert!(codex.push(b"data: [DONE]\n\n").is_err(), "Codex requires a completed response");
     }
 }

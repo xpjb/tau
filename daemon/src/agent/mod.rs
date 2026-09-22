@@ -3,14 +3,13 @@ pub mod journal;
 mod provider;
 mod tools;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use crate::manager::{AgentManager, SessionContent, SessionRuntime, bounded};
-use crate::protocol::{ContextUsage, PromptDisposition, ServerMessage, SessionStatus};
+use crate::protocol::{ContextUsage, ServerMessage, SessionStatus};
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, TranscriptChange};
 use crate::settings::SteeringMode;
@@ -20,7 +19,7 @@ pub struct AgentSession {
     pub journal: Journal,
     pub model: SessionModel,
     pub thinking: String,
-    pub receipts: HashMap<String, (String, PromptDisposition)>,
+    pub receipts: journal::Receipts,
     pub running: bool,
     pub cancel: CancellationToken,
     pub task: Option<tokio::task::JoinHandle<()>>,
@@ -34,7 +33,7 @@ impl SessionContent {
         let agent = self.agent.as_mut().context("Session is not loaded")?;
         let entry = agent.journal.entry(value);
         let transcript = self.transcript.as_mut().unwrap();
-        let change = transcript.project(&json!({"type":"append","leafId":entry["id"],"entry":entry}))?;
+        let change = transcript.project(&entry, false)?;
         agent.journal.append(entry).await?;
         self.publish(id, change)
     }
@@ -45,13 +44,14 @@ impl SessionContent {
         Ok(())
     }
     pub async fn save_queue(&mut self, id: &str, queue: QueueState, accepted: Option<Value>) -> Result<()> {
+        if queue.requests.iter().map(|r| r.text.len()).sum::<usize>() > 4 * 1024 * 1024 { bail!("Pending messages exceed the 4 MB queue limit"); }
         self.append(id, json!({"type":"tau_queue","queue":queue,"accepted":accepted})).await?;
         let mut change = TranscriptChange::default(); change.queue = Some(queue);
         self.publish(id, change)
     }
     pub fn live(&mut self, id: &str, stream: &str, message: Value) -> Result<()> {
         let transcript = self.transcript.as_mut().unwrap();
-        let mut change = transcript.project(&json!({"type":"live","entry":{"streamId":stream,"parentId":transcript.head,"message":message}}))?;
+        let mut change = transcript.project(&json!({"streamId":stream,"parentId":transcript.head,"message":message}), true)?;
         // Emit a delta for the common single growing block; avoid resending the whole response.
         change.events.retain(|event| transcript.event(&event.id).is_none_or(|old| old != event));
         if change.events.len() == 1 && let Some(old) = transcript.event(&change.events[0].id) {
@@ -89,7 +89,7 @@ impl AgentManager {
         self.set_runtime_state(&id, &runtime, SessionStatus::Running, None, None);
         agent.task = Some(tokio::spawn(async move {
             loop {
-            let result = manager.run_agent(&id, &runtime).await;
+            let mut result = manager.run_agent(&id, &runtime).await;
             let mut content = runtime.content.lock().await;
             let Some(agent) = &mut content.agent else { return; };
             let cancelled = agent.cancel.is_cancelled();
@@ -101,7 +101,16 @@ impl AgentManager {
             let mut queue = content.transcript.as_ref().unwrap().queue.clone();
             queue.run_id = None;
             if cancelled || result.is_err() { queue.paused = true; }
-            if let Err(error) = content.save_queue(&id, queue, None).await { tracing::error!(session=%id, %error, "Could not save settled queue"); }
+            if let Err(error) = content.save_queue(&id, queue, None).await {
+                tracing::error!(session=%id, %error, "Could not save settled queue");
+                result = Err(error.context("Could not save settled queue"));
+            }
+            let mut interrupted = TranscriptChange::default();
+            for event in content.transcript.as_mut().unwrap().events_mut().filter(|event| event.phase == crate::transcript::EventPhase::Live) {
+                let mut event = event.clone(); event.phase = crate::transcript::EventPhase::Interrupted;
+                interrupted.events.push(event);
+            }
+            if !interrupted.events.is_empty() { let _ = content.publish(&id, interrupted); }
             manager.set_runtime_state(&id, &runtime, if result.is_err() && !cancelled { SessionStatus::Error } else { SessionStatus::Idle },
                 result.err().map(|e| bounded(&e.to_string(), 480)), Some(usage));
             drop(content);
@@ -113,6 +122,7 @@ impl AgentManager {
     }
 
     async fn run_agent(&self, id: &str, runtime: &Arc<SessionRuntime>) -> Result<()> {
+        let mut compacted = false;
         loop {
             let settings = self.inner.settings.get();
             let (selected, thinking, cancel, messages, tokens) = {
@@ -149,15 +159,19 @@ impl AgentManager {
                 (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), messages, agent.tokens)
             };
             let context_window = settings.model(&selected)?.context_window;
-            let estimated = messages.iter().map(|message| message.to_string().len() as u64 / 4).sum::<u64>();
+            let estimated = messages.iter().map(journal::estimate_tokens).sum::<u64>();
             if settings.agent.compaction.enabled && tokens.unwrap_or(estimated).max(estimated) > context_window.saturating_sub(settings.agent.compaction.reserve_tokens) {
+                if compacted { bail!("Context is still too large after compaction; reduce the queued input or fork an earlier turn"); }
                 self.compact(id, runtime, "").await?;
+                compacted = true;
                 continue;
             }
             let stream = uuid::Uuid::new_v4().to_string();
             let (updates, mut receiver) = mpsc::channel(8);
-            let generation = provider::generate(&self.inner.http, &self.inner.auth, &settings, &selected, &thinking, &messages, id,
-                tools::definitions(&self.inner.config), provider::Mode::Chat, updates);
+            let generation = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
+                settings:&settings, selected:&selected, thinking:&thinking, messages:&messages, session_id:id,
+                definitions:tools::definitions(&self.inner.config), mode:provider::Mode::Chat,
+            }, updates);
             tokio::pin!(generation);
             let mut partial = json!({"role":"assistant","content":""});
             let completion = loop {
@@ -177,15 +191,18 @@ impl AgentManager {
                     let mut content = runtime.content.lock().await;
                     let mut message = assistant_message(&partial, &selected, if cancel.is_cancelled() {"aborted"} else {"error"});
                     message["errorMessage"] = json!(bounded(&error.to_string(), 480));
+                    message["timestamp"] = json!(now_ms());
                     content.append(id, json!({"type":"message","origin":{"streamId":stream},"message":message})).await?;
-                    content.agent.as_mut().unwrap().needs_turn = false;
+                    content.agent.as_mut().unwrap().needs_turn = true;
                     return Err(error);
                 }
             };
+            compacted = false;
             let calls = completion.message["tool_calls"].as_array().cloned().unwrap_or_default();
             {
-                let mut message = assistant_message(&completion.message, &selected, if calls.is_empty() {"stop"} else {"toolUse"});
+                let mut message = assistant_message(&completion.message, &selected, if completion.limited {"length"} else if calls.is_empty() {"stop"} else {"toolUse"});
                 message["tauModelMessage"] = completion.message.clone();
+                message["timestamp"] = json!(now_ms());
                 let mut content = runtime.content.lock().await;
                 content.append(id, json!({"type":"message","origin":{"streamId":stream},"message":message})).await?;
                 let agent = content.agent.as_mut().unwrap(); agent.tokens = completion.tokens; agent.needs_turn = !calls.is_empty();
@@ -201,7 +218,9 @@ impl AgentManager {
                         let (updates, _receiver) = mpsc::channel(1);
                         tokio::select! {
                             _ = cancel.cancelled() => Err(anyhow::anyhow!("Tool cancelled")),
-                            result = provider::generate(&self.inner.http, &self.inner.auth, &settings, &selected, "low", &messages, id, vec![], provider::Mode::Search, updates) =>
+                            result = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
+                                settings:&settings, selected:&selected, thinking:"low", messages:&messages, session_id:id, definitions:vec![], mode:provider::Mode::Search,
+                            }, updates) =>
                                 result.map(|completion| tools::text_result(format!("{}\n{}", completion.message["content"].as_str().unwrap_or_default(), completion.message["annotations"]))),
                         }
                     }
@@ -229,21 +248,24 @@ impl AgentManager {
             if users.len() < 2 { bail!("Not enough completed turns to compact safely"); }
             let mut cut = *users.last().unwrap(); let mut size = 0;
             for (index, entry) in entries.iter().enumerate().rev() {
-                if entry["type"] == "message" { size += entry["message"].to_string().len() as u64 / 4; }
+                if entry["type"] == "message" { size += journal::estimate_tokens(&entry["message"]); }
                 if entry["message"]["role"] == "user" && size <= settings.agent.compaction.keep_recent_tokens { cut = index; }
             }
             if cut <= users[0] { cut = users[1]; }
             let prefix = Journal { path:agent.journal.path.clone(), entries:entries[..cut].to_vec() };
             (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), entries[cut]["id"].clone(), prefix, agent.tokens)
         };
+        settings.model(&selected)?;
         self.set_runtime_state(id, runtime, SessionStatus::Running, Some("Compacting context".into()), None);
         let native = settings.agent.compaction.native_codex && settings.providers[&selected.provider].api == crate::settings::Api::Codex;
         let mut messages = prefix.messages(settings.system_prompt(&self.inner.config.cwd).await?, &selected)?;
         if !native { messages.push(json!({"role":"user","content":format!("Summarize this conversation for another coding agent. Preserve goals, decisions, files changed, commands run, pending work, and important constraints. Do not continue the task. {instructions}")})); }
         else if !instructions.is_empty() { messages.push(json!({"role":"user","content":format!("Compaction instructions: {instructions}")})); }
         let (updates, _receiver) = mpsc::channel(1);
-        let generation = provider::generate(&self.inner.http, &self.inner.auth, &settings, &selected, &thinking, &messages, id, vec![],
-            if native {provider::Mode::Compact} else {provider::Mode::Summary}, updates);
+        let generation = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
+            settings:&settings, selected:&selected, thinking:&thinking, messages:&messages, session_id:id, definitions:vec![],
+            mode:if native {provider::Mode::Compact} else {provider::Mode::Summary},
+        }, updates);
         let result = tokio::select! {
             _ = cancel.cancelled() => bail!("Compaction cancelled; history is unchanged"),
             result = tokio::time::timeout(std::time::Duration::from_secs(settings.agent.compaction.timeout_seconds), generation) => result.context("Compaction timed out; history is unchanged")??,

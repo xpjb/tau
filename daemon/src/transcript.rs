@@ -164,41 +164,6 @@ pub struct QueueState {
     pub boundaries: Vec<String>,
 }
 
-impl QueueState {
-    pub fn from_entry(raw: &Value) -> Result<Self> {
-        let mut ids = HashSet::new();
-        let mut requests = Vec::new();
-        for request in raw.get("queuedRequests").and_then(Value::as_array).context("History has no queue")? {
-            let request_id = request.get("requestId").and_then(Value::as_str)
-                .filter(|id| !id.is_empty() && id.len() <= 128).context("History queue has an invalid request ID")?;
-            if !ids.insert(request_id) { bail!("History queue has duplicate request IDs"); }
-            let revision = request.get("revision").and_then(Value::as_u64).context("History queue has no revision")?;
-            let kind = request.get("kind").and_then(Value::as_str)
-                .filter(|kind| matches!(*kind, "steer" | "followUp")).context("History queue has an invalid kind")?;
-            let message = request.get("message").context("History queue has no message")?;
-            let (text, images) = match message.get("content") {
-                Some(Value::String(text)) => (text.clone(), 0),
-                Some(Value::Array(blocks)) => (
-                    blocks.iter().filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-                        .filter_map(|block| block.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n"),
-                    blocks.iter().filter(|block| block.get("type").and_then(Value::as_str) == Some("image")).count(),
-                ),
-                _ => bail!("History queue has no editable content"),
-            };
-            requests.push(QueuedRequest { request_id: request_id.to_owned(), revision, kind: kind.to_owned(), text, images,
-                timestamp_ms: message.get("timestamp").and_then(Value::as_u64) });
-        }
-        Ok(Self {
-            available: true, requests,
-            run_id: raw.get("runId").and_then(Value::as_str).map(str::to_owned),
-            paused: raw.get("paused").and_then(Value::as_bool).context("History has no queue pause state")?,
-            control: serde_json::from_value(raw.get("control").cloned().unwrap_or(Value::Null))?,
-            capabilities: serde_json::from_value(raw.get("capabilities").context("History has no queue capabilities")?.clone())?,
-            boundaries: serde_json::from_value(raw.get("boundaries").context("History has no queue boundaries")?.clone())?,
-        })
-    }
-}
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSnapshot {
@@ -337,7 +302,7 @@ impl Event {
 }
 
 impl Transcript {
-    pub fn new(raw: &[Value], live: &[Value], head: Option<String>, queue: QueueState, previous: Option<&Self>) -> Result<Self> {
+    pub fn new(raw: &[Value], head: Option<String>, queue: QueueState) -> Result<Self> {
         let mut by_entry = HashMap::new();
         for entry in raw {
             let id = entry.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("History entry has no ID")?;
@@ -353,49 +318,13 @@ impl Transcript {
             cursor = entry.get("parentId").and_then(Value::as_str);
         }
         if head.as_ref().is_some_and(|id| !by_entry.contains_key(id.as_str())) { bail!("History head is missing"); }
-        let continuing = previous.filter(|old| old.head.as_deref().is_none_or(|id| seen.contains(id)));
-        let mut live_at = HashMap::<Option<&str>, Vec<Event>>::new();
-        for raw in live {
-            let parent = raw.get("parentId").and_then(Value::as_str);
-            if parent.is_some_and(|id| !seen.contains(id)) { bail!("History live entry is outside the selected branch"); }
-            live_at.entry(parent).or_default().extend(Event::from_entry(raw, true)?);
-        }
-        let mut incoming = live_at.remove(&None).unwrap_or_default();
-        if cursor.is_some() { incoming.extend(live_at.remove(&cursor).unwrap_or_default()); }
-        let mut old_head_end = 0;
-        for raw in branch.into_iter().rev() {
-            let id = raw.get("id").and_then(Value::as_str);
-            incoming.extend(Event::from_entry(raw, false)?);
-            if continuing.is_some_and(|old| old.head.as_deref() == id) { old_head_end = incoming.len(); }
-            incoming.extend(live_at.remove(&id).unwrap_or_default());
-        }
-        let mut ids = HashMap::new();
-        for (index, event) in incoming.iter().enumerate() {
-            if ids.insert(event.id.as_str(), index).is_some() { bail!("History has duplicate event identities"); }
-        }
-        let mut interrupted = HashMap::<usize, Vec<Event>>::new();
-        if let Some(old) = continuing {
-            let mut next = None;
-            let mut tail = Vec::new();
-            for event in old.events.values().rev() {
-                if let Some(&index) = ids.get(event.id.as_str()) {
-                    if next.is_none() && !tail.is_empty() { interrupted.entry(index + 1).or_default().append(&mut tail); }
-                    next = Some(index);
-                } else if event.phase != EventPhase::Saved && !ids.contains_key(format!("{}:0", event.source_key()).as_str()) {
-                    let mut event = event.clone(); event.phase = EventPhase::Interrupted;
-                    if let Some(index) = next { interrupted.entry(index).or_default().push(event); }
-                    else { tail.push(event); }
-                }
-            }
-            if !tail.is_empty() { interrupted.entry(old_head_end).or_default().append(&mut tail); }
-        }
         let mut transcript = Self {
             generation: Uuid::new_v4().to_string(), sequence: 0,
-            events: BTreeMap::new(), by_id: BTreeMap::new(), attachments: HashMap::new(),
-            next_order: 0, head, queue,
+            events: BTreeMap::new(), by_id: BTreeMap::new(), attachments: HashMap::new(), next_order: 0, head, queue,
         };
-        for (index, event) in incoming.into_iter().map(Some).chain(std::iter::once(None)).enumerate() {
-            for mut event in interrupted.remove(&index).unwrap_or_default().into_iter().rev().chain(event) {
+        for raw in branch.into_iter().rev() {
+            for mut event in Event::from_entry(raw, false)? {
+                if transcript.by_id.contains_key(&event.id) { bail!("History has duplicate event identities"); }
                 event.order = transcript.next_order; transcript.next_order += 1;
                 if event.attachment.is_some() { transcript.attachments.insert(event.entry_id.clone(), event.order); }
                 transcript.by_id.insert(event.id.clone(), event.order);
@@ -437,63 +366,21 @@ impl Transcript {
             queue: self.queue.clone(), before: page.before, delivered: delivered.into_iter().collect() }
     }
 
-    pub fn project(&self, raw: &Value) -> Result<TranscriptChange> {
+    pub fn project(&self, entry: &Value, live: bool) -> Result<TranscriptChange> {
         let mut change = TranscriptChange::default();
-        match raw.get("type").and_then(Value::as_str) {
-            Some("append" | "live") => {
-                let live = raw.get("type").and_then(Value::as_str) == Some("live");
-                let entry = raw.get("entry").context("History change has no entry")?;
-                if !live {
-                    let id = entry.get("id").and_then(Value::as_str).context("History append has no ID")?;
-                    if raw.get("leafId").and_then(Value::as_str) != Some(id) || entry.get("parentId").and_then(Value::as_str) != self.head.as_deref() {
-                        bail!("History branch changed; read its current snapshot");
-                    }
-                    change.head = Some(id.to_owned());
-                    if let Some(id) = entry.pointer("/origin/requestId").and_then(Value::as_str) { change.delivered.push(id.to_owned()); }
-                }
-                change.events = Event::from_entry(entry, live)?;
-                if let Some(first) = change.events.first() {
-                    let base = first.source_key();
-                    let prefix = format!("{base}:");
-                    let ids = change.events.iter().map(|event| &event.id).collect::<HashSet<_>>();
-                    change.removed = self.by_id.range(prefix.clone()..).take_while(|(id, _)| id.starts_with(&prefix))
-                        .filter(|(id, order)| !ids.contains(id) && self.events[order].source_key() == base).map(|(id, _)| id.clone()).collect();
-                }
-            }
-            Some("delta") => {
-                let stream = raw.get("streamId").and_then(Value::as_str).context("History delta has no stream ID")?;
-                let delta = raw.pointer("/event/assistantMessageEvent").context("History delta has no content event")?;
-                let index = delta.get("contentIndex").and_then(Value::as_u64).context("History delta has no content index")?;
-                let id = format!("stream:{stream}:{index}");
-                if index > 0 && self.event(&id).is_none() && self.event(&format!("stream:{stream}:{}", index - 1)).is_none() {
-                    bail!("History skipped a content block; read its current snapshot");
-                }
-                let kind = delta.get("type").and_then(Value::as_str).context("History delta has no kind")?;
-                if matches!(kind, "text_delta" | "thinking_delta" | "toolcall_delta") {
-                    change.delta = Some(TextDelta { event_id: id, text: delta.get("delta").and_then(Value::as_str).context("History delta has no text")?.to_owned() });
-                } else {
-                    let template = self.event(&format!("stream:{stream}:0")).context("History stream has no start")?;
-                    if template.phase != EventPhase::Live { bail!("History updated a finished stream"); }
-                    let mut event = template.clone(); event.id = id; event.attachment = None;
-                    match kind {
-                        "text_start" | "text_end" | "thinking_start" | "thinking_end" => {
-                            event.kind = if kind.starts_with("thinking") { EventKind::Thinking } else { EventKind::Text };
-                            event.text = delta.get("content").and_then(Value::as_str).unwrap_or_default().to_owned();
-                            event.tool_call_id = None; event.tool_name = None;
-                        }
-                        "toolcall_start" => {
-                            event.kind = EventKind::Tool; event.text.clear();
-                            event.tool_call_id = delta.get("id").and_then(Value::as_str).map(str::to_owned);
-                            event.tool_name = delta.get("toolName").and_then(Value::as_str).map(str::to_owned);
-                        }
-                        "toolcall_end" => event.set_content(delta.get("toolCall").context("History tool completion has no call")?),
-                        _ => bail!("Unsupported History content update"),
-                    }
-                    change.events.push(event);
-                }
-            }
-            Some("queue") => change.queue = Some(QueueState::from_entry(raw)?),
-            _ => bail!("History branch changed; read its current snapshot"),
+        if !live {
+            let id = entry.get("id").and_then(Value::as_str).context("History append has no ID")?;
+            if entry.get("parentId").and_then(Value::as_str) != self.head.as_deref() { bail!("History branch changed"); }
+            change.head = Some(id.to_owned());
+            if let Some(id) = entry.pointer("/origin/requestId").and_then(Value::as_str) { change.delivered.push(id.to_owned()); }
+        }
+        change.events = Event::from_entry(entry, live)?;
+        if let Some(first) = change.events.first() {
+            let base = first.source_key();
+            let prefix = format!("{base}:");
+            let ids = change.events.iter().map(|event| &event.id).collect::<HashSet<_>>();
+            change.removed = self.by_id.range(prefix.clone()..).take_while(|(id, _)| id.starts_with(&prefix))
+                .filter(|(id, order)| !ids.contains(id) && self.events[order].source_key() == base).map(|(id, _)| id.clone()).collect();
         }
         let mut next = self.next_order;
         for event in &mut change.events {
@@ -508,16 +395,6 @@ impl Transcript {
             change.delta.as_ref().is_some_and(|delta| !delta.text.is_empty() && self.event(&delta.event_id).is_some_and(|event|
                 event.role == EventRole::Assistant && event.kind == EventKind::Text && event.text.is_empty()));
         Ok(change)
-    }
-
-    pub fn interrupt(&mut self) -> TranscriptChange {
-        self.queue.available = false;
-        let mut change = TranscriptChange { queue: Some(self.queue.clone()), ..Default::default() };
-        for event in self.events.values_mut().filter(|event| event.phase == EventPhase::Live) {
-            event.phase = EventPhase::Interrupted; change.events.push(event.clone());
-        }
-        self.sequence += 1;
-        change
     }
 
     pub fn apply(&mut self, change: &TranscriptChange) -> Result<()> {
