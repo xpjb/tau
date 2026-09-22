@@ -1,5 +1,10 @@
 # Tau
 
+> **Tau 2 frontend branch:** the native Rust client is in [`frontend/`](frontend/README.md).
+> It uses Chad/Sanscale, the shared [`protocol/`](protocol/) crate, and direct Rust
+> transfers. The Kotlin app below remains the reference during migration. See
+> [backend merge notes](frontend/MERGE.md) and preview release gates before cutover.
+
 Tau is a private, Tailnet-native client for independent Pi coding-agent sessions. It runs beside the existing Telegram gateway without sharing processes or chat history. Both use Pi's global settings. A model chosen in Tau becomes Pi's default for new chats; existing chats keep their saved model. Tau does not override Pi with a separate model default.
 
 ## Components

@@ -52,7 +52,7 @@ fn projects_flat_events_through_streaming_finalization_and_recovery() {
     transcript.apply(&transcript.project(&json!({"type":"live","entry":tool})).unwrap(), source.clone()).unwrap();
     let tool_order = transcript.event("stream:tool:0").unwrap().order;
     let interrupted = transcript.interrupt();
-    assert!(!interrupted.queue.unwrap().available);
+    assert!(!interrupted.queue.as_ref().unwrap().available);
     assert_eq!(transcript.event("stream:tool:0").unwrap().phase, EventPhase::Interrupted);
     let mut recovered = Transcript::new(&[user.clone(), model.clone(), saved.clone()], &[], Some("a".into()), Some(source.clone()), QueueState::default(), Some(&transcript)).unwrap();
     assert_eq!(recovered.event("stream:tool:0").unwrap().order, tool_order);

@@ -20,7 +20,7 @@ One-sentence responsibility per module. Read this before opening files.
 - `transcript.rs` — Pi data formats and the transcript state machine:
   branch projection into flat events, ordered updates, recovery, paging,
   queue state and model backfill walks.
-- `protocol.rs` — the client↔daemon wire contract. Pure data.
+- `protocol.rs` — re-export of `tau-protocol`, plus legacy Pi-only response/context adapters.
 - `state.rs` — Tau-owned session metadata and the serialized, durable flag log.
 - `pi-extension/send-media.ts` — Tau agent tools for sending media and flagging
   incidental findings; flag writes use a capability scoped to the current worker.
@@ -29,7 +29,24 @@ Dependencies point one way: `server → manager → {pi, transcript, state}`,
 with `transcript` owning Pi formats and `state.rs` owning Tau's own
 `state.json` and `flags.jsonl`. Events flow back up via broadcast channels, never calls.
 
-## Client (`app/composeApp/`, Kotlin, Android + desktop)
+## Tau 2 client (`frontend/`, Rust, Android + desktop)
+
+- `controller.rs` — local-first actions, daemon messages and receipt reconciliation.
+- `feed.rs` — transactional remote transcript windows; generation/sequence/order validation.
+- `store.rs` — private local-only SQLite state and copied files; no remote transcript persistence.
+- `transport.rs` — epoch-scoped authenticated sockets, reconnect/heartbeat, HTTP and native Iroh.
+- `app.rs` — responsive screens, transcript grouping, anchors and UI actions.
+- `editor.rs` / `render.rs` — input state, Sanscale text/Markdown and GPU image presentation.
+- `desktop.rs` / `android.rs` — platform input/lifecycle/services; a small Android Java OS bridge.
+- `protocol/` — **single Rust wire contract**, consumed by both frontend and daemon.
+- `markdown/` — extracted incremental parser and window-independent Sanscale view.
+
+The daemon's `protocol.rs` now re-exports `tau-protocol`; Pi-only conversion traits
+stay in the daemon. Native-client production code does not depend on taud or Pi.
+See `frontend/MERGE.md` for the transitional daemon adapters and independent
+backend merge seam, and `frontend/README.md` for remaining preview release gates.
+
+## Reference client (`app/composeApp/`, Kotlin, Android + desktop)
 
 - `TauApp.kt` — app screens and transcript UI. Long-lived state is owned by `TauController`.
 - `LocalImage.kt` — bounded image loading, fitted previews and full-screen zoom/pan controls; zoom state stays in the open viewer.
@@ -65,8 +82,9 @@ with `transcript` owning Pi formats and `state.rs` owning Tau's own
   received visible feedback.
 - No single-caller functions unless they are UI composables, axum route
   handlers, or platform-interface implementations.
-- Wire changes are versioned: `PROTOCOL_VERSION` in `protocol.rs` and
-  `Protocol.kt` move together with matched client releases.
+- Wire changes are versioned: `PROTOCOL_VERSION` in `tau-protocol` is shared by
+  both Rust endpoints. The preserved Kotlin reference remains at protocol 10;
+  a production cutover must explicitly retire or update it.
 - The daemon owns one reusable starter in session metadata. New Chat starts Pi
   before replying and shows its real model. Sent messages, explicit renames or
   client keep hints retain work. Idle sleep stops the worker, not the chat.

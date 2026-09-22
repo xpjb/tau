@@ -1,3 +1,5 @@
+use crate::protocol::ContextUsagePi;
+use crate::transcript::QueueStatePi;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
@@ -1126,7 +1128,7 @@ impl AgentManager {
                             let bumps_chat = change.bumps_chat;
                             let message = ServerMessage::TranscriptUpdate {
                                 session_id: id.clone(), generation: transcript.generation.clone(),
-                                sequence: transcript.sequence, change,
+                                sequence: transcript.sequence, change: change.wire,
                             };
                             let _ = content.events.send(Arc::new(message));
                             if bumps_chat {
@@ -1259,7 +1261,7 @@ impl AgentManager {
             let change = transcript.interrupt();
             let message = ServerMessage::TranscriptUpdate {
                 session_id: id.to_owned(), generation: transcript.generation.clone(),
-                sequence: transcript.sequence, change,
+                sequence: transcript.sequence, change: change.wire,
             };
             let _ = content.events.send(Arc::new(message));
         }

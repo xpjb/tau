@@ -1,8 +1,27 @@
+#[cfg(test)]
+pub use tau_protocol::QueueRef;
+pub use tau_protocol::{AttachmentKind, ChatAttachment, Event, EventPhase, EventRole, EventKind, Origin, QueuedRequest, QueueState, TranscriptSnapshot, HistoryPage, TextDelta};
+
+// Projection metadata never crosses the client boundary.
+#[derive(Clone, Debug, Default)]
+pub struct TranscriptChange {
+    pub wire: tau_protocol::TranscriptChange,
+    head: Option<String>,
+    pub bumps_chat: bool,
+}
+impl std::ops::Deref for TranscriptChange {
+    type Target = tau_protocol::TranscriptChange;
+    fn deref(&self) -> &Self::Target { &self.wire }
+}
+impl std::ops::DerefMut for TranscriptChange {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.wire }
+}
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -15,25 +34,6 @@ pub const PAGE_BYTES: usize = 256 * 1024;
 
 pub const IMAGE_LIMIT: u64 = 10_000_000;
 pub const FILE_LIMIT: u64 = 50_000_000;
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatAttachment {
-    #[serde(skip)]
-    pub source_path: Option<PathBuf>,
-    pub kind: AttachmentKind,
-    pub file_name: String,
-    pub caption: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttachmentKind {
-    Image,
-    File,
-}
 
 pub struct AttachmentRequest {
     pub kind: AttachmentKind,
@@ -81,91 +81,9 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Event {
-    pub id: String,
-    pub order: u64,
-    pub entry_id: String,
-    pub phase: EventPhase,
-    pub origin: Origin,
-    pub role: EventRole,
-    pub kind: EventKind,
-    pub text: String,
-    pub timestamp: Option<String>,
-    pub timestamp_ms: Option<u64>,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub stop_reason: Option<String>,
-    pub error_message: Option<String>,
-    pub is_error: bool,
-    pub attachment: Option<ChatAttachment>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventPhase { Saved, Live, Interrupted }
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventRole { User, Assistant, Tool, System }
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Origin {
-    pub request_id: Option<String>,
-    pub request_revision: Option<u64>,
-    pub stream_id: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventKind { Text, Thinking, Tool, Image, Hidden }
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueRef {
-    pub request_id: String,
-    pub revision: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueuedRequest {
-    pub request_id: String,
-    pub revision: u64,
-    pub kind: String,
-    pub text: String,
-    pub images: usize,
-    pub timestamp_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueControl {
-    pub command_id: String,
-    pub run_id: Option<String>,
-    pub action: String,
-    pub boundary: Option<String>,
-    pub requests: Vec<QueueRef>,
-    pub status: String,
-    pub detail: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueState {
-    pub available: bool,
-    pub requests: Vec<QueuedRequest>,
-    pub run_id: Option<String>,
-    pub paused: bool,
-    pub control: Option<QueueControl>,
-    pub capabilities: Vec<String>,
-    pub boundaries: Vec<String>,
-}
-
-impl QueueState {
-    pub fn from_pi(raw: &Value) -> Result<Self> {
+pub trait QueueStatePi { fn from_pi(raw: &Value) -> Result<Self> where Self: Sized; }
+impl QueueStatePi for QueueState {
+    fn from_pi(raw: &Value) -> Result<Self> {
         let mut ids = HashSet::new();
         let mut requests = Vec::new();
         for request in raw.get("queuedRequests").and_then(Value::as_array).context("Pi has no queue")? {
@@ -199,47 +117,6 @@ impl QueueState {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptSnapshot {
-    pub generation: String,
-    pub sequence: u64,
-    pub events: Vec<Event>,
-    pub queue: QueueState,
-    pub before: Option<u64>,
-    pub delivered: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryPage {
-    pub events: Vec<Event>,
-    pub before: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptChange {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub events: Vec<Event>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub removed: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<TextDelta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue: Option<QueueState>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub delivered: Vec<String>,
-    #[serde(skip)]
-    head: Option<String>,
-    #[serde(skip)]
-    pub bumps_chat: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TextDelta { pub event_id: String, pub text: String }
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PiPosition {
@@ -270,14 +147,12 @@ pub struct Transcript {
     pub queue: QueueState,
 }
 
-impl Event {
-    pub fn source_key(&self) -> String {
-        if let Some(id) = &self.origin.stream_id { format!("stream:{id}") }
-        else if let Some(id) = &self.origin.request_id && self.role == EventRole::User { format!("request:{id}") }
-        else { format!("entry:{}", self.entry_id) }
-    }
-
-    pub fn from_pi(raw: &Value, live: bool) -> Result<Vec<Self>> {
+pub trait EventPi {
+ fn from_pi(raw: &Value, live: bool) -> Result<Vec<Self>> where Self: Sized;
+ fn set_content(&mut self, block: &Value);
+}
+impl EventPi for Event {
+    fn from_pi(raw: &Value, live: bool) -> Result<Vec<Self>> {
         let message = raw.get("message").unwrap_or(&Value::Null);
         let entry_type = raw.get("type").and_then(Value::as_str).unwrap_or("message");
         let role = match message.get("role").and_then(Value::as_str) {
@@ -539,7 +414,8 @@ impl Transcript {
 
     pub fn interrupt(&mut self) -> TranscriptChange {
         self.queue.available = false; self.source = None;
-        let mut change = TranscriptChange { queue: Some(self.queue.clone()), ..Default::default() };
+        let mut change = TranscriptChange::default();
+        change.queue = Some(self.queue.clone());
         for event in self.events.values_mut().filter(|event| event.phase == EventPhase::Live) {
             event.phase = EventPhase::Interrupted; change.events.push(event.clone());
         }
