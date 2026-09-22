@@ -2,7 +2,8 @@ mod attachments;
 mod commands;
 mod config;
 mod manager;
-mod pi;
+mod agent;
+mod settings;
 mod protocol;
 mod server;
 mod state;
@@ -27,7 +28,7 @@ pub async fn run(mut config: Config) -> Result<()> {
         .await
         .with_context(|| {
             format!(
-                "failed to create Pi session directory {}",
+                "failed to create session directory {}",
                 config.session_dir.display()
             )
         })?;
@@ -39,15 +40,6 @@ pub async fn run(mut config: Config) -> Result<()> {
                 config.attachment_root.display()
             )
         })?;
-    if !fs::metadata(&config.pi_extension_path)
-        .await
-        .is_ok_and(|metadata| metadata.is_file())
-    {
-        bail!(
-            "Pi extension {} is missing",
-            config.pi_extension_path.display()
-        );
-    }
     if let Some(parent) = config.state_path.parent() {
         fs::create_dir_all(parent)
             .await
@@ -64,6 +56,9 @@ pub async fn run(mut config: Config) -> Result<()> {
         .with_context(|| format!("failed to bind {}", config.bind))?;
     config.bind = listener.local_addr()?;
     let state = StateStore::load(config.state_path.clone()).await?;
-    let manager = AgentManager::new(config.clone(), state);
+    let manager = AgentManager::new(config.clone(), state).await?;
     server::serve(config, manager, listener).await
 }
+
+#[cfg(test)]
+mod agent_test;

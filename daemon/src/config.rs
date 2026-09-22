@@ -9,13 +9,12 @@ pub struct Config {
     pub bind: SocketAddr,
     pub transfer_bind: SocketAddrV4,
     pub token: Arc<str>,
-    pub pi_command: PathBuf,
-    pub default_thinking_level: String,
+    pub settings_path: PathBuf,
+    pub import_pi_dir: Option<PathBuf>,
     pub cwd: PathBuf,
     pub state_path: PathBuf,
     pub session_dir: PathBuf,
     pub telemetry_path: PathBuf,
-    pub pi_extension_path: PathBuf,
     pub attachment_root: PathBuf,
     pub upload_root: PathBuf,
     pub title_command: Option<String>,
@@ -39,19 +38,10 @@ impl Config {
             .unwrap_or_else(|_| "127.0.0.1:8788".to_owned())
             .parse()
             .context("TAU_TRANSFER_BIND must be an IPv4 address and UDP port")?;
-        let pi_command = std::env::var_os("TAU_PI_COMMAND")
+        let settings_path = std::env::var_os("TAU_SETTINGS_PATH")
             .map(PathBuf::from)
-            .unwrap_or_else(|| "/usr/bin/pi".into());
-        let default_thinking_level = std::env::var("TAU_DEFAULT_THINKING_LEVEL")
-            .unwrap_or_else(|_| "max".to_owned());
-        if !matches!(
-            default_thinking_level.as_str(),
-            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-        ) {
-            bail!(
-                "TAU_DEFAULT_THINKING_LEVEL must be off, minimal, low, medium, high, xhigh, or max"
-            );
-        }
+            .unwrap_or_else(|| "/var/lib/tau/settings.json".into());
+        let import_pi_dir = std::env::var_os("TAU_IMPORT_PI_DIR").map(PathBuf::from);
         let cwd = std::env::var_os("TAU_CWD")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root".into());
@@ -64,9 +54,6 @@ impl Config {
         let telemetry_path = std::env::var_os("TAU_TELEMETRY_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/var/lib/tau/client-crashes.jsonl".into());
-        let pi_extension_path = std::env::var_os("TAU_PI_EXTENSION")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| "/usr/local/lib/tau/send-media.ts".into());
         let attachment_root = std::env::var_os("TAU_ATTACHMENT_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root/.local/share/tau/outbox".into());
@@ -79,7 +66,8 @@ impl Config {
             || !state_path.is_absolute()
             || !session_dir.is_absolute()
             || !telemetry_path.is_absolute()
-            || !pi_extension_path.is_absolute()
+            || !settings_path.is_absolute()
+            || import_pi_dir.as_ref().is_some_and(|path| !path.is_absolute())
             || !attachment_root.is_absolute()
             || !upload_root.is_absolute()
         {
@@ -90,13 +78,12 @@ impl Config {
             bind,
             transfer_bind,
             token: Arc::from(token),
-            pi_command,
-            default_thinking_level,
+            settings_path,
+            import_pi_dir,
             cwd,
             state_path,
             session_dir,
             telemetry_path,
-            pi_extension_path,
             attachment_root,
             upload_root,
             title_command,

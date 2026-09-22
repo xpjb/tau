@@ -165,17 +165,17 @@ pub struct QueueState {
 }
 
 impl QueueState {
-    pub fn from_pi(raw: &Value) -> Result<Self> {
+    pub fn from_entry(raw: &Value) -> Result<Self> {
         let mut ids = HashSet::new();
         let mut requests = Vec::new();
-        for request in raw.get("queuedRequests").and_then(Value::as_array).context("Pi has no queue")? {
+        for request in raw.get("queuedRequests").and_then(Value::as_array).context("History has no queue")? {
             let request_id = request.get("requestId").and_then(Value::as_str)
-                .filter(|id| !id.is_empty() && id.len() <= 128).context("Pi queue has an invalid request ID")?;
-            if !ids.insert(request_id) { bail!("Pi queue has duplicate request IDs"); }
-            let revision = request.get("revision").and_then(Value::as_u64).context("Pi queue has no revision")?;
+                .filter(|id| !id.is_empty() && id.len() <= 128).context("History queue has an invalid request ID")?;
+            if !ids.insert(request_id) { bail!("History queue has duplicate request IDs"); }
+            let revision = request.get("revision").and_then(Value::as_u64).context("History queue has no revision")?;
             let kind = request.get("kind").and_then(Value::as_str)
-                .filter(|kind| matches!(*kind, "steer" | "followUp")).context("Pi queue has an invalid kind")?;
-            let message = request.get("message").context("Pi queue has no message")?;
+                .filter(|kind| matches!(*kind, "steer" | "followUp")).context("History queue has an invalid kind")?;
+            let message = request.get("message").context("History queue has no message")?;
             let (text, images) = match message.get("content") {
                 Some(Value::String(text)) => (text.clone(), 0),
                 Some(Value::Array(blocks)) => (
@@ -183,7 +183,7 @@ impl QueueState {
                         .filter_map(|block| block.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n"),
                     blocks.iter().filter(|block| block.get("type").and_then(Value::as_str) == Some("image")).count(),
                 ),
-                _ => bail!("Pi queue has no editable content"),
+                _ => bail!("History queue has no editable content"),
             };
             requests.push(QueuedRequest { request_id: request_id.to_owned(), revision, kind: kind.to_owned(), text, images,
                 timestamp_ms: message.get("timestamp").and_then(Value::as_u64) });
@@ -191,10 +191,10 @@ impl QueueState {
         Ok(Self {
             available: true, requests,
             run_id: raw.get("runId").and_then(Value::as_str).map(str::to_owned),
-            paused: raw.get("paused").and_then(Value::as_bool).context("Pi has no queue pause state")?,
+            paused: raw.get("paused").and_then(Value::as_bool).context("History has no queue pause state")?,
             control: serde_json::from_value(raw.get("control").cloned().unwrap_or(Value::Null))?,
-            capabilities: serde_json::from_value(raw.get("capabilities").context("Pi has no queue capabilities")?.clone())?,
-            boundaries: serde_json::from_value(raw.get("boundaries").context("Pi has no queue boundaries")?.clone())?,
+            capabilities: serde_json::from_value(raw.get("capabilities").context("History has no queue capabilities")?.clone())?,
+            boundaries: serde_json::from_value(raw.get("boundaries").context("History has no queue boundaries")?.clone())?,
         })
     }
 }
@@ -240,28 +240,9 @@ pub struct TranscriptChange {
 #[serde(rename_all = "camelCase")]
 pub struct TextDelta { pub event_id: String, pub text: String }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PiPosition {
-    pub session_id: String,
-    pub generation: String,
-    pub sequence: u64,
-}
-
-impl PiPosition {
-    pub fn from_pi(raw: &Value) -> Result<Self> {
-        Ok(Self {
-            session_id: raw.get("sessionId").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi transcript has no session ID")?.to_owned(),
-            generation: raw.get("generation").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi transcript has no generation")?.to_owned(),
-            sequence: raw.get("sequence").and_then(Value::as_u64).context("Pi transcript has no sequence")?,
-        })
-    }
-}
-
 pub struct Transcript {
     pub generation: String,
     pub sequence: u64,
-    pub source: Option<PiPosition>,
     events: BTreeMap<u64, Event>,
     by_id: BTreeMap<String, u64>,
     attachments: HashMap<String, u64>,
@@ -277,7 +258,7 @@ impl Event {
         else { format!("entry:{}", self.entry_id) }
     }
 
-    pub fn from_pi(raw: &Value, live: bool) -> Result<Vec<Self>> {
+    pub fn from_entry(raw: &Value, live: bool) -> Result<Vec<Self>> {
         let message = raw.get("message").unwrap_or(&Value::Null);
         let entry_type = raw.get("type").and_then(Value::as_str).unwrap_or("message");
         let role = match message.get("role").and_then(Value::as_str) {
@@ -290,10 +271,10 @@ impl Event {
             _ => return Ok(Vec::new()),
         };
         let stream_id = if live {
-            Some(raw.get("streamId").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi live entry has no stream ID")?.to_owned())
+            Some(raw.get("streamId").and_then(Value::as_str).filter(|id| !id.is_empty()).context("History live entry has no stream ID")?.to_owned())
         } else { raw.pointer("/origin/streamId").and_then(Value::as_str).map(str::to_owned) };
         let entry_id = if live { format!("live-{}", stream_id.as_deref().unwrap()) }
-            else { raw.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi entry has no ID")?.to_owned() };
+            else { raw.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("History entry has no ID")?.to_owned() };
         let body = if entry_type == "custom_message" { raw.get("content") }
             else if matches!(entry_type, "compaction" | "branch_summary") { raw.get("summary") }
             else if message.get("role").and_then(Value::as_str) == Some("bashExecution") { message.get("output") }
@@ -356,41 +337,41 @@ impl Event {
 }
 
 impl Transcript {
-    pub fn new(raw: &[Value], live: &[Value], head: Option<String>, source: Option<PiPosition>, queue: QueueState, previous: Option<&Self>) -> Result<Self> {
+    pub fn new(raw: &[Value], live: &[Value], head: Option<String>, queue: QueueState, previous: Option<&Self>) -> Result<Self> {
         let mut by_entry = HashMap::new();
         for entry in raw {
-            let id = entry.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("Pi entry has no ID")?;
-            if by_entry.insert(id, entry).is_some() { bail!("Pi has duplicate entry IDs"); }
+            let id = entry.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).context("History entry has no ID")?;
+            if by_entry.insert(id, entry).is_some() { bail!("History has duplicate entry IDs"); }
         }
         let mut branch = Vec::new();
         let mut seen = HashSet::new();
         let mut cursor = head.as_deref();
         while let Some(id) = cursor {
-            if !seen.insert(id) { bail!("Pi branch contains a cycle"); }
+            if !seen.insert(id) { bail!("History branch contains a cycle"); }
             let Some(entry) = by_entry.get(id) else { break; };
             branch.push(*entry);
             cursor = entry.get("parentId").and_then(Value::as_str);
         }
-        if head.as_ref().is_some_and(|id| !by_entry.contains_key(id.as_str())) { bail!("Pi head is missing"); }
+        if head.as_ref().is_some_and(|id| !by_entry.contains_key(id.as_str())) { bail!("History head is missing"); }
         let continuing = previous.filter(|old| old.head.as_deref().is_none_or(|id| seen.contains(id)));
         let mut live_at = HashMap::<Option<&str>, Vec<Event>>::new();
         for raw in live {
             let parent = raw.get("parentId").and_then(Value::as_str);
-            if parent.is_some_and(|id| !seen.contains(id)) { bail!("Pi live entry is outside the selected branch"); }
-            live_at.entry(parent).or_default().extend(Event::from_pi(raw, true)?);
+            if parent.is_some_and(|id| !seen.contains(id)) { bail!("History live entry is outside the selected branch"); }
+            live_at.entry(parent).or_default().extend(Event::from_entry(raw, true)?);
         }
         let mut incoming = live_at.remove(&None).unwrap_or_default();
         if cursor.is_some() { incoming.extend(live_at.remove(&cursor).unwrap_or_default()); }
         let mut old_head_end = 0;
         for raw in branch.into_iter().rev() {
             let id = raw.get("id").and_then(Value::as_str);
-            incoming.extend(Event::from_pi(raw, false)?);
+            incoming.extend(Event::from_entry(raw, false)?);
             if continuing.is_some_and(|old| old.head.as_deref() == id) { old_head_end = incoming.len(); }
             incoming.extend(live_at.remove(&id).unwrap_or_default());
         }
         let mut ids = HashMap::new();
         for (index, event) in incoming.iter().enumerate() {
-            if ids.insert(event.id.as_str(), index).is_some() { bail!("Pi has duplicate event identities"); }
+            if ids.insert(event.id.as_str(), index).is_some() { bail!("History has duplicate event identities"); }
         }
         let mut interrupted = HashMap::<usize, Vec<Event>>::new();
         if let Some(old) = continuing {
@@ -409,7 +390,7 @@ impl Transcript {
             if !tail.is_empty() { interrupted.entry(old_head_end).or_default().append(&mut tail); }
         }
         let mut transcript = Self {
-            generation: Uuid::new_v4().to_string(), sequence: 0, source,
+            generation: Uuid::new_v4().to_string(), sequence: 0,
             events: BTreeMap::new(), by_id: BTreeMap::new(), attachments: HashMap::new(),
             next_order: 0, head, queue,
         };
@@ -456,29 +437,21 @@ impl Transcript {
             queue: self.queue.clone(), before: page.before, delivered: delivered.into_iter().collect() }
     }
 
-    pub fn check_position(&self, position: &PiPosition) -> Result<bool> {
-        let source = self.source.as_ref().context("Pi transcript needs its initial snapshot")?;
-        if position.session_id != source.session_id || position.generation != source.generation { bail!("Pi transcript generation changed"); }
-        if position.sequence <= source.sequence { return Ok(false); }
-        if position.sequence != source.sequence + 1 { bail!("Pi transcript has an update gap"); }
-        Ok(true)
-    }
-
     pub fn project(&self, raw: &Value) -> Result<TranscriptChange> {
         let mut change = TranscriptChange::default();
         match raw.get("type").and_then(Value::as_str) {
             Some("append" | "live") => {
                 let live = raw.get("type").and_then(Value::as_str) == Some("live");
-                let entry = raw.get("entry").context("Pi change has no entry")?;
+                let entry = raw.get("entry").context("History change has no entry")?;
                 if !live {
-                    let id = entry.get("id").and_then(Value::as_str).context("Pi append has no ID")?;
+                    let id = entry.get("id").and_then(Value::as_str).context("History append has no ID")?;
                     if raw.get("leafId").and_then(Value::as_str) != Some(id) || entry.get("parentId").and_then(Value::as_str) != self.head.as_deref() {
-                        bail!("Pi branch changed; read its current snapshot");
+                        bail!("History branch changed; read its current snapshot");
                     }
                     change.head = Some(id.to_owned());
                     if let Some(id) = entry.pointer("/origin/requestId").and_then(Value::as_str) { change.delivered.push(id.to_owned()); }
                 }
-                change.events = Event::from_pi(entry, live)?;
+                change.events = Event::from_entry(entry, live)?;
                 if let Some(first) = change.events.first() {
                     let base = first.source_key();
                     let prefix = format!("{base}:");
@@ -488,19 +461,19 @@ impl Transcript {
                 }
             }
             Some("delta") => {
-                let stream = raw.get("streamId").and_then(Value::as_str).context("Pi delta has no stream ID")?;
-                let delta = raw.pointer("/event/assistantMessageEvent").context("Pi delta has no content event")?;
-                let index = delta.get("contentIndex").and_then(Value::as_u64).context("Pi delta has no content index")?;
+                let stream = raw.get("streamId").and_then(Value::as_str).context("History delta has no stream ID")?;
+                let delta = raw.pointer("/event/assistantMessageEvent").context("History delta has no content event")?;
+                let index = delta.get("contentIndex").and_then(Value::as_u64).context("History delta has no content index")?;
                 let id = format!("stream:{stream}:{index}");
                 if index > 0 && self.event(&id).is_none() && self.event(&format!("stream:{stream}:{}", index - 1)).is_none() {
-                    bail!("Pi skipped a content block; read its current snapshot");
+                    bail!("History skipped a content block; read its current snapshot");
                 }
-                let kind = delta.get("type").and_then(Value::as_str).context("Pi delta has no kind")?;
+                let kind = delta.get("type").and_then(Value::as_str).context("History delta has no kind")?;
                 if matches!(kind, "text_delta" | "thinking_delta" | "toolcall_delta") {
-                    change.delta = Some(TextDelta { event_id: id, text: delta.get("delta").and_then(Value::as_str).context("Pi delta has no text")?.to_owned() });
+                    change.delta = Some(TextDelta { event_id: id, text: delta.get("delta").and_then(Value::as_str).context("History delta has no text")?.to_owned() });
                 } else {
-                    let template = self.event(&format!("stream:{stream}:0")).context("Pi stream has no start")?;
-                    if template.phase != EventPhase::Live { bail!("Pi updated a finished stream"); }
+                    let template = self.event(&format!("stream:{stream}:0")).context("History stream has no start")?;
+                    if template.phase != EventPhase::Live { bail!("History updated a finished stream"); }
                     let mut event = template.clone(); event.id = id; event.attachment = None;
                     match kind {
                         "text_start" | "text_end" | "thinking_start" | "thinking_end" => {
@@ -513,21 +486,21 @@ impl Transcript {
                             event.tool_call_id = delta.get("id").and_then(Value::as_str).map(str::to_owned);
                             event.tool_name = delta.get("toolName").and_then(Value::as_str).map(str::to_owned);
                         }
-                        "toolcall_end" => event.set_content(delta.get("toolCall").context("Pi tool completion has no call")?),
-                        _ => bail!("Unsupported Pi content update"),
+                        "toolcall_end" => event.set_content(delta.get("toolCall").context("History tool completion has no call")?),
+                        _ => bail!("Unsupported History content update"),
                     }
                     change.events.push(event);
                 }
             }
-            Some("queue") => change.queue = Some(QueueState::from_pi(raw)?),
-            _ => bail!("Pi branch changed; read its current snapshot"),
+            Some("queue") => change.queue = Some(QueueState::from_entry(raw)?),
+            _ => bail!("History branch changed; read its current snapshot"),
         }
         let mut next = self.next_order;
         for event in &mut change.events {
             event.order = self.by_id.get(&event.id).copied().unwrap_or_else(|| { let order = next; next += 1; order });
         }
         if change.events.windows(2).any(|pair| pair[0].order >= pair[1].order) {
-            bail!("Pi content order changed; read its current snapshot");
+            bail!("History content order changed; read its current snapshot");
         }
         change.bumps_chat = change.events.iter().any(|event|
             matches!(event.role, EventRole::User | EventRole::Assistant) && matches!(event.kind, EventKind::Text | EventKind::Image) &&
@@ -538,7 +511,7 @@ impl Transcript {
     }
 
     pub fn interrupt(&mut self) -> TranscriptChange {
-        self.queue.available = false; self.source = None;
+        self.queue.available = false;
         let mut change = TranscriptChange { queue: Some(self.queue.clone()), ..Default::default() };
         for event in self.events.values_mut().filter(|event| event.phase == EventPhase::Live) {
             event.phase = EventPhase::Interrupted; change.events.push(event.clone());
@@ -547,11 +520,11 @@ impl Transcript {
         change
     }
 
-    pub fn apply(&mut self, change: &TranscriptChange, position: PiPosition) -> Result<()> {
+    pub fn apply(&mut self, change: &TranscriptChange) -> Result<()> {
         if let Some(delta) = &change.delta {
-            let order = self.by_id.get(&delta.event_id).context("Pi delta references a missing event")?;
+            let order = self.by_id.get(&delta.event_id).context("History delta references a missing event")?;
             let event = self.events.get_mut(order).unwrap();
-            if event.phase != EventPhase::Live { bail!("Pi delta references a finished event"); }
+            if event.phase != EventPhase::Live { bail!("History delta references a finished event"); }
             event.text.push_str(&delta.text);
         }
         for id in &change.removed {
@@ -566,7 +539,7 @@ impl Transcript {
         }
         if let Some(head) = &change.head { self.head = Some(head.clone()); }
         if let Some(queue) = &change.queue { self.queue = queue.clone(); }
-        self.source = Some(position); self.sequence += 1;
+        self.sequence += 1;
         Ok(())
     }
 }

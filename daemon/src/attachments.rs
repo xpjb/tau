@@ -94,8 +94,7 @@ impl AgentManager {
             } else { None }
         };
         let request = if let Some(request) = cached { request } else {
-            let process = runtime.content.lock().await.process.clone();
-            let (entries, _) = self.entries_for_read(id, process.as_ref()).await?;
+            let (entries, _) = self.entries_for_read(id).await?;
             let entry = entries.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id))
                 .with_context(|| format!("attachment entry {entry_id} does not exist"))?;
             attachment_request(entry).context("entry has no Tau attachment")?

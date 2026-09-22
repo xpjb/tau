@@ -51,7 +51,6 @@ pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::
             "protocolVersion": PROTOCOL_VERSION
         })) }))
         .route("/v1/ws", get(websocket))
-        .route("/v1/sessions/{session_id}/flags", post(flag_it).layer(DefaultBodyLimit::max(32 * 1024)))
         .route(
             "/v1/sessions/{session_id}/attachments/{entry_id}",
             get(download_attachment),
@@ -97,34 +96,6 @@ pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::
     transfers.shutdown().await;
     manager.shutdown().await;
     result
-}
-
-#[derive(Deserialize)]
-struct FlagInput {
-    text: String,
-}
-
-async fn flag_it(
-    State(state): State<AppState>,
-    AxumPath(session_id): AxumPath<String>,
-    headers: HeaderMap,
-    Json(input): Json<FlagInput>,
-) -> Response {
-    let Some(token) = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer ")) else {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"Tau flag capability is required"}))).into_response();
-    };
-    if input.text.trim().is_empty() || input.text.chars().count() > crate::state::MAX_FLAG_CHARS {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Flag text must contain 1–4096 characters"}))).into_response();
-    }
-    match state.manager.flag(&session_id, token, &input.text).await {
-        Ok(Some(flag)) => Json(flag).into_response(),
-        Ok(None) => (StatusCode::UNAUTHORIZED, Json(json!({"error":"Tau flag capability is invalid or expired"}))).into_response(),
-        Err(error) => {
-            warn!(session = %session_id, %error, "Tau flag save failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"Tau could not confirm the flag save; check flags.jsonl before retrying"}))).into_response()
-        }
-    }
 }
 
 async fn websocket(
@@ -262,6 +233,19 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             }
                             ServerMessage::success(request_id, None, None)
                         }
+                        command @ (ClientCommand::GetSettings | ClientCommand::SetSettings { .. }) => {
+                            let result = match command {
+                                ClientCommand::SetSettings { revision, settings } => manager.set_settings(revision, *settings).await,
+                                _ => Ok(manager.inner.settings.get()),
+                            };
+                            match result {
+                                Ok(settings) => {
+                                    queue_server(&response_outbound, &ServerMessage::Settings { request_id:request_id.clone(), settings:Box::new(settings), default_system_prompt:crate::settings::DEFAULT_SYSTEM_PROMPT }).await;
+                                    ServerMessage::success(request_id, None, None)
+                                }
+                                Err(error) => ServerMessage::command_failure(request_id, error),
+                            }
+                        }
                         ClientCommand::SetTitlePrompt { prompt } if prompt.chars().count() > MAX_PROMPT_CHARS => {
                             ServerMessage::failure(request_id, "Title prompt is too long")
                         }
@@ -270,7 +254,11 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 ClientCommand::SetTitlePrompt { prompt } => Some(prompt),
                                 _ => None,
                             };
-                            match manager.inner.state.title_prompt(replacement).await {
+                            match async {
+                                let mut settings = manager.inner.settings.get();
+                                if let Some(prompt) = replacement { settings.daemon.title_prompt = prompt; settings = manager.set_settings(settings.revision, settings).await?; }
+                                Ok::<_, anyhow::Error>(settings.daemon.title_prompt)
+                            }.await {
                                 Ok(prompt) => {
                                     queue_server(&response_outbound, &ServerMessage::TitlePrompt {
                                         request_id: request_id.clone(), prompt,
@@ -350,21 +338,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             confirmed,
                             cancelled,
                         } => {
-                            match manager.extension_ui_response(
-                                &session_id,
-                                &extension_request_id,
-                                value,
-                                confirmed,
-                                cancelled,
-                            ).await {
-                                Ok(()) => ServerMessage::success(
-                                    request_id,
-                                    Some(session_id),
-                                    None,
-                                ),
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
+                            let _ = (session_id, extension_request_id, value, confirmed, cancelled);
+                            ServerMessage::failure(request_id, "Pi extension dialogs are not supported by the integrated agent")
                         }
+
                         ClientCommand::QueueControl { session_id, generation, operation } => {
                             match manager.queue_control(&session_id, &generation, &request_id, operation).await {
                                 Ok(outcome) => {
@@ -710,13 +687,11 @@ mod tests {
         let log = root.join("crashes.jsonl");
         let config = Config {
             transfer_bind: "127.0.0.1:0".parse().unwrap(),
-            bind: address, token: Arc::from("test-token"), pi_command: root.join("unused-pi"),
-            default_thinking_level: "high".to_owned(), cwd: root.clone(), state_path: root.join("state.json"),
-            session_dir: root.join("pi-sessions"), telemetry_path: log.clone(),
-            pi_extension_path: root.join("extension.ts"), attachment_root: root.join("outbox"),
+            bind: address, token: Arc::from("test-token"), settings_path: root.join("settings.json"), import_pi_dir: None, cwd: root.clone(), state_path: root.join("state.json"),
+            session_dir: root.join("pi-sessions"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
             upload_root: root.join("uploads"), title_command: None,
         };
-        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
         let app = Router::new().route("/v1/telemetry/crash", post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)))
             .with_state(AppState { config, manager, telemetry_gate: Arc::new(Mutex::new(())),
             transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) });
@@ -779,316 +754,23 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn saves_flags_and_notifies_all_clients_with_worker_scoped_access() {
-        use std::os::unix::fs::{PermissionsExt, MetadataExt};
-        use super::*;
-        use crate::state::StateStore;
-        use tokio::io::AsyncReadExt;
-        use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
-
-        async fn submit(address: std::net::SocketAddr, id: &str, token: &str, text: &str) -> (u16, serde_json::Value) {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                let body = json!({"text":text, "sessionId":"cannot-spoof-source"}).to_string();
-                let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-                stream.write_all(format!("POST /v1/sessions/{id}/flags HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-                let mut bytes = Vec::new();
-                stream.read_to_end(&mut bytes).await.unwrap();
-                let reply = String::from_utf8(bytes).unwrap();
-                let (header, body) = reply.split_once("\r\n\r\n").unwrap();
-                (header.split_whitespace().nth(1).unwrap().parse().unwrap(), serde_json::from_str(body).unwrap())
-            }).await.unwrap()
-        }
-
-        let root = std::env::temp_dir().join(format!("tau-flags-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).await.unwrap();
-        let pi = root.join("pi.py");
-        fs::write(&pi, include_str!("../tests/fixtures/pi.py")).await.unwrap();
-        fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o700)).await.unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let config = Config {
-            transfer_bind: "127.0.0.1:0".parse().unwrap(),
-            bind: address, token: Arc::from("full-client-token"), pi_command: pi,
-            default_thinking_level: "high".to_owned(), cwd: root.clone(), state_path: root.join("state.json"),
-            session_dir: root.join("pi-sessions"), telemetry_path: root.join("crashes.jsonl"),
-            pi_extension_path: root.join("extension.ts"), attachment_root: root.join("outbox"),
-            upload_root: root.join("uploads"), title_command: None,
-        };
-        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
-        let first = manager.create_session(None).await.unwrap();
-        let second = manager.create_session(Some(&first)).await.unwrap();
-        manager.rename_session(&first, "Flag source").await.unwrap();
-        let mut tokens = Vec::new();
-        for id in [&first, &second] {
-            manager.commands(id).await.unwrap();
-            let session = manager.inner.state.get(id).unwrap().session_file.unwrap();
-            let capability: serde_json::Value = serde_json::from_slice(&fs::read(format!("{session}.flag-capability")).await.unwrap()).unwrap();
-            assert_eq!(capability["url"], format!("http://{address}/v1/sessions/{id}/flags"));
-            assert_eq!(capability["clientTokenPresent"], false);
-            tokens.push(capability["token"].as_str().unwrap().to_owned());
-        }
-        assert_ne!(tokens[0], tokens[1]);
-        let session = manager.inner.state.get(&first).unwrap();
-        let history = fs::read(session.session_file.as_ref().unwrap()).await.unwrap();
-        let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
-            transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) };
-        let app = Router::new().route("/v1/ws", get(websocket))
-            .route("/v1/sessions/{session_id}/flags", post(flag_it).layer(DefaultBodyLimit::max(32 * 1024))).with_state(state);
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-        let mut request = format!("ws://{address}/v1/ws").into_client_request().unwrap();
-        request.headers_mut().insert(AUTHORIZATION, format!("Bearer {}", tokens[0]).parse().unwrap());
-        assert!(connect_async(request.clone()).await.is_err(), "Flag token granted client access");
-        request.headers_mut().insert(AUTHORIZATION, "Bearer full-client-token".parse().unwrap());
-        let mut clients = Vec::new();
-        for _ in 0..2 {
-            let (mut socket, _) = connect_async(request.clone()).await.unwrap();
-            for _ in 0..2 { socket.next().await.unwrap().unwrap(); }
-            clients.push(socket);
-        }
-        let log = root.join("flags.jsonl");
-        for (id, token, text, status) in [
-            (first.as_str(), "full-client-token", "Denied", 401),
-            (second.as_str(), tokens[0].as_str(), "Wrong source", 401),
-            ("missing", tokens[0].as_str(), "Missing source", 401),
-            (first.as_str(), tokens[0].as_str(), " \n ", 400),
-            (first.as_str(), tokens[0].as_str(), &"x".repeat(4097), 400),
-        ] {
-            assert_eq!(submit(address, id, token, text).await.0, status);
-            assert!(!log.exists());
-        }
-        let texts = ["Private cache 🔧\nQuote: \"build-dir\"".to_owned(), "x".repeat(4096)];
-        let mut flags = Vec::new();
-        for text in &texts {
-            let (status, saved) = submit(address, &first, &tokens[0], text).await;
-            assert_eq!(status, 200);
-            assert_eq!(saved["text"], *text);
-            assert_eq!(saved["sessionId"], first);
-            assert_eq!(saved["sessionTitle"], "Flag source");
-            assert!(saved["timestampMs"].as_u64().unwrap() > 0);
-            assert!(uuid::Uuid::parse_str(saved["id"].as_str().unwrap()).is_ok());
-            flags.push(saved.clone());
-            let persisted: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-            assert_eq!(persisted, flags, "Success preceded a complete durable log entry");
-            for socket in &mut clients {
-                let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-                let message: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-                assert_eq!(message["type"], "extension_ui");
-                assert_eq!(message["sessionId"], first);
-                assert_eq!(message["request"]["method"], "notify");
-                assert_eq!(message["request"]["notifyType"], "info");
-                assert!(message["request"]["message"].as_str().unwrap().starts_with(&format!("Flagged {}", saved["id"].as_str().unwrap())));
-                assert!(message["request"]["message"].as_str().unwrap().chars().count() < 480);
-            }
-        }
-        assert_eq!(fs::metadata(&log).await.unwrap().mode() & 0o777, 0o600);
-        {
-            let mut cancelled = Box::pin(manager.flag(&first, &tokens[0], "Caller disconnected"));
-            assert!(futures_util::poll!(&mut cancelled).is_pending());
-        }
-        for socket in &mut clients {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let message: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            assert_eq!(message["request"]["notifyType"], "info");
-            assert!(message["request"]["message"].as_str().unwrap().contains("Caller disconnected"));
-        }
-        let completed: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(completed.len(), 3);
-        assert_eq!(completed.last().unwrap()["text"], "Caller disconnected");
-        let before_failure = fs::read(&log).await.unwrap();
-        fs::rename(&log, root.join("flags-backup")).await.unwrap();
-        fs::create_dir(&log).await.unwrap();
-        assert_eq!(submit(address, &first, &tokens[0], "Unsaved").await.0, 500);
-        for socket in &mut clients {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let message: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            assert_eq!(message["request"]["notifyType"], "error");
-            assert!(message["request"]["message"].as_str().unwrap().starts_with("Flag save failed"));
-        }
-        assert_eq!(fs::read(root.join("flags-backup")).await.unwrap(), before_failure);
-        fs::remove_dir(&log).await.unwrap();
-        fs::rename(root.join("flags-backup"), &log).await.unwrap();
-        let (left, right) = tokio::join!(submit(address, &first, &tokens[0], "Concurrent first"), submit(address, &second, &tokens[1], "Concurrent second"));
-        assert_eq!((left.0, right.0), (200, 200));
-        let rows: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(rows.len(), 5);
-        assert!(rows.contains(&left.1) && rows.contains(&right.1));
-        assert_eq!(manager.inner.state.get(&first).unwrap().updated_at_ms, session.updated_at_ms);
-        assert_eq!(fs::read(session.session_file.as_ref().unwrap()).await.unwrap(), history);
-        manager.close_session(&first).await.unwrap();
-        assert_eq!(submit(address, &first, &tokens[0], "Retired token").await.0, 401);
-        manager.commands(&first).await.unwrap();
-        assert_eq!(submit(address, &first, &tokens[0], "Old worker token").await.0, 401);
-        for socket in &mut clients { socket.close(None).await.unwrap(); }
-        manager.shutdown().await;
-        server.abort();
-        let restored = StateStore::load(config.state_path.clone()).await.unwrap();
-        let saved = restored.flag(&first, "After restart").await.unwrap();
-        assert_eq!(saved.session_id, first);
-        let rows: Vec<serde_json::Value> = fs::read_to_string(&log).await.unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(rows.len(), 6);
-        assert_eq!(rows.last().unwrap()["id"], saved.id);
-        fs::create_dir(root.join("collision")).await.unwrap();
-        let collision = root.join("collision/flags.jsonl");
-        fs::copy(config.state_path, &collision).await.unwrap();
-        let before = fs::read(&collision).await.unwrap();
-        let colliding = StateStore::load(collision.clone()).await.unwrap();
-        assert!(colliding.flag(&first, "Must not overwrite state").await.is_err());
-        assert_eq!(fs::read(collision).await.unwrap(), before);
-        fs::remove_dir_all(root).await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn saves_the_full_title_prompt_and_passes_it_to_the_generator() {
-        use std::os::unix::fs::PermissionsExt;
-        use super::*;
-        use crate::state::{StateStore, DEFAULT_TITLE_PROMPT};
-        use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, Message as ClientMessage}};
-
-        let root = std::env::temp_dir().join(format!("tau-title-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).await.unwrap();
-        let pi = root.join("pi.py");
-        fs::write(&pi, include_str!("../tests/fixtures/pi.py")).await.unwrap();
-        fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o700)).await.unwrap();
-        fs::write(root.join("title_gen.py"), include_str!("../../scripts/title_gen.py")).await.unwrap();
-        fs::write(root.join("title_prompt.txt"), DEFAULT_TITLE_PROMPT).await.unwrap();
-        fs::write(root.join("llama_cpp.py"), r#"import json
-from pathlib import Path
-class Llama:
-    def __init__(self, model_path, n_ctx, n_threads, verbose):
-        assert (n_ctx, n_threads, verbose) == (2048, 4, False)
-        self.path = Path(model_path)
-    def __call__(self, prompt, **options):
-        assert options == dict(max_tokens=25, temperature=0.2, stop=["\n", "Session:", "Title:"], echo=False)
-        self.path.write_text(json.dumps({"prompt": prompt}))
-        return {"choices": [{"text": ' "Literal title" '}]}
-"#).await.unwrap();
-        let config = Config {
-            transfer_bind: "127.0.0.1:0".parse().unwrap(),
-            bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
-            pi_command: pi, default_thinking_level: "high".to_owned(), cwd: root.clone(),
-            state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
-            telemetry_path: root.join("crashes.jsonl"), pi_extension_path: root.join("extension.ts"),
-            attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
-            title_command: Some(format!("python3 {} --model {}", root.join("title_gen.py").display(), root.join("model-call.json").display())),
-        };
-        fs::write(&config.state_path, r#"{"schema":1,"sessions":{}}"#).await.unwrap();
-        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
-        let existing = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
-        manager.rename_session(&existing, "Existing title").await.unwrap();
-        let state = AppState { config: config.clone(), manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
-            transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) };
-        let app = Router::new().route("/v1/ws", get(websocket)).with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-        assert!(connect_async(&url).await.is_err());
-        let mut request = url.into_client_request().unwrap();
-        request.headers_mut().insert(AUTHORIZATION, "Bearer test-token".parse().unwrap());
-        let (mut first, _) = connect_async(request.clone()).await.unwrap();
-        let (mut second, _) = connect_async(request).await.unwrap();
-        let custom = "  Literal \"rules\" 🔧\n{text}\nAgain: {text}\n  ";
-        for (index, (command, expected)) in [
-            (json!({"type":"get_title_prompt"}), Some(DEFAULT_TITLE_PROMPT)),
-            (json!({"type":"set_title_prompt", "prompt":custom}), Some(custom)),
-            (json!({"type":"get_title_prompt"}), Some(custom)),
-            (json!({"type":"set_title_prompt", "prompt":""}), Some("")),
-            (json!({"type":"get_title_prompt"}), Some("")),
-            (json!({"type":"set_title_prompt", "prompt":custom}), Some(custom)),
-            (json!({"type":"set_title_prompt", "prompt":"x".repeat(MAX_PROMPT_CHARS + 1)}), None),
-            (json!({"type":"set_title_prompt", "prompt":"Unsaved"}), None),
-        ].into_iter().enumerate() {
-            if index == 7 {
-                fs::rename(&config.state_path, root.join("backup.json")).await.unwrap();
-                fs::create_dir(&config.state_path).await.unwrap();
-            }
-            let mut command = command;
-            command["id"] = json!(format!("setting-{index}"));
-            let socket = if index % 2 == 0 { &mut first } else { &mut second };
-            socket.send(ClientMessage::Text(command.to_string().into())).await.unwrap();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                let mut prompt = None;
-                loop {
-                    let frame = socket.next().await.unwrap().unwrap();
-                    let message: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-                    if message["type"] == "title_prompt" {
-                        assert_eq!(message["requestId"], command["id"]);
-                        assert_eq!(message["defaultPrompt"], DEFAULT_TITLE_PROMPT);
-                        prompt = Some(message["prompt"].as_str().unwrap().to_owned());
-                    }
-                    if message["type"] == "response" && message["requestId"] == command["id"] {
-                        assert_eq!(message["ok"], expected.is_some());
-                        assert_eq!(prompt.as_deref(), expected);
-                        break;
-                    }
-                }
-            }).await.unwrap();
-        }
-        fs::remove_dir(&config.state_path).await.unwrap();
-        fs::rename(root.join("backup.json"), &config.state_path).await.unwrap();
-        assert_eq!(manager.inner.state.title_prompt(None).await.unwrap(), custom);
-        assert_eq!(manager.inner.state.get(&existing).unwrap().title, "Existing title");
-        assert!(!root.join("pi-sessions/spawn-args").exists());
-        assert!(!root.join("model-call.json").exists());
-        first.close(None).await.unwrap();
-        second.close(None).await.unwrap();
-        server.abort();
-        manager.shutdown().await;
-
-        let restored = StateStore::load(config.state_path.clone()).await.unwrap();
-        assert_eq!(restored.title_prompt(None).await.unwrap(), custom);
-        let manager = AgentManager::new(config, restored);
-        let id = manager.create_session(None).await.unwrap();
-        let text = format!("First {{text}} 🔧 {}", "z".repeat(900));
-        manager.prompt(&id, &text, "title-test").await.unwrap();
-        let call: serde_json::Value = serde_json::from_slice(&fs::read(root.join("model-call.json")).await.unwrap()).unwrap();
-        assert_eq!(call["prompt"], custom.replace("{text}", &text.chars().take(600).collect::<String>()));
-        assert_eq!(manager.inner.state.get(&id).unwrap().title, "Literal title");
-        manager.shutdown().await;
-        for (template, cli, expected) in [
-            (None, None, DEFAULT_TITLE_PROMPT),
-            (None, Some("CLI {text}"), "CLI {text}"),
-            (Some(""), Some("CLI {text}"), ""),
-            (Some(custom), Some("CLI {text}"), custom),
-        ] {
-            let mut command = tokio::process::Command::new("python3");
-            command.arg(root.join("title_gen.py")).arg("--model").arg(root.join("model-call.json"));
-            if let Some(cli) = cli { command.arg("--prompt-template").arg(cli); }
-            let mut child = command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
-            let mut input = json!({"text":"Message {text}"});
-            if let Some(template) = template { input["promptTemplate"] = json!(template); }
-            child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).await.unwrap();
-            let output = child.wait_with_output().await.unwrap();
-            assert!(output.status.success());
-            let call: serde_json::Value = serde_json::from_slice(&fs::read(root.join("model-call.json")).await.unwrap()).unwrap();
-            assert_eq!(call["prompt"], expected.replace("{text}", "Message {text}"));
-        }
-        fs::remove_dir_all(root).await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn pings_clients_and_reaps_missing_pongs_without_waiting_for_commands() {
-        use std::os::unix::fs::PermissionsExt;
         use super::*;
         use crate::state::StateStore;
         use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
         let root = std::env::temp_dir().join(format!("tau-ws-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).await.unwrap();
-        let mock = root.join("pi.py");
-        fs::write(&mock, include_str!("../tests/fixtures/pi.py")).await.unwrap();
-        fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700)).await.unwrap();
         let config = Config {
             transfer_bind: "127.0.0.1:0".parse().unwrap(),
             bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
-            pi_command: mock, default_thinking_level: "high".to_owned(),
+            settings_path: root.join("settings.json"), import_pi_dir: None,
             cwd: root.clone(), state_path: root.join("state.json"), session_dir: root.join("pi-sessions"),
-            telemetry_path: root.join("crashes.jsonl"), pi_extension_path: root.join("extension.ts"),
+            telemetry_path: root.join("crashes.jsonl"),
             attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
         title_command: None,
         };
-        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap());
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
         let id = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
         let other = manager.inner.state.create("New chat".to_owned(), None, None, None, false).await.unwrap();
         let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
@@ -1139,10 +821,9 @@ class Llama:
             loop {
                 let message = healthy.next().await.unwrap().unwrap();
                 let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                if message["type"] == "transcript_update" { assert_eq!(message["sessionId"], id); break; }
+                if message["type"] == "resync_required" { assert_eq!(message["sessionId"], id); break; }
             }
         }).await.expect("opening another chat must retain the first feed");
-        assert!(!root.join("pi-sessions/spawn-args").exists(), "reading chats must not start Pi");
         healthy.send(ClientMessage::Ping(Bytes::from_static(b"client-ping"))).await.unwrap();
         let pong = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -1164,14 +845,6 @@ class Llama:
             assert_eq!(response["requestId"], request_id);
             assert_eq!(response["ok"], false);
         }
-        wrong.send(ClientMessage::Text(json!({"id":"dialog", "type":"prompt", "sessionId":id, "text":"/choose"}).to_string().into())).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let message = wrong.next().await.unwrap().unwrap();
-                let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                if message["type"] == "extension_ui" { break; }
-            }
-        }).await.unwrap();
         tokio::time::pause();
         tokio::time::advance(WS_PING_INTERVAL).await;
         tokio::time::resume();
@@ -1212,7 +885,6 @@ class Llama:
         healthy.flush().await.unwrap();
         healthy.close(None).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), closed_rx.recv()).await.unwrap().unwrap();
-        manager.extension_ui_response(&id, "dialog-1", None, None, true).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), manager.commands(&id)).await.unwrap().unwrap();
         manager.shutdown().await;
         server.abort();

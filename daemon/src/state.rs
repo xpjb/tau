@@ -247,6 +247,16 @@ impl StateStore {
         self.commit(state).await
     }
 
+    pub async fn rename_if_untitled(&self, id: &str, title: String) -> Result<()> {
+        let _guard = self.inner.write_gate.lock().await;
+        let mut state = self.read_state().clone();
+        let updated = next_activity_ms(&state);
+        let session = state.sessions.get_mut(id).context("Unknown session")?;
+        if session.title != "New chat" { return Ok(()); }
+        session.title = title; session.starter = false; session.updated_at_ms = updated;
+        self.commit(state).await
+    }
+
     pub async fn touch(&self, id: &str) -> Result<()> {
         let _guard = self.inner.write_gate.lock().await;
         let mut state = self.read_state().clone();

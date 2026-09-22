@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::SessionModel;
 use crate::transcript::{HistoryPage, QueueRef, TranscriptChange, TranscriptSnapshot};
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -21,6 +21,8 @@ pub struct ClientRequest {
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ClientCommand {
     ListSessions,
+    GetSettings,
+    SetSettings { revision: u64, settings: Box<crate::settings::Settings> },
     GetTitlePrompt,
     SetTitlePrompt { prompt: String },
     CreateSession { #[serde(default)] keep_session_id: Option<String> },
@@ -82,6 +84,7 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    Settings { request_id: String, settings: Box<crate::settings::Settings>, default_system_prompt: &'static str },
     TitlePrompt {
         request_id: String,
         prompt: String,
@@ -164,11 +167,7 @@ impl ServerMessage {
     }
 
     pub fn command_failure(request_id: String, error: anyhow::Error) -> Self {
-        let mut response = Self::failure(request_id, error.to_string());
-        if let Self::Response { uncertain, .. } = &mut response {
-            *uncertain = error.is::<crate::pi::UnconfirmedCommand>();
-        }
-        response
+        Self::failure(request_id, error.to_string())
     }
 
     pub fn failure(request_id: String, error: impl Into<String>) -> Self {
@@ -263,14 +262,6 @@ pub enum SessionStatus {
 pub struct ContextUsage {
     pub tokens: Option<u64>,
     pub context_window: u64,
-}
-
-impl ContextUsage {
-    pub fn from_pi(data: &serde_json::Value) -> Option<Self> {
-        let usage: Self = serde_json::from_value(data.get("contextUsage")?.clone()).ok()?;
-        (usage.context_window > 0 && usage.context_window <= 9_007_199_254_740_991
-            && usage.tokens.is_none_or(|tokens| tokens <= 9_007_199_254_740_991)).then_some(usage)
-    }
 }
 
 #[derive(Clone, Debug, Serialize)]
