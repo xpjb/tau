@@ -286,7 +286,7 @@ impl AgentManager {
         let mut tokens = None;
         for entry in journal.entries.iter().rev() {
             if entry["type"] == "compaction" || entry["type"] == "model_change" { break; }
-            if entry["message"]["role"] == "assistant" {
+            if entry["type"] == "message" && entry["message"]["role"] == "assistant" {
                 let usage = &entry["message"]["tauModelMessage"]["usage"];
                 tokens = usage["total_tokens"].as_u64();
                 break;
@@ -330,8 +330,10 @@ impl AgentManager {
                 tokio::time::sleep(Duration::from_secs(timeout)).await;
                 let _guard = runtime.operation.lock().await;
                 let content = runtime.content.lock().await;
-                if runtime.snapshot().idle_since != idle_since || content.agent.as_ref().is_some_and(|a| a.running)
-                    || content.transcript.as_ref().is_some_and(|t| t.queue.paused || !t.queue.requests.is_empty()) { return; }
+                // Unlike a Pi worker, the native runtime owns no unsaved queue.
+                // Paused/pending work survives eviction and reopens paused; retaining
+                // it here would abandon the one-shot timer and leak idle runtimes.
+                if runtime.snapshot().idle_since != idle_since || content.agent.as_ref().is_some_and(|a| a.running) { return; }
                 drop(content); manager.retire_session(&id, &runtime).await;
             });
         }

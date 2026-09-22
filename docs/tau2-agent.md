@@ -54,6 +54,24 @@ functions or an extension trait after moving the structs). Keep
 its transfer changes. Keep this branch's native manager and removal of Pi source
 positions. Do not reintroduce a second event sequence to resolve the conflict.
 
+### Backend follow-ups from frontend notes
+
+Reviewed `frontend/MERGE.md`, `frontend/QA.md` and the timing/idle flags. New native
+assistant reasoning, text and individual function-call sections now capture their
+first daemon stream-observation time in the persisted content block. Projection
+uses that time for the existing `timestampMs` field, unchanged by later deltas,
+completion or reopening. This is **not** a provider-reported generation start.
+Old Pi entries still fall back to their entry/message timestamp; historical
+section times cannot be reconstructed. The current agent aggregates one reasoning
+section and one answer section per model response, plus individual tool calls.
+
+The old paused-queue idle retention problem does not require a polling/retry layer:
+native queues are already durable. An idle runtime now evicts even with paused or
+pending work; reopening restores that work paused and still deduplicates accepted
+requests. This is only in-memory agent lifetime. It is unrelated to provider cache
+expiration or the frontend's explicitly estimated cache ring; no worker-TTL wire
+field is added.
+
 ## Files and migration
 
 - `TAU_SETTINGS_PATH`: `/var/lib/tau/settings.json` by default. JSON, schema 1,
@@ -167,7 +185,9 @@ or send paid model requests. Live-provider acceptance remains a release check.
   small byte fragments; the framer also checks every possible byte split.
 - Real WebSocket coverage includes failed disk writes before acceptance,
   duplicate IDs, queue edits/deletes/pause/prefix/cancel/resume and stale revisions,
-  settings conflicts, delayed titles, reconnect, fork/clone and restart recovery.
+  settings conflicts, delayed titles, reconnect, fork/clone, paused-work idle eviction
+  and restart recovery. A gated stream checks distinct section timestamps and their
+  persistence through compaction/reopening.
 - Real tools cover exact writes/edits, overlapping-match rejection, shell output,
   process-group cancellation, bounded image input, automatic staging, inline/file classification, outbox confinement and flags.
 - Codex fixtures cover encrypted reasoning replay, native compaction and retained

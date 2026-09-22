@@ -279,6 +279,7 @@ impl Event {
     }
 
     fn set_content(&mut self, block: &Value) {
+        if let Some(timestamp) = block.get("timestamp").and_then(Value::as_u64) { self.timestamp_ms = Some(timestamp); }
         self.text.clear();
         self.kind = match block.get("type").and_then(Value::as_str) {
             Some("text") => { self.text = block.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(); EventKind::Text }

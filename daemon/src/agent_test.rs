@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::{Message, client::IntoClientRequest}};
 use crate::{Config, manager::AgentManager, settings::{Api, Settings}, state::StateStore};
 
-struct Reply { status: u16, bytes: Vec<u8>, gate: Option<Arc<Notify>> }
+struct Reply { status: u16, bytes: Vec<u8>, gate: Option<Arc<Notify>>, body_gate: Option<(usize, Arc<Notify>)> }
 struct ModelServer { url: String, requests: mpsc::UnboundedReceiver<Value>, task: tokio::task::JoinHandle<()> }
 impl ModelServer {
     async fn start(replies: Vec<Reply>) -> Self {
@@ -18,8 +18,13 @@ impl ModelServer {
             let reply = script.replies.lock().await.pop_front().expect("Unexpected extra provider request");
             if let Some(gate) = reply.gate { gate.notified().await; }
             let fragments = reply.bytes.chunks(7).map(|bytes| Ok::<_, std::convert::Infallible>(bytes.to_vec())).collect::<Vec<_>>();
+            let gated = reply.body_gate.map(|(offset,gate)| (offset.div_ceil(7),gate));
+            let body = futures_util::stream::iter(fragments).enumerate().then(move |(index,fragment)| {
+                let gate = gated.as_ref().filter(|(at,_)| *at == index).map(|(_,gate)| gate.clone());
+                async move { if let Some(gate) = gate { gate.notified().await; } fragment }
+            });
             Response::builder().status(StatusCode::from_u16(reply.status).unwrap()).header("content-type", "text/event-stream")
-                .body(Body::from_stream(futures_util::stream::iter(fragments))).unwrap()
+                .body(Body::from_stream(body)).unwrap()
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -33,7 +38,7 @@ impl Drop for ModelServer { fn drop(&mut self) { self.task.abort(); } }
 fn completion(text: &str, calls: Vec<Value>) -> Reply {
     let mut delta = json!({"content":text});
     if !calls.is_empty() { delta["tool_calls"] = json!(calls.iter().enumerate().map(|(index, call)| { let mut call = call.clone(); call["index"] = json!(index); call }).collect::<Vec<_>>()); }
-    Reply { status:200, gate:None, bytes:format!("data: {}\r\n\r\ndata: {}\r\n\r\ndata: [DONE]\r\n\r\n",
+    Reply { status:200, gate:None, body_gate:None, bytes:format!("data: {}\r\n\r\ndata: {}\r\n\r\ndata: [DONE]\r\n\r\n",
         json!({"choices":[{"index":0,"delta":delta}]}), json!({"choices":[{"index":0,"delta":{},"finish_reason":if calls.is_empty() {"stop"} else {"tool_calls"}}],"usage":{"total_tokens":1024}})).into_bytes() }
 }
 fn call(id: &str, name: &str, arguments: Value) -> Value { json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}}) }
@@ -154,6 +159,7 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     client.request(json!({"id":"get","type":"get_settings"})).await;
     let mut settings = client.seen.iter().rev().find(|m| m["type"] == "settings").unwrap()["settings"].clone();
     settings["agent"]["systemPrompt"] = json!("Custom system prompt"); settings["daemon"]["titlePrompt"] = json!("Custom title {text}");
+    settings["daemon"]["idleTimeoutSeconds"] = json!(2);
     assert_eq!(client.request(json!({"id":"save","type":"set_settings","revision":0,"settings":settings})).await["ok"], true);
     assert_eq!(client.request(json!({"id":"stale-settings","type":"set_settings","revision":0,"settings":settings})).await["ok"], false);
     client.request(json!({"id":"title","type":"get_title_prompt"})).await;
@@ -192,6 +198,10 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; assert_eq!(file.metadata().await.unwrap().permissions().mode() & 0o777, 0o600); }
     assert_eq!(tokio::fs::read_to_string(root.path().join("ambiguous.txt")).await.unwrap(), "aaa");
     assert!(!client.seen.iter().any(|m| m.to_string().contains("fixture-key")));
+    client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "sleeping").await;
+    assert!(manager.inner.runtimes.lock().await[&id].content.lock().await.agent.is_none(), "Paused work must not pin the in-memory agent forever");
+    let restored = client.open(&id).await;
+    assert_eq!(restored["queue"]["paused"], true); assert_eq!(restored["queue"]["requests"][0]["text"], "Edited queued text");
     let config = manager.inner.config.clone();
     client.socket.close(None).await.unwrap(); manager.shutdown().await; server.abort();
     let manager = AgentManager::new(config.clone(), StateStore::load(config.state_path.clone()).await.unwrap()).await.unwrap();
@@ -230,27 +240,40 @@ fn codex(text: &str, extra: Vec<Value>) -> Reply {
     for (index, item) in output.iter().enumerate() { frames.push_str(&format!("data: {}\n\n", json!({"type":"response.output_item.done","output_index":index,"item":item}))); }
     // Codex often omits output in the terminal event. Replay must use completed items.
     frames.push_str(&format!("data: {}\n\n", json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}})));
-    Reply { status:200, bytes:frames.into_bytes(), gate:None }
+    Reply { status:200, bytes:frames.into_bytes(), gate:None, body_gate:None }
 }
 
 #[tokio::test]
 async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposing_it_to_clients() {
     let reasoning = json!({"type":"reasoning","id":"rs_fixture","encrypted_content":"private-reasoning-cipher","summary":[{"type":"summary_text","text":"Thinking π🧠"}]});
     let checkpoint = json!({"type":"compaction","encrypted_content":"private-compaction-cipher"});
-    let mut model = ModelServer::start(vec![codex("First answer",vec![reasoning]),codex("Second answer",vec![]),codex("",vec![checkpoint]),codex("Third answer",vec![])]).await;
+    let gate = Arc::new(Notify::new()); let mut first = codex("First answer",vec![reasoning]);
+    let prefix = first.bytes.windows(2).position(|bytes| bytes == b"\n\n").unwrap()+2;
+    first.body_gate = Some((prefix,gate.clone()));
+    let mut model = ModelServer::start(vec![first,codex("Second answer",vec![]),codex("",vec![checkpoint]),codex("Third answer",vec![])]).await;
     let (root, manager, url, server) = fixture(&model, Api::Codex).await;
     let mut client = Client::connect(&url).await;
     let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
     client.open(&id).await;
+    let mut thinking_started = Value::Null;
     for (request, text) in [("one","First task"),("two","Second task")] {
         assert_eq!(client.request(json!({"id":request,"type":"prompt","sessionId":id,"text":text})).await["ok"], true);
         let payload = model.request().await;
         assert_eq!(payload["model"], "gpt-6-astra"); assert_eq!(payload["reasoning"]["effort"], "max");
         assert_eq!(payload["store"], false);
         if request == "two" { assert!(payload["input"].to_string().contains("private-reasoning-cipher")); }
+        else {
+            let update = client.until(|m| m["change"]["events"].as_array().is_some_and(|events| events.iter().any(|e| e["kind"] == "thinking"))).await;
+            thinking_started = update["change"]["events"].as_array().unwrap().iter().find(|e| e["kind"] == "thinking").unwrap()["timestampMs"].clone();
+            tokio::time::sleep(Duration::from_millis(20)).await; gate.notify_one();
+        }
         client.until(|m| m["type"] == "session_state" && m["status"] == "idle").await;
     }
     let before = client.open(&id).await;
+    let answer = before["events"].as_array().unwrap().iter().find(|e| e["text"] == "First answer").unwrap();
+    let thinking = before["events"].as_array().unwrap().iter().find(|e| e["entryId"] == answer["entryId"] && e["kind"] == "thinking").unwrap();
+    assert_eq!(thinking["timestampMs"],thinking_started);
+    assert!(answer["timestampMs"].as_u64().unwrap() > thinking_started.as_u64().unwrap(), "Sections record their own first stream observation, not a cloned save time");
     let compact = client.request(json!({"id":"compact","type":"prompt","sessionId":id,"text":"/compact Keep the task goals"})).await;
     assert_eq!(compact["ok"], true, "{compact}");
     assert_eq!(client.request(json!({"id":"compact","type":"prompt","sessionId":id,"text":"/compact Keep the task goals"})).await["disposition"], "handled");
@@ -261,6 +284,7 @@ async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposin
     manager.close_session(&id).await.unwrap();
     let snapshot = client.open(&id).await;
     assert_eq!(snapshot["events"].as_array().unwrap().len(), before["events"].as_array().unwrap().len()+1);
+    for event in [answer,thinking] { assert!(snapshot["events"].as_array().unwrap().contains(event), "Section times must survive reopening and compaction"); }
     client.request(json!({"id":"three","type":"prompt","sessionId":id,"text":"Third task"})).await;
     let payload = model.request().await;
     assert_eq!(payload["input"][0]["type"], "compaction");
@@ -283,7 +307,7 @@ async fn incomplete_stream_never_executes_tools_abort_kills_shell_group_and_retr
     let mut partial = completion("Incomplete", vec![attempted]);
     let end = partial.bytes.windows(b"data: [DONE]".len()).position(|part| part == b"data: [DONE]").unwrap(); partial.bytes.truncate(end);
     let shell = call("sleep", "bash", json!({"command":"echo $$ > shell.pid; sleep 60 & echo $! > child.pid; wait"}));
-    let mut model = ModelServer::start(vec![partial,completion("",vec![shell]),Reply {status:429,bytes:vec![],gate:None},completion("Recovered",vec![])]).await;
+    let mut model = ModelServer::start(vec![partial,completion("",vec![shell]),Reply {status:429,bytes:vec![],gate:None, body_gate:None},completion("Recovered",vec![])]).await;
     let (root, manager, url, server) = fixture(&model, Api::ChatCompletions).await;
     let mut client = Client::connect(&url).await;
     let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
@@ -427,6 +451,7 @@ async fn native_images_are_delivered_reopened_and_replayed_as_references_without
     let after = client.open(&id).await;
     assert!(after["events"].as_array().unwrap().contains(&image));
     assert_eq!(after["queue"]["paused"],false);
+    assert_eq!(client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap()["contextUsage"]["tokens"],120);
     assert_eq!(client.request(json!({"id":"generate","type":"prompt","sessionId":id,"text":"Generate an image"})).await["ok"],true);
     assert!(model.requests.try_recv().is_err(),"Retrying an accepted prompt must not regenerate an image");
     client.request(json!({"id":"edit-image","type":"prompt","sessionId":id,"text":"Make two variations of that image"})).await;
@@ -473,7 +498,7 @@ async fn failed_native_images_never_publish_bytes_or_retry_a_started_generation(
     let mut malformed = generated("img_malformed"); malformed["result"] = json!("not-base64!");
     let mut unfinished = generated("img_unfinished"); unfinished["status"] = json!("in_progress");
     let mut wrong_format = generated("img_format"); wrong_format["output_format"] = json!("jpeg");
-    let error = Reply {status:200,gate:None,bytes:format!("data: {}\n\ndata: {}\n\n",
+    let error = Reply {status:200,gate:None, body_gate:None,bytes:format!("data: {}\n\ndata: {}\n\n",
         json!({"type":"response.image_generation_call.in_progress"}), json!({"type":"error","error":{"code":"server_error"}})).into_bytes()};
     let replies = vec![interrupted,codex("",vec![generated("img_duplicate"),generated("img_duplicate")]),
         codex("",vec![generated("img_valid"),malformed]),codex("",vec![unfinished]),codex("",vec![wrong_format]),error];

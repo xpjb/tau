@@ -4,6 +4,7 @@ mod provider;
 mod tools;
 
 use std::sync::Arc;
+use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -66,7 +67,7 @@ impl SessionContent {
     }
 }
 
-fn assistant_message(message: &Value, model: &SessionModel, stop: &str) -> Value {
+fn assistant_message(message: &Value, model: &SessionModel, stop: &str, started: &mut HashMap<String, u64>) -> Value {
     let mut content = Vec::new();
     if let Some(reasoning) = message.get("reasoning").or_else(|| message.get("reasoning_content")).and_then(Value::as_str).filter(|v| !v.is_empty()) {
         content.push(json!({"type":"thinking","thinking":reasoning}));
@@ -76,6 +77,13 @@ fn assistant_message(message: &Value, model: &SessionModel, stop: &str) -> Value
         let arguments = call["function"]["arguments"].as_str().unwrap_or_default();
         content.push(json!({"type":"toolCall","id":call["id"],"name":call["function"]["name"],
             "arguments":serde_json::from_str::<Value>(arguments).unwrap_or(Value::Null),"partialArguments":arguments}));
+    }
+    // First observation by the daemon, not the final entry's save time or a
+    // fabricated provider timestamp. Keep it unchanged across deltas and restart.
+    for block in &mut content {
+        let key = if block["type"] == "toolCall" { format!("tool:{}", block["id"].as_str().unwrap_or_default()) }
+            else { block["type"].as_str().unwrap().to_owned() };
+        block["timestamp"] = json!(*started.entry(key).or_insert_with(now_ms));
     }
     json!({"role":"assistant","content":content,"provider":model.provider,"model":model.model_id,"stopReason":stop})
 }
@@ -174,13 +182,14 @@ impl AgentManager {
             }, updates);
             tokio::pin!(generation);
             let mut partial = json!({"role":"assistant","content":""});
+            let mut started = HashMap::new();
             let completion = loop {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break Err(anyhow::anyhow!("Aborted")),
                     Some(message) = receiver.recv() => {
                         partial = message;
-                        runtime.content.lock().await.live(id, &stream, assistant_message(&partial, &selected, ""))?;
+                        runtime.content.lock().await.live(id, &stream, assistant_message(&partial, &selected, "", &mut started))?;
                     }
                     result = &mut generation => break result,
                 }
@@ -189,7 +198,7 @@ impl AgentManager {
                 Ok(completion) => completion,
                 Err(error) => {
                     let mut content = runtime.content.lock().await;
-                    let mut message = assistant_message(&partial, &selected, if cancel.is_cancelled() {"aborted"} else {"error"});
+                    let mut message = assistant_message(&partial, &selected, if cancel.is_cancelled() {"aborted"} else {"error"}, &mut started);
                     message["errorMessage"] = json!(bounded(&error.to_string(), 480));
                     message["timestamp"] = json!(now_ms());
                     content.append(id, json!({"type":"message","origin":{"streamId":stream},"message":message})).await?;
@@ -208,7 +217,7 @@ impl AgentManager {
                     "details":staged["details"],"timestamp":now_ms()}}));
             }
             {
-                let mut message = assistant_message(&completion.message, &selected, if completion.limited {"length"} else if calls.is_empty() {"stop"} else {"toolUse"});
+                let mut message = assistant_message(&completion.message, &selected, if completion.limited {"length"} else if calls.is_empty() {"stop"} else {"toolUse"}, &mut started);
                 message["tauModelMessage"] = completion.message.clone();
                 message["timestamp"] = json!(now_ms());
                 let mut content = runtime.content.lock().await;
@@ -257,7 +266,7 @@ impl AgentManager {
             if users.len() < 2 { bail!("Not enough completed turns to compact safely"); }
             let mut cut = *users.last().unwrap(); let mut size = 0;
             for (index, entry) in entries.iter().enumerate().rev() {
-                if entry["type"] == "message" { size += journal::estimate_tokens(&entry["message"]); }
+                if matches!(entry["type"].as_str(), Some("message" | "tau_attachment")) { size += journal::estimate_tokens(&entry["message"]); }
                 if entry["message"]["role"] == "user" && size <= settings.agent.compaction.keep_recent_tokens { cut = index; }
             }
             if cut <= users[0] { cut = users[1]; }
