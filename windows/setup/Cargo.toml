@@ -4,6 +4,9 @@ version = "0.5.5"
 edition = "2024"
 build = "build.rs"
 
+[features]
+beta = []
+
 [build-dependencies]
 winresource = "0.1"
 

@@ -1,6 +1,6 @@
 [package]
 name = "tau-frontend"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 
 [lib]
@@ -45,7 +45,7 @@ open = "5"
 png = "0.18"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = "3"

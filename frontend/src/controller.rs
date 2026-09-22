@@ -72,6 +72,7 @@ impl Controller {
         self.network = Some(Network::start(self.settings.clone(), self.wake.clone()));
     }
     pub fn configure(&mut self, settings: Settings) -> Result<()> {
+        let settings = settings.normalized();
         settings.url()?;
         self.store.put("", "settings", &settings)?;
         self.network = None;
@@ -83,6 +84,7 @@ impl Controller {
         self.dialogs.clear();
         self.requests.clear();
         self.title_prompt = None;
+        self.notice = None;
         if let Some(id) = self.account.selected.clone() {
             self.ensure_chat(&id)?;
         }

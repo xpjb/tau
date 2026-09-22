@@ -314,11 +314,39 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         if outcome.is_ok() {
             break;
         }
-        // Avoid formatting errors with authenticated URLs/headers in them.
-        if !events
-            .send(Event::Disconnected("Reconnecting to Tau…".into()))
-            .await
+        // Classify without printing headers, request bodies, or token-bearing URLs.
+        let error = outcome.unwrap_err();
+        let detail = if let Some(error) =
+            error.downcast_ref::<tokio_tungstenite::tungstenite::Error>()
         {
+            use tokio_tungstenite::tungstenite::Error;
+            match error {
+                Error::Http(response) => match response.status().as_u16() {
+                    401 | 403 => "Access denied. Check the access token in Settings.",
+                    404 => "Tau's WebSocket endpoint was not found. Check the daemon URL.",
+                    _ => {
+                        "The server refused the connection. Check the daemon URL and server status."
+                    }
+                },
+                Error::Tls(_) => {
+                    "TLS connection failed. Check the server certificate and HTTPS URL."
+                }
+                Error::Io(_) => {
+                    "Cannot reach the daemon. Check the URL, port, and Tailscale connection. Retrying…"
+                }
+                _ => {
+                    "Connection to the daemon was lost or it returned an invalid response. Retrying…"
+                }
+            }
+        } else if error
+            .downcast_ref::<tokio::time::error::Elapsed>()
+            .is_some()
+        {
+            "Connection timed out. Check the daemon URL and Tailscale connection. Retrying…"
+        } else {
+            "The server did not return a valid Tau response. Check the URL and server version. Retrying…"
+        };
+        if !events.send(Event::Disconnected(detail.into())).await {
             break;
         }
         let wait = tokio::time::sleep(Duration::from_secs(delay));

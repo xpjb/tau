@@ -1,8 +1,8 @@
 # Tau 2 · native Rust frontend
 
-Branch: `tau2/rust-frontend`. This is a working **preview**, not a production
-replacement installer. `app/` remains the Kotlin reference; this branch does not
-modify, uninstall, migrate, or deploy over the existing client/service.
+Branch: `tau2/rust-frontend`. **Tau Beta** is a parallel-install Rust preview,
+not the production cutover. `app/` remains the Kotlin reference. The beta installer
+does not replace stable Tau, migrate its data, or deploy over the daemon.
 
 The UI, retained transcript, local work, protocol, HTTP/WebSocket transport,
 Markdown and file transfer are Rust. Chad owns the window/surface lifecycle;
@@ -17,7 +17,7 @@ IME editing, clipboard, document grants, insets and task Back.
 ## Run / build
 
 The beta uses a red-trim Tau icon and the desktop title/executable **Tau Beta**;
-the in-app theme is unchanged. It runs alongside stable Tau: Windows uses a
+the in-app styling follows the Kotlin reference. It runs alongside stable Tau: Windows uses a
 separate taskbar identity (`app.tau.beta`) and portable executable, and Android
 keeps its separate package (`app.tau.rust`). No stable installer, updater or
 registration is touched. Local state remains in `%LOCALAPPDATA%\Tau2` (or
@@ -31,7 +31,9 @@ From the repository root, using the host's normal managed Cargo wrapper:
 cargo run --locked -p tau-frontend --bin tau
 ANDROID_ABI=arm64-v8a frontend/android/build.sh
 ANDROID_ABI=x86_64 frontend/android/build.sh   # emulator
-scripts/build-rust-windows.sh                # Linux + cargo-xwin
+scripts/build-windows-sfx.sh --beta           # native beta installer, Linux + cargo-xwin
+scripts/build-rust-windows.sh                # alias for the beta installer
+scripts/build-windows-sfx.sh                 # existing stable Kotlin installer
 ```
 
 Android: SDK 35, build tools 35.0.0, NDK 27.2.12479018, Java, Python 3 and the
@@ -41,10 +43,21 @@ package `app.tau.rust` is labeled **Tau Beta**. Only Internet permission is
 requested; files use the system document picker. Plain HTTP is supported for
 Tailnet/loopback setups, just as in the existing client—not for public networks.
 
-Windows: native x64 portable `dist/tau-beta-windows-x64/Tau Beta.exe`. No JVM or UniFFI
-runtime. Static CRT is selected in `.cargo/config.toml`; Windows system libraries
-are still required. The old Compose self-extractor is deliberately unchanged. Windows resource
-embedding uses `llvm-rc` when cross-building, or the Windows SDK on Windows.
+Windows: ship **`dist/Tau-Beta-0.6.1-windows-x64.exe`**, a per-user installer using
+the normal Tau setup path with a `beta` feature/channel. It installs a small native
+launcher to `%LOCALAPPDATA%\Tau Beta\Tau Beta.exe`, a distinct **Tau Beta** Start
+Menu entry, and hash-keyed versions under `%LOCALAPPDATA%\Tau Beta\versions`.
+Updates switch `current.txt` atomically; repair also restores a missing Start Menu
+entry. Local work stays in `%LOCALAPPDATA%\Tau2`, so existing beta settings/drafts
+survive updates. Stable `%LOCALAPPDATA%\Tau`, its data and its Start Menu launcher
+are not touched. Close an earlier beta window to use the newly installed version.
+`--quiet --no-launch` is available for installer automation. No JVM or UniFFI
+runtime is needed. Native startup errors use a Windows message box, not a hidden
+console. Static CRT is selected in `.cargo/config.toml`. Resource embedding uses
+`llvm-rc` when cross-building, or the Windows SDK on Windows.
+
+The scripts still leave a bare executable under `dist/tau-beta-windows-x64` for
+development, but the installer above is the shipping artifact.
 
 Desktop input explicitly calls `ctx.request_redraw()` after UI mutations;
 Chad's desktop on-demand runner does not implicitly redraw on input. Network
@@ -54,7 +67,14 @@ are updated without switching to continuous rendering.
 Icon source: `frontend/assets/tau-beta.svg`. Regenerate its PNG/ICO launcher
 assets with `python3 frontend/assets/generate-icons.py` (`rsvg-convert` required).
 
-Use Settings to enter the URL and token. Desktop automation can explicitly set
+Use Settings to enter the URL and token. These are real single-line fields with
+horizontal scrolling, matching caret/hit/selection layout, Tab/Shift+Tab and
+Enter to connect. Token paste trims surrounding whitespace. Validation and
+connection errors are visible on the form; it closes only after authenticated
+protocol negotiation succeeds. Title prompt loading requires the connected,
+unchanged account. Notices remain visible even without a selected chat.
+
+Desktop automation can explicitly set
 `TAU2_SERVER` and `TAU2_TOKEN`; these override and save the settings. Do not put
 credentials in command-line arguments or screenshots. `TAU2_DATA_DIR` overrides
 private desktop storage (default `$XDG_DATA_HOME/Tau2`, `~/.local/share/Tau2`, or
@@ -138,7 +158,14 @@ regression covers link-destination edits and projected selection/copy.
   connection settings via IME, created chat, sent to the isolated fixture daemon,
   received transcript, force-stopped **while editing before Done**, reopened and
   verified the draft plus fetched history survived. No production daemon touched.
-- Windows x64 cross-build. A real Windows device acceptance run is still needed.
+- Windows setup + installed launcher/client exercised under an isolated Wine prefix:
+  fresh install, hash-keyed update with draft retained, Start Menu repair, stable Tau
+  sentinel files untouched, typed/pasted settings, invalid URL, rejected token,
+  correction/retry, create chat, send/receive, restart, and title-prompt save/reload.
+  Wine used Vulkan; physical Windows/DirectX/DPI acceptance is still needed.
+- Kotlin and Rust settings/list/chat screens compared directly using the same
+  isolated daemon. See [UI-ACCEPTANCE.md](UI-ACCEPTANCE.md) and the reference images.
+  Existing 51 workspace + 4 legacy Windows tests pass; no new trivial UI test scaffold.
 
 ## Remaining release gates / deliberate preview differences
 
@@ -147,8 +174,8 @@ This branch is **not** a claim of complete production parity:
 1. Merge the backend and settle its durable-ack contract. Do not remove uncertain
    delivery state before that guarantee exists. Re-run the end-to-end suite.
 2. Keep the old app until explicit migration of its SQLite drafts/pending work and
-   cached files, production Android package/signing, and native Windows installer
-   integration are done. This preview intentionally uses separate storage/package.
+   cached files and production Android package/signing are done. The Windows beta
+   installer intentionally uses separate identity/storage; it is not a stable migration.
 3. Chad's documented winit Activity Destroy/recreation bugs remain. Root Back
    backgrounds; ordinary resume is not evidence that actual Activity destruction
    and same-process recreation work. Do not mask this with `process::exit`.

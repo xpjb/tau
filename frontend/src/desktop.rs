@@ -5,7 +5,7 @@ use crate::{
 use chad::winit::{
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
-    keyboard::{Key, ModifiersState},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::CursorIcon,
 };
 use chad::{ChadApp, Config, Ctx, wgpu};
@@ -113,16 +113,34 @@ impl ChadApp for Desktop {
             WindowEvent::Ime(Ime::Commit(text)) => self.app.input(text),
             WindowEvent::Ime(Ime::Preedit(text, _)) => self.app.preedit(text.clone()),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let control = self.modifiers.control_key() || self.modifiers.super_key();
+                let control = (self.modifiers.control_key() && !self.modifiers.alt_key())
+                    || self.modifiers.super_key();
                 let shift = self.modifiers.shift_key();
                 match &event.logical_key {
-                    Key::Named(key) => self.app.key(&format!("{key:?}"), control, shift),
+                    Key::Named(
+                        key @ (NamedKey::Escape
+                        | NamedKey::Enter
+                        | NamedKey::Tab
+                        | NamedKey::Backspace
+                        | NamedKey::Delete
+                        | NamedKey::ArrowLeft
+                        | NamedKey::ArrowRight
+                        | NamedKey::ArrowUp
+                        | NamedKey::ArrowDown
+                        | NamedKey::Home
+                        | NamedKey::End),
+                    ) => self.app.key(&format!("{key:?}"), control, shift),
                     Key::Character(text) if control => self.app.key(text, true, shift),
-                    _ => {
-                        if let Some(text) = &event.text {
+                    _ if !control => {
+                        // Produced text is authoritative, even for named/unidentified keys.
+                        // IME composition comes separately through Ime::Commit.
+                        if let Some(text) = &event.text
+                            && !text.chars().any(char::is_control)
+                        {
                             self.app.input(text);
                         }
                     }
+                    _ => {}
                 }
             }
             WindowEvent::DroppedFile(path) => {
@@ -249,8 +267,9 @@ impl Desktop {
                     title,
                     value,
                     secret,
+                    single_line,
                 } => {
-                    let _ = (title, value, secret);
+                    let _ = (title, value, secret, single_line);
                 }
             }
         }
@@ -289,7 +308,7 @@ pub fn run() -> Result<(), String> {
             height: icon.height(),
             rgba: icon.into_raw(),
         }),
-        size: (1120, 800),
+        size: (1100, 760),
         redraw: chad::RedrawMode::OnDemand,
         device_limits: limits(),
         ..Default::default()
@@ -311,6 +330,7 @@ pub fn screenshot(path: &Path, phone: bool) -> Result<(), String> {
     let root = std::env::temp_dir().join(format!("tau-preview-{}", uuid::Uuid::new_v4()));
     let store = Store::open(root.clone()).map_err(|e| e.to_string())?;
     let mut app = App::new(&ctx, store, Arc::new(|| {}), phone).map_err(|e| e.to_string())?;
+    app.back(); // The offline fixture bypasses first-run connection setup.
     crate::demo::populate(&mut app.controller).map_err(|e| e.to_string())?;
     app.resize(size, if phone { 2.5 } else { 1. }, Vec2::new(0., 0.));
     app.tick(0.);

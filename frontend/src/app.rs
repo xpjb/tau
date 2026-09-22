@@ -74,6 +74,7 @@ struct Hit {
 }
 #[derive(Clone)]
 struct Row {
+    header: bool,
     key: String,
     title: String,
     source: String,
@@ -108,6 +109,7 @@ pub enum PlatformAction {
         title: String,
         value: String,
         secret: bool,
+        single_line: bool,
     },
     Background,
 }
@@ -130,6 +132,7 @@ pub struct App {
     composer_session: Option<String>,
     show_chats: bool,
     waiting_title: bool,
+    connecting: bool,
     scroll: f32,
     max_scroll: f32,
     list_scroll: f32,
@@ -159,7 +162,8 @@ impl App {
                 .unwrap_or_default(),
         );
         let show_chats = composer_session.is_none();
-        Ok(Self {
+        let needs_setup = controller.settings.url().is_err();
+        let mut app = Self {
             controller,
             renderer: Renderer::new(ctx).map_err(anyhow::Error::msg)?,
             size: ctx.size(),
@@ -172,6 +176,7 @@ impl App {
             composer_session,
             show_chats,
             waiting_title: false,
+            connecting: false,
             scroll: 0.,
             max_scroll: 0.,
             list_scroll: 0.,
@@ -189,7 +194,11 @@ impl App {
             platform: vec![],
             mobile,
             dirty: true,
-        })
+        };
+        if needs_setup {
+            app.apply(Action::Settings)?;
+        }
+        Ok(app)
     }
     pub fn resize(&mut self, size: (u32, u32), scale: f32, origin: Vec2) {
         if self.size != size || self.scale != scale || self.origin != origin {
@@ -249,6 +258,12 @@ impl App {
     }
     pub fn tick(&mut self, dt: f32) -> bool {
         self.dirty |= self.controller.poll();
+        if self.connecting && self.controller.epoch.is_some() {
+            self.connecting = false;
+            self.modal = None;
+            self.focus = None;
+            self.dirty = true;
+        }
         let selected = self.controller.account.selected.clone();
         if selected != self.composer_session {
             self.composer_session = selected;
@@ -268,6 +283,9 @@ impl App {
         {
             self.composer = Editor::new(chat.local.draft.clone());
             self.dirty = true;
+        }
+        if self.waiting_title && self.controller.notice.is_some() {
+            self.waiting_title = false;
         }
         if self.waiting_title
             && let Some((prompt, _)) = &self.controller.title_prompt
@@ -368,7 +386,7 @@ impl App {
         if self.viewer.take().is_some() {
         } else if self.modal.is_some() {
             self.activate(Action::CancelModal);
-        } else if !self.show_chats && self.size.0 as f32 / self.scale < 840. {
+        } else if !self.show_chats && self.size.0 as f32 / self.scale < 760. {
             self.show_chats = true;
         } else {
             self.platform.push(PlatformAction::Background);
@@ -382,8 +400,8 @@ impl App {
         } else if horizontal {
             self.horizontal = (self.horizontal + amount).clamp(0., self.max_horizontal);
         } else if self.show_chats
-            || self.size.0 as f32 / self.scale >= 840.
-                && point.x < self.origin.x + 280. * self.scale
+            || self.size.0 as f32 / self.scale >= 760.
+                && point.x < self.origin.x + 300. * self.scale
         {
             self.list_scroll = (self.list_scroll + amount).max(0.);
         } else {
@@ -550,35 +568,26 @@ impl App {
         self.field_selection = None;
     }
     fn field_hit(&mut self, rect: Rect, point: Vec2, extend: bool) {
-        let s = self.scale;
-        let size = if self.focus == Some(None) {
-            15. * s
-        } else {
-            14. * s
-        };
-        let Some(e) = self.editor() else {
-            return;
-        };
-        let value = e.value.clone();
-        let old = e.cursor;
-        let style = sanscale::Style {
-            chain: self.renderer.faces.prose[0],
-            wrap_em: Some((rect.width - 20.).max(1.) / size),
-            align: sanscale::Align::Left,
-            line_spacing: 1.15,
-        };
-        if let Some(block) = self.renderer.text.shape_transient(&value, &style) {
-            let layout = self.renderer.text.measure(block);
-            let caret = layout.caret_rect(old);
-            let scroll = (caret.y_em * size + caret.height_em * size - (rect.height - 16.)).max(0.);
-            if let Some(hit) = layout.hit_test(Vec2::new(
-                (point.x - rect.x - 10.) / size,
-                (point.y - rect.y - 8. + scroll) / size,
-            )) && let Some(e) = self.editor()
-            {
-                e.move_to(hit.byte_index, extend);
+        let (editor, secret) = match self.focus {
+            Some(None) => (&mut self.composer, false),
+            Some(Some(i)) => {
+                let Some((_, editor, secret)) =
+                    self.modal.as_mut().and_then(|m| m.fields.get_mut(i))
+                else {
+                    return;
+                };
+                (editor, *secret)
             }
-        }
+            None => return,
+        };
+        editor.hit(
+            &mut self.renderer,
+            rect,
+            point,
+            16. * self.scale,
+            secret,
+            extend,
+        );
     }
     fn editor(&mut self) -> Option<&mut Editor> {
         match self.focus? {
@@ -595,11 +604,21 @@ impl App {
     #[cfg(target_os = "android")]
     pub fn native_edit(&mut self, value: String) {
         if let Some(e) = self.editor() {
-            *e = Editor::new(value);
+            *e = if e.single_line {
+                Editor::line(value)
+            } else {
+                Editor::new(value)
+            };
         }
         self.edited();
     }
     fn edited(&mut self) {
+        if matches!(
+            self.modal.as_ref().map(|m| &m.kind),
+            Some(ModalKind::Settings)
+        ) {
+            self.controller.notice = None;
+        }
         if self.focus == Some(None) {
             let result = self.controller.draft(self.composer.value.clone());
             self.report(result);
@@ -614,6 +633,26 @@ impl App {
         self.dirty = true;
     }
     pub fn key(&mut self, key: &str, ctrl: bool, shift: bool) {
+        if let Some(modal) = &self.modal {
+            if key == "Tab" && !ctrl && !modal.fields.is_empty() {
+                let count = modal.fields.len();
+                let current = self
+                    .focus
+                    .flatten()
+                    .unwrap_or(if shift { 0 } else { count - 1 });
+                self.focus = Some(Some(if shift {
+                    (current + count - 1) % count
+                } else {
+                    (current + 1) % count
+                }));
+                self.dirty = true;
+                return;
+            }
+            if key == "Enter" && matches!(modal.kind, ModalKind::Settings | ModalKind::Rename) {
+                self.activate(Action::Confirm);
+                return;
+            }
+        }
         if key == "Escape" {
             if self.modal.is_some() || self.viewer.is_some() {
                 self.back();
@@ -705,18 +744,20 @@ impl App {
             }
             Action::Back => self.back(),
             Action::Settings => {
+                self.controller.notice = None;
+                self.connecting = false;
                 self.modal = Some(Modal {
                     kind: ModalKind::Settings,
                     title: "Connection settings".into(),
                     fields: vec![
                         (
                             "Server URL".into(),
-                            Editor::new(self.controller.settings.server_url.clone()),
+                            Editor::line(self.controller.settings.server_url.clone()),
                             false,
                         ),
                         (
-                            "Bearer token".into(),
-                            Editor::new(self.controller.settings.token.clone()),
+                            "Access token".into(),
+                            Editor::line(self.controller.settings.token.clone()),
                             true,
                         ),
                     ],
@@ -726,7 +767,7 @@ impl App {
                         ("Cancel".into(), Action::CancelModal),
                     ],
                 });
-                self.focus = None;
+                self.focus = Some(Some(0));
             }
             Action::Menu => {
                 self.modal = Some(Modal {
@@ -745,17 +786,23 @@ impl App {
             Action::Focus(field) => {
                 self.focus = Some(field);
                 if self.mobile {
-                    let (title, value, secret) = match field {
+                    let (title, value, secret, single_line) = match field {
                         Some(i) => {
                             let (label, e, secret) = &self.modal.as_ref().unwrap().fields[i];
-                            (label.clone(), e.value.clone(), *secret)
+                            (label.clone(), e.value.clone(), *secret, e.single_line)
                         }
-                        None => ("Message Tau".into(), self.composer.value.clone(), false),
+                        None => (
+                            "Message Tau".into(),
+                            self.composer.value.clone(),
+                            false,
+                            false,
+                        ),
                     };
                     self.platform.push(PlatformAction::Edit {
                         title,
                         value,
                         secret,
+                        single_line,
                     });
                 }
             }
@@ -769,10 +816,18 @@ impl App {
                     .map(|(_, e, _)| e.value.clone())
                     .collect::<Vec<_>>();
                 match modal.kind.clone() {
-                    ModalKind::Settings => self.controller.configure(Settings {
-                        server_url: values[0].clone(),
-                        token: values[1].clone(),
-                    })?,
+                    ModalKind::Settings => {
+                        if self.connecting && self.controller.connection == "Connecting…" {
+                            return Ok(());
+                        }
+                        self.controller.configure(Settings {
+                            server_url: values[0].clone(),
+                            token: values[1].clone(),
+                        })?;
+                        self.connecting = true;
+                        // Stay on the form until the authenticated protocol hello succeeds.
+                        return Ok(());
+                    }
                     ModalKind::Rename => {
                         if let Some(id) = selected {
                             self.controller.request(ClientCommand::RenameSession {
@@ -813,6 +868,8 @@ impl App {
                 self.focus = None;
             }
             Action::CancelModal => {
+                self.connecting = false;
+                self.waiting_title = false;
                 if let Some(Modal {
                     kind: ModalKind::Extension(session, r),
                     ..
@@ -853,7 +910,7 @@ impl App {
                 self.modal = Some(Modal {
                     kind: ModalKind::Rename,
                     title: "Rename chat".into(),
-                    fields: vec![("Title".into(), Editor::new(title), false)],
+                    fields: vec![("Title".into(), Editor::line(title), false)],
                     options: vec![
                         ("Save".into(), Action::Confirm),
                         ("Cancel".into(), Action::CancelModal),
@@ -1061,9 +1118,9 @@ impl App {
         let mut overlay = Layer::new(input);
         self.hits.clear();
         self.renderer.clear_scenes();
-        main.rect(bounds, color(0x090d12));
-        let wide = bounds.width / s >= 840.;
-        let side = if wide { 280. * s } else { 0. };
+        main.rect(bounds, color(0x0e141b));
+        let wide = bounds.width / s >= 760.;
+        let side = if wide { 300. * s } else { 0. };
         if wide || self.show_chats {
             self.sidebar(
                 &mut main,
@@ -1180,8 +1237,19 @@ impl App {
                 true,
             );
         }
-        if self.modal.is_some() {
+        if matches!(
+            self.modal.as_ref().map(|m| &m.kind),
+            Some(ModalKind::Settings)
+        ) {
+            self.settings_frame(&mut overlay, bounds);
+        } else if self.modal.is_some() {
             self.modal_frame(&mut overlay, bounds);
+        }
+        if !matches!(
+            self.modal.as_ref().map(|m| &m.kind),
+            Some(ModalKind::Settings)
+        ) {
+            self.notice_frame(&mut overlay, bounds);
         }
         self.renderer
             .draw(ctx, view, &[main, body, chrome, overlay]);
@@ -1189,11 +1257,25 @@ impl App {
     fn sidebar(&mut self, layer: &mut Layer, b: Rect) {
         let s = self.scale;
         layer.rect(b, color(0x0e141b));
+        layer.rect(
+            Rect::new(b.x + b.width - s, b.y, s, b.height),
+            color(0x2a3541),
+        );
+        layer.rect(Rect::new(b.x, b.y + 140. * s, b.width, s), color(0x2a3541));
+        layer.rounded_rect(
+            Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s),
+            4. * s,
+            color(if self.controller.epoch.is_some() {
+                0x4ade80
+            } else {
+                0xfbbf24
+            }),
+        );
         self.renderer.label(
             layer,
-            "τ  Tau",
-            Rect::new(b.x + 20. * s, b.y + 20. * s, b.width - 140. * s, 36. * s),
-            26. * s,
+            "Tau",
+            Rect::new(b.x + 16. * s, b.y + 20. * s, b.width - 140. * s, 36. * s),
+            30. * s,
             color(0xe5eaf0),
             true,
         );
@@ -1211,19 +1293,19 @@ impl App {
             &mut self.renderer,
             layer,
             &mut self.hits,
-            Rect::new(b.x + 16. * s, b.y + 76. * s, b.width - 32. * s, 44. * s),
-            "+  New chat",
+            Rect::new(b.x + 16. * s, b.y + 84. * s, b.width - 32. * s, 40. * s),
+            "New chat",
             Action::New,
             s,
             true,
         );
-        let clip = Rect::new(b.x, b.y + 136. * s, b.width, (b.height - 178. * s).max(0.));
+        let clip = Rect::new(b.x, b.y + 148. * s, b.width, (b.height - 190. * s).max(0.));
         self.list_scroll = self
             .list_scroll
-            .min((self.controller.account.sessions.len() as f32 * 72. * s - clip.height).max(0.));
+            .min((self.controller.account.sessions.len() as f32 * 90. * s - clip.height).max(0.));
         for (i, session) in self.controller.account.sessions.iter().enumerate() {
-            let y = clip.y + i as f32 * 72. * s - self.list_scroll;
-            let rect = Rect::new(b.x + 8. * s, y, b.width - 16. * s, 68. * s);
+            let y = clip.y + i as f32 * 90. * s - self.list_scroll;
+            let rect = Rect::new(b.x + 8. * s, y, b.width - 16. * s, 84. * s);
             if y + rect.height < clip.y || y > clip.y + clip.height {
                 continue;
             }
@@ -1231,7 +1313,7 @@ impl App {
             layer.clipped_rounded_rect(
                 rect,
                 12. * s,
-                layer.control_color(rect, color(if selected { 0x182b38 } else { 0x0e141b })),
+                layer.control_color(rect, color(if selected { 0x303a66 } else { 0x0e141b })),
                 clip,
             );
             let rect = crate::render::intersect(rect, clip);
@@ -1253,11 +1335,21 @@ impl App {
             self.renderer.label(
                 layer,
                 title,
-                Rect::new(rect.x + 12. * s, y + 8. * s, rect.width - 24. * s, 25. * s),
-                15. * s,
+                Rect::new(rect.x + 12. * s, y + 10. * s, rect.width - 24. * s, 22. * s),
+                16. * s,
                 color(0xe5eaf0),
-                unread,
+                unread || selected,
             );
+            if let Some(model) = &session.model {
+                self.renderer.label(
+                    layer,
+                    &format!("{}/{}", model.provider, model.model_id),
+                    Rect::new(rect.x + 12. * s, y + 38. * s, rect.width - 24. * s, 18. * s),
+                    12. * s,
+                    color(0xb7c2ce),
+                    false,
+                );
+            }
             let status = format!(
                 "{}{}",
                 if unread { "●  " } else { "" },
@@ -1272,7 +1364,7 @@ impl App {
             self.renderer.label(
                 layer,
                 &status,
-                Rect::new(rect.x + 12. * s, y + 36. * s, rect.width - 24. * s, 22. * s),
+                Rect::new(rect.x + 12. * s, y + 58. * s, rect.width - 24. * s, 18. * s),
                 12. * s,
                 color(if session.status == SessionStatus::Running {
                     0x67d4ff
@@ -1364,6 +1456,7 @@ impl App {
                     String::new()
                 };
                 rows.push(Row {
+                    header: true,
                     key: format!("{session}/{}", e.id),
                     title,
                     source,
@@ -1404,6 +1497,7 @@ impl App {
                 actions.push(("Fork".into(), Action::Fork(e.entry_id.clone())));
             }
             rows.push(Row {
+                header: e.role == EventRole::System || e.is_error || e.error_message.is_some(),
                 key: format!("{session}/{}", e.id),
                 title,
                 source: if user {
@@ -1420,6 +1514,7 @@ impl App {
         }
         for (key, value) in &chat.statuses {
             rows.push(Row {
+                header: true,
                 key: format!("status:{key}"),
                 title: "Extension status".into(),
                 source: literal(value),
@@ -1432,6 +1527,7 @@ impl App {
         for (key, lines) in &chat.widgets {
             if !lines.is_empty() {
                 rows.push(Row {
+                    header: true,
                     key: format!("widget:{key}"),
                     title: key.clone(),
                     source: literal(&lines.join("\n")),
@@ -1444,6 +1540,7 @@ impl App {
         }
         for p in &chat.local.pending {
             rows.push(Row {
+                header: true,
                 key: format!("pending:{}", p.request.id),
                 title: p.status.label().into(),
                 source: literal(&format!(
@@ -1510,6 +1607,7 @@ impl App {
                 ));
             }
             rows.push(Row {
+                header: true,
                 key: format!("queue:{}", q.request_id),
                 title: format!("Queued{}", if state.paused { " · held" } else { "" }),
                 source: literal(&q.text),
@@ -1523,15 +1621,16 @@ impl App {
     }
     fn chat(&mut self, ctx: &impl RenderContext, layer: &mut Layer, chrome: &mut Layer, b: Rect) {
         let s = self.scale;
-        let wide = self.size.0 as f32 / s >= 840.;
+        let wide = self.size.0 as f32 / s >= 760.;
         let Some(session) = self.controller.account.selected.clone() else {
             return;
         };
         if !self.controller.chats.contains_key(&session) {
             return;
         }
-        let header = Rect::new(b.x, b.y, b.width, 64. * s);
+        let header = Rect::new(b.x, b.y, b.width, 56. * s);
         chrome.rect(header, color(0x0e141b));
+        chrome.rect(Rect::new(b.x, b.y + 56. * s, b.width, s), color(0x2a3541));
         if !wide {
             button(
                 &mut self.renderer,
@@ -1544,7 +1643,7 @@ impl App {
                 false,
             );
         }
-        let title_x = b.x + if wide { 24. * s } else { 64. * s };
+        let title_x = b.x + if wide { 14. * s } else { 64. * s };
         let summary = self
             .controller
             .account
@@ -1573,15 +1672,24 @@ impl App {
                 (b.x + b.width - 64. * s - title_x).max(1.),
                 28. * s,
             ),
-            17. * s,
+            16. * s,
             color(0xe5eaf0),
             true,
         );
         self.renderer.label(
             chrome,
-            &self.controller.connection,
-            Rect::new(title_x, b.y + 40. * s, b.width - 120. * s, 18. * s),
-            10. * s,
+            if self.controller.epoch.is_none() {
+                "Offline"
+            } else if summary
+                .as_ref()
+                .is_some_and(|s| s.status == SessionStatus::Running)
+            {
+                "Working"
+            } else {
+                "Ready"
+            },
+            Rect::new(title_x, b.y + 34. * s, b.width - 120. * s, 18. * s),
+            12. * s,
             color(if self.controller.epoch.is_some() {
                 0x4ade80
             } else {
@@ -1600,19 +1708,30 @@ impl App {
             false,
         );
         let files = self.controller.chats[&session].local.files.clone();
-        let composer_h = (if files.is_empty() { 146. } else { 188. }) * s;
+        let width = (b.width - 28. * s).min(900. * s).max(160. * s);
+        let x = b.x + (b.width - width) / 2.;
+        let editor_h = self
+            .composer
+            .height(&mut self.renderer, width - 92. * s, 16. * s);
+        let queue = &self.controller.chats[&session].feed.queue;
+        let controls = queue.paused
+            || queue
+                .control
+                .as_ref()
+                .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
+        let composer_h = editor_h
+            + (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
         let bottom = b.y + b.height;
         let composer_top = (bottom - composer_h).max(b.y + 80. * s);
         let viewport = Rect::new(
             b.x,
-            b.y + 64. * s,
+            b.y + 57. * s,
             b.width,
-            (composer_top - b.y - 64. * s).max(1.),
+            (composer_top - b.y - 57. * s).max(1.),
         );
         self.transcript = viewport;
-        let width = (b.width - 32. * s).min(900. * s).max(80. * s);
-        let x = b.x + (b.width - width) / 2.;
-        let text_width = width - 28. * s;
+        let bubble_width = width * 0.9;
+        let text_width = bubble_width - 28. * s;
         let rows = self.rows(&session);
         let mut placements = vec![];
         let mut y = 12. * s;
@@ -1628,7 +1747,7 @@ impl App {
                 0.
             } else {
                 self.renderer
-                    .message_height(&row.key, &row.source, text_width, 15. * s)
+                    .message_height(&row.key, &row.source, text_width, 16. * s)
             };
             if let Some(message) = self.renderer.messages.get(&row.key) {
                 self.max_horizontal = self.max_horizontal.max(message.view.width - text_width);
@@ -1648,11 +1767,20 @@ impl App {
             } else {
                 0.
             };
-            let height = 38. * s
-                + text_height
-                + if row.source.is_empty() { 0. } else { 14. * s }
-                + attachment
-                + 42. * s;
+            let collapsed = row.source.is_empty()
+                && row
+                    .actions
+                    .iter()
+                    .any(|(_, a)| matches!(a, Action::Toggle(_)));
+            let height = if collapsed {
+                40. * s
+            } else {
+                (if row.header { 38. } else { 12. }) * s
+                    + text_height
+                    + 12. * s
+                    + attachment
+                    + 30. * s
+            };
             placements.push(Placed {
                 key: row.key.clone(),
                 top: y,
@@ -1663,6 +1791,11 @@ impl App {
         self.renderer.retain_messages(&keys);
         self.horizontal = self.horizontal.clamp(0., self.max_horizontal);
         self.max_scroll = (y - viewport.height).max(0.);
+        if y < viewport.height {
+            for p in &mut placements {
+                p.top += viewport.height - y;
+            }
+        }
         let position = &self.controller.chats[&session].local.position;
         if position.follow {
             self.scroll = self.max_scroll;
@@ -1699,32 +1832,64 @@ impl App {
             if top + p.height < viewport.y || top > viewport.y + viewport.height {
                 continue;
             }
-            let rect = Rect::new(x, top, width, p.height);
+            let x = x + if row.user { width - bubble_width } else { 0. };
+            let rect = Rect::new(x, top, bubble_width, p.height);
             layer.clipped_rounded_rect(
                 rect,
                 12. * s,
-                color(if row.user { 0x13232f } else { 0x18212b }),
+                color(if row.user { 0x164e63 } else { 0x18212b }),
                 viewport,
             );
+            if row.source.is_empty()
+                && row
+                    .actions
+                    .iter()
+                    .any(|(_, a)| matches!(a, Action::Toggle(_)))
+            {
+                layer.clipped_rounded_rect(
+                    rect,
+                    12. * s,
+                    layer.control_color(rect, color(0x18212b)),
+                    viewport,
+                );
+                self.renderer.label(
+                    layer,
+                    &row.title,
+                    crate::render::intersect(
+                        Rect::new(x + 12. * s, top + 10. * s, text_width, 24. * s),
+                        viewport,
+                    ),
+                    14. * s,
+                    color(0xb7c2ce),
+                    false,
+                );
+                self.hits.push(Hit {
+                    rect: crate::render::intersect(rect, viewport),
+                    action: row.actions[0].1.clone(),
+                });
+                continue;
+            }
             let label_rect = crate::render::intersect(
                 Rect::new(x + 14. * s, top + 10. * s, text_width, 24. * s),
                 viewport,
             );
-            self.renderer.label(
-                layer,
-                &row.title,
-                label_rect,
-                12. * s,
-                color(if row.error {
-                    0xffb4ab
-                } else if row.user {
-                    0x67d4ff
-                } else {
-                    0xa5b4fc
-                }),
-                true,
-            );
-            let text_top = top + 38. * s;
+            if row.header {
+                self.renderer.label(
+                    layer,
+                    &row.title,
+                    label_rect,
+                    12. * s,
+                    color(if row.error {
+                        0xffb4ab
+                    } else if row.user {
+                        0x67d4ff
+                    } else {
+                        0xa5b4fc
+                    }),
+                    true,
+                );
+            }
+            let text_top = top + if row.header { 38. * s } else { 12. * s };
             if !row.source.is_empty() {
                 self.renderer.message(
                     layer,
@@ -1846,7 +2011,7 @@ impl App {
                     break;
                 }
                 let r = crate::render::intersect(
-                    Rect::new(ax, top + p.height - 38. * s, width, 30. * s),
+                    Rect::new(ax, top + p.height - 28. * s, width, 24. * s),
                     viewport,
                 );
                 if r.height > 10. * s {
@@ -1871,7 +2036,7 @@ impl App {
         let mut model = summary
             .as_ref()
             .and_then(|s| s.model.as_ref())
-            .map(|m| format!("{} / {}", m.provider, m.model_id))
+            .map(|m| format!("{}/{}", m.provider, m.model_id))
             .unwrap_or_else(|| "Model loads when the worker starts".into());
         if let Some(usage) = summary.as_ref().and_then(|s| s.context_usage) {
             model.push_str(&format!(
@@ -1883,20 +2048,48 @@ impl App {
         self.renderer.label(
             chrome,
             &model,
-            Rect::new(x, composer_top + 8. * s, width, 20. * s),
-            10. * s,
+            Rect::new(x, composer_top + 10. * s, width, 20. * s),
+            12. * s,
             color(0x82909f),
             false,
         );
-        let composer_rect = Rect::new(x, composer_top + 32. * s, width - 90. * s, 68. * s);
+        chrome.rect(Rect::new(b.x, composer_top, b.width, s), color(0x2a3541));
+        let field = Rect::new(x, composer_top + 32. * s, width, editor_h);
+        let edge = if self.focus == Some(None) { 2. * s } else { s };
+        chrome.rounded_rect(
+            field,
+            4. * s,
+            color(if self.focus == Some(None) {
+                0x67d4ff
+            } else {
+                0x526170
+            }),
+        );
+        chrome.rounded_rect(
+            Rect::new(
+                field.x + edge,
+                field.y + edge,
+                field.width - 2. * edge,
+                field.height - 2. * edge,
+            ),
+            3. * s,
+            color(0x0e141b),
+        );
+        let composer_rect = Rect::new(
+            field.x + 40. * s,
+            field.y,
+            field.width - 92. * s,
+            field.height,
+        );
         self.composer.draw(
             &mut self.renderer,
             chrome,
             composer_rect,
-            15. * s,
+            16. * s,
             self.focus == Some(None),
             false,
-            "Message Tau…",
+            "Message Tau",
+            false,
         );
         self.hits.push(Hit {
             rect: composer_rect,
@@ -1907,22 +2100,12 @@ impl App {
             chrome,
             &mut self.hits,
             Rect::new(
-                x + width - 82. * s,
-                composer_top + 32. * s,
-                82. * s,
-                68. * s,
+                field.x + 4. * s,
+                field.y + (field.height - 40. * s) / 2.,
+                36. * s,
+                40. * s,
             ),
-            "Send",
-            Action::Send,
-            s,
-            true,
-        );
-        button(
-            &mut self.renderer,
-            chrome,
-            &mut self.hits,
-            Rect::new(x, composer_top + 108. * s, 72. * s, 30. * s),
-            "Attach",
+            "+",
             Action::Attach,
             s,
             false,
@@ -1931,12 +2114,33 @@ impl App {
             &mut self.renderer,
             chrome,
             &mut self.hits,
-            Rect::new(x + 80. * s, composer_top + 108. * s, 66. * s, 30. * s),
-            "Stop",
-            Action::Abort,
+            Rect::new(
+                field.x + field.width - 44. * s,
+                field.y + (field.height - 40. * s) / 2.,
+                40. * s,
+                40. * s,
+            ),
+            "↑",
+            Action::Send,
             s,
-            false,
+            true,
         );
+        if summary
+            .as_ref()
+            .is_some_and(|s| s.status == SessionStatus::Running)
+        {
+            button(
+                &mut self.renderer,
+                chrome,
+                &mut self.hits,
+                Rect::new(b.x + b.width - 98. * s, b.y + 8. * s, 36. * s, 36. * s),
+                "■",
+                Action::Abort,
+                s,
+                false,
+            );
+        }
+        let controls_y = field.y + field.height + 4. * s;
         if self.scroll + 24. * s < self.max_scroll {
             button(
                 &mut self.renderer,
@@ -1960,7 +2164,7 @@ impl App {
                 &mut self.renderer,
                 chrome,
                 &mut self.hits,
-                Rect::new(x + 154. * s, composer_top + 108. * s, 82. * s, 30. * s),
+                Rect::new(x, controls_y, 82. * s, 30. * s),
                 "Resume",
                 Action::Queue(QueueOperation::Resume {
                     run_id: queue.run_id.clone(),
@@ -1976,7 +2180,7 @@ impl App {
                 &mut self.renderer,
                 chrome,
                 &mut self.hits,
-                Rect::new(x + 242. * s, composer_top + 108. * s, 100. * s, 30. * s),
+                Rect::new(x + 92. * s, controls_y, 100. * s, 30. * s),
                 "Cancel control",
                 Action::Queue(QueueOperation::Cancel {
                     control_id: control.command_id.clone(),
@@ -1996,7 +2200,12 @@ impl App {
                 &mut self.renderer,
                 chrome,
                 &mut self.hits,
-                Rect::new(fx, composer_top + 148. * s, fw, 30. * s),
+                Rect::new(
+                    fx,
+                    controls_y + if controls { 40. * s } else { 0. },
+                    fw,
+                    30. * s,
+                ),
                 &label,
                 Action::RemoveFile(file.id),
                 s,
@@ -2035,11 +2244,16 @@ impl App {
                 );
             }
         }
+    }
+    fn notice_frame(&mut self, layer: &mut Layer, b: Rect) {
+        let s = self.scale;
+        let width = (b.width - 32. * s).min(640. * s);
+        let x = b.x + (b.width - width) / 2.;
         if let Some(notice) = &self.controller.notice {
-            let rect = Rect::new(x, b.y + 70. * s, width, 68. * s);
-            chrome.rounded_rect(rect, 12. * s, color(0x452c2a));
+            let rect = Rect::new(x, b.y + 16. * s, width, 68. * s);
+            layer.rounded_rect(rect, 12. * s, color(0x452c2a));
             self.renderer.label(
-                chrome,
+                layer,
                 notice,
                 Rect::new(x + 10. * s, rect.y + 8. * s, width - 54. * s, 54. * s),
                 12. * s,
@@ -2048,12 +2262,200 @@ impl App {
             );
             button(
                 &mut self.renderer,
-                chrome,
+                layer,
                 &mut self.hits,
                 Rect::new(x + width - 40. * s, rect.y + 8. * s, 32. * s, 32. * s),
                 "×",
                 Action::DismissNotice,
                 s,
+                false,
+            );
+        }
+    }
+    fn settings_frame(&mut self, layer: &mut Layer, b: Rect) {
+        let s = self.scale;
+        self.hits.clear();
+        layer.rect(b, color(0x0e141b));
+        let modal = self.modal.as_ref().unwrap();
+        let connected = self.controller.epoch.is_some()
+            && modal.fields[0].1.value.trim().trim_end_matches('/')
+                == self.controller.settings.server_url
+            && modal.fields[1].1.value.trim() == self.controller.settings.token;
+        let configured = !self.controller.settings.token.is_empty();
+        let connection_error = (!matches!(
+            self.controller.connection.as_str(),
+            "Connected" | "Connecting…" | "Not connected"
+        ))
+        .then_some(self.controller.connection.as_str());
+        let error = self.controller.notice.as_deref().or(connection_error);
+        let width = (b.width - 48. * s).min(520. * s).max(240. * s);
+        let inner_w = width - 48. * s;
+        let height =
+            (372. + if configured { 92. } else { 0. } + if error.is_some() { 84. } else { 0. }) * s;
+        let card = Rect::new(
+            b.x + (b.width - width) / 2.,
+            b.y + ((b.height - height) / 2.).max(12. * s),
+            width,
+            height,
+        );
+        layer.rounded_rect(card, 12. * s, color(0x36343b));
+        let x = card.x + 24. * s;
+        self.renderer.label(
+            layer,
+            "Tau",
+            Rect::new(x, card.y + 24. * s, inner_w, 44. * s),
+            32. * s,
+            color(0xe5eaf0),
+            true,
+        );
+        self.renderer.label(
+            layer,
+            concat!("Version ", env!("CARGO_PKG_VERSION"), " · Beta"),
+            Rect::new(x, card.y + 66. * s, inner_w, 20. * s),
+            12. * s,
+            color(0xb7c2ce),
+            false,
+        );
+        self.renderer.label(
+            layer,
+            "Connect directly to the Tau daemon over your Tailnet.",
+            Rect::new(x, card.y + 102. * s, inner_w, 42. * s),
+            16. * s,
+            color(0xe5eaf0),
+            false,
+        );
+        let field_y = card.y + 146. * s;
+        for (i, (name, editor, secret)) in modal.fields.iter().enumerate() {
+            let rect = Rect::new(x, field_y + i as f32 * 80. * s, inner_w, 56. * s);
+            editor.draw(
+                &mut self.renderer,
+                layer,
+                rect,
+                16. * s,
+                self.focus == Some(Some(i)),
+                *secret,
+                if i == 0 {
+                    "http://vibe:8787"
+                } else {
+                    "Access token"
+                },
+                true,
+            );
+            let label = if i == 0 { "Daemon URL" } else { name };
+            let style = sanscale::Style {
+                chain: self.renderer.faces.prose[0],
+                wrap_em: None,
+                align: sanscale::Align::Left,
+                line_spacing: 1.,
+            };
+            let label_w = self
+                .renderer
+                .text
+                .shape_transient(label, &style)
+                .map_or(100. * s, |b| {
+                    self.renderer.text.measure(b).width_em() * 12. * s + 12. * s
+                });
+            layer.rect(
+                Rect::new(x + 12. * s, rect.y - 7. * s, label_w, 16. * s),
+                color(0x36343b),
+            );
+            self.renderer.label(
+                layer,
+                label,
+                Rect::new(x + 16. * s, rect.y - 8. * s, label_w, 18. * s),
+                12. * s,
+                color(0xb7c2ce),
+                false,
+            );
+            self.hits.push(Hit {
+                rect,
+                action: Action::Focus(Some(i)),
+            });
+        }
+        let buttons_y = field_y + 158. * s;
+        if !self.connecting || self.controller.connection != "Connecting…" {
+            button(
+                &mut self.renderer,
+                layer,
+                &mut self.hits,
+                Rect::new(x + inner_w - 104. * s, buttons_y, 104. * s, 40. * s),
+                "Connect",
+                Action::Confirm,
+                s,
+                true,
+            );
+        } else {
+            self.renderer.label(
+                layer,
+                "Connecting…",
+                Rect::new(
+                    x + inner_w - 132. * s,
+                    buttons_y + 10. * s,
+                    132. * s,
+                    28. * s,
+                ),
+                14. * s,
+                color(0x67d4ff),
+                false,
+            );
+        }
+        button(
+            &mut self.renderer,
+            layer,
+            &mut self.hits,
+            Rect::new(x + inner_w - 204. * s, buttons_y, 88. * s, 40. * s),
+            "Cancel",
+            Action::CancelModal,
+            s,
+            false,
+        );
+        let mut y = buttons_y + 60. * s;
+        if configured {
+            layer.rect(Rect::new(x, y, inner_w, s), color(0x526170));
+            y += 12. * s;
+            self.renderer.label(
+                layer,
+                "Title system prompt",
+                Rect::new(x, y, inner_w, 26. * s),
+                16. * s,
+                color(0xe5eaf0),
+                true,
+            );
+            y += 28. * s;
+            if connected && !self.waiting_title {
+                button(
+                    &mut self.renderer,
+                    layer,
+                    &mut self.hits,
+                    Rect::new(x, y, 168. * s, 32. * s),
+                    "Load title prompt",
+                    Action::TitlePrompt,
+                    s,
+                    false,
+                );
+            } else {
+                self.renderer.label(
+                    layer,
+                    if self.waiting_title {
+                        "Loading title prompt…"
+                    } else {
+                        "Connect to edit this daemon's title prompt."
+                    },
+                    Rect::new(x, y, inner_w, 36. * s),
+                    14. * s,
+                    color(0xb7c2ce),
+                    false,
+                );
+            }
+            y += 42. * s;
+        }
+        if let Some(error) = error {
+            self.renderer.label(
+                layer,
+                error,
+                Rect::new(x, y, inner_w, 72. * s),
+                14. * s,
+                color(0xffb4ab),
                 false,
             );
         }
@@ -2105,10 +2507,11 @@ impl App {
                 &mut self.renderer,
                 layer,
                 field,
-                14. * s,
+                16. * s,
                 self.focus == Some(Some(i)),
                 *secret,
                 "",
+                true,
             );
             self.hits.push(Hit {
                 rect: field,
@@ -2148,7 +2551,7 @@ fn button(
     layer.rounded_rect(
         rect,
         rect.height * 0.5,
-        layer.control_color(rect, color(if primary { 0x164e63 } else { 0x18212b })),
+        layer.control_color(rect, color(if primary { 0x67d4ff } else { 0x18212b })),
     );
     let style = sanscale::Style {
         chain: renderer.faces.prose[0],
@@ -2158,7 +2561,8 @@ fn button(
     };
     if let Some(block) = renderer.text.shape_transient(label, &style) {
         let layout = renderer.text.measure(block);
-        let size = (12. * s).min((rect.width - 12. * s).max(1.) / layout.width_em().max(1.));
+        let size = (if label.chars().count() == 1 { 22. } else { 14. } * s)
+            .min((rect.width - 12. * s).max(1.) / layout.width_em().max(1.));
         layer.draws.push(sanscale::Draw {
             block,
             at: Vec2::new(
@@ -2166,7 +2570,7 @@ fn button(
                 rect.y + (rect.height - layout.height_em() * size) / 2.,
             ),
             size,
-            color: color(if primary { 0xc7f0ff } else { 0xb7c2ce }),
+            color: color(if primary { 0x003546 } else { 0x67d4ff }),
             clip: Some(rect),
             ..Default::default()
         });

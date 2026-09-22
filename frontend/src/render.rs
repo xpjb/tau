@@ -189,9 +189,42 @@ impl Renderer {
             include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf"),
         ];
         let mut chains = vec![];
-        for bytes in fonts {
+        for (index, bytes) in fonts.into_iter().enumerate() {
+            let system = if index < 4 {
+                let path = if let Some(windows) = std::env::var_os("WINDIR") {
+                    PathBuf::from(windows).join("Fonts").join(
+                        [
+                            "segoeui.ttf",
+                            "segoeuib.ttf",
+                            "segoeuii.ttf",
+                            "segoeuiz.ttf",
+                        ][index],
+                    )
+                } else if cfg!(target_os = "android") {
+                    PathBuf::from("/system/fonts").join(
+                        [
+                            "Roboto-Regular.ttf",
+                            "Roboto-Bold.ttf",
+                            "Roboto-Italic.ttf",
+                            "Roboto-BoldItalic.ttf",
+                        ][index],
+                    )
+                } else {
+                    PathBuf::from("/usr/share/fonts/noto").join(
+                        [
+                            "NotoSans-Regular.ttf",
+                            "NotoSans-Bold.ttf",
+                            "NotoSans-Italic.ttf",
+                            "NotoSans-BoldItalic.ttf",
+                        ][index],
+                    )
+                };
+                sanscale::read_font_file(&path.to_string_lossy()).ok()
+            } else {
+                None
+            };
             let f = text
-                .map_font(Arc::new(bytes), 0)
+                .map_font(system.unwrap_or_else(|| Arc::new(bytes)), 0)
                 .map_err(|e| e.to_string())?;
             let mut chain = vec![f];
             chain.extend(&fallback);

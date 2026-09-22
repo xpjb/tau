@@ -66,8 +66,13 @@ No grant/QUIC protocol changes were made.
 
 Merge workspace/package manifests first, then resolve/regenerate `Cargo.lock`
 with Cargo. Don't take one branch's lockfile wholesale over the other's new
-backend dependencies. `windows/` remains excluded; the native client has a
-separate portable cross-build script and static-CRT target setting.
+backend dependencies. `windows/` remains excluded. `build-windows-sfx.sh --beta`
+now packages the native frontend through the existing installer; no flag retains
+the Kotlin path. `windows/channel.rs` selects isolated install/Start Menu names,
+and `tau-beta-launcher` dispatches a native version instead of Java. Preserve this
+parallel channel until an explicit stable migration. Both use the static-CRT
+target setting; regenerate the separate Windows lockfile only if its dependencies
+change. These packaging edits do not depend on the backend rewrite.
 
 ## Tests at merge
 

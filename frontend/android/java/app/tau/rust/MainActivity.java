@@ -39,12 +39,13 @@ public final class MainActivity extends NativeActivity {
         } else nativeInsets(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());
     }
     public void background() { runOnUiThread(() -> moveTaskToBack(true)); }
-    public void edit(String title, String value, boolean secret) { runOnUiThread(() -> {
+    public void edit(String title, String value, boolean secret, boolean singleLine) { runOnUiThread(() -> {
         if (editor != null) editor.dismiss();
         EditText input = new EditText(this);
-        input.setInputType(secret ? 129 : (android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES));
+        input.setInputType(secret ? 129 : (singleLine ? android.text.InputType.TYPE_CLASS_TEXT : (android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)));
+        input.setSingleLine(singleLine);
         input.setFilters(new InputFilter[] { new InputFilter.LengthFilter(262144) });
-        input.setMinLines(secret ? 1 : 3); input.setMaxLines(10); input.setText(value); input.setSelection(input.length());
+        input.setMinLines(singleLine ? 1 : 3); input.setMaxLines(singleLine ? 1 : 10); input.setText(value); input.setSelection(input.length());
         input.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s,int st,int c,int a) {}
             public void onTextChanged(CharSequence s,int st,int before,int count) { nativeResult(0,s.toString(),""); }

@@ -15,8 +15,14 @@ pub struct Settings {
     pub token: String,
 }
 impl Settings {
+    pub fn normalized(mut self) -> Self {
+        self.server_url = self.server_url.trim().trim_end_matches('/').to_owned();
+        self.token = self.token.trim().to_owned();
+        self
+    }
     pub fn url(&self) -> Result<url::Url> {
-        let url = url::Url::parse(self.server_url.trim().trim_end_matches('/'))?;
+        let url = url::Url::parse(self.server_url.trim().trim_end_matches('/'))
+            .map_err(|_| anyhow::anyhow!("Enter the daemon URL, including http:// or https:// (for example http://vibe:8787)."))?;
         ensure!(
             matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
             "Use an http:// or https:// Tau URL"
@@ -29,7 +35,7 @@ impl Settings {
             "URL must not contain credentials, a query, or a fragment"
         );
         ensure!(
-            !self.token.is_empty() && !self.token.chars().any(char::is_whitespace),
+            !self.token.is_empty() && self.token.bytes().all(|b| (33..=126).contains(&b)),
             "Enter the Tau bearer token (without spaces)"
         );
         Ok(url)

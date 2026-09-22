@@ -147,17 +147,19 @@ impl Android {
                             title,
                             value,
                             secret,
+                            single_line,
                         } => {
                             let title = env.new_string(title)?;
                             let value = env.new_string(value)?;
                             env.call_method(
                                 &activity,
                                 "edit",
-                                "(Ljava/lang/String;Ljava/lang/String;Z)V",
+                                "(Ljava/lang/String;Ljava/lang/String;ZZ)V",
                                 &[
                                     JValue::Object(&title),
                                     JValue::Object(&value),
                                     JValue::Bool(secret as u8),
+                                    JValue::Bool(single_line as u8),
                                 ],
                             )?;
                         }
