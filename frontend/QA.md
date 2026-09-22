@@ -40,6 +40,16 @@ next signal. Continue keeping build/test/verification resource use low.
 - Tooltip hover bridges cross the anchor/card gap; cards intercept clicks instead
   of activating underlying content. Sidebar labels now clip to the list viewport.
 
+- Restored Stop's always-visible tonal circle, 40dp like Tau 1, centered in the
+  56dp header. Mobile Back uses the same size/center; title/status no longer reserve
+  an overflow slot. Removed the chat-actions button and its modal entirely.
+- Chat actions now use the contextual menu on a sidebar chat or its title/header
+  (also empty transcript background), with touch-and-hold support. Message menus
+  remain independent. Rename/delete confirmations retain the clicked session ID;
+  right-clicking another chat does not select it or retarget the operation to the
+  active chat. Target highlight follows the stable ID during list reordering.
+  Touch hold duration no longer resets on sub-threshold finger movement.
+
 ## Checks / limits
 
 Managed `cargo check --locked -p tau-frontend --lib` passed with one Cargo job;
@@ -48,7 +58,8 @@ or new trivial API test was started. Per-corner WGSL pipeline/rendering, hover a
 clipped group ends, timestamps/DST, clipboard boundaries and scroll anchoring still
 need device acceptance before delivery. Connection hover/tap, timeout/reconnect
 and RTT display also await device acceptance; the incremental library check for
-this change took 1.28s (one managed Cargo job).
+this change took 1.28s (one managed Cargo job). Header/context-menu library check
+also passed (0.78s); GUI/touch acceptance remains deferred.
 
 **Timing source limitation (user accepted; deferred to backend integration):** Pi/daemon currently clones an entry/message timestamp
 onto its content blocks. Details and text within that same entry can therefore

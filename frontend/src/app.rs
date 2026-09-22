@@ -28,7 +28,6 @@ enum Action {
     Usage,
     ConnectionInfo,
     Back,
-    Menu,
     Send,
     Abort,
     Tail,
@@ -38,10 +37,10 @@ enum Action {
     CancelModal,
     TitlePrompt,
     ResetTitlePrompt,
-    Rename,
-    Delete,
-    Clone,
-    Sleep,
+    Rename(String),
+    Delete(String),
+    Clone(String),
+    Sleep(String),
     Fork(String),
     Copy(String),
     CopyDetails(String, Vec<String>),
@@ -65,9 +64,8 @@ enum Action {
 #[derive(Clone)]
 enum ModalKind {
     Settings,
-    Rename,
-    Delete,
-    Menu,
+    Rename(String),
+    Delete(String),
     TitlePrompt,
     QueueEdit(String, u64),
     Extension(String, Box<ExtensionUiRequest>),
@@ -110,6 +108,7 @@ struct Placed {
 struct ContextMenu {
     at: Vec2,
     section: Option<String>,
+    chat: Option<String>,
     options: Vec<(String, Action)>,
     selected: usize,
 }
@@ -130,6 +129,7 @@ struct Pointer {
     start: Vec2,
     last: Vec2,
     at: Instant,
+    started: Instant,
     dragged: bool,
     touch: bool,
 }
@@ -169,6 +169,7 @@ pub struct App {
     context_menu: Option<ContextMenu>,
     context_rect: Rect,
     message_areas: Vec<MessageArea>,
+    chat_areas: Vec<(Rect, String)>,
     usage: Tooltip,
     connection_tip: Tooltip,
     composer_session: Option<String>,
@@ -226,6 +227,7 @@ impl App {
             context_menu: None,
             context_rect: Rect::new(0., 0., 0., 0.),
             message_areas: vec![],
+            chat_areas: vec![],
             usage: Tooltip::default(),
             connection_tip: Tooltip::default(),
             composer_session,
@@ -771,6 +773,7 @@ impl App {
                 start: point,
                 last: point,
                 at: Instant::now(),
+                started: Instant::now(),
                 dragged: true,
                 touch,
             });
@@ -800,6 +803,7 @@ impl App {
             start: point,
             last: point,
             at: Instant::now(),
+            started: Instant::now(),
             dragged: false,
             touch,
         });
@@ -904,7 +908,14 @@ impl App {
         let p = self.pointer.take().unwrap();
         self.scroll_drag = None;
         if !p.dragged {
-            if p.touch && p.at.elapsed().as_millis() > 450 && contains(self.transcript, point) {
+            if p.touch
+                && p.started.elapsed().as_millis() > 450
+                && (contains(self.transcript, point)
+                    || self
+                        .chat_areas
+                        .iter()
+                        .any(|(r, _)| contains(*r, point) && contains(*r, p.start)))
+            {
                 self.context_at(point);
             } else if let Some(hit) = self
                 .hits
@@ -1066,7 +1077,7 @@ impl App {
                 self.dirty = true;
                 return;
             }
-            if key == "Enter" && matches!(modal.kind, ModalKind::Settings | ModalKind::Rename) {
+            if key == "Enter" && matches!(modal.kind, ModalKind::Settings | ModalKind::Rename(_)) {
                 self.activate(Action::Confirm);
                 return;
             }
@@ -1198,20 +1209,6 @@ impl App {
                 });
                 self.focus = Some(Some(0));
             }
-            Action::Menu => {
-                self.modal = Some(Modal {
-                    kind: ModalKind::Menu,
-                    title: "Chat actions".into(),
-                    fields: vec![],
-                    options: vec![
-                        ("Rename".into(), Action::Rename),
-                        ("Clone chat".into(), Action::Clone),
-                        ("Sleep worker".into(), Action::Sleep),
-                        ("Delete chat…".into(), Action::Delete),
-                        ("Cancel".into(), Action::CancelModal),
-                    ],
-                });
-            }
             Action::Focus(field) => {
                 self.focus = Some(field);
                 if self.mobile {
@@ -1257,19 +1254,15 @@ impl App {
                         // Stay on the form until the authenticated protocol hello succeeds.
                         return Ok(());
                     }
-                    ModalKind::Rename => {
-                        if let Some(id) = selected {
-                            self.controller.request(ClientCommand::RenameSession {
-                                session_id: id,
-                                title: values[0].clone(),
-                            })?;
-                        }
+                    ModalKind::Rename(session_id) => {
+                        self.controller.request(ClientCommand::RenameSession {
+                            session_id,
+                            title: values[0].clone(),
+                        })?;
                     }
-                    ModalKind::Delete => {
-                        if let Some(id) = selected {
-                            self.controller
-                                .request(ClientCommand::DeleteSession { session_id: id })?;
-                        }
+                    ModalKind::Delete(session_id) => {
+                        self.controller
+                            .request(ClientCommand::DeleteSession { session_id })?;
                     }
                     ModalKind::TitlePrompt => {
                         self.controller.request(ClientCommand::SetTitlePrompt {
@@ -1291,7 +1284,6 @@ impl App {
                         false,
                     )?,
                     ModalKind::ConfirmLink(url) => self.platform.push(PlatformAction::OpenUrl(url)),
-                    _ => {}
                 }
                 self.modal = None;
                 self.focus = None;
@@ -1327,17 +1319,17 @@ impl App {
                     modal.fields[0].1 = Editor::new(default.clone());
                 }
             }
-            Action::Rename => {
+            Action::Rename(id) => {
                 let title = self
                     .controller
                     .account
                     .sessions
                     .iter()
-                    .find(|s| Some(&s.id) == selected.as_ref())
+                    .find(|s| s.id == id)
                     .map(|s| s.title.clone())
                     .unwrap_or_default();
                 self.modal = Some(Modal {
-                    kind: ModalKind::Rename,
+                    kind: ModalKind::Rename(id),
                     title: "Rename chat".into(),
                     fields: vec![("Title".into(), Editor::line(title), false)],
                     options: vec![
@@ -1346,9 +1338,9 @@ impl App {
                     ],
                 });
             }
-            Action::Delete => {
+            Action::Delete(id) => {
                 self.modal = Some(Modal {
-                    kind: ModalKind::Delete,
+                    kind: ModalKind::Delete(id),
                     title: "Permanently delete this chat and its files?".into(),
                     fields: vec![],
                     options: vec![
@@ -1357,19 +1349,13 @@ impl App {
                     ],
                 })
             }
-            Action::Clone => {
-                if let Some(id) = selected {
-                    self.controller
-                        .request(ClientCommand::CloneSession { session_id: id })?;
-                }
-                self.modal = None;
+            Action::Clone(session_id) => {
+                self.controller
+                    .request(ClientCommand::CloneSession { session_id })?;
             }
-            Action::Sleep => {
-                if let Some(id) = selected {
-                    self.controller
-                        .request(ClientCommand::CloseSession { session_id: id })?;
-                }
-                self.modal = None;
+            Action::Sleep(session_id) => {
+                self.controller
+                    .request(ClientCommand::CloseSession { session_id })?;
             }
             Action::Fork(entry_id) => {
                 if let Some(id) = selected {
@@ -1564,6 +1550,7 @@ impl App {
         self.hits.clear();
         self.scrollbars.clear();
         self.message_areas.clear();
+        self.chat_areas.clear();
         self.usage.region = Rect::new(0., 0., 0., 0.);
         self.connection_tip.region = Rect::new(0., 0., 0., 0.);
         self.renderer.clear_scenes();
@@ -1784,13 +1771,27 @@ impl App {
                 continue;
             }
             let selected = self.controller.account.selected.as_ref() == Some(&session.id);
+            let targeted = self
+                .context_menu
+                .as_ref()
+                .is_some_and(|m| m.chat.as_ref() == Some(&session.id));
             layer.clipped_rounded_rect(
                 rect,
                 12. * s,
-                layer.control_color(rect, color(if selected { 0x303a66 } else { 0x0e141b })),
+                layer.control_color(
+                    rect,
+                    color(if targeted {
+                        0x35415a
+                    } else if selected {
+                        0x303a66
+                    } else {
+                        0x0e141b
+                    }),
+                ),
                 clip,
             );
             let rect = crate::render::intersect(rect, clip);
+            self.chat_areas.push((rect, session.id.clone()));
             let unread = self
                 .controller
                 .account
@@ -2098,7 +2099,12 @@ impl App {
                 &mut self.renderer,
                 chrome,
                 &mut self.hits,
-                Rect::new(b.x + 8. * s, b.y + 12. * s, 44. * s, 40. * s),
+                Rect::new(
+                    b.x + 8. * s,
+                    header.y + (header.height - 40. * s) / 2.,
+                    40. * s,
+                    40. * s,
+                ),
                 "‹",
                 Action::Back,
                 s,
@@ -2113,6 +2119,15 @@ impl App {
             .iter()
             .find(|s| s.id == session)
             .cloned();
+        let running = summary
+            .as_ref()
+            .is_some_and(|s| s.status == SessionStatus::Running);
+        let title_width =
+            (b.x + b.width - if running { 64. * s } else { 12. * s } - title_x).max(1.);
+        self.chat_areas.push((
+            Rect::new(title_x, b.y, title_width, header.height),
+            session.clone(),
+        ));
         let title = summary
             .as_ref()
             .map(|s| {
@@ -2128,12 +2143,7 @@ impl App {
         self.renderer.label(
             chrome,
             title,
-            Rect::new(
-                title_x,
-                b.y + 12. * s,
-                (b.x + b.width - 64. * s - title_x).max(1.),
-                28. * s,
-            ),
+            Rect::new(title_x, b.y + 8. * s, title_width, 22. * s),
             16. * s,
             color(0xe5eaf0),
             true,
@@ -2150,23 +2160,13 @@ impl App {
             } else {
                 "Ready"
             },
-            Rect::new(title_x, b.y + 34. * s, b.width - 120. * s, 18. * s),
+            Rect::new(title_x, b.y + 30. * s, title_width, 18. * s),
             12. * s,
             color(if self.controller.epoch.is_some() {
                 0x4ade80
             } else {
                 0xfbbf24
             }),
-            false,
-        );
-        button(
-            &mut self.renderer,
-            chrome,
-            &mut self.hits,
-            Rect::new(b.x + b.width - 52. * s, b.y + 12. * s, 40. * s, 40. * s),
-            "···",
-            Action::Menu,
-            s,
             false,
         );
         let files = self.controller.chats[&session].local.files.clone();
@@ -2737,14 +2737,16 @@ impl App {
             true,
             can_send,
         );
-        if summary
-            .as_ref()
-            .is_some_and(|s| s.status == SessionStatus::Running)
-        {
+        if running {
             self.icon_button(
                 ctx,
                 chrome,
-                Rect::new(b.x + b.width - 98. * s, b.y + 8. * s, 36. * s, 36. * s),
+                Rect::new(
+                    b.x + b.width - 52. * s,
+                    header.y + (header.height - 40. * s) / 2.,
+                    40. * s,
+                    40. * s,
+                ),
                 Icon::Stop,
                 20.,
                 Action::Abort,
@@ -2885,35 +2887,64 @@ impl App {
         }
     }
     pub fn context_at(&mut self, point: Vec2) {
-        if self.modal.is_some() || self.viewer.is_some() || !contains(self.transcript, point) {
+        if self.modal.is_some()
+            || self.viewer.is_some()
+            || self.usage.contains_card(point)
+            || self.connection_tip.contains_card(point)
+            || self.context_menu.is_some() && contains(self.context_rect, point)
+        {
+            return;
+        }
+        let mut chat = self
+            .chat_areas
+            .iter()
+            .find(|(rect, _)| contains(*rect, point))
+            .map(|(_, id)| id.clone());
+        let transcript = contains(self.transcript, point);
+        if chat.is_none() && !transcript {
             return;
         }
         if self.cancel_autoscroll() {
             return;
         }
         self.wheel = None;
+        self.velocity = 0.;
         self.usage.dismiss();
         self.connection_tip.dismiss();
+        let area = transcript
+            .then(|| self.message_areas.iter().find(|a| a.contains(point)))
+            .flatten();
         let mut options = vec![];
-        if self
-            .renderer
-            .selected_text()
-            .is_some_and(|text| !text.is_empty())
-        {
-            options.push(("Copy selection".into(), Action::CopySelection));
+        if chat.is_none() {
+            if self
+                .renderer
+                .selected_text()
+                .is_some_and(|text| !text.is_empty())
+            {
+                options.push(("Copy selection".into(), Action::CopySelection));
+            }
+            if let Some(area) = area {
+                options.extend(area.options.clone());
+            }
+            if options.is_empty() {
+                chat = self.controller.account.selected.clone();
+            }
         }
-        let area = self.message_areas.iter().find(|a| a.contains(point));
-        if let Some(area) = area {
-            options.extend(area.options.clone());
+        if let Some(id) = &chat {
+            options = vec![
+                ("Rename…".into(), Action::Rename(id.clone())),
+                ("Clone chat".into(), Action::Clone(id.clone())),
+                ("Sleep worker".into(), Action::Sleep(id.clone())),
+                ("Delete chat…".into(), Action::Delete(id.clone())),
+            ];
         }
-        if !options.is_empty() {
-            self.context_menu = Some(ContextMenu {
-                at: point,
-                section: area.map(|area| area.key.clone()),
-                options,
-                selected: 0,
-            });
-        }
+        self.context_menu = (!options.is_empty()).then(|| ContextMenu {
+            at: point,
+            section: area.map(|a| a.key.clone()),
+            chat,
+            options,
+            selected: 0,
+        });
         self.pointer = None;
         self.selecting = false;
         self.dirty = true;
@@ -2977,7 +3008,8 @@ impl App {
         enabled: bool,
     ) {
         let hovered = layer.interaction.hover.is_some_and(|p| contains(r, p));
-        if primary || enabled && hovered {
+        let tonal = matches!(icon, Icon::Stop);
+        if primary || tonal || enabled && hovered {
             layer.rounded_rect(
                 r,
                 r.height / 2.,
@@ -2987,6 +3019,8 @@ impl App {
                         0x303942
                     } else if primary {
                         0x67d4ff
+                    } else if tonal {
+                        0x18212b
                     } else {
                         0x24303b
                     }),
