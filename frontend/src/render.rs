@@ -358,6 +358,18 @@ impl Renderer {
     ) -> f32 {
         self.clipped_label(layer, value, rect, size, color, bold, rect)
     }
+    pub fn label_height(&mut self, value: &str, width: f32, size: f32, bold: bool) -> f32 {
+        let style = Style {
+            chain: self.faces.prose[usize::from(bold)],
+            wrap_em: Some(width.max(1.) / size),
+            align: Align::Left,
+            line_spacing: 1.15,
+        };
+        self.text
+            .shape_transient(value, &style)
+            .map(|block| self.text.measure(block).height_em() * size)
+            .unwrap_or(0.)
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn clipped_label(
         &mut self,

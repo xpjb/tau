@@ -33,6 +33,7 @@ pub struct Controller {
     pub dialogs: Vec<(String, ExtensionUiRequest)>,
     pub title_prompt: Option<(String, String)>,
     pub connection: String,
+    pub health: crate::connection::Health,
     pub epoch: Option<u64>,
     pub notice: Option<String>,
     network: Option<Network>,
@@ -54,6 +55,7 @@ impl Controller {
             dialogs: vec![],
             title_prompt: None,
             connection: "Not connected".into(),
+            health: crate::connection::Health::default(),
             epoch: None,
             notice: None,
             network: None,
@@ -71,6 +73,7 @@ impl Controller {
     pub fn connect(&mut self) {
         self.epoch = None;
         self.connection = "Connecting…".into();
+        self.health = crate::connection::Health::connecting();
         self.network = Some(Network::start(self.settings.clone(), self.wake.clone()));
     }
     pub fn configure(&mut self, settings: Settings) -> Result<()> {
@@ -497,10 +500,12 @@ impl Controller {
         changed
     }
     fn network_event(&mut self, event: transport::Event) -> Result<()> {
+        let fatal = matches!(&event, transport::Event::Fatal(_));
         match event {
             transport::Event::Ready(epoch) => {
                 self.epoch = Some(epoch);
                 self.connection = "Connected".into();
+                self.health.connected();
                 self.request(ClientCommand::ListSessions)?;
                 for id in self.chats.keys().cloned().collect::<Vec<_>>() {
                     self.open(&id)?;
@@ -512,6 +517,7 @@ impl Controller {
             transport::Event::Disconnected(detail) | transport::Event::Fatal(detail) => {
                 self.epoch = None;
                 self.connection = detail;
+                self.health.disconnected(fatal);
                 self.requests.clear();
                 for (session, chat) in &mut self.chats {
                     chat.feed.synchronized = false;
@@ -524,6 +530,14 @@ impl Controller {
                     }
                     self.store.save_chat(&self.identity, session, &chat.local)?;
                 }
+            }
+            transport::Event::HeartbeatSent { epoch, at } if self.epoch == Some(epoch) => {
+                self.health.sent(at)
+            }
+            transport::Event::HeartbeatReply { epoch, at, rtt, ok }
+                if self.epoch == Some(epoch) =>
+            {
+                self.health.reply(at, rtt, ok)
             }
             transport::Event::NotSent(id, detail) => self.not_sent(&id, &detail)?,
             transport::Event::Prepared { epoch, id, result } => {

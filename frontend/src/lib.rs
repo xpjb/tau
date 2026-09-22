@@ -6,6 +6,7 @@ pub mod transport;
 mod android;
 mod app;
 mod clock;
+pub mod connection;
 pub mod controller;
 #[cfg(not(target_os = "android"))]
 mod demo;

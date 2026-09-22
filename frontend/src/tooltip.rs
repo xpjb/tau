@@ -1,4 +1,4 @@
-use sanscale::Rect;
+use sanscale::{Rect, Vec2};
 use std::time::Instant;
 
 pub struct Tooltip {
@@ -30,6 +30,34 @@ impl Default for Tooltip {
     }
 }
 impl Tooltip {
+    pub fn contains_card(&self, point: Vec2) -> bool {
+        self.region.width > 0. && self.progress > 0. && crate::render::contains(self.card, point)
+    }
+    pub fn contains(&self, point: Vec2) -> bool {
+        use crate::render::contains;
+        if contains(self.region, point) || self.contains_card(point) {
+            return true;
+        }
+        if self.region.width <= 0. || self.progress <= 0. {
+            return false;
+        }
+        // A narrow hover bridge prevents a tooltip closing while crossing the
+        // small gap between its indicator and card.
+        let x = self.region.x.max(self.card.x);
+        let width = (self.region.x + self.region.width).min(self.card.x + self.card.width) - x;
+        let (y, height) = if self.card.y >= self.region.y + self.region.height {
+            (
+                self.region.y + self.region.height,
+                self.card.y - self.region.y - self.region.height,
+            )
+        } else {
+            (
+                self.card.y + self.card.height,
+                self.region.y - self.card.y - self.card.height,
+            )
+        };
+        contains(Rect::new(x, y, width.max(0.), height.max(0.)), point)
+    }
     pub fn hover(&mut self, inside: bool) {
         if inside {
             if self.hover.is_none() {

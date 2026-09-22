@@ -30,15 +30,27 @@ next signal. Continue keeping build/test/verification resource use low.
   trailing paragraph gap after the final block. Explicit authored line breaks and
   line leading are unchanged. Empty/hidden no-op events no longer split Details.
 
+- Removed the duplicate bottom-left connection label and its reserved space.
+  The dot beside Tau now supports hover and click/tap-to-pin diagnostics: endpoint
+  origin (no token/path/query), TLS, real application-heartbeat RTT, last-eight
+  average/range, last reply, connected-since and reconnect count. It reuses the
+  existing 20s probe; no extra traffic, guessed quality grade, loss or speed claim.
+  Epoch changes clear samples; late-epoch results are ignored. Heartbeat timeout
+  gets a specific reconnect reason. Absolute local timestamps need no ticking UI.
+- Tooltip hover bridges cross the anchor/card gap; cards intercept clicks instead
+  of activating underlying content. Sidebar labels now clip to the list viewport.
+
 ## Checks / limits
 
 Managed `cargo check --locked -p tau-frontend --lib` passed with one Cargo job;
 formatting/diff checks passed. No GUI/emulator session, release build, full suite
 or new trivial API test was started. Per-corner WGSL pipeline/rendering, hover at
 clipped group ends, timestamps/DST, clipboard boundaries and scroll anchoring still
-need device acceptance before delivery.
+need device acceptance before delivery. Connection hover/tap, timeout/reconnect
+and RTT display also await device acceptance; the incremental library check for
+this change took 1.28s (one managed Cargo job).
 
-**Timing source limitation:** Pi/daemon currently clones an entry/message timestamp
+**Timing source limitation (user accepted; deferred to backend integration):** Pi/daemon currently clones an entry/message timestamp
 onto its content blocks. Details and text within that same entry can therefore
 show the same source time; exact distinct historical block-start times need
 upstream capture/persistence. Do not claim those times were reconstructed or

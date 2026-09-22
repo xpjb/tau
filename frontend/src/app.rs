@@ -26,6 +26,7 @@ enum Action {
     New,
     Settings,
     Usage,
+    ConnectionInfo,
     Back,
     Menu,
     Send,
@@ -169,6 +170,7 @@ pub struct App {
     context_rect: Rect,
     message_areas: Vec<MessageArea>,
     usage: Tooltip,
+    connection_tip: Tooltip,
     composer_session: Option<String>,
     show_chats: bool,
     waiting_title: bool,
@@ -225,6 +227,7 @@ impl App {
             context_rect: Rect::new(0., 0., 0., 0.),
             message_areas: vec![],
             usage: Tooltip::default(),
+            connection_tip: Tooltip::default(),
             composer_session,
             show_chats,
             waiting_title: false,
@@ -275,15 +278,16 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn hover(&mut self, point: Option<Vec2>) {
-        self.usage.hover(
-            self.modal.is_none()
-                && self.viewer.is_none()
-                && self.context_menu.is_none()
-                && point.is_some_and(|p| {
-                    contains(self.usage.region, p)
-                        || self.usage.progress > 0. && contains(self.usage.card, p)
-                }),
-        );
+        let enabled = self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none();
+        self.usage
+            .hover(enabled && point.is_some_and(|p| self.usage.contains(p)));
+        self.connection_tip
+            .hover(enabled && point.is_some_and(|p| self.connection_tip.contains(p)));
+        if enabled && point.is_some_and(|p| contains(self.connection_tip.region, p)) {
+            self.usage.dismiss();
+        } else if enabled && point.is_some_and(|p| contains(self.usage.region, p)) {
+            self.connection_tip.dismiss();
+        }
         let old = self
             .hover
             .and_then(|p| self.hits.iter().rev().find(|h| contains(h.rect, p)))
@@ -330,6 +334,13 @@ impl App {
         };
         if self.modal.is_none()
             && self.viewer.is_none()
+            && self.context_menu.is_none()
+            && (self.connection_tip.contains_card(point) || self.usage.contains_card(point))
+        {
+            return CursorIcon::Default;
+        }
+        if self.modal.is_none()
+            && self.viewer.is_none()
             && self.scrollbars.iter().any(|b| contains(b.track, point))
         {
             return CursorIcon::Default;
@@ -363,6 +374,7 @@ impl App {
     pub fn tick(&mut self, dt: f32) -> bool {
         self.dirty |= self.controller.poll();
         self.dirty |= self.usage.tick();
+        self.dirty |= self.connection_tip.tick();
         if self.connecting && self.controller.epoch.is_some() {
             self.connecting = false;
             self.modal = None;
@@ -460,6 +472,8 @@ impl App {
             self.dirty = true;
         }
         if self.modal.is_some() || self.viewer.is_some() {
+            self.usage.dismiss();
+            self.connection_tip.dismiss();
             self.autoscroll = None;
             self.wheel = None;
         }
@@ -544,6 +558,16 @@ impl App {
         }
     }
     pub fn back(&mut self) {
+        if self.connection_tip.pinned
+            || self.connection_tip.progress > 0.
+            || self.usage.pinned
+            || self.usage.progress > 0.
+        {
+            self.connection_tip.dismiss();
+            self.usage.dismiss();
+            self.dirty = true;
+            return;
+        }
         self.focus = None;
         if self.viewer.take().is_some() {
         } else if self.modal.is_some() {
@@ -613,6 +637,7 @@ impl App {
     pub fn wheel(&mut self, amount: f32, horizontal: bool, point: Vec2) {
         self.context_menu = None;
         self.usage.dismiss();
+        self.connection_tip.dismiss();
         self.cancel_autoscroll();
         self.expansion_pin = None;
         self.history_attempt = None;
@@ -688,8 +713,20 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.modal.is_none()
+            && self.viewer.is_none()
+            && self.context_menu.is_none()
+            && (self.connection_tip.contains_card(point) || self.usage.contains_card(point))
+        {
+            // Informational cards must not activate the list/message behind them.
+            self.dirty = true;
+            return;
+        }
         if !contains(self.usage.region, point) {
             self.usage.dismiss();
+        }
+        if !contains(self.connection_tip.region, point) {
+            self.connection_tip.dismiss();
         }
         self.wheel = None;
         self.expansion_pin = None;
@@ -902,6 +939,7 @@ impl App {
     pub fn cancel_pointer(&mut self) {
         self.context_menu = None;
         self.usage.dismiss();
+        self.connection_tip.dismiss();
         self.dirty = true;
         self.hover = None;
         self.autoscroll = None;
@@ -1000,8 +1038,14 @@ impl App {
             self.dirty = true;
             return;
         }
-        if key == "Escape" && (self.usage.pinned || self.usage.progress > 0.) {
+        if key == "Escape"
+            && (self.usage.pinned
+                || self.usage.progress > 0.
+                || self.connection_tip.pinned
+                || self.connection_tip.progress > 0.)
+        {
             self.usage.dismiss();
+            self.connection_tip.dismiss();
             self.dirty = true;
             return;
         }
@@ -1113,7 +1157,13 @@ impl App {
                 self.scroll = 0.;
                 self.focus = Some(None);
             }
+            Action::ConnectionInfo => {
+                self.usage.dismiss();
+                self.connection_tip.pinned = !self.connection_tip.pinned;
+                self.connection_tip.suppressed = !self.connection_tip.pinned;
+            }
             Action::Usage => {
+                self.connection_tip.dismiss();
                 self.usage.pinned = !self.usage.pinned;
                 self.usage.suppressed = !self.usage.pinned;
             }
@@ -1515,6 +1565,7 @@ impl App {
         self.scrollbars.clear();
         self.message_areas.clear();
         self.usage.region = Rect::new(0., 0., 0., 0.);
+        self.connection_tip.region = Rect::new(0., 0., 0., 0.);
         self.renderer.clear_scenes();
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
@@ -1543,7 +1594,12 @@ impl App {
                 ),
             );
         }
+        if self.connection_tip.region.width <= 0. {
+            self.connection_tip.hover(false);
+            self.connection_tip.dismiss();
+        }
         self.usage_frame(&mut overlay, bounds);
+        self.connection_frame(&mut overlay, bounds);
         self.context_frame(&mut overlay, bounds);
         if let Some(auto) = &self.autoscroll {
             let a = auto.anchor;
@@ -1673,15 +1729,22 @@ impl App {
             color(0x2a3541),
         );
         layer.rect(Rect::new(b.x, b.y + 140. * s, b.width, s), color(0x2a3541));
+        let indicator = Rect::new(b.x + 72. * s, b.y + 22. * s, 28. * s, 34. * s);
+        self.connection_tip.region = indicator;
+        layer.rounded_rect(
+            indicator,
+            8. * s,
+            layer.control_color(indicator, color(0x0e141b)),
+        );
         layer.rounded_rect(
             Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s),
             4. * s,
-            color(if self.controller.epoch.is_some() {
-                0x4ade80
-            } else {
-                0xfbbf24
-            }),
+            color(self.controller.health.color()),
         );
+        self.hits.push(Hit {
+            rect: indicator,
+            action: Action::ConnectionInfo,
+        });
         self.renderer.label(
             layer,
             "Tau",
@@ -1710,7 +1773,7 @@ impl App {
             s,
             true,
         );
-        let clip = Rect::new(b.x, b.y + 148. * s, b.width, (b.height - 190. * s).max(0.));
+        let clip = Rect::new(b.x, b.y + 148. * s, b.width, (b.height - 156. * s).max(0.));
         self.max_list_scroll =
             (self.controller.account.sessions.len() as f32 * 90. * s - clip.height).max(0.);
         self.list_scroll = self.list_scroll.min(self.max_list_scroll);
@@ -1743,22 +1806,24 @@ impl App {
             } else {
                 &session.title
             };
-            self.renderer.label(
+            self.renderer.clipped_label(
                 layer,
                 title,
                 Rect::new(rect.x + 12. * s, y + 10. * s, rect.width - 24. * s, 22. * s),
                 16. * s,
                 color(0xe5eaf0),
                 unread || selected,
+                clip,
             );
             if let Some(model) = &session.model {
-                self.renderer.label(
+                self.renderer.clipped_label(
                     layer,
                     &format!("{}/{}", model.provider, model.model_id),
                     Rect::new(rect.x + 12. * s, y + 38. * s, rect.width - 24. * s, 18. * s),
                     12. * s,
                     color(0xb7c2ce),
                     false,
+                    clip,
                 );
             }
             let status = format!(
@@ -1772,7 +1837,7 @@ impl App {
                     SessionStatus::Sleeping => "Sleeping",
                 }
             );
-            self.renderer.label(
+            self.renderer.clipped_label(
                 layer,
                 &status,
                 Rect::new(rect.x + 12. * s, y + 58. * s, rect.width - 24. * s, 18. * s),
@@ -1783,6 +1848,7 @@ impl App {
                     0x82909f
                 }),
                 false,
+                clip,
             );
             self.hits.push(Hit {
                 rect,
@@ -1790,28 +1856,6 @@ impl App {
             });
         }
         self.scrollbar(layer, Lane::Sidebar, clip);
-        let label = if self.controller.epoch.is_some() {
-            "●  Connected"
-        } else {
-            &self.controller.connection
-        };
-        self.renderer.label(
-            layer,
-            label,
-            Rect::new(
-                b.x + 18. * s,
-                b.y + b.height - 32. * s,
-                b.width - 36. * s,
-                24. * s,
-            ),
-            12. * s,
-            color(if self.controller.epoch.is_some() {
-                0x4ade80
-            } else {
-                0xfbbf24
-            }),
-            false,
-        );
     }
     fn rows(&self, session: &str) -> Vec<Row> {
         let chat = &self.controller.chats[session];
@@ -2849,6 +2893,7 @@ impl App {
         }
         self.wheel = None;
         self.usage.dismiss();
+        self.connection_tip.dismiss();
         let mut options = vec![];
         if self
             .renderer
@@ -3008,6 +3053,66 @@ impl App {
             color(0x303038),
             false,
             animated,
+        );
+    }
+    fn connection_frame(&mut self, layer: &mut Layer, bounds: Rect) {
+        if self.connection_tip.progress <= 0.
+            || self.connection_tip.region.width <= 0.
+            || self.modal.is_some()
+            || self.viewer.is_some()
+            || self.context_menu.is_some()
+        {
+            return;
+        }
+        self.connection_tip.text = self
+            .controller
+            .health
+            .details(&self.controller.settings, &self.controller.connection);
+        let s = self.scale;
+        let margin = 8. * s;
+        let w = (360. * s).min((bounds.width - margin * 2.).max(1.));
+        let h = (self.renderer.label_height(
+            &self.connection_tip.text,
+            (w - 20. * s).max(1.),
+            12. * s,
+            false,
+        ) + 20. * s)
+            .min((bounds.height - margin * 2.).max(1.));
+        let anchor = self.connection_tip.region;
+        let x = (anchor.x + anchor.width / 2. - w / 2.).clamp(
+            bounds.x + margin,
+            (bounds.x + bounds.width - margin - w).max(bounds.x + margin),
+        );
+        let y = (anchor.y + anchor.height + 6. * s).clamp(
+            bounds.y + margin,
+            (bounds.y + bounds.height - margin - h).max(bounds.y + margin),
+        );
+        let full = Rect::new(x, y, w, h);
+        self.connection_tip.card = full;
+        let t = self.connection_tip.progress;
+        let pivot = (anchor.x + anchor.width / 2.).clamp(full.x, full.x + full.width);
+        let animated = Rect::new(pivot + (x - pivot) * t, y, w * t, h * t);
+        layer.rounded_rect(animated, 6. * s, color(0xe5e1e6));
+        // Keep revealed text inside the rounded mask as the opaque card expands.
+        let clip = Rect::new(
+            animated.x + 6. * s,
+            animated.y + 6. * s,
+            (animated.width - 12. * s).max(0.),
+            (animated.height - 12. * s).max(0.),
+        );
+        self.renderer.clipped_label(
+            layer,
+            &self.connection_tip.text,
+            Rect::new(
+                full.x + 10. * s,
+                full.y + 10. * s,
+                (full.width - 20. * s).max(1.),
+                (full.height - 20. * s).max(0.),
+            ),
+            12. * s,
+            color(0x303038),
+            false,
+            clip,
         );
     }
     fn settings_frame(&mut self, layer: &mut Layer, b: Rect) {
