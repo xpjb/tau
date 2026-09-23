@@ -7,7 +7,7 @@ use chad::{
     wgpu,
     winit::{
         event::{ElementState, TouchPhase, WindowEvent},
-        keyboard::{Key, NamedKey},
+        keyboard::{Key, NamedKey, ModifiersState},
         window::Window,
     },
 };
@@ -60,6 +60,7 @@ fn queue(event: NativeEvent) {
 struct Android {
     app: App,
     import_scope: Option<(String, String)>,
+    modifiers: ModifiersState,
 }
 impl Android {
     fn layout(&mut self, ctx: &Ctx) {
@@ -200,6 +201,7 @@ impl chad::android::App for Android {
         let mut android = Self {
             app,
             import_scope: None,
+            modifiers: ModifiersState::empty(),
         };
         android.layout(ctx);
         Ok(android)
@@ -222,17 +224,18 @@ impl chad::android::App for Android {
                 self.app.report(result);
             }
             WindowEvent::CloseRequested => self.app.back(),
+            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                match &event.logical_key {
-                    Key::Named(NamedKey::Escape | NamedKey::GoBack | NamedKey::BrowserBack) => {
-                        self.app.back()
-                    }
-                    Key::Named(key) => self.app.key(&format!("{key:?}"), false, false),
-                    _ => {
-                        if let Some(text) = &event.text {
-                            self.app.input(text);
-                        }
-                    }
+                let control = (self.modifiers.control_key() && !self.modifiers.alt_key()) || self.modifiers.super_key();
+                let shift = self.modifiers.shift_key();
+                if matches!(event.logical_key, Key::Named(NamedKey::GoBack | NamedKey::BrowserBack)) {
+                    self.app.back();
+                } else if let Some(key) = crate::keyboard::named(&event.logical_key) {
+                    self.app.key(key, control, shift);
+                } else if control {
+                    if let Some(key) = crate::keyboard::shortcut(event) { self.app.key(key, true, shift); }
+                } else if let Some(text) = &event.text && !text.chars().any(char::is_control) {
+                    self.app.input(text);
                 }
             }
             _ => {}

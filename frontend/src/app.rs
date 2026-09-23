@@ -504,6 +504,13 @@ impl App {
                 self.dirty = true;
             }
         }
+        if self.field_selection.is_some()
+            && let Some(point) = self.pointer.as_ref().filter(|p| p.dragged).map(|p| p.last)
+            && let Some((editor, renderer)) = self.editor_and_renderer()
+        {
+            let moved = editor.drag_scroll(&mut renderer.text, renderer.faces.prose[0], point, dt);
+            self.dirty |= moved;
+        }
         if self.selecting
             && let Some(p) = &self.pointer
             && p.dragged
@@ -651,6 +658,15 @@ impl App {
         self.expansion_pin = None;
         self.history_attempt = None;
         self.velocity = 0.;
+        if self.viewer.is_none() && let Some(field) = self.field_at(point) {
+            let editor = match field {
+                None => &mut self.composer,
+                Some(i) => &mut self.modal.as_mut().unwrap().fields[i].1,
+            };
+            editor.wheel(&mut self.renderer.text, self.renderer.faces.prose[0], amount, horizontal);
+            self.dirty = true;
+            return;
+        }
         if let Some(v) = &mut self.viewer {
             v.zoom = (v.zoom * (-amount * 0.002).exp()).clamp(1., 16.);
         } else if self.modal.is_none() {
@@ -793,7 +809,7 @@ impl App {
                 if let Action::Focus(field) = hit.action {
                     self.focus = Some(field);
                     self.field_selection = Some(hit.rect);
-                    self.field_hit(hit.rect, point, false);
+                    self.field_hit(point, false);
                 }
             } else if self.modal.is_none()
                 && self.context_menu.is_none()
@@ -867,9 +883,9 @@ impl App {
             self.dirty = true;
             return;
         }
-        if let Some(rect) = self.field_selection {
+        if self.field_selection.is_some() {
             p.dragged = true;
-            self.field_hit(rect, point, true);
+            self.field_hit(point, true);
             self.dirty = true;
             return;
         }
@@ -970,27 +986,38 @@ impl App {
         self.selecting = false;
         self.field_selection = None;
     }
-    fn field_hit(&mut self, rect: Rect, point: Vec2, extend: bool) {
-        let (editor, secret) = match self.focus {
-            Some(None) => (&mut self.composer, false),
-            Some(Some(i)) => {
-                let Some((_, editor, secret)) =
-                    self.modal.as_mut().and_then(|m| m.fields.get_mut(i))
-                else {
-                    return;
-                };
-                (editor, *secret)
-            }
-            None => return,
+    fn editor_and_renderer(&mut self) -> Option<(&mut Editor, &mut Renderer)> {
+        let editor = match self.focus? {
+            None => &mut self.composer,
+            Some(i) => &mut self.modal.as_mut()?.fields.get_mut(i)?.1,
         };
-        editor.hit(
-            &mut self.renderer,
-            rect,
-            point,
-            16. * self.scale,
-            secret,
-            extend,
-        );
+        Some((editor, &mut self.renderer))
+    }
+    fn field_hit(&mut self, point: Vec2, extend: bool) {
+        if let Some((editor, renderer)) = self.editor_and_renderer() {
+            editor.hit(&mut renderer.text, renderer.faces.prose[0], point, extend);
+        }
+    }
+    fn field_at(&self, point: Vec2) -> Option<Option<usize>> {
+        if let Some(modal) = &self.modal {
+            modal.fields.iter().rposition(|(_, e, _)| e.contains(point)).map(Some)
+        } else {
+            self.composer.contains(point).then_some(None)
+        }
+    }
+    pub fn ime_rect(&self) -> Option<Rect> {
+        let editor = match self.focus? {
+            None => &self.composer,
+            Some(i) => &self.modal.as_ref()?.fields.get(i)?.1,
+        };
+        editor.ime_rect(&self.renderer.text)
+    }
+    pub fn composing(&self) -> bool {
+        match self.focus {
+            Some(None) => self.composer.composing(),
+            Some(Some(i)) => self.modal.as_ref().and_then(|m| m.fields.get(i)).is_some_and(|(_, e, _)| e.composing()),
+            None => false,
+        }
     }
     fn editor(&mut self) -> Option<&mut Editor> {
         match self.focus? {
@@ -999,21 +1026,13 @@ impl App {
         }
     }
     pub fn input(&mut self, value: &str) {
-        if let Some(e) = self.editor() {
-            e.replace(value);
-        }
-        self.edited();
+        if self.editor().is_some_and(|e| e.replace(value)) { self.edited(); }
+        self.dirty = true;
     }
     #[cfg(target_os = "android")]
     pub fn native_edit(&mut self, value: String) {
-        if let Some(e) = self.editor() {
-            *e = if e.single_line {
-                Editor::line(value)
-            } else {
-                Editor::new(value)
-            };
-        }
-        self.edited();
+        if self.editor().is_some_and(|e| e.replace_all(&value)) { self.edited(); }
+        self.dirty = true;
     }
     fn edited(&mut self) {
         if matches!(
@@ -1029,13 +1048,22 @@ impl App {
         self.dirty = true;
     }
     #[cfg(not(target_os = "android"))]
-    pub fn preedit(&mut self, text: String) {
+    pub fn preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
         if let Some(e) = self.editor() {
-            e.preedit = text;
+            e.preedit(text, cursor);
         }
         self.dirty = true;
     }
     pub fn key(&mut self, key: &str, ctrl: bool, shift: bool) {
+        // Composition belongs to the IME. Enter must not send the draft, and
+        // Escape must not abort the agent, while candidate text is active.
+        if self.composing() {
+            if key == "Escape" {
+                if let Some(e) = self.editor() { e.preedit(String::new(), None); }
+                self.dirty = true;
+            }
+            return;
+        }
         if let Some(menu) = &mut self.context_menu {
             match key {
                 "Escape" => self.context_menu = None,
@@ -1071,16 +1099,15 @@ impl App {
         self.wheel = None;
         if let Some(modal) = &self.modal {
             if key == "Tab" && !ctrl && !modal.fields.is_empty() {
-                let count = modal.fields.len();
-                let current = self
-                    .focus
-                    .flatten()
-                    .unwrap_or(if shift { 0 } else { count - 1 });
-                self.focus = Some(Some(if shift {
-                    (current + count - 1) % count
-                } else {
-                    (current + 1) % count
-                }));
+                let fields: Vec<_> = self.hits.iter().filter_map(|h| match h.action {
+                    Action::Focus(Some(i)) => Some(i), _ => None,
+                }).collect();
+                if !fields.is_empty() {
+                    let current = fields.iter().position(|&i| self.focus == Some(Some(i)));
+                    let next = if shift { current.map_or(fields.len() - 1, |i| (i + fields.len() - 1) % fields.len()) }
+                        else { current.map_or(0, |i| (i + 1) % fields.len()) };
+                    self.focus = Some(Some(fields[next]));
+                }
                 self.dirty = true;
                 return;
             }
@@ -1110,11 +1137,10 @@ impl App {
             }
             if let Some(e) = self.editor() {
                 let copy = e.selected().to_owned();
-                if key.eq_ignore_ascii_case("x") {
-                    e.replace("");
-                }
+                let changed = key.eq_ignore_ascii_case("x") && e.replace("");
                 self.platform.push(PlatformAction::Copy(copy));
-                self.edited();
+                if changed { self.edited(); }
+                self.dirty = true;
             }
             return;
         }
@@ -1122,44 +1148,10 @@ impl App {
             self.activate(Action::Send);
             return;
         }
-        let Some(e) = self.editor() else {
-            return;
-        };
-        match key {
-            "a" | "A" if ctrl => {
-                e.anchor = 0;
-                e.cursor = e.value.len();
-            }
-            "z" | "Z" if ctrl => e.undo(shift),
-            "y" | "Y" if ctrl => e.undo(true),
-            "Backspace" => e.backspace(),
-            "Delete" => e.delete(),
-            "ArrowLeft" => e.move_to(e.previous(), shift),
-            "ArrowRight" => e.move_to(e.next(), shift),
-            "Home" => e.move_to(
-                if ctrl {
-                    0
-                } else {
-                    e.value[..e.cursor].rfind('\n').map_or(0, |n| n + 1)
-                },
-                shift,
-            ),
-            "End" => e.move_to(
-                if ctrl {
-                    e.value.len()
-                } else {
-                    e.value[e.cursor..]
-                        .find('\n')
-                        .map_or(e.value.len(), |n| n + e.cursor)
-                },
-                shift,
-            ),
-            "Space" if !ctrl => e.replace(" "),
-            "Enter" => e.replace("\n"),
-            "Tab" => e.replace("    "),
-            _ => {}
-        }
-        self.edited();
+        let Some((editor, renderer)) = self.editor_and_renderer() else { return; };
+        let changed = editor.key(&mut renderer.text, renderer.faces.prose[0], key, ctrl, shift);
+        if changed { self.edited(); }
+        self.dirty = true;
     }
     fn activate(&mut self, action: Action) {
         let result = self.apply(action);
@@ -1698,6 +1690,10 @@ impl App {
         self.info_areas.clear();
         self.usage.region = Rect::new(0., 0., 0., 0.);
         self.info_tip.region = Rect::new(0., 0., 0., 0.);
+        self.composer.hide();
+        if let Some(modal) = &mut self.modal {
+            for (_, editor, _) in &mut modal.fields { editor.hide(); }
+        }
         self.renderer.clear_scenes();
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
@@ -3488,7 +3484,7 @@ impl App {
         let s = self.scale;
         self.hits.clear();
         layer.rect(b, color(0x0e141b));
-        let modal = self.modal.as_ref().unwrap();
+        let modal = self.modal.as_mut().unwrap();
         let connected = self.controller.epoch.is_some()
             && modal.fields[0].1.value.trim().trim_end_matches('/')
                 == self.controller.settings.server_url
@@ -3537,7 +3533,7 @@ impl App {
             false,
         );
         let field_y = card.y + 146. * s;
-        for (i, (name, editor, secret)) in modal.fields.iter().enumerate() {
+        for (i, (name, editor, secret)) in modal.fields.iter_mut().enumerate() {
             let rect = Rect::new(x, field_y + i as f32 * 80. * s, inner_w, 56. * s);
             editor.draw(
                 &mut self.renderer,
@@ -3691,7 +3687,7 @@ impl App {
         let x = b.x + (b.width - w) / 2.;
         let top = b.y + 16. * s;
         let footer = b.y + b.height - 56. * s;
-        let modal = self.modal.as_ref().unwrap();
+        let modal = self.modal.as_mut().unwrap();
         self.renderer.label(
             layer,
             "Quick model selection",
@@ -3975,8 +3971,8 @@ impl App {
                 false,
             );
             y += help_h + 8. * s;
-            let modal = self.modal.as_ref().unwrap();
-            if let Some((_, editor, _)) = modal.fields.first() {
+            let modal = self.modal.as_mut().unwrap();
+            if let Some((_, editor, _)) = modal.fields.first_mut() {
                 if definition.kind == Kind::Bool {
                     button(
                         &mut self.renderer,
@@ -4105,7 +4101,7 @@ impl App {
         let s = self.scale;
         self.hits.clear();
         layer.rect(b, sanscale::Color([0., 0., 0., 0.8]));
-        let modal = self.modal.as_ref().unwrap();
+        let modal = self.modal.as_mut().unwrap();
         let long = matches!(modal.kind, ModalKind::QueueEdit(..));
         let field_h = if long { 180. } else { 60. };
         let width = (b.width - 24. * s).min(620. * s);
@@ -4130,7 +4126,7 @@ impl App {
             true,
         );
         let mut y = rect.y + 84. * s;
-        for (i, (name, e, secret)) in modal.fields.iter().enumerate() {
+        for (i, (name, e, secret)) in modal.fields.iter_mut().enumerate() {
             self.renderer.label(
                 layer,
                 name,

@@ -4906,7 +4906,7 @@ dependencies = [
 [[package]]
 name = "sanscale"
 version = "0.1.0"
-source = "git+https://github.com/xpjb/sanscale?rev=2be4f316c3870d8cd9ba6e12b5e10b2af385bf2c#2be4f316c3870d8cd9ba6e12b5e10b2af385bf2c"
+source = "git+https://github.com/xpjb/sanscale?rev=8cc5afe833176a4fc71d1e5b8b97ad4952adfe40#8cc5afe833176a4fc71d1e5b8b97ad4952adfe40"
 dependencies = [
  "bytemuck",
  "glam",

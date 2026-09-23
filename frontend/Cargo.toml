@@ -18,7 +18,7 @@ tau-protocol = { path = "../protocol" }
 tau-markdown = { path = "../markdown" }
 tau-transfer = { path = "../transfer", default-features = false }
 chad = { git = "https://github.com/xpjb/chad", rev = "a0f465e06eeb5e498bd45b0b4b23305a69778a40" }
-sanscale = { git = "https://github.com/xpjb/sanscale", rev = "2be4f316c3870d8cd9ba6e12b5e10b2af385bf2c" }
+sanscale = { workspace = true }
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -50,6 +50,7 @@ png = "0.18"
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 
 [dev-dependencies]
+sanscale = { workspace = true, features = ["perf-counters"] }
 tempfile = "3"
 axum = { version = "0.8", features = ["ws"] }
 taud = { path = "../daemon" }

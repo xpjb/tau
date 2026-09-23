@@ -3,9 +3,9 @@ use crate::{
     store::{Settings, Store},
 };
 use chad::winit::{
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
-    keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::CursorIcon,
 };
 use chad::{ChadApp, Config, Ctx, wgpu};
@@ -127,7 +127,7 @@ impl ChadApp for Desktop {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Ime(Ime::Commit(text)) => self.app.input(text),
-            WindowEvent::Ime(Ime::Preedit(text, _)) => self.app.preedit(text.clone()),
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => self.app.preedit(text.clone(), *cursor),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let cancelled = self.app.cancel_autoscroll();
                 if cancelled && event.logical_key == Key::Named(NamedKey::Escape) {
@@ -138,66 +138,17 @@ impl ChadApp for Desktop {
                 let control = (self.modifiers.control_key() && !self.modifiers.alt_key())
                     || self.modifiers.super_key();
                 let shift = self.modifiers.shift_key();
-                match &event.logical_key {
-                    Key::Named(
-                        key @ (NamedKey::Escape
-                        | NamedKey::Enter
-                        | NamedKey::Tab
-                        | NamedKey::Backspace
-                        | NamedKey::Delete
-                        | NamedKey::ArrowLeft
-                        | NamedKey::ArrowRight
-                        | NamedKey::ArrowUp
-                        | NamedKey::ArrowDown
-                        | NamedKey::Home
-                        | NamedKey::End),
-                    ) => self.app.key(&format!("{key:?}"), control, shift),
-                    _ if control => {
-                        // Prefer the layout's shortcut letter (e.g. AZERTY), then
-                        // physical editing keys for non-Latin/named-key layouts.
-                        let logical = match &event.logical_key {
-                            Key::Character(text) => Some(text.as_str()),
-                            _ => event.text.as_deref(),
-                        };
-                        let shortcut = logical
-                            .filter(|text| {
-                                matches!(
-                                    *text,
-                                    "a" | "A"
-                                        | "c"
-                                        | "C"
-                                        | "v"
-                                        | "V"
-                                        | "x"
-                                        | "X"
-                                        | "y"
-                                        | "Y"
-                                        | "z"
-                                        | "Z"
-                                )
-                            })
-                            .or(match event.physical_key {
-                                PhysicalKey::Code(KeyCode::KeyA) => Some("a"),
-                                PhysicalKey::Code(KeyCode::KeyC) => Some("c"),
-                                PhysicalKey::Code(KeyCode::KeyV) => Some("v"),
-                                PhysicalKey::Code(KeyCode::KeyX) => Some("x"),
-                                PhysicalKey::Code(KeyCode::KeyY) => Some("y"),
-                                PhysicalKey::Code(KeyCode::KeyZ) => Some("z"),
-                                _ => None,
-                            });
-                        if let Some(key) = shortcut {
-                            self.app.key(key, true, shift);
-                        }
+                if let Some(key) = crate::keyboard::named(&event.logical_key) {
+                    self.app.key(key, control, shift);
+                } else if control {
+                    if let Some(key) = crate::keyboard::shortcut(event) {
+                        self.app.key(key, true, shift);
                     }
-                    _ => {
-                        // Produced text is authoritative, even for named/unidentified keys.
-                        // IME composition comes separately through Ime::Commit.
-                        if let Some(text) = &event.text
-                            && !text.chars().any(char::is_control)
-                        {
-                            self.app.input(text);
-                        }
-                    }
+                } else if !self.app.composing()
+                    && let Some(text) = &event.text
+                    && !text.chars().any(char::is_control)
+                {
+                    self.app.input(text);
                 }
             }
             WindowEvent::DroppedFile(path) => {
@@ -240,13 +191,16 @@ impl ChadApp for Desktop {
             ctx.request_redraw();
         }
         self.actions(ctx);
-        ctx.window.set_ime_cursor_area(
-            LogicalPosition::new(30., ctx.size().1 as f64 / ctx.scale_factor() - 100.),
-            LogicalSize::new(1., 24.),
-        );
+
     }
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
         self.app.frame(ctx, view);
+        if let Some(rect) = self.app.ime_rect() {
+            ctx.window.set_ime_cursor_area(
+                PhysicalPosition::new(rect.x as f64, rect.y as f64),
+                PhysicalSize::new(rect.width.ceil() as u32, rect.height.ceil() as u32),
+            );
+        }
         self.sync_cursor(ctx);
         if self.app.needs_redraw() {
             ctx.request_redraw();

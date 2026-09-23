@@ -16,7 +16,7 @@ impl Files {
             data.clone()
         } else {
             let data =
-                sanscale::read_font_file(&path.to_string_lossy()).map_err(|e| e.to_string())?;
+                sanscale::read_font_file(&path).map_err(|e| e.to_string())?;
             self.0.insert(path, data.clone());
             data
         };
@@ -61,7 +61,7 @@ pub fn load(text: &mut TextService) -> Result<Faces, String> {
         let primary = primary(text, &mut files, index)?;
         let mut chain = vec![primary];
         chain.extend(fallback.iter().copied().filter(|font| *font != primary));
-        chains.push(text.register_chain(&chain));
+        chains.push(text.register_chain(&chain).map_err(|e| e.to_string())?);
     }
     Ok(Faces {
         prose: chains[..4].try_into().unwrap(),

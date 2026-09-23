@@ -704,7 +704,7 @@ impl Renderer {
     pub fn draw(&mut self, ctx: &impl RenderContext, target: &wgpu::TextureView, layers: &[Layer]) {
         let (width, height) = ctx.size();
         self.text
-            .set_transform(ctx.queue(), TextService::pixel_ortho(width, height));
+            .set_transform(TextService::pixel_ortho(width, height));
         let ndc = |x: f32, y: f32| [x / width as f32 * 2. - 1., 1. - y / height as f32 * 2.];
         let mut batches = vec![];
         let mut shapes = vec![];

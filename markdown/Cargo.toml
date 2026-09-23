@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-sanscale = { git = "https://github.com/xpjb/sanscale", rev = "2be4f316c3870d8cd9ba6e12b5e10b2af385bf2c" }
+sanscale = { workspace = true }
 ropey = { version = "1", default-features = false, features = ["simd"] }
 unicode-segmentation = "1"
 

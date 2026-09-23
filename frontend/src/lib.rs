@@ -16,6 +16,7 @@ mod desktop;
 mod details;
 mod daemon_settings;
 mod editor;
+mod keyboard;
 mod fonts;
 mod icons;
 mod models;
