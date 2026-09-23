@@ -20,7 +20,7 @@ upstream bug from a Tau byte-caret/controller bug. Avoid duplicating Sanscale's
 caret geometry. Validate workspace plus real GPU render and device input paths.
 
 Integration: `tau2-sanscale-text-input` through `04fd60c` was fast-forwarded into
-`tau2-rust-frontend`, then `tau2`. The frontend branch is retained. Not deployed;
+`tau2-rust-frontend`, then `tau2`. The frontend branch is retained. Included in beta 0.7.1 daemon/Windows delivery;
 physical acceptance and any upstream limitations below remain open.
 
 ## Migration handoff

@@ -278,3 +278,15 @@ Remaining: physical Windows/DirectX/DPI and Android/native-IME acceptance, OS
 composition/focus ordering, actual autorepeat-to-display measurements and held-drag
 input on devices. Android's existing bridge sends full text, not native caret or
 composition ranges. SDK intra-ligature caret granularity remains documented in 004.
+
+
+## Beta 0.7.1 Windows delivery
+
+At the user's request, built the release daemon and Windows x64 native app,
+launcher and self-extracting installer sequentially from `6cacd15`. Verified the
+compressed app payload matches the fresh executable; posted the approximately
+9.4 MiB installer. Beta health reports 0.7.1/protocol 13 after its authorized
+restart; stable's process/start/executable were unchanged. No backup or activity
+check, as explicitly requested. Full checksums and deployment evidence are in
+../INTEGRATION.md. No new Android package, test-suite rerun or physical GUI/input
+acceptance is claimed by this delivery.

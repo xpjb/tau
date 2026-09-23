@@ -126,3 +126,33 @@ remaining SDK/device checks are in frontend/QA.md. Version 0.7.1/protocol 13 is
 still not deployed. Stable `master`, running services and production data were
 not changed. The archived storage-reconciliation scratch branch is untouched;
 the completed agent implementation was already integrated in `4171a86`.
+
+
+## Beta 0.7.1 deployment and Windows delivery — 2026-09-24
+
+User authorized beta deployment and the Windows EXE, explicitly waiving activity
+checks and backups. Built source `6cacd154ea91263cd8786460b8c06f167901ba52` with
+managed Cargo, one build job and one Rayon thread; daemon and Windows targets
+were built sequentially. No backup, active-session gate or paid provider request.
+
+- Release daemon installed atomically by the beta-only installer. Restarted only
+  `tau2-beta.service`; active PID **475435** at acceptance.
+- `http://vibe:8789` remains the beta URL. Local `/v1/health` reports Tau **0.7.1**,
+  **protocol 13**. The installed executable matches the freshly built release.
+- Stable `tau.service` PID **474496**, start time and executable hash were unchanged.
+  No stable data, executable, service or route replacement.
+- Built and posted `Tau-Beta-0.7.1-windows-x64.exe` (about 9.4 MiB), preserving the
+  existing isolated Tau Beta installation and local-work identities. The compressed
+  app payload contains exactly `app/Tau Beta.exe`, hash-matched to the new native
+  Windows release binary. No JVM, extra runtime installer or debug-symbol payload.
+- Linker warnings concerned unavailable Microsoft static-library debug PDBs;
+  all three Windows release build stages completed successfully.
+- No new Android package, GUI/device acceptance, full test rerun or release claim
+  beyond these builds and deployment checks. Existing pre-protocol-13 beta clients
+  need a matched update. Physical input/IME/DPI and SDK ligature checks remain open.
+
+Daemon SHA-256:
+`b714a97211d8c2f477ac3ff2f4dc84a35efc63f4ce6b3c3214cf1093888ca590`
+
+Windows installer SHA-256:
+`80dce02691ee91431916d42529983b41b3efac30790d5710454064f51994200c`

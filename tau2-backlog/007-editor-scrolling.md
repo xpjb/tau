@@ -13,7 +13,7 @@ and visible clip. Avoid inheriting transcript scrolling state. Verify desktop an
 Android IME/touch paths; log Sanscale difficulties under 004.
 
 Integration: `tau2-sanscale-text-input` through `04fd60c` was fast-forwarded into
-`tau2-rust-frontend`, then `tau2`. The frontend branch is retained. Not deployed;
+`tau2-rust-frontend`, then `tau2`. The frontend branch is retained. Included in beta 0.7.1 daemon/Windows delivery;
 physical acceptance and any upstream limitations below remain open.
 
 ## Editor handoff

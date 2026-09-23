@@ -6,8 +6,8 @@ complete just because code compiles.
 
 | Item | Priority | Status |
 | --- | --- | --- |
-| 001 Daemon settings and hierarchical prompts | First | Implemented; not deployed |
-| 002 Direct model selection without a catalog gate | With 001 | Implemented; not deployed |
+| 001 Daemon settings and hierarchical prompts | First | Beta daemon/Windows delivered |
+| 002 Direct model selection without a catalog gate | With 001 | Beta daemon/Windows delivered |
 | 003 Text input keyboard navigation | Editor worktree | Merged via frontend into tau2; device QA pending |
 | 004 Sanscale API migration | Editor worktree | Pinned/migrated; ligature limitation recorded |
 | 005 Highlight colour | Visual | Open |
@@ -16,7 +16,7 @@ complete just because code compiles.
 | 008 Click-origin ripple | Visual | Open |
 | 009 Nested tool hover feedback | Visual | Open |
 | 010 Account usage remaining | Context hover | Open |
-| 011 Title generation model and prompt | With 001 | Implemented; not deployed |
+| 011 Title generation model and prompt | With 001 | Beta daemon/Windows delivered |
 
 Settings and the composer must reuse the existing shared editor. Do not create
 another text controller. See 004 for the pinned source and migration difficulties.
@@ -59,3 +59,11 @@ The code commit is on `tau2/daemon-settings-prompts`, based on `tau2-integration
 Stable `master` and other worktrees are unchanged. Keep the paired daemon/client
 protocol change together when integrating with editor work. Deploy only after an
 idle, coordinated beta update; do not interrupt the active conversation.
+
+
+## Beta 0.7.1 delivery
+
+The integrated settings and shared-editor code was deployed to beta and delivered
+as the matched Windows x64 installer on 2026-09-24. Android was not rebuilt for
+this request. Device acceptance, physical latency and documented SDK limitations
+remain pending; deployment does not close those checks. See ../INTEGRATION.md.

@@ -15,7 +15,8 @@ resolutions were necessary. Feature branches/worktrees are preserved and clean.
 This integration changes documentation only beyond `04fd60c`; its recorded
 64-test run remains the implementation evidence. No build/test rerun, packaging,
 deployment, database migration or daemon restart was performed for the merge.
-Version 0.7.1/protocol 13 remains unshipped. SDK ligature limitations and physical
+The merge itself did not ship a build; the subsequent authorized beta daemon and
+Windows 0.7.1/protocol-13 delivery is recorded in ../INTEGRATION.md. SDK ligature limitations and physical
 Windows/Android input acceptance remain open; see QA and backlog 004.
 
 Current contracts and evidence live in:
