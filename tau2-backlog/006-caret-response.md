@@ -1,6 +1,6 @@
 # 006 — Check caret response speed
 
-Priority: editor. Status: needs measurement. Related: 003/004.
+Priority: editor. Status: hot path fixed/measured; physical latency QA pending. Related: 003/004.
 
 The user suspects slow caret movement but is uncertain. Measure key-repeat input,
 redraw/wake latency, shaping work and blink reset in the composer and prompt editor.
@@ -10,5 +10,14 @@ caret smoothing or a polling timer to mask missed redraws.
 Acceptance: distinguish key repeat delay from draw latency, verify immediate caret
 feedback and solid caret after input, record measurements and remaining device QA.
 
-Ownership: the user assigned editor work to another worktree. No editor or Sanscale
-implementation was started by the settings worktree. Coordinate there before editing.
+Ownership: `tau2-sanscale-text-input` in `/root/tau2-text-input`; leave the settings
+worktree untouched. This branch is not merged or deployed.
+
+## Editor handoff
+
+Cursor-only keys no longer save unchanged drafts to synchronous SQLite. Cached
+layout/placed-caret queries avoid reshaping on warm motion; a SQLite trigger and
+SDK work counters verify both. App input dirties an on-demand frame immediately;
+idle remains idle and the existing solid caret is retained. Measured App-key and
+completed headless-frame timings, with explicit OS/display exclusions, are in
+frontend/QA.md. Physical repeat-to-display latency is still unmeasured.

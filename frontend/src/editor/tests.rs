@@ -13,7 +13,7 @@ impl Fixture {
     fn view(&mut self, editor: &mut Editor, width_em: f32, height_em: f32, secret: bool) -> ShapedHandle {
         editor.view = Some(View { rect: Rect::new(0., 0., (width_em + 1.5) * 16., (height_em + 1.5) * 16.), size: 16., secret });
         editor.visible = true;
-        editor.prepare_view(&mut self.text, self.chain).unwrap()
+        editor.prepare_view(&mut self.text, self.chain, true).unwrap()
     }
     fn key(&mut self, editor: &mut Editor, key: &str, ctrl: bool, shift: bool) -> bool {
         editor.key(&mut self.text, self.chain, key, ctrl, shift)
@@ -184,7 +184,7 @@ fn wheel_stays_independent_until_navigation_and_hit_testing_uses_the_scrolled_or
     assert!(e.scroll.y > 0.);
     e.wheel(&mut f.text, f.chain, -100_000., false);
     assert_eq!(e.scroll.y, 0.);
-    for _ in 0..3 { e.prepare_view(&mut f.text, f.chain); assert_eq!(e.scroll.y, 0., "idle must not snap back to caret"); }
+    for _ in 0..3 { e.prepare_view(&mut f.text, f.chain, true); assert_eq!(e.scroll.y, 0., "idle must not snap back to caret"); }
     e.wheel(&mut f.text, f.chain, 90., false);
     let view = e.view.unwrap(); let point = Vec2::new(view.inner().x + 4., view.inner().y + 8.);
     let origin = e.origin(f.layout(&e), view);
@@ -196,7 +196,7 @@ fn wheel_stays_independent_until_navigation_and_hit_testing_uses_the_scrolled_or
     assert_eq!(e.anchor, anchor);
     assert!(e.caret.byte_index > anchor);
     f.key(&mut e, "Home", true, false);
-    e.prepare_view(&mut f.text, f.chain);
+    e.prepare_view(&mut f.text, f.chain, true);
     assert_eq!(e.scroll.y, 0.);
     f.key(&mut e, "PageDown", false, true);
     assert!(e.caret.line_index > 0);
@@ -215,4 +215,34 @@ fn a_cleared_service_recovers_the_editor_layout_without_losing_text() {
     assert_eq!(f.text.measure(old).line_count(), 0);
     assert_eq!(f.layout(&e).len_bytes(), e.value.len());
     assert_eq!(f.layout(&e).line_count(), 2);
+}
+
+#[test]
+fn ligatures_do_not_turn_one_backspace_into_deleting_several_letters() {
+    let mut f = Fixture::new();
+    let font = f.text.map_font(Arc::new(include_bytes!("../../assets/DejaVuSans.ttf").as_slice()), 0).unwrap();
+    f.chain = f.text.register_chain(&[font]).unwrap();
+    let mut e = Editor::new("office".into());
+    f.view(&mut e, 30., 4., false);
+    let mut stops = vec![0];
+    while let Some(next) = f.layout(&e).next_caret_stop(*stops.last().unwrap()) { stops.push(next); }
+    assert_eq!(stops.first(), Some(&0));
+    assert_eq!(stops.last(), Some(&e.value.len()));
+    for expected in ["offic", "offi", "off", "of", "o", ""] {
+        assert!(f.key(&mut e, "Backspace", false, false));
+        assert_eq!(e.value, expected);
+    }
+}
+
+
+#[test]
+fn inserting_a_base_before_a_combining_mark_places_after_the_new_grapheme() {
+    let mut f = Fixture::new(); let mut e = Editor::new("\u{301} end".into());
+    f.view(&mut e, 30., 6., false);
+    f.key(&mut e, "Home", true, false);
+    e.replace("e");
+    assert_eq!(e.value, "e\u{301} end");
+    assert_eq!(e.caret.byte_index, "e\u{301}".len());
+    f.key(&mut e, "Backspace", false, false);
+    assert_eq!(e.value, " end");
 }

@@ -59,6 +59,11 @@ Chad owns platform events and GPU lifecycle. Sanscale handles text; incremental
 Markdown retains paragraph/layout state. Android's thin Java bridge supplies IME,
 clipboard, picker and document APIs; it is not a Kotlin UI or agent runtime.
 
+One shared `Editor` serves the composer and settings/dialog fields. It owns source
+text, selection, undo, composition and a persistent field viewport. Sanscale owns
+placed-caret geometry and visual motion. Navigation requests an on-demand redraw,
+not a draft write or a new shape request while its cached layout remains live.
+
 The client owns drafts, account-scoped local views and uncertain-send presentation.
 The daemon owns sessions, queued prompts, durable receipts, tools and history. On
 reconnect, native receipts reconcile accepted work; unknown requests are not replayed

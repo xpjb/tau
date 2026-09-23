@@ -239,3 +239,39 @@ Windows x64 installer and Android ARM64 APK built sequentially with one Cargo jo
 APK versionCode is 3; signing and 16KiB ZIP alignment checks passed. Packaged native
 payloads were hash-checked against the freshly built executable/library. No new GUI
 session, emulator, full test suite, or Android x86_64 build was started for delivery.
+
+
+## Shared editor / Sanscale migration — `tau2-sanscale-text-input`
+
+Isolated worktree `/root/tau2-text-input`, based on the completed settings handoff
+`446ac29`. SDK pinned to `8cc5afe833176a4fc71d1e5b8b97ad4952adfe40` in one workspace
+dependency. No merge, deployment, production account access or daemon restart.
+
+Completed on the implementation retained in this branch:
+- Workspace/all-targets check; **64 nextest tests passed**, including 13 new editor
+  tests with real fonts and three actual App/SQLite/headless-GPU tests.
+- Scoped frontend Clippy, all targets, `--no-deps -- -D warnings`, passed. Workspace
+  dependency linting still hits the existing Markdown lints (previously recorded
+  as `896a973b-1da6-4680-b894-c147eeb7d6fc`); no unrelated lint cleanup.
+- A SQLite trigger catches redundant same-value draft writes: navigation/copy
+  produce zero writes; cut writes once. Warm navigation produces zero shape,
+  flow or block requests. Selection visibly changes GPU pixels; repeated frames
+  are byte-identical. The actual new default-prompt settings UI exercises click
+  geometry, clipboard, composition/commit/undo and independent scrolling.
+- An observed debug run of 300 warm App Up/Down keys: p50 770ns, p95 800ns;
+  one completed headless frame plus readback 2.61ms. These are NOT physical
+  key-to-display or OS autorepeat latency measurements. Idle tick stays idle;
+  no blink/polling/smoothing timer was added. Chad forwards keyboard events and
+  the desktop adapter explicitly requests redraw after dirty input.
+
+At the user's finish request, a repeat check encountered a cold shared build and
+was stopped during dependency compilation. The late, unvalidated IME clause-highlight
+polish/test was removed, retaining the implementation from the completed 64-test
+run. Android cross-check stopped in dependency compilation (`regex-automata`),
+before checking this frontend. Do not count either attempt as a pass. The attempted
+private X11 input run supplied no completed result; no native GUI acceptance is claimed.
+
+Remaining: physical Windows/DirectX/DPI and Android/native-IME acceptance, OS
+composition/focus ordering, actual autorepeat-to-display measurements and held-drag
+input on devices. Android's existing bridge sends full text, not native caret or
+composition ranges. SDK intra-ligature caret granularity remains documented in 004.

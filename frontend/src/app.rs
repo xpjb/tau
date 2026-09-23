@@ -807,8 +807,10 @@ impl App {
             if let Some(hit) = self.hits.iter().rev().find(|h| contains(h.rect, point)) {
                 // Controls take priority over transcript selection beneath them.
                 if let Action::Focus(field) = hit.action {
+                    let rect = hit.rect;
+                    self.cancel_preedit();
                     self.focus = Some(field);
-                    self.field_selection = Some(hit.rect);
+                    self.field_selection = Some(rect);
                     self.field_hit(point, false);
                 }
             } else if self.modal.is_none()
@@ -885,6 +887,7 @@ impl App {
         }
         if self.field_selection.is_some() {
             p.dragged = true;
+            p.last = point;
             self.field_hit(point, true);
             self.dirty = true;
             return;
@@ -1011,6 +1014,12 @@ impl App {
             Some(i) => &self.modal.as_ref()?.fields.get(i)?.1,
         };
         editor.ime_rect(&self.renderer.text)
+    }
+    pub fn cancel_preedit(&mut self) {
+        if let Some(e) = self.editor() && e.composing() {
+            e.preedit(String::new(), None);
+            self.dirty = true;
+        }
     }
     pub fn composing(&self) -> bool {
         match self.focus {
@@ -1158,6 +1167,7 @@ impl App {
         self.report(result);
     }
     fn apply(&mut self, action: Action) -> Result<()> {
+        self.cancel_preedit();
         self.context_menu = None;
         let selected = self.controller.account.selected.clone();
         match action {
@@ -4245,3 +4255,6 @@ fn count(n: u64) -> String {
     }
     out
 }
+
+#[cfg(all(test, not(target_os = "android")))]
+mod editor_tests;

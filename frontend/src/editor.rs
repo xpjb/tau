@@ -89,7 +89,10 @@ impl Editor {
             self.redo.clear();
             self.value.replace_range(range.clone(), &value);
         }
-        self.caret.byte_index = range.start + value.len();
+        let inserted_end = range.start + value.len();
+        // An insertion can join the following combining mark/ZWJ sequence.
+        self.caret.byte_index = self.value.grapheme_indices(true).map(|(at, _)| at)
+            .find(|&at| at >= inserted_end).unwrap_or(self.value.len());
         self.anchor = self.caret.byte_index;
         self.composition = None;
         self.layout = None;
@@ -179,12 +182,12 @@ impl Editor {
         self.follow_caret = true;
         Some(block)
     }
-    fn prepare_view(&mut self, text: &mut TextService, chain: FontChainHandle) -> Option<ShapedHandle> {
+    fn prepare_view(&mut self, text: &mut TextService, chain: FontChainHandle, follow: bool) -> Option<ShapedHandle> {
         let view = self.view?;
         let block = self.block(text, chain, view.inner().width, view.size, view.secret)?;
         let layout = text.measure(block);
         self.clamp_scroll(layout, view);
-        if self.follow_caret {
+        if follow && self.follow_caret {
             let caret = layout.caret_rect(self.placed(layout, view.secret));
             self.scroll.x = reveal(self.scroll.x, caret.x_em, 1.5 / view.size, view.inner().width / view.size);
             self.scroll.y = reveal(self.scroll.y, caret.y_em, caret.height_em, view.inner().height / view.size);
@@ -231,7 +234,7 @@ impl Editor {
             _ => {}
         }
         let Some(view) = self.view else { return false; };
-        let Some(block) = self.prepare_view(text, chain) else { return false; };
+        let Some(block) = self.prepare_view(text, chain, false) else { return false; };
         let layout = text.measure(block);
         let caret = self.placed(layout, view.secret);
         let page = (view.inner().height / view.size / layout.caret_rect(caret).height_em.max(0.01)).floor().max(1.) as usize;
@@ -249,6 +252,18 @@ impl Editor {
         let selection = self.range();
         let deleting = matches!(key, "Backspace" | "Delete");
         if deleting && !selection.is_empty() { return self.replace(""); }
+        if deleting && !ctrl {
+            // Editing is grapheme-based, not glyph-based: a font's fi ligature
+            // must never turn Backspace into deleting two letters. Geometry and
+            // visual motion still use the engine's caret stops.
+            let byte = self.caret.byte_index;
+            let range = if key == "Backspace" {
+                self.value[..byte].grapheme_indices(true).next_back().map_or(byte, |(at, _)| at)..byte
+            } else {
+                byte..self.value[byte..].graphemes(true).next().map_or(byte, |g| byte + g.len())
+            };
+            return self.replace_range(range, "");
+        }
         if !deleting && !shift && !selection.is_empty() && matches!(key, "ArrowLeft" | "ArrowRight") {
             let byte = if key == "ArrowLeft" { selection.start } else { selection.end };
             let caret = layout.caret_at(self.display_byte(byte, view.secret));
@@ -266,10 +281,12 @@ impl Editor {
             false
         }
     }
+    // Mouse/wheel operate on the displayed viewport, not a pending keyboard
+    // reveal. Repainting is the point where that reveal becomes visible.
     pub fn hit(&mut self, text: &mut TextService, chain: FontChainHandle, point: Vec2, extend: bool) {
         if self.composing() { self.preedit(String::new(), None); }
         let Some(view) = self.view else { return; };
-        let Some(block) = self.prepare_view(text, chain) else { return; };
+        let Some(block) = self.prepare_view(text, chain, false) else { return; };
         let layout = text.measure(block);
         let origin = self.origin(layout, view);
         if let Some(caret) = layout.hit_test(Vec2::new((point.x - origin.x) / view.size, (point.y - origin.y) / view.size)) {
@@ -279,7 +296,7 @@ impl Editor {
     }
     pub fn wheel(&mut self, text: &mut TextService, chain: FontChainHandle, amount: f32, horizontal: bool) -> bool {
         let Some(view) = self.view else { return false; };
-        let Some(block) = self.prepare_view(text, chain) else { return false; };
+        let Some(block) = self.prepare_view(text, chain, false) else { return false; };
         let before = self.scroll;
         if horizontal || self.single_line { self.scroll.x += amount / view.size; }
         else { self.scroll.y += amount / view.size; }
@@ -371,7 +388,7 @@ impl Editor {
                 false,
             );
         }
-        if let Some(block) = self.prepare_view(&mut renderer.text, renderer.faces.prose[0]) {
+        if let Some(block) = self.prepare_view(&mut renderer.text, renderer.faces.prose[0], true) {
             let layout = renderer.text.measure(block);
             let caret = layout.caret_rect(self.placed(layout, secret));
             let origin = self.origin(layout, view);
@@ -436,7 +453,9 @@ fn char_boundary(value: &str, byte: usize) -> usize {
     byte
 }
 fn reveal(offset: f32, at: f32, extent: f32, visible: f32) -> f32 {
-    if at < offset { at } else if at + extent > offset + visible { (at + extent - visible).max(at.min(offset)) } else { offset }
+    if at < offset || extent >= visible { at }
+    else if at + extent > offset + visible { at + extent - visible }
+    else { offset }
 }
 
 // Word policy belongs to Tau, not shaping. Skip whitespace, then cross a run of

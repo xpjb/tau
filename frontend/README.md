@@ -40,3 +40,21 @@ entries are disabled, not invented capabilities or fallback model choices.
 
 [QA](QA.md) · [Packaging](PACKAGING.md) · [Architecture](../ARCHITECTURE.md) ·
 [Daemon/storage](../docs/tau2-agent.md)
+
+
+## Shared text input
+
+Composer and settings/dialog fields use the same editor. Arrows follow Sanscale's
+visual lines; Up/Down retain a goal column. Ctrl+arrows and Ctrl+Backspace/Delete
+use word boundaries; Home/End use visual lines (Ctrl selects document edges),
+PageUp/Down use the field viewport, and Shift extends selection. Undo/redo,
+clipboard and desktop IME share the same edit path. Backspace/Delete remove one
+Unicode grapheme, not a whole font ligature.
+
+Wheel over a field scrolls that field, independently of the transcript. Shift+wheel
+scrolls horizontally; single-line fields also scroll horizontally. Drag selection
+autoscrolls at field edges. Navigation/editing reveals the caret; idle rendering
+does not reset manual scrolling. Android keeps its native EditText/IME bridge.
+
+Migration evidence and remaining SDK/device limitations: `QA.md` and
+`../tau2-backlog/004-sanscale-migration.md`.

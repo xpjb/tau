@@ -127,6 +127,7 @@ impl ChadApp for Desktop {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Ime(Ime::Commit(text)) => self.app.input(text),
+            WindowEvent::Ime(Ime::Disabled) => self.app.cancel_preedit(),
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => self.app.preedit(text.clone(), *cursor),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let cancelled = self.app.cancel_autoscroll();
@@ -156,6 +157,8 @@ impl ChadApp for Desktop {
                 self.app.report(result);
             }
             WindowEvent::Focused(false) => {
+                self.modifiers = ModifiersState::empty();
+                self.app.cancel_preedit();
                 self.app.cancel_pointer();
                 let result = self.app.save();
                 self.app.report(result);
