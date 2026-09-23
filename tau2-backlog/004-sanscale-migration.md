@@ -18,3 +18,6 @@ Not attempted yet. Record each concrete API gap/repro here with commit, symptom,
 minimal example, local impact and proposed upstream change. Do not claim an
 upstream bug from a Tau byte-caret/controller bug. Avoid duplicating Sanscale's
 caret geometry. Validate workspace plus real GPU render and device input paths.
+
+Ownership: the user assigned editor work to another worktree. No editor or Sanscale
+implementation was started by the settings worktree. Coordinate there before editing.

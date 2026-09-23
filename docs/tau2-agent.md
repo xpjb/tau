@@ -10,7 +10,8 @@ compaction and cancellation. No Node/Pi worker, pipes, worker capability HTTP
 endpoint, RPC correlation, second transcript sequence, or process recovery.
 Titles are native and run after prompt acknowledgement. The default uses the first
 nonempty prompt line without a provider call. Optional `daemon.generateTitles`
-uses a bounded, no-tools native request with `titlePrompt`, falls back on failure,
+uses a bounded, no-tools native request with `titlePrompt` and optional `titleModel`
+(unset uses the chat model), falls back on failure,
 and cannot overwrite a later manual rename. There is no external title helper.
 
 The conversation tools run with the daemon's OS permissions, just as Pi did.
@@ -18,7 +19,7 @@ This is not a sandbox. Keep the daemon behind authenticated access.
 
 ## Shared native protocol
 
-Protocol **12** keeps flat transcript, paging, session, upload and attachment
+Protocol **13** keeps flat transcript, paging, session, upload and attachment
 shapes. The transfer crate and iroh routes are unchanged.
 
 - `prompt` success means its queue item, receipt and session metadata have committed to SQLite. It does not
@@ -39,8 +40,7 @@ shapes. The transfer crate and iroh routes are unchanged.
 - The daemon does not emit `starting` or interactive Pi extension dialogs.
   Extension request/response types and title-only settings aliases are removed.
   Native flag notifications use `notice`, not a fake extension dialog.
-- `get_settings {id}` returns `settings {requestId, settings,
-  defaultSystemPrompt}`, then the usual success response.
+- `get_settings {id}` returns `settings {requestId, settings}`, then the usual success response.
 - `set_settings {id, revision, settings}` replaces the complete document with a
   compare-and-swap revision check. It returns the new document. Reload on conflict;
   do not silently overwrite another client's changes.
@@ -48,10 +48,13 @@ shapes. The transfer crate and iroh routes are unchanged.
   lookup precedes stale generation checks; replaying an old abort cannot cancel a
   newer run. Aborts cancel promptly but acknowledge success only after persistence.
 
-The Rust settings UI has Daemon, Agent, System, Projects, Providers and Models
-sections. It edits one complete CAS document, preserves edits on conflict, distinguishes
-built-in/null from intentionally empty prompts, and has staged per-field reset.
-Advanced maps/catalogs use JSON editors. Secrets are never sent to the frontend.
+The Rust settings UI has Daemon, Agent, Prompts, Providers and Model metadata
+sections. It edits one complete CAS document, preserves edits on conflict, and has
+staged per-field reset. Prompt selection is exactly model override → saved default.
+`agent.systemPrompt` is text; `agent.modelSystemPrompts` maps exact provider/model IDs
+to text. A missing key inherits and an empty string overrides. There is no project,
+provider or built-in prompt fallback. `loadAgentsFiles` controls separate AGENTS.md
+context. Advanced maps use JSON editors. Secrets are never sent to the frontend.
 Chat context actions expose native model/thinking/compact/priority commands and keep
 their target chat ID. Shared settings/DTOs live in `tau-protocol`; filesystem loading,
 validation and prompt composition remain daemon-only through `SettingsExt`.
@@ -79,7 +82,7 @@ field is added.
 
 ## Files and migration
 
-- `TAU_SETTINGS_PATH`: `/var/lib/tau/settings.json` by default. JSON, schema 1,
+- `TAU_SETTINGS_PATH`: `/var/lib/tau/settings.json` by default. JSON, schema 2,
   camelCase, `daemon`, `agent`, `providers`, `models`, and a monotonic revision.
   Writes use a private temporary file, fsync, atomic rename, directory fsync.
 - `auth.json` beside settings: private provider credentials, separate from menu
@@ -121,9 +124,9 @@ For existing **Tau 1/Pi** data only, there is an explicit offline import:
    `scripts/install-daemon.sh` installs only the separate beta unit/data/ports;
    it cannot silently replace the stable Tau 1 executable or service.
 
-Only when settings do not yet exist, `TAU_IMPORT_PI_DIR` imports the provider/model
-catalog, selected model, thinking defaults, steering, compaction/retry, shell
-settings, global SYSTEM.md / APPEND_SYSTEM.md, working-directory .pi overrides,
+Only when settings do not yet exist, `TAU_IMPORT_PI_DIR` imports the optional model
+metadata, selected model, thinking defaults, steering, compaction/retry, shell
+settings, global SYSTEM.md / APPEND_SYSTEM.md text,
 Codex priority/native compaction settings and credentials (without overwriting
 an existing auth file). `--import-state` also supplies the old title prompt on
 first settings creation. Never run old and copied refresh credentials concurrently.
@@ -261,3 +264,14 @@ native settings/menu UI are implemented; the real GPU/settings path has been
 exercised locally. Physical Windows/Android acceptance remains device QA. An account/endpoint mismatch
 on an encrypted checkpoint fails explicitly; use the original account or fork
 before that checkpoint. There is no silent lossy fallback.
+
+## Unshipped settings update
+
+See `tau2-backlog/README.md` for the 0.7.1/protocol-13 handoff. The live daemon remains
+0.7.0. Model metadata is optional, not an allowlist; absent capacity remains unknown
+and disables threshold-based auto-compaction. Provider errors are bounded and
+credential-redacted. Default prompt text from older settings stays intact. The
+loader does not rewrite the existing file merely by opening it; save uses the
+normal revision check. Nonempty removed project overrides fail explicitly rather
+than silently losing text. This does not import conversations or add a migration
+service. Astra's explicit empty override must be set during the coordinated update.

@@ -4,7 +4,7 @@ Rust client, daemon, coding agent, shared protocol, Markdown and verified file t
 No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Python title
 helper. Android retains a small Java bridge for Android OS APIs.
 
-**0.7.0 beta · protocol 12.** This is a separate installation, not a stable-Tau cutover.
+**0.7.1 development · protocol 13 (not deployed).** This is a separate installation, not a stable-Tau cutover.
 The older frontend snapshot is preserved at `tau2-rust-frontend`; the integrated
 release branch is `tau2`.
 
@@ -22,15 +22,18 @@ history, bounded hot transcripts, checkpoint/suffix replay, and transactional fo
 There is no writable JSONL mirror. Interrupted work is paused; uncertain tool effects
 are never automatically replayed. See [agent/storage details](docs/tau2-agent.md).
 
-Settings → **Daemon / agent settings** exposes daemon, agent, system, project,
-provider and model configuration. Edits use revision compare-and-swap; conflicts
-retain your edits instead of overwriting another client's changes. System prompt
-`null` means built-in/inherited; a custom empty string is deliberately empty.
-Provider/model/project structures use explicit JSON editors; credentials are never
+Settings → **Daemon settings** exposes daemon, agent, prompt, provider and optional
+model-metadata configuration. Edits use revision compare-and-swap; conflicts
+retain your edits instead of overwriting another client's changes. The prompt chain has exactly two levels: **model override → default system prompt**.
+Both are ordinary text, including empty text. A missing model override inherits;
+there is no project/provider/built-in fallback. Prompt fields use the shared editor;
+advanced provider/metadata structures use JSON editors; credentials are never
 part of the wire settings document.
 
 New chats use the last explicitly chosen model. Quick-select favorites do not change
-that default. Cache rings are estimates from existing reply timestamps, not native
+that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
+context capacity stays unknown. The title model is separately configurable; unset
+uses the chat model. Cache rings are estimates from existing reply timestamps, not native
 runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.
 
@@ -92,3 +95,5 @@ This daemon is not a sandbox. Keep it behind authenticated Tailnet access.
 
 [Architecture](ARCHITECTURE.md) · [Transcript contract](TRANSCRIPT.md) ·
 [Frontend QA](frontend/QA.md) · [Integration/release log](INTEGRATION.md)
+
+Current work and acceptance: [Tau 2 backlog / settings handoff](tau2-backlog/README.md).

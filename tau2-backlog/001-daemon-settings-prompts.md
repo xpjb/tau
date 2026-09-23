@@ -1,6 +1,6 @@
 # 001 — Daemon settings and hierarchical system prompts
 
-Priority: first. Status: in progress.
+Priority: first. Status: implemented in `15d2a69`; not deployed.
 
 ## Report and confirmed facts
 
@@ -37,9 +37,11 @@ Their presence is not a requirement. Model prompt overrides are the priority.
 ## Acceptance
 
 Exercise the real settings wire, stale-save protection, restart, provider payloads,
-empty versus null, model switching and daemon-default fallback. Check that
+empty versus unset, model switching and daemon-default fallback. Check that
 Astra's empty override removes replacement boilerplate but keeps tools.
 Test Codex and Chat Completions. Check prompt lengths and
 invalid targets. Show the target and fallback order in the actual menu.
 
 Leave editor/Sanscale work in 003–007. Leave active production services unchanged.
+
+Validation and remaining release/device checks: see the settings handoff in `README.md`.

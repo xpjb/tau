@@ -11,3 +11,6 @@ snapping away from user scrolling. Wheel, selection drag/autoscroll, click hit t
 soft wrapping, resize and long settings prompts must use the same content origin
 and visible clip. Avoid inheriting transcript scrolling state. Verify desktop and
 Android IME/touch paths; log Sanscale difficulties under 004.
+
+Ownership: the user assigned editor work to another worktree. No editor or Sanscale
+implementation was started by the settings worktree. Coordinate there before editing.

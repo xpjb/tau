@@ -6,17 +6,17 @@ complete just because code compiles.
 
 | Item | Priority | Status |
 | --- | --- | --- |
-| 001 Daemon settings and hierarchical prompts | First | In progress; two-level scope confirmed |
-| 002 Direct model selection without a catalog gate | Next; shares 001 settings | In progress |
-| 003 Text input keyboard navigation | Next editor work | Open |
-| 004 Sanscale API migration | Before 003/006/007 | Open; upstream verified |
+| 001 Daemon settings and hierarchical prompts | First | Implemented; not deployed |
+| 002 Direct model selection without a catalog gate | With 001 | Implemented; not deployed |
+| 003 Text input keyboard navigation | Editor worktree | Assigned to another worktree |
+| 004 Sanscale API migration | Editor worktree | Assigned to another worktree; upstream verified |
 | 005 Highlight colour | Visual | Open |
-| 006 Caret response | Editor | Needs measurement |
-| 007 Text input scrolling | Editor | Open |
+| 006 Caret response | Editor worktree | Assigned; needs measurement |
+| 007 Text input scrolling | Editor worktree | Assigned to another worktree |
 | 008 Click-origin ripple | Visual | Open |
 | 009 Nested tool hover feedback | Visual | Open |
 | 010 Account usage remaining | Context hover | Open |
-| 011 Title generation model and prompt | With 001 | In progress |
+| 011 Title generation model and prompt | With 001 | Implemented; not deployed |
 
 Settings and the composer must reuse the existing shared editor. Do not create
 another text controller. See 004 for the pinned source and migration difficulties.
@@ -29,3 +29,33 @@ Project overrides were not requested. Do not treat their existing implementation
 as an accepted requirement. Item 001 has exactly two levels:
 **model override → default system prompt**. There is no provider, project or
 built-in fallback layer. Empty default/override text is intentional.
+
+## Settings handoff — implementation `15d2a69`
+
+User requested a stop after important settings work and assigned the editor to
+another worktree. No editor/Sanscale code was changed here.
+
+- Settings schema 2, protocol 13, client/daemon version 0.7.1 (unshipped).
+- Exactly model override → saved default prompt. Default and model overrides can
+  both be empty. No project/provider/built-in prompt fallback and no append layer.
+- Settings → Daemon settings → Prompts edits the default and any exact model ID.
+  A missing `agent.modelSystemPrompts` key inherits; a string, including `""`, overrides.
+- Optional `daemon.titleModel`; unset follows the chat model. Titles remain native.
+- Model IDs no longer require membership in metadata. Provider errors reach the
+  chat. Unknown capacity stays unknown; no threshold-based auto-compaction then.
+- Workspace check and all **51 nextest tests passed**. Scoped daemon/frontend/
+  protocol Clippy with warnings denied passed. Native debug client/daemon build
+  passed. The full workspace Clippy gate remains blocked by existing untouched
+  Markdown lints; flag `896a973b-1da6-4680-b894-c147eeb7d6fc` records this.
+- Real settings-controller/daemon/local-provider tests cover empty/default/custom
+  prompts, both provider formats, model switches, compaction, restart, settings
+  conflicts, direct IDs, provider rejections, title models and draft preservation.
+- No new GUI/device acceptance or release packages. Do not claim those passed.
+- No production settings, daemon restart, history import or paid model request.
+  The existing settings reader preserves old default text without rewriting files
+  on load. The live Astra override still needs `""` set at the matched beta update.
+
+The code commit is on `tau2/daemon-settings-prompts`, based on `tau2-integration`.
+Stable `master` and other worktrees are unchanged. Keep the paired daemon/client
+protocol change together when integrating with editor work. Deploy only after an
+idle, coordinated beta update; do not interrupt the active conversation.

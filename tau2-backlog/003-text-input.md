@@ -16,3 +16,6 @@ word motion/deletion, selection extension/collapse, Home/End and document edges,
 Unicode/emoji/ligatures, undo/redo, IME and clipboard. Typing a settings prompt must
 behave like typing a message. Inspect Chad's key translation before blaming shaping.
 Record Sanscale obstacles in 004 rather than adding silent local workarounds.
+
+Ownership: the user assigned editor work to another worktree. No editor or Sanscale
+implementation was started by the settings worktree. Coordinate there before editing.

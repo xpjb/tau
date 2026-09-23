@@ -1,6 +1,6 @@
 # 002 — Select a model without a catalog gate
 
-Priority: after/alongside 001. Status: in progress.
+Priority: after/alongside 001. Status: implemented in `15d2a69`; not deployed.
 
 The user wants exact provider/model IDs sent to the provider. A local list must
 never disable a quick-model tile or reject `/model`. Do not silently substitute
@@ -16,3 +16,5 @@ Unknown capacity stays unknown; skip threshold-based auto-compaction in that cas
 Test an ID absent from metadata reaching the HTTP provider unchanged, the actual
 provider error reaching the chat, no retries of a 400 rejection, and persistence of
 explicit model choice without draft loss. Quick-model search is convenience only.
+
+Validation and remaining release/device checks: see the settings handoff in `README.md`.
