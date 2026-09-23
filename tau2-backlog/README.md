@@ -6,7 +6,7 @@ complete just because code compiles.
 
 | Item | Priority | Status |
 | --- | --- | --- |
-| 001 Daemon settings and hierarchical prompts | First | In progress |
+| 001 Daemon settings and hierarchical prompts | First | Scope corrected; provider layer awaiting confirmation |
 | 002 Direct model selection without a catalog gate | Next; shares 001 settings | In progress |
 | 003 Text input keyboard navigation | Next editor work | Open |
 | 004 Sanscale API migration | Before 003/006/007 | Open; upstream verified |
@@ -22,3 +22,9 @@ Settings and the composer must reuse the existing shared editor. Do not create
 another text controller. See 004 for the pinned source and migration difficulties.
 Work stays on Tau 2. Do not replace stable Tau or restart a daemon hosting an active
 conversation to deploy its own update. New settings fields require matched clients.
+
+## Scope correction
+
+Project overrides were not requested. Do not treat their existing implementation
+as an accepted requirement. Item 001 uses model → daemon default → built-in;
+provider-level defaults need confirmation. No runtime changes have started.
