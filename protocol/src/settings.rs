@@ -23,10 +23,11 @@ pub struct Settings {
 pub struct DaemonSettings {
     pub title_prompt: String,
     pub generate_titles: bool,
+    pub title_model: Option<SessionModel>,
     pub idle_timeout_seconds: u64,
 }
 impl Default for DaemonSettings {
-    fn default() -> Self { Self { title_prompt: DEFAULT_TITLE_PROMPT.into(), generate_titles:false, idle_timeout_seconds: 3600 } }
+    fn default() -> Self { Self { title_prompt: DEFAULT_TITLE_PROMPT.into(), generate_titles:false, title_model:None, idle_timeout_seconds: 3600 } }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36,10 +37,9 @@ pub struct AgentSettings {
     pub thinking_level: String,
     pub model_thinking_levels: BTreeMap<String, String>,
     pub steering_mode: SteeringMode,
-    pub system_prompt: Option<String>,
-    pub append_system_prompt: String,
-    pub project_prompts: BTreeMap<PathBuf, PromptOverride>,
-    pub load_project_instructions: bool,
+    pub system_prompt: String,
+    pub model_system_prompts: BTreeMap<String, String>,
+    pub load_agents_files: bool,
     pub fast_mode: bool,
     pub retry: RetrySettings,
     pub compaction: CompactionSettings,
@@ -51,9 +51,6 @@ pub struct AgentSettings {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode { All, OneAtATime }
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct PromptOverride { pub system_prompt: Option<String>, pub append_system_prompt: String }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct RetrySettings { pub enabled: bool, pub max_retries: u32, pub base_delay_ms: u64 }
@@ -76,8 +73,8 @@ impl Default for AgentSettings {
     fn default() -> Self { Self {
         model: SessionModel { provider: "openai-codex".into(), model_id: "gpt-6-astra".into() },
         thinking_level: "max".into(), model_thinking_levels: BTreeMap::new(), steering_mode: SteeringMode::All,
-        system_prompt: None, append_system_prompt: String::new(), project_prompts: BTreeMap::new(),
-        load_project_instructions: true, fast_mode: false, retry: RetrySettings::default(), compaction: CompactionSettings::default(),
+        system_prompt: DEFAULT_SYSTEM_PROMPT.into(), model_system_prompts: BTreeMap::new(),
+        load_agents_files: true, fast_mode: false, retry: RetrySettings::default(), compaction: CompactionSettings::default(),
         shell_path: "/bin/bash".into(), shell_command_prefix: String::new(), http_idle_timeout_seconds: 300, max_tool_output_bytes: 50 * 1024,
     } }
 }
@@ -92,22 +89,22 @@ pub struct ProviderSettings {
     pub api_key_env: Option<String>,
     #[serde(default)] pub web_search: bool,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ModelSettings {
     pub provider: String,
     pub id: String,
-    pub name: String,
-    pub context_window: u64,
+    #[serde(default)] pub name: String,
+    #[serde(default)] pub context_window: Option<u64>,
     #[serde(default)] pub thinking_level_map: BTreeMap<String, Option<String>>,
 }
 impl Default for Settings {
     fn default() -> Self { Self {
-        schema: 1, revision: 0, daemon: DaemonSettings::default(), agent: AgentSettings::default(),
+        schema: 2, revision: 0, daemon: DaemonSettings::default(), agent: AgentSettings::default(),
         providers: BTreeMap::from([
             ("openai-codex".into(), ProviderSettings { api: Api::Codex, base_url: "https://chatgpt.com/backend-api/codex".into(), api_key_env: None, web_search: true }),
             ("openrouter".into(), ProviderSettings { api: Api::ChatCompletions, base_url: "https://openrouter.ai/api/v1".into(), api_key_env: Some("OPENROUTER_API_KEY".into()), web_search: true }),
         ]),
-        models: vec![ModelSettings { provider: "openai-codex".into(), id: "gpt-6-astra".into(), name: "GPT-6 Astra".into(), context_window: 272000, thinking_level_map: BTreeMap::new() }],
+        models: vec![ModelSettings { provider: "openai-codex".into(), id: "gpt-6-astra".into(), name: "GPT-6 Astra".into(), context_window: Some(272000), thinking_level_map: BTreeMap::new() }],
     } }
 }

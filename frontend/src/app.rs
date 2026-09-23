@@ -440,12 +440,11 @@ impl App {
             self.dirty = true;
         }
         if self.waiting_settings
-            && let Some((document, default)) = self.controller.daemon_settings.clone()
+            && let Some(document) = self.controller.daemon_settings.clone()
         {
             self.waiting_settings = false;
             let result = crate::daemon_settings::Draft::new(
                 &document,
-                default,
                 self.controller.identity.clone(),
             );
             match result {
@@ -467,7 +466,7 @@ impl App {
                 let ok = self.controller.settings_result.take().unwrap().1;
                 self.saving_settings = None;
                 if ok
-                    && let (Some(draft), Some((document, _))) =
+                    && let (Some(draft), Some(document)) =
                         (&mut self.daemon_draft, &self.controller.daemon_settings)
                 {
                     draft.revision = document.revision;
@@ -1214,7 +1213,7 @@ impl App {
                             false,
                         ),
                         (
-                            "Search daemon models".into(),
+                            "Search model suggestions".into(),
                             Editor::line(String::new()),
                             false,
                         ),
@@ -1276,7 +1275,7 @@ impl App {
                     ],
                     options: vec![
                         ("Connect".into(), Action::Confirm),
-                        ("Daemon / agent settings".into(), Action::DaemonSettings),
+                        ("Daemon settings".into(), Action::DaemonSettings),
                         ("Cancel".into(), Action::CancelModal),
                     ],
                 });
@@ -1424,10 +1423,10 @@ impl App {
             }
             Action::SettingToggle => {
                 if let (Some(draft), Some(modal)) = (&mut self.daemon_draft, &mut self.modal) {
-                    if draft.definition().kind == crate::daemon_settings::Kind::Nullable {
-                        draft.builtin = !draft.builtin;
-                        if draft.builtin {
-                            modal.fields[0].1 = Editor::new(draft.builtin_text().into());
+                    if draft.definition().kind == crate::daemon_settings::Kind::PromptOverride {
+                        draft.inherit = !draft.inherit;
+                        if draft.inherit {
+                            modal.fields[0].1 = Editor::new(draft.default_prompt().into());
                         }
                     } else {
                         modal.fields[0].1 =
@@ -1437,10 +1436,8 @@ impl App {
                 }
             }
             Action::SettingReset => {
-                if let (Some(draft), Some(modal)) = (&mut self.daemon_draft, &mut self.modal) {
-                    modal.fields[0].1 = Editor::new(draft.reset()?);
-                }
-                self.focus = None;
+                if let Some(draft) = &mut self.daemon_draft { draft.reset()?; }
+                self.load_setting_field()?;
             }
             Action::AgentSetting(session, command) => {
                 let (label, value) = match command.as_str() {
@@ -3000,7 +2997,7 @@ impl App {
             );
             fx += fw + 6. * s;
         }
-        // Slash completion is driven by the daemon catalog, including built-in arguments.
+        // Slash completion uses optional arguments advertised by the daemon.
         if self.composer.value.starts_with('/')
             && !self.composer.value.contains('\n')
             && self.focus == Some(None)
@@ -3053,8 +3050,6 @@ impl App {
             "Connect to choose a model"
         } else if busy {
             "Selecting model… your draft is kept"
-        } else if !chat.commands_loaded {
-            "Loading the daemon's model catalog…"
         } else {
             "Choose before your first message"
         };
@@ -3093,9 +3088,9 @@ impl App {
                 w,
                 76. * s,
             );
-            let resolved = crate::models::resolve(selector, &chat.commands);
-            let selected = resolved.is_some() && resolved == current.as_deref();
-            let enabled = connected && chat.commands_loaded && !busy && resolved.is_some();
+            let valid = selector.parse::<tau_protocol::SessionModel>().is_ok();
+            let selected = current.as_deref() == Some(selector.as_str());
+            let enabled = connected && !busy && valid;
             let base = color(if selected { 0x303a66 } else { 0x18212b });
             layer.clipped_rounded_rect(
                 r,
@@ -3109,7 +3104,7 @@ impl App {
             );
             self.renderer.clipped_label(
                 layer,
-                resolved.unwrap_or(selector),
+                selector,
                 Rect::new(r.x + 12. * s, r.y + 10. * s, w - 24. * s, 32. * s),
                 12. * s,
                 color(if enabled || selected {
@@ -3122,14 +3117,12 @@ impl App {
             );
             let status = if !connected {
                 "Offline"
-            } else if !chat.commands_loaded {
-                "Catalog not loaded"
-            } else if resolved.is_none() {
-                "Not in daemon catalog"
+            } else if !valid {
+                "Invalid provider/model ID"
             } else if chat
                 .model_request
                 .as_ref()
-                .is_some_and(|(_, slug)| Some(slug.as_str()) == resolved)
+                .is_some_and(|(_, slug)| slug == selector)
             {
                 "Selecting…"
             } else if selected {
@@ -3149,7 +3142,7 @@ impl App {
             if enabled {
                 self.hits.push(Hit {
                     rect: crate::render::intersect(r, clip),
-                    action: Action::ChooseModel(session.into(), resolved.unwrap().into()),
+                    action: Action::ChooseModel(session.into(), selector.clone()),
                 });
             }
         }
@@ -3645,7 +3638,7 @@ impl App {
             y += 12. * s;
             self.renderer.label(
                 layer,
-                "Daemon / agent settings",
+                "Daemon settings",
                 Rect::new(x, y, inner_w, 26. * s),
                 16. * s,
                 color(0xe5eaf0),
@@ -3708,7 +3701,7 @@ impl App {
             true,
         );
         let compact = b.height / s < 480.;
-        let show_catalog = b.height / s >= 320.;
+        let show_suggestions = b.height / s >= 320.;
         let help_h = if compact { 32. } else { 58. } * s;
         self.renderer.label(layer, if compact { "One slug per line. Last chosen model is remembered. Empty disables tiles." }
             else { "One provider/model per line (max 12). New chats keep the last chosen model. This list only controls quick-select tiles; empty disables them." },
@@ -3716,7 +3709,7 @@ impl App {
         let edit_y = top + 36. * s + help_h + 8. * s;
         let edit_h = (b.height * 0.25)
             .min(164. * s)
-            .min((footer - 48. * s - edit_y - if show_catalog { 56. * s } else { 0. }).max(0.));
+            .min((footer - 48. * s - edit_y - if show_suggestions { 56. * s } else { 0. }).max(0.));
         let edit = Rect::new(x, edit_y, w, edit_h);
         modal.fields[0].1.draw(
             &mut self.renderer,
@@ -3733,7 +3726,7 @@ impl App {
             action: Action::Focus(Some(0)),
         });
         let search = Rect::new(x, edit.y + edit.height + 12. * s, w, 36. * s);
-        if show_catalog {
+        if show_suggestions {
             modal.fields[1].1.draw(
                 &mut self.renderer,
                 layer,
@@ -3741,7 +3734,7 @@ impl App {
                 16. * s,
                 self.focus == Some(Some(1)),
                 false,
-                "Search daemon models to add/remove",
+                "Search optional model suggestions",
                 true,
             );
             self.hits.push(Hit {
@@ -3758,21 +3751,23 @@ impl App {
             .map(|c| c.commands.as_slice())
             .unwrap_or(&[]);
         let preferences = crate::models::Preferences::parse(&modal.fields[0].1.value).ok();
-        let count = if show_catalog {
+        let count = if show_suggestions {
             ((list_bottom - list_y) / (32. * s)).max(0.) as usize
         } else {
             0
         };
-        let catalog = crate::models::catalog(commands);
+        let suggestions = commands.iter()
+            .find(|c| c.name == "model" && c.source == tau_protocol::SlashCommandSource::Builtin)
+            .map(|c| c.arguments.as_slice()).unwrap_or(&[]);
         let mut shown = 0;
-        for model in catalog
+        for model in suggestions
             .iter()
             .filter(|m| m.value.to_lowercase().contains(&query))
             .take(count)
         {
             let existing = preferences.as_ref().and_then(|p| {
                 p.slugs.iter().find(|slug| {
-                    crate::models::resolve(slug, commands) == Some(model.value.as_str())
+                    *slug == &model.value
                 })
             });
             let r = Rect::new(x, list_y + shown as f32 * 32. * s, w, 30. * s);
@@ -3798,10 +3793,10 @@ impl App {
         if shown == 0 && count > 0 {
             self.renderer.label(
                 layer,
-                if catalog.is_empty() {
-                    "Open a connected chat to load available models."
+                if suggestions.is_empty() {
+                    "No suggestions loaded. You can enter any provider/model above."
                 } else {
-                    "No matching models."
+                    "No matching suggestions. You can still enter the ID above."
                 },
                 Rect::new(x, list_y, w, 40. * s),
                 12. * s,
@@ -3814,7 +3809,7 @@ impl App {
             self.controller
                 .notice
                 .as_deref()
-                .unwrap_or("This list doesn't change your model. Search to narrow the catalog."),
+                .unwrap_or("Enter any provider/model. Suggestions are optional; the provider decides availability."),
             Rect::new(x, footer - 44. * s, w, 36. * s),
             12. * s,
             color(if self.controller.notice.is_some() {
@@ -3851,10 +3846,9 @@ impl App {
         }
     }
     fn apply_setting_field(&mut self) -> Result<()> {
-        if let (Some(draft), Some(modal)) = (&mut self.daemon_draft, &self.modal) {
-            if let Some((_, editor, _)) = modal.fields.first() {
-                draft.apply(&editor.value)?;
-            }
+        if let (Some(draft), Some(modal)) = (&mut self.daemon_draft, &self.modal)
+            && let Some((_, editor, _)) = modal.fields.first() {
+            draft.apply(&editor.value)?;
         }
         Ok(())
     }
@@ -3865,7 +3859,7 @@ impl App {
             let definition = draft.definition();
             let editor = if matches!(
                 definition.kind,
-                Kind::Line | Kind::Number | Kind::Bool | Kind::Model
+                Kind::Line | Kind::Number | Kind::Bool | Kind::Model | Kind::OptionalModel | Kind::PromptModel
             ) {
                 Editor::line(text)
             } else {
@@ -3900,7 +3894,7 @@ impl App {
         );
         let busy = self.saving_settings.is_some();
         if let Some(draft) = &self.daemon_draft {
-            let columns = if w / s >= 600. { 6 } else { 3 };
+            let columns = if w / s >= 600. { SECTIONS.len() } else { 3 };
             let tab_w = (w - 8. * s * (columns - 1) as f32) / columns as f32;
             let mut y = top + 36. * s;
             for (i, label) in SECTIONS.iter().enumerate() {
@@ -3968,10 +3962,13 @@ impl App {
                 true,
             );
             y += 40. * s;
-            let help_h = if b.height / s < 480. { 32. } else { 58. } * s;
+            let help = if definition.kind == Kind::PromptOverride {
+                format!("{}\n{}", draft.prompt_model, definition.help)
+            } else { definition.help.into() };
+            let help_h = if b.height / s < 480. { 44. } else { 72. } * s;
             self.renderer.label(
                 layer,
-                definition.help,
+                &help,
                 Rect::new(x, y, w, help_h),
                 12. * s,
                 color(0xb7c2ce),
@@ -3996,21 +3993,21 @@ impl App {
                         editor.value == "true",
                     );
                 } else {
-                    let readonly = definition.kind == Kind::Nullable && draft.builtin;
-                    if definition.kind == Kind::Nullable {
+                    let readonly = definition.kind == Kind::PromptOverride && draft.inherit;
+                    if definition.kind == Kind::PromptOverride {
                         button(
                             &mut self.renderer,
                             layer,
                             &mut self.hits,
                             Rect::new(x, y, w, 32. * s),
-                            if draft.builtin {
-                                "✓ Built-in default — switch to custom"
+                            if draft.inherit {
+                                "✓ Inherit default prompt — switch to override"
                             } else {
-                                "Custom replacement — switch to built-in"
+                                "Model override — switch to inherited default"
                             },
                             Action::SettingToggle,
                             s,
-                            draft.builtin,
+                            draft.inherit,
                         );
                         y += 40. * s;
                     }

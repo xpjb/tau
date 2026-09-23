@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use serde_json::json;
 use crate::manager::{AgentManager, PromptOutcome, SessionRuntime};
-use crate::protocol::{PromptDisposition, SessionStatus, SlashCommand, SlashCommandArgument, SlashCommandSource};
+use crate::protocol::{ContextUsage, PromptDisposition, SessionStatus, SlashCommand, SlashCommandArgument, SlashCommandSource};
 use crate::state::SessionModel;
 
 impl AgentManager {
@@ -23,14 +23,15 @@ impl AgentManager {
         if content.agent.as_ref().unwrap().running && matches!(name, "model" | "thinking" | "compact") { bail!("Stop the current run before changing /{name}"); }
         let notice = match name {
             "model" => {
-                let (provider, model_id) = arguments.split_once('/').ok_or_else(|| anyhow::anyhow!("Usage: /model <provider/model>"))?;
-                let model = SessionModel { provider:provider.into(), model_id:model_id.into() };
+                let model: SessionModel = arguments.parse().map_err(anyhow::Error::msg)?;
                 let mut settings = self.inner.settings.get(); settings.model(&model)?;
                 settings.agent.model = model.clone();
                 self.set_settings(settings.revision, settings).await?;
                 let settings = self.inner.settings.get();
                 let level = settings.agent.model_thinking_levels.get(arguments).unwrap_or(&settings.agent.thinking_level).clone();
-                content.append(id,json!({"type":"model_change","provider":provider,"modelId":model_id,"thinkingLevel":level})).await?;
+                content.append(id,json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":level})).await?;
+                let usage = settings.model(&model)?.context_window.map(|context_window| ContextUsage { tokens:None, context_window });
+                self.set_runtime_state(id, runtime, SessionStatus::Idle, None, Some(usage));
                 format!("Model set to {arguments}. New chats will use it too.")
             }
             "thinking" => {

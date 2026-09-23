@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use std::time::Duration;
 
-use crate::settings::{Api, ModelSettings, Settings};
+use crate::settings::{Api, Settings};
 use crate::state::SessionModel;
 use super::auth::AuthStore;
 mod codex;
@@ -186,7 +186,7 @@ pub struct Request<'a> {
 }
 pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request<'_>, updates: mpsc::Sender<Value>) -> Result<Completion> {
     let Request { settings, selected, thinking, messages, session_id, definitions, mode } = request;
-    let model: &ModelSettings = settings.model(selected)?;
+    let model = settings.model(selected)?;
     let provider = &settings.providers[&selected.provider];
     let decoder: &dyn Decoder = match provider.api { Api::Codex => &codex::Codex, Api::ChatCompletions => &completions::Completions };
     let effort = model.thinking_level_map.get(thinking).cloned().unwrap_or_else(|| match thinking {
@@ -291,7 +291,25 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
                 .map(|s| s.saturating_mul(1000)).unwrap_or_else(|| settings.agent.retry.base_delay_ms.saturating_mul(1 << attempt)).min(60_000);
             attempt += 1; tokio::time::sleep(Duration::from_millis(delay)).await; continue;
         }
-        if !status.is_success() { bail!("Model provider returned HTTP {}", status.as_u16()); }
+        if !status.is_success() {
+            let mut body = response.bytes_stream();
+            let bytes = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut bytes = Vec::new();
+                while let Some(Ok(chunk)) = body.next().await {
+                    let remaining = 16_384 - bytes.len();
+                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                    if bytes.len() == 16_384 { break; }
+                }
+                bytes
+            }).await.unwrap_or_default();
+            let error: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let message = error.pointer("/error/message").or_else(|| error.get("message")).and_then(Value::as_str).unwrap_or_default();
+            let mut message = message.replace(&key, "[redacted]");
+            if let Some(account) = account.as_deref().filter(|id| !id.is_empty()) { message = message.replace(account, "[redacted]"); }
+            let message = message.chars().take(320).collect::<String>();
+            bail!("Model provider returned HTTP {} for {}/{}{}{}", status.as_u16(), selected.provider, selected.model_id,
+                if message.is_empty() { "" } else { ": " }, message);
+        }
         // Never retry a started response, including image generation: provider-side
         // effects/billing may already have happened even when no output was delivered.
         let mut chunks = response.bytes_stream();

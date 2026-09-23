@@ -113,7 +113,7 @@ impl AgentManager {
             let agent = content.agent.as_mut().unwrap();
             agent.running = false;
             let settings = manager.inner.settings.get();
-            let usage = settings.model(&agent.model).ok().map(|model| ContextUsage { tokens:agent.tokens, context_window:model.context_window });
+            let usage = settings.model(&agent.model).ok().and_then(|model| model.context_window).map(|context_window| ContextUsage { tokens:agent.tokens, context_window });
             let mut queue = content.transcript.as_ref().unwrap().queue.clone();
             queue.run_id = None;
             if cancelled || result.is_err() { queue.paused = true; }
@@ -168,12 +168,12 @@ impl AgentManager {
                 content.commit(id,entries,Some(queue),None).await?;
                 let agent = content.agent.as_ref().unwrap();
                 let entries = agent.store.context(id,&agent.model).await?;
-                let messages = history::messages(&entries,settings.system_prompt(&self.inner.config.cwd).await?, &agent.model, &self.inner.config.attachment_root).await?;
+                let messages = history::messages(&entries,settings.system_prompt(&agent.model, &self.inner.config.cwd).await?, &agent.model, &self.inner.config.attachment_root).await?;
                 (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), messages, agent.tokens)
             };
             let context_window = settings.model(&selected)?.context_window;
             let estimated = messages.iter().map(history::estimate_tokens).sum::<u64>();
-            if settings.agent.compaction.enabled && tokens.unwrap_or(estimated).max(estimated) > context_window.saturating_sub(settings.agent.compaction.reserve_tokens) {
+            if settings.agent.compaction.enabled && context_window.is_some_and(|window| tokens.unwrap_or(estimated).max(estimated) > window.saturating_sub(settings.agent.compaction.reserve_tokens)) {
                 if compacted { bail!("Context is still too large after compaction; reduce the queued input or fork an earlier turn"); }
                 self.compact(id, runtime, "").await?;
                 compacted = true;
@@ -267,7 +267,7 @@ impl AgentManager {
                 runtime.content.lock().await.append(id, json!({"type":"message","message":result})).await?;
             }
             for attachment in attachments { runtime.content.lock().await.append(id, attachment).await?; }
-            self.set_runtime_state(id, runtime, SessionStatus::Running, None, Some(Some(ContextUsage { tokens:completion.tokens, context_window })));
+            self.set_runtime_state(id, runtime, SessionStatus::Running, None, Some(context_window.map(|context_window| ContextUsage { tokens:completion.tokens, context_window })));
         }
     }
 
@@ -324,7 +324,7 @@ impl AgentManager {
         settings.model(&selected)?;
         self.set_runtime_state(id, runtime, SessionStatus::Running, Some("Compacting context".into()), None);
         let native = settings.agent.compaction.native_codex && settings.providers[&selected.provider].api == crate::settings::Api::Codex;
-        let mut messages = history::messages(&prefix,settings.system_prompt(&self.inner.config.cwd).await?, &selected, &self.inner.config.attachment_root).await?;
+        let mut messages = history::messages(&prefix,settings.system_prompt(&selected, &self.inner.config.cwd).await?, &selected, &self.inner.config.attachment_root).await?;
         if !native { messages.push(json!({"role":"user","content":format!("Summarize this conversation for another coding agent. Preserve goals, decisions, files changed, commands run, pending work, and important constraints. Do not continue the task. {instructions}")})); }
         else if !instructions.is_empty() { messages.push(json!({"role":"user","content":format!("Compaction instructions: {instructions}")})); }
         let (updates, _receiver) = mpsc::channel(1);
@@ -360,7 +360,7 @@ impl AgentManager {
                 json!({"role":"user","content":settings.daemon.title_prompt.replace("{text}",&text)})];
             let (updates,_receiver)=mpsc::channel(1);
             tokio::time::timeout(std::time::Duration::from_secs(30),provider::generate(&self.inner.http,&self.inner.auth,provider::Request {
-                settings:&settings,selected:&stored.model,thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Summary,
+                settings:&settings,selected:settings.daemon.title_model.as_ref().unwrap_or(&stored.model),thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Summary,
             },updates)).await.ok().and_then(Result::ok).and_then(|completion|completion.message["content"].as_str().map(str::to_owned))
                 .map(|title|title.trim().to_owned()).filter(|title|title.chars().count()>1 && title.chars().count()<=crate::protocol::MAX_TITLE_CHARS && !title.contains(['\n','\r']))
         } else { None };

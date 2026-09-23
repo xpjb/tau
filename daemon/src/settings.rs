@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -10,22 +11,31 @@ use crate::state::SessionModel;
 pub use tau_protocol::settings::*;
 
 pub(crate) trait SettingsExt {
-    fn model(&self, selected: &SessionModel) -> Result<&ModelSettings>;
+    fn model(&self, selected: &SessionModel) -> Result<Cow<'_, ModelSettings>>;
     fn validate(&self) -> Result<()>;
-    fn system_prompt(&self, cwd: &Path) -> impl std::future::Future<Output = Result<String>> + Send;
+    fn system_prompt(&self, selected: &SessionModel, cwd: &Path) -> impl std::future::Future<Output = Result<String>> + Send;
 }
 impl SettingsExt for Settings {
-    fn model(&self, selected: &SessionModel) -> Result<&ModelSettings> {
-        self.models.iter().find(|model| model.provider == selected.provider && model.id == selected.model_id)
-            .with_context(|| format!("Model {}/{} is not in daemon settings", selected.provider, selected.model_id))
+    fn model(&self, selected: &SessionModel) -> Result<Cow<'_, ModelSettings>> {
+        let slug = format!("{}/{}", selected.provider, selected.model_id);
+        let parsed: SessionModel = slug.parse().map_err(anyhow::Error::msg)?;
+        if parsed != *selected { bail!("Invalid provider/model"); }
+        if !self.providers.contains_key(&selected.provider) { bail!("Configure provider {} in daemon settings", selected.provider); }
+        Ok(match self.models.iter().find(|model| model.provider == selected.provider && model.id == selected.model_id) {
+            Some(model) => Cow::Borrowed(model),
+            None => Cow::Owned(ModelSettings { provider: selected.provider.clone(), id: selected.model_id.clone(), ..ModelSettings::default() }),
+        })
     }
     fn validate(&self) -> Result<()> {
-        if self.schema != 1 { bail!("Unsupported settings schema {}", self.schema); }
-        if self.models.is_empty() || self.models.len() > 4096 { bail!("Configure 1–4096 models"); }
+        if self.schema != 2 { bail!("Unsupported settings schema {}", self.schema); }
+        if self.models.len() > 4096 { bail!("Configure at most 4096 model metadata records"); }
         self.model(&self.agent.model)?;
+        if let Some(model) = &self.daemon.title_model { self.model(model)?; }
         let mut ids = std::collections::HashSet::new();
         for model in &self.models {
-            if model.id.is_empty() || model.context_window < 1024 || model.context_window > 100_000_000
+            let slug = format!("{}/{}", model.provider, model.id);
+            let parsed: SessionModel = slug.parse().map_err(anyhow::Error::msg)?;
+            if parsed.provider != model.provider || model.context_window.is_some_and(|n| !(1024..=100_000_000).contains(&n))
                 || !self.providers.contains_key(&model.provider) || !ids.insert((&model.provider, &model.id)) {
                 bail!("Invalid or duplicate model {}", model.id);
             }
@@ -48,34 +58,27 @@ impl SettingsExt for Settings {
             || self.daemon.idle_timeout_seconds > 604800 || !self.agent.shell_path.is_absolute() {
             bail!("Invalid agent limits");
         }
-        for (path, prompt) in &self.agent.project_prompts {
-            if !path.is_absolute() { bail!("Project prompt paths must be absolute"); }
-            for text in [prompt.system_prompt.as_deref().unwrap_or_default(), &prompt.append_system_prompt] {
-                if text.chars().count() > crate::protocol::MAX_PROMPT_CHARS { bail!("Project prompt is too long"); }
-            }
+        for slug in self.agent.model_system_prompts.keys() {
+            let _: SessionModel = slug.parse().map_err(anyhow::Error::msg)?;
         }
-        for text in [&self.daemon.title_prompt, self.agent.system_prompt.as_deref().unwrap_or_default(), &self.agent.append_system_prompt] {
+        for text in [&self.daemon.title_prompt, &self.agent.system_prompt].into_iter().chain(self.agent.model_system_prompts.values()) {
             if text.chars().count() > crate::protocol::MAX_PROMPT_CHARS { bail!("Prompt is too long"); }
         }
         if serde_json::to_vec(self)?.len() > 900_000 { bail!("Settings exceed 900 KB"); }
         Ok(())
     }
 
-    async fn system_prompt(&self, cwd: &Path) -> Result<String> {
-        let project = self.agent.project_prompts.iter().filter(|(path, _)| cwd.starts_with(path))
-            .max_by_key(|(path, _)| path.components().count()).map(|(_, prompt)| prompt);
-        let mut prompt = project.and_then(|p| p.system_prompt.as_ref()).or(self.agent.system_prompt.as_ref())
-            .map(String::as_str).unwrap_or(DEFAULT_SYSTEM_PROMPT).to_owned();
-        prompt.push_str(&format!("\n\n{}", self.agent.append_system_prompt));
-        if let Some(project) = project { prompt.push_str(&format!("\n\n{}", project.append_system_prompt)); }
-        if self.agent.load_project_instructions {
+    async fn system_prompt(&self, selected: &SessionModel, cwd: &Path) -> Result<String> {
+        let slug = format!("{}/{}", selected.provider, selected.model_id);
+        let mut prompt = self.agent.model_system_prompts.get(&slug).unwrap_or(&self.agent.system_prompt).clone();
+        if self.agent.load_agents_files {
             for directory in cwd.ancestors().collect::<Vec<_>>().into_iter().rev() {
                 let path = directory.join("AGENTS.md");
                 match tokio::fs::read_to_string(&path).await {
-                    Ok(text) if text.len() <= 1024 * 1024 => prompt.push_str(&format!("\n\nProject instructions ({}):\n{text}", path.display())),
-                    Ok(_) => bail!("Project instructions {} exceed 1 MB", path.display()),
+                    Ok(text) if text.len() <= 1024 * 1024 => prompt.push_str(&format!("\n\nAGENTS.md instructions ({}):\n{text}", path.display())),
+                    Ok(_) => bail!("AGENTS.md instructions {} exceed 1 MB", path.display()),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-                    Err(error) => return Err(error).context("Could not read project instructions"),
+                    Err(error) => return Err(error).context("Could not read AGENTS.md instructions"),
                 }
             }
         }
@@ -88,8 +91,30 @@ impl SettingsExt for Settings {
 pub struct SettingsStore { path: PathBuf, value: Arc<RwLock<Settings>>, gate: Arc<Mutex<()>> }
 impl SettingsStore {
     pub async fn load(config: &crate::config::Config, title_prompt: String) -> Result<Self> {
-        let mut settings = match tokio::fs::read(&config.settings_path).await {
-            Ok(bytes) => serde_json::from_slice::<Settings>(&bytes).context("Invalid daemon settings")?,
+        let settings = match tokio::fs::read(&config.settings_path).await {
+            Ok(bytes) => {
+                let mut value: Value = serde_json::from_slice(&bytes).context("Invalid daemon settings")?;
+                if value["schema"] == 1 {
+                    let agent = value["agent"].as_object_mut().context("Invalid agent settings")?;
+                    if let Some(projects) = agent.remove("projectPrompts")
+                        && !projects.as_object().is_some_and(|p| p.is_empty()) {
+                        bail!("Project prompt settings were removed; put their text in the default or model prompt before upgrading");
+                    }
+                    let mut prompt = match agent.remove("systemPrompt") {
+                        Some(Value::String(text)) => text,
+                        None | Some(Value::Null) => DEFAULT_SYSTEM_PROMPT.into(),
+                        _ => bail!("Invalid default system prompt"),
+                    };
+                    if let Some(append) = agent.remove("appendSystemPrompt") {
+                        let append = append.as_str().context("Invalid append prompt")?;
+                        if !append.is_empty() { prompt.push_str("\n\n"); prompt.push_str(append); }
+                    }
+                    agent.insert("systemPrompt".into(), Value::String(prompt));
+                    if let Some(enabled) = agent.remove("loadProjectInstructions") { agent.insert("loadAgentsFiles".into(), enabled); }
+                    value["schema"] = Value::from(2);
+                }
+                serde_json::from_value::<Settings>(value).context("Invalid daemon settings")?
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut settings = Settings::default();
                 settings.daemon.title_prompt = title_prompt;
@@ -111,16 +136,9 @@ impl SettingsStore {
                     }
                     if let Some(v) = legacy.get("shellPath").and_then(Value::as_str) { settings.agent.shell_path = v.into(); }
                     if let Some(v) = legacy.get("shellCommandPrefix").and_then(Value::as_str) { settings.agent.shell_command_prefix = v.into(); }
-                    for (file, append) in [("SYSTEM.md", false), ("APPEND_SYSTEM.md", true)] {
-                        if let Some(text) = optional_text(&dir.join(file)).await? {
-                            if append { settings.agent.append_system_prompt = text; } else { settings.agent.system_prompt = Some(text); }
-                        }
-                    }
-                    let project = config.cwd.join(".pi");
-                    let override_prompt = PromptOverride { system_prompt: optional_text(&project.join("SYSTEM.md")).await?,
-                        append_system_prompt: optional_text(&project.join("APPEND_SYSTEM.md")).await?.unwrap_or_default() };
-                    if override_prompt.system_prompt.is_some() || !override_prompt.append_system_prompt.is_empty() {
-                        settings.agent.project_prompts.insert(config.cwd.clone(), override_prompt);
+                    if let Some(text) = optional_text(&dir.join("SYSTEM.md")).await? { settings.agent.system_prompt = text; }
+                    if let Some(text) = optional_text(&dir.join("APPEND_SYSTEM.md")).await? && !text.is_empty() {
+                        settings.agent.system_prompt.push_str("\n\n"); settings.agent.system_prompt.push_str(&text);
                     }
                     if let Some(text) = optional_text(&dir.join("codex-fast-mode.json")).await? {
                         let raw: Value = serde_json::from_str(&text)?;
@@ -136,7 +154,7 @@ impl SettingsStore {
                         for provider in settings.providers.keys() {
                             for model in raw.get(provider).and_then(|v| v.get("models")).and_then(Value::as_array).into_iter().flatten() {
                                 models.push(ModelSettings { provider: provider.clone(), id: model["id"].as_str().context("Legacy model has no ID")?.into(),
-                                    name: model["name"].as_str().unwrap_or_default().into(), context_window: model["contextWindow"].as_u64().unwrap_or(128000),
+                                    name: model["name"].as_str().unwrap_or_default().into(), context_window: model["contextWindow"].as_u64(),
                                     thinking_level_map: if model.get("reasoning").and_then(Value::as_bool) == Some(false) {
                                         LEVELS.iter().map(|level| ((*level).to_owned(), None)).collect()
                                     } else { model.get("thinkingLevelMap").map(|v| serde_json::from_value(v.clone())).transpose()?.unwrap_or_default() } });
@@ -158,8 +176,6 @@ impl SettingsStore {
             Err(error) => return Err(error).context("Could not read daemon settings"),
         };
         settings.validate()?;
-        // Revision zero is a valid initial revision; every edit uses compare-and-swap.
-        settings.schema = 1;
         Ok(Self { path: config.settings_path.clone(), value: Arc::new(RwLock::new(settings)), gate: Arc::new(Mutex::new(())) })
     }
     pub fn get(&self) -> Settings { self.value.read().unwrap_or_else(|e| e.into_inner()).clone() }

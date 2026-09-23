@@ -30,7 +30,7 @@ pub struct Controller {
     pub chats: HashMap<String, Chat>,
     pub downloads: HashMap<String, Download>,
     pub settings_result: Option<(String, bool)>,
-    pub daemon_settings: Option<(tau_protocol::settings::Settings, String)>,
+    pub daemon_settings: Option<tau_protocol::settings::Settings>,
     pub connection: String,
     pub health: crate::connection::Health,
     pub epoch: Option<u64>,
@@ -404,12 +404,11 @@ impl Controller {
         );
         let chat = &self.chats[session];
         ensure!(
-            chat.commands_loaded && chat.model_request.is_none(),
-            "Wait for model selection/catalog to finish"
+            chat.model_request.is_none(),
+            "Wait for model selection to finish"
         );
-        let slug = crate::models::resolve(selector, &chat.commands)
-            .ok_or_else(|| anyhow::anyhow!("That model is not offered by this daemon"))?
-            .to_owned();
+        let _: tau_protocol::SessionModel = selector.parse().map_err(anyhow::Error::msg)?;
+        let slug = selector.to_owned();
         // /model already persists the last chosen model in the daemon.
         // Send even when it matches this chat: another chat may have changed
         // the remembered default. Only an explicit tile click reaches here.
@@ -763,10 +762,9 @@ impl Controller {
             }
             ServerMessage::Settings {
                 settings,
-                default_system_prompt,
                 ..
             } => {
-                self.daemon_settings = Some((*settings, default_system_prompt));
+                self.daemon_settings = Some(*settings);
             }
             ServerMessage::Notice { message, .. } => self.notice = Some(message),
             ServerMessage::ResyncRequired { session_id } => {

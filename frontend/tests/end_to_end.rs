@@ -11,6 +11,9 @@ use tau_frontend::{
 };
 use tau_protocol::*;
 
+#[path = "../src/daemon_settings.rs"]
+mod daemon_settings;
+
 async fn until(c: &mut Controller, condition: impl Fn(&Controller) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(12);
     loop {
@@ -90,7 +93,7 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     });
     let mut daemon_settings = tau_protocol::settings::Settings::default();
     daemon_settings.daemon.idle_timeout_seconds = 0;
-    daemon_settings.agent.load_project_instructions = false;
+    daemon_settings.agent.load_agents_files = false;
     let endpoint = daemon_settings.providers.get_mut("openai-codex").unwrap();
     endpoint.api = tau_protocol::settings::Api::ChatCompletions;
     endpoint.base_url = format!("http://{model_address}");
@@ -258,9 +261,31 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     );
     c.request(ClientCommand::GetSettings).unwrap();
     until(&mut c, |c| c.daemon_settings.is_some()).await;
-    let mut document = c.daemon_settings.as_ref().unwrap().0.clone();
-    document.daemon.title_prompt = "\n  exact whitespace  \n".into();
-    document.agent.system_prompt = Some(String::new());
+    let mut draft = daemon_settings::Draft::new(c.daemon_settings.as_ref().unwrap(), c.identity.clone()).unwrap();
+    assert_eq!(draft.identity, c.identity);
+    assert_eq!(draft.revision, 0);
+    assert_eq!(daemon_settings::SECTIONS[draft.section], "Prompts");
+    assert_eq!(draft.definition().name, "Default system prompt");
+    assert!(!draft.definition().help.is_empty());
+    draft.apply("Default exact\n").unwrap();
+    draft.field = 1;
+    draft.apply("openai-codex/gpt-6-astra").unwrap();
+    draft.field = 2;
+    assert_eq!(draft.text().unwrap(), "Default exact\n");
+    assert!(draft.inherit);
+    draft.inherit = false;
+    draft.apply("").unwrap();
+    assert_eq!(draft.text().unwrap(), "");
+    assert!(!draft.inherit);
+    assert_eq!(draft.reset().unwrap(), "Default exact\n");
+    draft.inherit = false;
+    draft.apply("").unwrap();
+    draft.section = 0;
+    draft.field = 1;
+    draft.apply("openai-codex/title-without-metadata").unwrap();
+    draft.field = 2;
+    draft.apply("\n  exact whitespace  \n").unwrap();
+    let document = draft.document().unwrap();
     c.request(ClientCommand::SetSettings {
         revision: document.revision,
         settings: Box::new(document.clone()),
@@ -269,23 +294,14 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     until(&mut c, |c| {
         c.daemon_settings
             .as_ref()
-            .is_some_and(|(s, _)| s.revision == 1)
+            .is_some_and(|s| s.revision == 1)
     })
     .await;
-    assert_eq!(
-        c.daemon_settings
-            .as_ref()
-            .unwrap()
-            .0
-            .agent
-            .system_prompt
-            .as_deref(),
-        Some("")
-    );
-    assert_eq!(
-        c.daemon_settings.as_ref().unwrap().0.daemon.title_prompt,
-        "\n  exact whitespace  \n"
-    );
+    let saved = c.daemon_settings.as_ref().unwrap();
+    assert_eq!(saved.agent.system_prompt, "Default exact\n");
+    assert_eq!(saved.agent.model_system_prompts["openai-codex/gpt-6-astra"], "");
+    assert_eq!(saved.daemon.title_model.as_ref().unwrap().model_id, "title-without-metadata");
+    assert_eq!(saved.daemon.title_prompt, "\n  exact whitespace  \n");
     c.notice = None;
     c.request(ClientCommand::SetSettings {
         revision: 0,
@@ -346,6 +362,19 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
             .any(|s| s.id == session || s.id == child)
     })
     .await;
+    c.new_chat().unwrap();
+    until(&mut c, |c| c.selected().is_some_and(|chat| chat.feed.synchronized)).await;
+    let starter = c.account.selected.clone().unwrap();
+    c.draft("Keep my draft".into()).unwrap();
+    c.chats.get_mut(&starter).unwrap().commands.clear();
+    c.chats.get_mut(&starter).unwrap().commands_loaded = false;
+    c.choose_model(&starter, "openai-codex/unlisted-exact-id").unwrap();
+    until(&mut c, |c| c.chats[&starter].model_request.is_none()
+        && c.account.sessions.iter().any(|s| s.id == starter && s.model.as_ref().is_some_and(|m| m.model_id == "unlisted-exact-id"))).await;
+    assert_eq!(c.chats[&starter].local.draft, "Keep my draft");
+    assert!(c.account.sessions.iter().find(|s| s.id == starter).unwrap().context_usage.is_none());
+    c.request(ClientCommand::DeleteSession { session_id:starter.clone() }).unwrap();
+    until(&mut c, |c| !c.account.sessions.iter().any(|s| s.id == starter)).await;
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(!root.join("state.json").exists() && !root.join("sessions").exists());
     drop(c);

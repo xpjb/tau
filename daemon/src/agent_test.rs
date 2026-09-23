@@ -49,7 +49,7 @@ async fn fixture(model: &ModelServer, api: Api) -> (tempfile::TempDir, AgentMana
         telemetry_path:root_path.join("crashes.jsonl"), attachment_root:root_path.join("outbox"), upload_root:root_path.join("uploads") };
     tokio::fs::create_dir_all(&config.attachment_root).await.unwrap();
     let mut settings = Settings::default();
-    settings.agent.load_project_instructions = false; settings.agent.retry.base_delay_ms = 1; settings.daemon.idle_timeout_seconds = 0;
+    settings.agent.load_agents_files = false; settings.agent.retry.base_delay_ms = 1; settings.daemon.idle_timeout_seconds = 0;
     let provider = settings.providers.get_mut("openai-codex").unwrap(); provider.api = api; provider.base_url = model.url.clone(); provider.web_search = false;
     tokio::fs::write(&config.settings_path, serde_json::to_vec(&settings).unwrap()).await.unwrap();
     let auth = if api == Api::Codex { json!({"type":"oauth","access":"fixture-access","refresh":"unused","accountId":"fixture-account","expires":u64::MAX}) } else { json!({"type":"api_key","key":"fixture-key"}) };
@@ -386,7 +386,7 @@ async fn imports_deployed_pi_history_read_only_into_sqlite_without_rerunning_too
     let mut settings = manager.inner.settings.get();
     assert_eq!(settings.daemon.title_prompt, "Legacy title template"); assert!(settings.agent.fast_mode && settings.agent.compaction.native_codex);
     assert_eq!(settings.agent.thinking_level, "high"); assert_eq!(settings.agent.retry.max_retries,2);
-    assert_eq!(settings.agent.system_prompt.as_deref(), Some("Global replacement"));
+    assert_eq!(settings.agent.system_prompt, "Global replacement\n\nGlobal append");
     settings.providers.get_mut("openai-codex").unwrap().base_url = model.url.clone();
     manager.set_settings(settings.revision,settings).await.unwrap();
     let (url,server) = serve(&manager).await; let mut client = Client::connect(&url).await;
@@ -399,8 +399,9 @@ async fn imports_deployed_pi_history_read_only_into_sqlite_without_rerunning_too
     let payload = model.request().await;
     assert_eq!(payload["reasoning"]["effort"],"max", "Saved chat thinking takes precedence over the default");
     assert_eq!(payload["service_tier"],"priority");
-    assert!(payload["instructions"].as_str().unwrap().starts_with("Project replacement"));
-    for text in ["Global append","Project append","Project instructions"] { assert!(payload["instructions"].as_str().unwrap().contains(text)); }
+    assert!(payload["instructions"].as_str().unwrap().starts_with("Global replacement\n\nGlobal append"));
+    assert!(payload["instructions"].as_str().unwrap().contains("AGENTS.md instructions"));
+    for text in ["Project replacement", "Project append"] { assert!(!payload["instructions"].as_str().unwrap().contains(text)); }
     assert!(!payload.to_string().contains("Abandoned task"));
     assert!(payload["input"].as_array().unwrap().iter().any(|item| item["type"] == "function_call_output" && item["call_id"] == "call_old" && item["output"].as_str().unwrap().contains("effects are unknown")));
     client.until(|message| message["type"] == "session_state" && message["status"] == "idle").await;
@@ -650,16 +651,160 @@ async fn cross_provider_image_tool_uses_codex_without_changing_the_chat_model_or
 #[tokio::test]
 async fn native_title_request_uses_configured_prompt_and_never_overwrites_a_manual_name() {
     let gate=Arc::new(Notify::new()); let mut reply=completion("Generated title",vec![]); reply.gate=Some(gate.clone());
-    let mut model=ModelServer::start(vec![reply]).await;
+    let mut model=ModelServer::start(vec![reply,completion("Chat model title",vec![]),Reply {
+        status:400, bytes:br#"{"error":{"message":"Title model rejected"}}"#.to_vec(), gate:None, body_gate:None,
+    }]).await;
     let (_root,manager,_url,server)=fixture(&model,Api::ChatCompletions).await;
     let mut settings=manager.inner.settings.get(); settings.daemon.generate_titles=true; settings.daemon.title_prompt="Exact template: {text}\n".into();
+    settings.daemon.title_model=Some("openai-codex/title-without-metadata".parse().unwrap());
     manager.set_settings(settings.revision,settings).await.unwrap();
     let id=manager.create_session(None).await.unwrap(); let task_manager=manager.clone(); let task_id=id.clone();
     let title=tokio::spawn(async move { task_manager.title_after_prompt(&task_id,"Example task").await; });
     let request=model.request().await;
+    assert_eq!(request["model"],"title-without-metadata");
+    assert_eq!(manager.inner.state.get(&id).await.unwrap().unwrap().model.model_id,"gpt-6-astra");
+    assert_eq!(manager.inner.settings.get().agent.model.model_id,"gpt-6-astra");
     assert_eq!(request["messages"][1]["content"],"Exact template: Example task\n");
     assert!(request["tools"].as_array().is_none_or(|tools|tools.is_empty()));
     manager.rename_session(&id,"Manually named").await.unwrap(); gate.notify_one(); title.await.unwrap();
     assert_eq!(manager.inner.state.get(&id).await.unwrap().unwrap().title,"Manually named");
+    let mut settings=manager.inner.settings.get(); settings.daemon.title_model=None;
+    manager.set_settings(settings.revision,settings).await.unwrap();
+    let next=manager.create_session(None).await.unwrap();
+    manager.title_after_prompt(&next,"Next task").await;
+    assert_eq!(model.request().await["model"],"gpt-6-astra");
+    assert_eq!(manager.inner.state.get(&next).await.unwrap().unwrap().title,"Chat model title");
+    let failed=manager.create_session(None).await.unwrap();
+    manager.title_after_prompt(&failed,"Fallback first line\nMore text").await;
+    model.request().await;
+    assert_eq!(manager.inner.state.get(&failed).await.unwrap().unwrap().title,"Fallback first line");
     manager.shutdown().await; server.abort();
+}
+
+#[tokio::test]
+async fn model_prompt_overrides_and_unlisted_ids_reach_both_providers_and_survive_restart() {
+    for api in [Api::Codex, Api::ChatCompletions] {
+        let gate = Arc::new(Notify::new());
+        let mut replies = Vec::new();
+        for _ in 0..5 {
+            let mut reply = if api == Api::Codex { codex("Reply",vec![]) } else { completion("Reply",vec![]) };
+            reply.gate = Some(gate.clone()); replies.push(reply);
+        }
+        replies.push(if api == Api::Codex { codex("",vec![json!({"type":"compaction","encrypted_content":"fixture-checkpoint"})]) }
+            else { completion("Summary",vec![]) });
+        let credential = if api == Api::Codex { "fixture-access" } else { "fixture-key" };
+        replies.push(Reply { status:400, bytes:json!({"error":{"message":format!("No such model: fixture-missing ({credential})")}}).to_string().into_bytes(),
+            gate:Some(gate.clone()), body_gate:None });
+        let mut model = ModelServer::start(replies).await;
+        let (root, manager, url, server) = fixture(&model, api).await;
+        tokio::fs::write(root.path().join("AGENTS.md"), "File context stays separate").await.unwrap();
+        let mut client = Client::connect(&url).await;
+        let mut settings = manager.inner.settings.get();
+        settings.models.clear();
+        settings.agent.system_prompt = "Default exact\n".into();
+        settings.agent.model_system_prompts.insert("openai-codex/gpt-6-astra".into(), String::new());
+        settings.agent.model_system_prompts.insert("openai-codex/gpt-6-sol".into(), "  Model exact\n".into());
+        settings.agent.load_agents_files = true;
+        settings.agent.compaction.reserve_tokens = 100_000_000;
+        assert_eq!(client.request(json!({"id":"settings","type":"set_settings","revision":settings.revision,"settings":settings})).await["ok"],true);
+        let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        client.open(&id).await;
+        for (index, (model_id, prefix)) in [("gpt-6-astra",""), ("gpt-6-sol","  Model exact\n"), ("unlisted/exact-id","Default exact\n")].into_iter().enumerate() {
+            assert_eq!(client.request(json!({"id":format!("select-{index}"),"type":"prompt","sessionId":id,"text":format!("/model openai-codex/{model_id}")})).await["ok"],true);
+            assert_eq!(client.request(json!({"id":format!("turn-{index}"),"type":"prompt","sessionId":id,"text":"Check prompt"})).await["ok"],true);
+            let request = model.request().await;
+            assert_eq!(request["model"],model_id);
+            let prompt = if api == Api::Codex { request["instructions"].as_str().unwrap() } else { request["messages"][0]["content"].as_str().unwrap() };
+            assert!(prompt.starts_with(&format!("{prefix}\n\nAGENTS.md instructions")),"{prompt}");
+            assert!(!prompt.contains(crate::settings::DEFAULT_SYSTEM_PROMPT));
+            assert!(prompt.contains("File context stays separate"));
+            assert!(request["tools"].as_array().unwrap().len()>1,"Empty prompt must keep tools");
+            gate.notify_one();
+            let idle = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
+            assert!(idle["contextUsage"].is_null(),"An unlisted model has no invented capacity");
+        }
+        let mut settings = manager.inner.settings.get(); settings.agent.system_prompt.clear();
+        assert_eq!(client.request(json!({"id":"empty-default","type":"set_settings","revision":settings.revision,"settings":settings})).await["ok"],true);
+        client.request(json!({"id":"empty-turn","type":"prompt","sessionId":id,"text":"Empty default stays empty"})).await;
+        let request = model.request().await;
+        let prompt = if api == Api::Codex { &request["instructions"] } else { &request["messages"][0]["content"] };
+        assert!(prompt.as_str().unwrap().starts_with("\n\nAGENTS.md instructions"));
+        gate.notify_one(); client.until(|m| m["type"] == "session_state" && m["status"] == "idle").await;
+        let saved: Value = serde_json::from_slice(&tokio::fs::read(&manager.inner.config.settings_path).await.unwrap()).unwrap();
+        assert_eq!(saved["agent"]["systemPrompt"],"");
+        assert_eq!(saved["agent"]["modelSystemPrompts"]["openai-codex/gpt-6-astra"],"");
+        assert!(saved["agent"].get("projectPrompts").is_none());
+        assert!(saved["agent"].get("appendSystemPrompt").is_none());
+        let config = manager.inner.config.clone();
+        drop(client); manager.shutdown().await; server.abort();
+        let manager = AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
+        assert_eq!(manager.inner.settings.get().agent.system_prompt,"");
+        assert_eq!(manager.inner.settings.get().agent.model_system_prompts["openai-codex/gpt-6-astra"],"");
+        let (url,server) = serve(&manager).await; let mut client = Client::connect(&url).await;
+        client.open(&id).await;
+        let mut settings = manager.inner.settings.get();
+        settings.agent.system_prompt = "Changed default".into(); settings.agent.model_system_prompts.remove("openai-codex/gpt-6-astra");
+        client.request(json!({"id":"inherit-default","type":"set_settings","revision":settings.revision,"settings":settings})).await;
+        client.request(json!({"id":"select-astra","type":"prompt","sessionId":id,"text":"/model openai-codex/gpt-6-astra"})).await;
+        client.request(json!({"id":"inherit-turn","type":"prompt","sessionId":id,"text":"Use saved default"})).await;
+        let request = model.request().await;
+        let prompt = if api == Api::Codex { &request["instructions"] } else { &request["messages"][0]["content"] };
+        assert!(prompt.as_str().unwrap().starts_with("Changed default\n\nAGENTS.md instructions"));
+        gate.notify_one(); client.until(|m| m["type"] == "session_state" && m["status"] == "idle").await;
+        let mut settings = manager.inner.settings.get(); settings.agent.model_system_prompts.insert("openai-codex/gpt-6-astra".into(),String::new());
+        client.request(json!({"id":"empty-again","type":"set_settings","revision":settings.revision,"settings":settings})).await;
+        assert_eq!(client.request(json!({"id":"compact-empty","type":"prompt","sessionId":id,"text":"/compact"})).await["ok"],true);
+        let request = model.request().await;
+        let prompt = if api == Api::Codex { &request["instructions"] } else { &request["messages"][0]["content"] };
+        assert!(prompt.as_str().unwrap().starts_with("\n\nAGENTS.md instructions"),"Compaction uses the same selected-model prompt");
+        let failed = client.request(json!({"id":"create-missing","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        client.open(&failed).await;
+        assert_eq!(client.request(json!({"id":"select-missing","type":"prompt","sessionId":failed,"text":"/model openai-codex/fixture-missing"})).await["ok"],true);
+        client.request(json!({"id":"missing-turn","type":"prompt","sessionId":failed,"text":"Try the exact ID"})).await;
+        assert_eq!(model.request().await["model"],"fixture-missing"); gate.notify_one();
+        let error = client.until(|m| m["type"] == "session_state" && m["sessionId"] == failed && m["status"] == "error").await;
+        let detail = error["detail"].as_str().unwrap();
+        assert!(detail.contains("HTTP 400") && detail.contains("No such model: fixture-missing"),"{detail}");
+        assert!(!detail.contains(credential));
+        assert!(model.requests.try_recv().is_err(),"Provider 400 errors are not retried");
+        manager.shutdown().await; server.abort();
+    }
+}
+
+#[tokio::test]
+async fn saved_settings_keep_exact_text_without_a_third_prompt_layer() {
+    use crate::settings::SettingsExt;
+    let model = ModelServer::start(vec![]).await;
+    let (_root, manager, _, server) = fixture(&model, Api::Codex).await;
+    let config = manager.inner.config.clone(); manager.shutdown().await; server.abort();
+    for (old, append, expected) in [(Value::Null,"",crate::settings::DEFAULT_SYSTEM_PROMPT), (json!(""),"",""), (json!("Custom\n"),"Append","Custom\n\n\nAppend")] {
+        let mut value = serde_json::to_value(manager.inner.settings.get()).unwrap();
+        value["schema"] = json!(1); value["agent"]["systemPrompt"] = old;
+        value["agent"]["appendSystemPrompt"] = json!(append); value["agent"]["projectPrompts"] = json!({});
+        let agent = value["agent"].as_object_mut().unwrap();
+        agent.remove("loadAgentsFiles"); agent.insert("loadProjectInstructions".into(),json!(false));
+        agent.remove("modelSystemPrompts");
+        let bytes = serde_json::to_vec(&value).unwrap(); tokio::fs::write(&config.settings_path,&bytes).await.unwrap();
+        let store = crate::settings::SettingsStore::load(&config,String::new()).await.unwrap();
+        let settings = store.get();
+        assert_eq!(settings.schema,2); assert_eq!(settings.agent.system_prompt,expected);
+        assert_eq!(tokio::fs::read(&config.settings_path).await.unwrap(),bytes,"Loading does not rewrite the settings file");
+        let mut settings = settings.clone();
+        settings.agent.model_system_prompts.insert("openai-codex/gpt-6-astra".into(),String::new());
+        assert!(settings.system_prompt(&settings.agent.model,&config.cwd).await.unwrap().starts_with("\n\nCurrent working directory:"));
+        store.set(settings.revision,settings).await.unwrap();
+        let restored = crate::settings::SettingsStore::load(&config,String::new()).await.unwrap().get();
+        assert_eq!(restored.agent.model_system_prompts["openai-codex/gpt-6-astra"],"");
+        assert_eq!(restored.agent.system_prompt,expected);
+        value["agent"]["projectPrompts"] = json!({"/somewhere":{"systemPrompt":"Never silently discard text"}});
+        tokio::fs::write(&config.settings_path,serde_json::to_vec(&value).unwrap()).await.unwrap();
+        assert!(crate::settings::SettingsStore::load(&config,String::new()).await.is_err());
+    }
+    let mut settings = manager.inner.settings.get(); settings.models.clear(); settings.validate().unwrap();
+    settings.agent.model_system_prompts.insert("invalid".into(),String::new()); assert!(settings.validate().is_err());
+    settings.agent.model_system_prompts.clear();
+    settings.agent.model_system_prompts.insert("openai-codex/example".into(),"x".repeat(crate::protocol::MAX_PROMPT_CHARS+1));
+    assert!(settings.validate().is_err());
+    settings.agent.model_system_prompts.clear();
+    settings.daemon.title_model=Some("missing-provider/model".parse().unwrap()); assert!(settings.validate().is_err());
 }

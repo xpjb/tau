@@ -15,25 +15,24 @@ Their presence is not a requirement. Model prompt overrides are the priority.
 
 - One settings document and the existing compare-and-swap save. No Pi worker,
   extension, live file mirror or new settings database.
-- Replacement fallback: exact model → daemon default → built-in.
-- Provider-level defaults need user confirmation before adding that layer.
+- Exactly two levels: model override → default system prompt. No provider or
+  built-in fallback layer. The default is ordinary saved text, including empty text.
 - No project concept, project settings section or project prompt override layer.
   The earlier plan carried forward an unwanted implementation detail; that scope
   decision is withdrawn before runtime implementation.
-- `null` inherits; `""` is an intentional replacement that stops fallback. Never
+- A missing model override inherits; `""` is an intentional override. Never
   trim prompt text or treat an empty replacement as missing.
-- Any existing append text and filesystem instructions remain separate from the
-  replacement fallback; do not invent a project settings system for them. Tools
-  remain tools.
+- No separate append-prompt setting. Existing nonempty global append text can be
+  included in the saved default text. AGENTS.md loading and working-directory
+  context stay separate from prompt selection. Tools remain tools.
 - Model targets use the existing settings form and shared editor,
-  with an inherit/custom toggle and a multiline replacement/append field. Advanced
+  with an inherit/custom toggle and a multiline prompt field. Advanced
   JSON still exposes every native runtime setting. Host bind addresses, filesystem
   locations and credentials remain deployment/security configuration, not prompts.
 - Models are optional metadata/prompt overrides, not an allowlist (002). A missing
   context window stays unknown; no made-up capacity or automatic compaction limit.
-- The existing explicit, first-run Tau 1 importer may read old prompts once. Native
-  operation never reads the Pi directory. Existing installations need an explicit
-  settings repair during an idle, matched-client beta upgrade.
+- Set Astra’s native model override to `""` when the matched beta update is applied.
+  No new migration system. Native operation never reads the Pi prompt directory.
 
 ## Acceptance
 

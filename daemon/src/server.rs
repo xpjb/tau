@@ -245,7 +245,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             };
                             match result {
                                 Ok(settings) => {
-                                    queue_server(&response_outbound, &ServerMessage::Settings { request_id:request_id.clone(), settings:Box::new(settings), default_system_prompt:crate::settings::DEFAULT_SYSTEM_PROMPT.into() }).await;
+                                    queue_server(&response_outbound, &ServerMessage::Settings { request_id:request_id.clone(), settings:Box::new(settings) }).await;
                                     ServerMessage::success(request_id, None, None)
                                 }
                                 Err(error) => ServerMessage::command_failure(request_id, error),

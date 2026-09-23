@@ -72,7 +72,7 @@ async fn sigkill_after_ack_recovers_wal_queue_receipts_and_unfinished_turn_witho
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider = format!("http://{}",listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener,app).await.unwrap(); });
-    std::fs::write(root.path().join("settings.json"),json!({"agent":{"loadProjectInstructions":false,"retry":{"enabled":false}},"daemon":{"idleTimeoutSeconds":0},
+    std::fs::write(root.path().join("settings.json"),json!({"agent":{"loadAgentsFiles":false,"retry":{"enabled":false}},"daemon":{"idleTimeoutSeconds":0},
         "providers":{"openai-codex":{"api":"chat_completions","baseUrl":provider,"webSearch":false}}}).to_string()).unwrap();
     let auth = root.path().join("auth.json");
     std::fs::write(&auth,json!({"openai-codex":{"type":"api_key","key":"crash-fixture-key"}}).to_string()).unwrap();

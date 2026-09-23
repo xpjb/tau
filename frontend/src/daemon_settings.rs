@@ -1,6 +1,6 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use tau_protocol::settings::Settings;
+use tau_protocol::{SessionModel, settings::Settings};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -10,7 +10,9 @@ pub enum Kind {
     Bool,
     Json,
     Model,
-    Nullable,
+    OptionalModel,
+    PromptModel,
+    PromptOverride,
 }
 pub struct Field {
     pub name: &'static str,
@@ -31,10 +33,9 @@ macro_rules! field {
 pub const SECTIONS: &[&str] = &[
     "Daemon",
     "Agent",
-    "System",
-    "Projects",
+    "Prompts",
     "Providers",
-    "Models",
+    "Model metadata",
 ];
 pub fn fields(section: usize) -> &'static [Field] {
     match section {
@@ -46,10 +47,16 @@ pub fn fields(section: usize) -> &'static [Field] {
                 "Optional extra provider request. Off uses the first nonempty prompt line. Title generation never delays prompt acknowledgement."
             ),
             field!(
+                "Title model",
+                "/daemon/titleModel",
+                OptionalModel,
+                "Optional provider/model used only for titles. Leave empty to use the chat model. This does not change the chat or new-chat model."
+            ),
+            field!(
                 "Title prompt",
                 "/daemon/titlePrompt",
                 Text,
-                "Exact whitespace is preserved. Empty text is intentional."
+                "Use {text} for the first user message. Exact whitespace is preserved. Empty text is intentional."
             ),
             field!(
                 "Idle runtime timeout (seconds)",
@@ -69,7 +76,7 @@ pub fn fields(section: usize) -> &'static [Field] {
                 "Default thinking level",
                 "/agent/thinkingLevel",
                 Line,
-                "off, minimal, low, medium, high, xhigh or max. Actual support comes from the model catalog."
+                "off, minimal, low, medium, high, xhigh or max. The provider determines support; optional model metadata can map levels."
             ),
             field!(
                 "Per-model thinking defaults",
@@ -128,41 +135,47 @@ pub fn fields(section: usize) -> &'static [Field] {
         ],
         2 => &[
             field!(
-                "System prompt replacement",
+                "Default system prompt",
                 "/agent/systemPrompt",
-                Nullable,
-                "Built-in means null. Custom empty text means an intentionally empty replacement. They are not equivalent."
-            ),
-            field!(
-                "Append system prompt",
-                "/agent/appendSystemPrompt",
                 Text,
-                "Appended exactly after the replacement or built-in system prompt."
+                "Used when a model has no override. This is saved text, not a hidden fallback. Empty text is intentional. Tools are separate."
             ),
             field!(
-                "Load project instructions",
-                "/agent/loadProjectInstructions",
+                "Model to edit",
+                "",
+                PromptModel,
+                "Enter any exact provider/model ID, then use the next field to edit its prompt. No model catalog is required."
+            ),
+            field!(
+                "Model system prompt",
+                "/agent/modelSystemPrompts",
+                PromptOverride,
+                "Model override → default prompt. Inherit uses the saved default; an empty override replaces it with nothing. Tools and AGENTS.md context remain separate."
+            ),
+            field!(
+                "Load AGENTS.md files",
+                "/agent/loadAgentsFiles",
                 Bool,
-                "Read AGENTS.md from the filesystem root down to the daemon working directory."
+                "Read AGENTS.md from the filesystem root down to the working directory. This adds file context; it is not another prompt fallback."
+            ),
+            field!(
+                "All model prompt overrides",
+                "/agent/modelSystemPrompts",
+                Json,
+                "Optional JSON view: provider/model keys map to exact prompt strings. An empty string is an override; remove the key to inherit the default."
             ),
         ],
         3 => &[field!(
-            "Project prompt overrides",
-            "/agent/projectPrompts",
-            Json,
-            "JSON keyed by absolute project path. Values have systemPrompt (null inherits; empty replaces with nothing) and appendSystemPrompt."
-        )],
-        4 => &[field!(
             "Provider endpoints",
             "/providers",
             Json,
             "JSON provider records: api, baseUrl, apiKeyEnv and webSearch. apiKeyEnv is a variable NAME, never an API key. Credentials stay on the daemon."
         )],
         _ => &[field!(
-            "Model catalog",
+            "Optional model metadata",
             "/models",
             Json,
-            "JSON model records: provider, id, name, contextWindow and thinkingLevelMap. Only configure capabilities confirmed by the provider."
+            "Optional name, contextWindow and thinkingLevelMap for each provider/id. This is not an allowlist. Unknown capacity stays unknown; automatic compaction needs a known contextWindow."
         )],
     }
 }
@@ -171,91 +184,94 @@ pub struct Draft {
     pub revision: u64,
     pub section: usize,
     pub field: usize,
-    pub builtin: bool,
-    default_prompt: String,
+    pub inherit: bool,
+    pub prompt_model: String,
     value: Value,
 }
 impl Draft {
-    pub fn new(settings: &Settings, default_prompt: String, identity: String) -> Result<Self> {
+    pub fn new(settings: &Settings, identity: String) -> Result<Self> {
         Ok(Self {
             identity,
             revision: settings.revision,
-            section: 0,
+            section: 2,
             field: 0,
-            builtin: false,
-            default_prompt,
+            inherit: false,
+            prompt_model: format!("{}/{}", settings.agent.model.provider, settings.agent.model.model_id),
             value: serde_json::to_value(settings)?,
         })
     }
-    pub fn builtin_text(&self) -> &str {
-        &self.default_prompt
+    pub fn default_prompt(&self) -> &str {
+        self.value["agent"]["systemPrompt"].as_str().unwrap_or_default()
     }
     pub fn definition(&self) -> &'static Field {
         &fields(self.section)[self.field]
     }
     pub fn text(&mut self) -> Result<String> {
         let definition = self.definition();
-        let value = self
-            .value
-            .pointer(definition.path)
-            .context("Missing settings field")?;
-        self.builtin = definition.kind == Kind::Nullable && value.is_null();
+        if definition.kind == Kind::PromptModel { return Ok(self.prompt_model.clone()); }
+        let value = self.value.pointer(definition.path).context("Missing settings field")?;
+        if definition.kind == Kind::PromptOverride {
+            let prompt = value.get(&self.prompt_model).and_then(Value::as_str);
+            self.inherit = prompt.is_none();
+            return Ok(prompt.unwrap_or_else(|| self.default_prompt()).to_owned());
+        }
         Ok(match definition.kind {
-            Kind::Nullable if self.builtin => self.default_prompt.clone(),
-            Kind::Model => format!(
-                "{}/{}",
-                value["provider"].as_str().unwrap_or_default(),
-                value["modelId"].as_str().unwrap_or_default()
+            Kind::Model | Kind::OptionalModel if !value.is_null() => format!(
+                "{}/{}", value["provider"].as_str().unwrap_or_default(), value["modelId"].as_str().unwrap_or_default()
             ),
-            Kind::Text | Kind::Line | Kind::Nullable => value.as_str().unwrap_or_default().into(),
+            Kind::OptionalModel => String::new(),
+            Kind::Text | Kind::Line => value.as_str().unwrap_or_default().into(),
             Kind::Json => serde_json::to_string_pretty(value)?,
             _ => value.to_string(),
         })
     }
     pub fn apply(&mut self, text: &str) -> Result<()> {
         let field = self.definition();
-        let value = match field.kind {
-            Kind::Nullable if self.builtin => Value::Null,
-            Kind::Text | Kind::Line | Kind::Nullable => json!(text),
-            Kind::Number => json!(
-                text.trim()
-                    .parse::<u64>()
-                    .context("Enter a non-negative whole number")?
-            ),
-            Kind::Bool => json!(text.parse::<bool>().context("Expected true or false")?),
-            Kind::Json => {
-                serde_json::from_str(text).context("Invalid JSON; edits have not been saved")?
-            }
-            Kind::Model => {
-                let (provider, model) =
-                    text.trim().split_once('/').context("Use provider/model")?;
-                ensure!(
-                    self.value["models"].as_array().is_some_and(|models| models
-                        .iter()
-                        .any(|m| m["provider"] == provider && m["id"] == model)),
-                    "That model is not in this daemon's catalog"
-                );
-                json!({"provider":provider,"modelId":model})
-            }
-        };
+        if field.kind == Kind::PromptModel {
+            let _: SessionModel = text.trim().parse().map_err(anyhow::Error::msg)?;
+            self.prompt_model = text.trim().into();
+            return Ok(());
+        }
         let mut candidate = self.value.clone();
-        *candidate
-            .pointer_mut(field.path)
-            .context("Missing settings field")? = value;
-        // Preserve all unedited fields; reject misspelled/secret JSON properties.
-        let _: Settings =
-            serde_json::from_value(candidate.clone()).context("Invalid settings field")?;
-        self.value = candidate;
+        let dest = candidate.pointer_mut(field.path).context("Missing settings field")?;
+        if field.kind == Kind::PromptOverride {
+            let prompts = dest.as_object_mut().context("Invalid prompt overrides")?;
+            if self.inherit { prompts.remove(&self.prompt_model); }
+            else { prompts.insert(self.prompt_model.clone(), json!(text)); }
+        } else {
+            *dest = match field.kind {
+                Kind::Text | Kind::Line => json!(text),
+                Kind::Number => json!(text.trim().parse::<u64>().context("Enter a non-negative whole number")?),
+                Kind::Bool => json!(text.parse::<bool>().context("Expected true or false")?),
+                Kind::Json => serde_json::from_str(text).context("Invalid JSON; edits have not been saved")?,
+                Kind::OptionalModel if text.trim().is_empty() => Value::Null,
+                Kind::Model | Kind::OptionalModel => {
+                    let model: SessionModel = text.trim().parse().map_err(anyhow::Error::msg)?;
+                    serde_json::to_value(model)?
+                }
+                Kind::PromptModel | Kind::PromptOverride => unreachable!(),
+            };
+        }
+        let settings: Settings = serde_json::from_value(candidate).context("Invalid settings field")?;
+        self.value = serde_json::to_value(settings)?;
         Ok(())
     }
     pub fn reset(&mut self) -> Result<String> {
-        let defaults = serde_json::to_value(Settings::default())?;
-        let path = self.definition().path;
-        *self
-            .value
-            .pointer_mut(path)
-            .context("Missing settings field")? =
-            defaults.pointer(path).context("Missing default")?.clone();
+        match self.definition().kind {
+            Kind::PromptOverride => {
+                self.inherit = true;
+                self.apply("")?;
+            }
+            Kind::PromptModel => {
+                self.prompt_model = format!("{}/{}", self.value["agent"]["model"]["provider"].as_str().unwrap_or_default(),
+                    self.value["agent"]["model"]["modelId"].as_str().unwrap_or_default());
+            }
+            _ => {
+                let defaults = serde_json::to_value(Settings::default())?;
+                let path = self.definition().path;
+                *self.value.pointer_mut(path).context("Missing settings field")? = defaults.pointer(path).context("Missing default")?.clone();
+            }
+        }
         self.text()
     }
     pub fn document(&self) -> Result<Settings> {

@@ -4,7 +4,7 @@ pub mod settings;
 mod transcript;
 pub use transcript::*;
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -137,7 +137,7 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    Settings { request_id: String, settings: Box<settings::Settings>, default_system_prompt: String },
+    Settings { request_id: String, settings: Box<settings::Settings> },
     Commands {
         session_id: String,
         commands: Vec<SlashCommand>,
@@ -350,4 +350,16 @@ pub struct CrashFrame {
 pub struct SessionModel {
     pub provider: String,
     pub model_id: String,
+}
+
+impl std::str::FromStr for SessionModel {
+    type Err = &'static str;
+    fn from_str(slug: &str) -> Result<Self, Self::Err> {
+        let (provider, model) = slug.split_once('/').ok_or("Use provider/model")?;
+        if provider.is_empty() || model.is_empty() || slug.len() > 240
+            || slug.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err("Use provider/model without whitespace (up to 240 bytes)");
+        }
+        Ok(Self { provider: provider.into(), model_id: model.into() })
+    }
 }

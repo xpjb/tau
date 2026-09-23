@@ -271,7 +271,7 @@ impl AgentManager {
         queue.run_id = None; queue.control = None;
         if !queue.requests.is_empty() || stored.needs_turn { queue.paused = true; }
         let detail = (queue.paused && (stored.needs_turn || !queue.requests.is_empty())).then(|| "Pending work is paused; resume when ready".to_owned());
-        let usage = settings.model(&stored.model).ok().map(|model| ContextUsage { tokens:stored.tokens,context_window:model.context_window });
+        let usage = settings.model(&stored.model).ok().and_then(|model| model.context_window).map(|context_window| ContextUsage { tokens:stored.tokens,context_window });
         let page = self.inner.state.page(id,None).await?;
         content.transcript = Some(Transcript::new(page,stored.head,stored.next_order,queue));
         content.agent = Some(AgentSession { store:self.inner.state.clone(), revision:stored.revision, model:stored.model, thinking:stored.thinking,
