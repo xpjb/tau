@@ -1,11 +1,11 @@
 # 003 — Complete shared text input navigation
 
-Priority: next editor work. Status: implemented on feature branch; merge/device acceptance pending. Depends on 004; coordinate 006/007.
+Priority: next editor work. Status: merged via frontend into tau2; device acceptance pending. Depends on 004; coordinate 006/007.
 
 Reported in the running Tau 2 composer: Left/Right inconsistently stop at line
 starts or fail to cross lines; Ctrl+Left/Right, Ctrl+Backspace and Up/Down do not
-work. Current `App::key` handles only byte/grapheme Left/Right, Home/End and simple
-delete. The editor stores a byte cursor but no visual-line affinity or goal column.
+work. The old `App::key` handled only byte/grapheme Left/Right, Home/End and simple
+delete. The old editor stored a byte cursor but no visual-line affinity or goal column.
 
 Use Sanscale's placed Caret, Motion and measured layout as in `examples/editor.rs`
 and `examples/code-editor.rs`. Inspect Compendium's controller without overwriting
@@ -17,8 +17,9 @@ Unicode/emoji/ligatures, undo/redo, IME and clipboard. Typing a settings prompt 
 behave like typing a message. Inspect Chad's key translation before blaming shaping.
 Record Sanscale obstacles in 004 rather than adding silent local workarounds.
 
-Ownership: `tau2-sanscale-text-input` in `/root/tau2-text-input`; leave the settings
-worktree untouched. This branch is not merged or deployed.
+Integration: `tau2-sanscale-text-input` through `04fd60c` was fast-forwarded into
+`tau2-rust-frontend`, then `tau2`. The frontend branch is retained. Not deployed;
+physical acceptance and any upstream limitations below remain open.
 
 ## Editor handoff
 

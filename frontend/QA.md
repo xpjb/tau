@@ -245,7 +245,10 @@ session, emulator, full test suite, or Android x86_64 build was started for deli
 
 Isolated worktree `/root/tau2-text-input`, based on the completed settings handoff
 `446ac29`. SDK pinned to `8cc5afe833176a4fc71d1e5b8b97ad4952adfe40` in one workspace
-dependency. No merge, deployment, production account access or daemon restart.
+dependency. The implementation task made no merge, deployment, production account
+access or daemon restart. It was subsequently fast-forwarded through the maintained
+frontend branch into `tau2`; see MERGE.md. Integration changed documentation only
+and did not rerun the suite or convert pending device checks into passes.
 
 Completed on the implementation retained in this branch:
 - Workspace/all-targets check; **64 nextest tests passed**, including 13 new editor

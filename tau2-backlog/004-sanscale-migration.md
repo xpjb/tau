@@ -1,6 +1,6 @@
 # 004 — Migrate to Sanscale's cleaned public API
 
-Priority: before completing the editor fixes. Status: implemented on feature branch; merge/device acceptance pending.
+Priority: before completing the editor fixes. Status: merged via frontend into tau2; device acceptance pending.
 
 `git ls-remote origin refs/heads/master` confirmed published Sanscale commit
 `8cc5afe833176a4fc71d1e5b8b97ad4952adfe40` (API lifetimes and explicit caret geometry).
@@ -19,8 +19,9 @@ minimal example, local impact and proposed upstream change. Do not claim an
 upstream bug from a Tau byte-caret/controller bug. Avoid duplicating Sanscale's
 caret geometry. Validate workspace plus real GPU render and device input paths.
 
-Ownership: `tau2-sanscale-text-input` in `/root/tau2-text-input`; leave the settings
-worktree untouched. This branch is not merged or deployed.
+Integration: `tau2-sanscale-text-input` through `04fd60c` was fast-forwarded into
+`tau2-rust-frontend`, then `tau2`. The frontend branch is retained. Not deployed;
+physical acceptance and any upstream limitations below remain open.
 
 ## Migration handoff
 

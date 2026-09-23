@@ -8,11 +8,11 @@ complete just because code compiles.
 | --- | --- | --- |
 | 001 Daemon settings and hierarchical prompts | First | Implemented; not deployed |
 | 002 Direct model selection without a catalog gate | With 001 | Implemented; not deployed |
-| 003 Text input keyboard navigation | Editor worktree | Implemented on feature branch; device QA pending |
+| 003 Text input keyboard navigation | Editor worktree | Merged via frontend into tau2; device QA pending |
 | 004 Sanscale API migration | Editor worktree | Pinned/migrated; ligature limitation recorded |
 | 005 Highlight colour | Visual | Open |
 | 006 Caret response | Editor worktree | Hot path fixed/measured; physical latency pending |
-| 007 Text input scrolling | Editor worktree | Implemented on feature branch; device QA pending |
+| 007 Text input scrolling | Editor worktree | Merged via frontend into tau2; device QA pending |
 | 008 Click-origin ripple | Visual | Open |
 | 009 Nested tool hover feedback | Visual | Open |
 | 010 Account usage remaining | Context hover | Open |

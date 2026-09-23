@@ -10,8 +10,9 @@ caret smoothing or a polling timer to mask missed redraws.
 Acceptance: distinguish key repeat delay from draw latency, verify immediate caret
 feedback and solid caret after input, record measurements and remaining device QA.
 
-Ownership: `tau2-sanscale-text-input` in `/root/tau2-text-input`; leave the settings
-worktree untouched. This branch is not merged or deployed.
+Integration: `tau2-sanscale-text-input` through `04fd60c` was fast-forwarded into
+`tau2-rust-frontend`, then `tau2`. The frontend branch is retained. Not deployed;
+physical acceptance and any upstream limitations below remain open.
 
 ## Editor handoff
 

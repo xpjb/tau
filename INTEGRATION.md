@@ -110,3 +110,19 @@ refreshes independently. If the primary access token expires, shared access repo
 that it needs primary refresh or independent beta login. No paid live completion was
 made just to claim provider acceptance. The initial device code expired unapproved;
 a fresh approval code is supplied at delivery, not committed here.
+
+
+## Settings and shared-editor integration (development only)
+
+At the user's request, integrated the completed settings handoff `446ac29` and
+shared-editor/Sanscale branch through `04fd60c` into `tau2-rust-frontend` first,
+then into `tau2`. Both updates are fast-forwards; the maintained frontend branch
+and clean feature worktrees remain available. Local `tau2-integration` tracks
+`origin/tau2`, and `/root/tau2` is back on that integration branch.
+
+No source changes beyond the already validated editor/settings implementation;
+this handoff updates branch/status documentation only. Prior test evidence and
+remaining SDK/device checks are in frontend/QA.md. Version 0.7.1/protocol 13 is
+still not deployed. Stable `master`, running services and production data were
+not changed. The archived storage-reconciliation scratch branch is untouched;
+the completed agent implementation was already integrated in `4171a86`.

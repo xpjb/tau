@@ -1,10 +1,10 @@
 # 007 — Repair text box scrolling
 
-Priority: editor. Status: implemented on feature branch; device acceptance pending. Related: 003/004.
+Priority: editor. Status: merged via frontend into tau2; device acceptance pending. Related: 003/004.
 
 The user reports bad scrolling in the composer and recalls fixes in Compendium or
-Sanscale examples. Current `Editor::text_origin` recomputes the entire offset from
-the caret every frame; the editor has no independent viewport scroll state.
+Sanscale examples. The old `Editor::text_origin` recomputed the entire offset from
+the caret every frame; the editor had no independent viewport scroll state.
 
 Compare prior implementations. Keep the caret visible after edits/navigation without
 snapping away from user scrolling. Wheel, selection drag/autoscroll, click hit tests,
@@ -12,8 +12,9 @@ soft wrapping, resize and long settings prompts must use the same content origin
 and visible clip. Avoid inheriting transcript scrolling state. Verify desktop and
 Android IME/touch paths; log Sanscale difficulties under 004.
 
-Ownership: `tau2-sanscale-text-input` in `/root/tau2-text-input`; leave the settings
-worktree untouched. This branch is not merged or deployed.
+Integration: `tau2-sanscale-text-input` through `04fd60c` was fast-forwarded into
+`tau2-rust-frontend`, then `tau2`. The frontend branch is retained. Not deployed;
+physical acceptance and any upstream limitations below remain open.
 
 ## Editor handoff
 

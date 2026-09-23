@@ -5,8 +5,8 @@ No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Pyth
 helper. Android retains a small Java bridge for Android OS APIs.
 
 **0.7.1 development · protocol 13 (not deployed).** This is a separate installation, not a stable-Tau cutover.
-The older frontend snapshot is preserved at `tau2-rust-frontend`; the integrated
-release branch is `tau2`.
+The maintained frontend branch is `tau2-rust-frontend`; the integrated release
+branch is `tau2`. Frontend work lands on the frontend branch before integration.
 
 ## Components
 
