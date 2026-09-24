@@ -87,6 +87,7 @@ impl ChadApp for Desktop {
                 self.app.motion(0, self.cursor);
             }
             WindowEvent::CursorLeft { .. } => self.app.hover(None),
+            WindowEvent::Occluded(occluded) => self.app.set_connection_visible(!occluded),
             WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Focused(true) => {
                 ctx.request_redraw()
             }
@@ -298,6 +299,7 @@ pub fn run() -> Result<(), String> {
         return screenshot(
             Path::new(args.get(1).ok_or("Missing output path")?),
             args.iter().any(|a| a == "--phone"),
+            args.iter().any(|a| a == "--connection-preview"),
         );
     }
     #[cfg(windows)]
@@ -337,7 +339,7 @@ pub fn limits() -> wgpu::Limits {
         ..wgpu::Limits::downlevel_defaults()
     }
 }
-pub fn screenshot(path: &Path, phone: bool) -> Result<(), String> {
+pub fn screenshot(path: &Path, phone: bool, connection_preview: bool) -> Result<(), String> {
     let size = if phone { (1080, 2160) } else { (1280, 900) };
     let ctx = chad::HeadlessCtx::new(&Config {
         size,
@@ -351,6 +353,7 @@ pub fn screenshot(path: &Path, phone: bool) -> Result<(), String> {
     crate::demo::populate(&mut app.controller).map_err(|e| e.to_string())?;
     app.resize(size, if phone { 2.5 } else { 1. }, Vec2::new(0., 0.));
     app.tick(0.);
+    if connection_preview { app.preview_connection(); }
     app.frame(&ctx, ctx.view());
     let rgba = ctx.read_rgba8()?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {

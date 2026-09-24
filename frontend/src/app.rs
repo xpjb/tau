@@ -1,5 +1,6 @@
 use crate::{
     clock,
+    connection::CounterTicker,
     controller::Controller,
     details::{Line as DetailLine, Tools},
     editor::Editor,
@@ -188,6 +189,9 @@ pub struct App {
     info_tip: Tooltip,
     info_target: Info,
     info_areas: Vec<(Rect, Info)>,
+    connection_counter: CounterTicker,
+    counter_bucket: Option<u128>,
+    connection_visible: bool,
     composer_session: Option<String>,
     show_chats: bool,
     waiting_settings: bool,
@@ -222,7 +226,7 @@ pub struct App {
 }
 impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
-        let controller = Controller::new(store, wake)?;
+        let controller = Controller::new(store, wake.clone())?;
         let composer_session = controller.account.selected.clone();
         let composer = Editor::new(
             controller
@@ -250,6 +254,9 @@ impl App {
             info_tip: Tooltip::default(),
             info_target: Info::Connection,
             info_areas: vec![],
+            connection_counter: CounterTicker::new(wake.clone()),
+            counter_bucket: None,
+            connection_visible: true,
             composer_session,
             show_chats,
             waiting_settings: false,
@@ -286,6 +293,27 @@ impl App {
             app.apply(Action::Settings)?;
         }
         Ok(app)
+    }
+    /// Explicitly mocked, offline status for the headless connection-card fixture.
+    #[cfg(not(target_os = "android"))]
+    pub fn preview_connection(&mut self) {
+        self.controller.settings.server_url = "https://tau.example.invalid/private?token=hidden".into();
+        self.controller.connection = "Connected".into();
+        self.controller.epoch = Some(1); // Fixture only; never starts a transport.
+        self.controller.health.connected();
+        self.controller.health.reply(std::time::Duration::from_millis(32));
+        self.controller.health.sent(Instant::now() - std::time::Duration::from_millis(347));
+        self.info_target = Info::Connection;
+        self.info_tip.pinned = true;
+        self.info_tip.suppressed = false;
+        self.info_tip.progress = 1.;
+    }
+    pub fn set_connection_visible(&mut self, visible: bool) {
+        self.connection_visible = visible;
+        if !visible {
+            self.connection_counter.sync(false);
+            self.counter_bucket = None;
+        }
     }
     pub fn resize(&mut self, size: (u32, u32), scale: f32, origin: Vec2) {
         if self.size != size || self.scale != scale || self.origin != origin {
@@ -486,6 +514,18 @@ impl App {
             self.autoscroll = None;
             self.wheel = None;
         }
+        let counter_bucket = (self.connection_visible
+            && self.info_target == Info::Connection
+            && self.info_tip.progress > 0.
+            && self.info_tip.region.width > 0.
+            && self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none())
+            .then(|| self.controller.health.waiting_ms(Instant::now()))
+            .flatten()
+            .map(|ms| ms / 50);
+        self.connection_counter.sync(counter_bucket.is_some());
+        // Wake at 50ms while visible; repaint only when the displayed counter changes.
+        self.dirty |= self.counter_bucket != counter_bucket;
+        self.counter_bucket = counter_bucket;
         if let Some(mut wheel) = self.wheel.take() {
             let (value, max) = self.scroll_value(wheel.lane);
             let (next, settled) = wheel.step(value, max, self.scale);
@@ -3427,7 +3467,7 @@ impl App {
             Info::Connection => self
                 .controller
                 .health
-                .details(&self.controller.settings, &self.controller.connection),
+                .details(&self.controller.settings, &self.controller.connection, Instant::now()),
             Info::CacheTtl(id) => {
                 let Some(session) = self
                     .controller
@@ -4258,3 +4298,5 @@ fn count(n: u64) -> String {
 
 #[cfg(all(test, not(target_os = "android")))]
 mod editor_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod connection_tests;

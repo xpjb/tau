@@ -1,9 +1,13 @@
-//! Diagnostics from the existing application heartbeat, not a synthetic quality score.
-use crate::{clock, store::Settings};
-use std::{collections::VecDeque, time::Duration};
+//! WebSocket heartbeat state, kept separately from presentation and wall-clock time.
+use crate::store::Settings;
+use std::{
+    sync::{Arc, mpsc},
+    time::{Duration, Instant},
+};
 
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
-const RECENT_SAMPLES: usize = 8;
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+const COUNTER_REFRESH: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Phase {
@@ -17,13 +21,8 @@ pub enum Phase {
 #[derive(Default)]
 pub struct Health {
     pub phase: Phase,
-    connected_at: Option<u64>,
-    last_reply: Option<u64>,
-    pending_at: Option<u64>,
-    pending: bool,
-    last_ok: Option<bool>,
-    connections: u64,
-    recent: VecDeque<Duration>,
+    last_rtt: Option<Duration>,
+    pending_since: Option<Instant>,
 }
 impl Health {
     pub fn connecting() -> Self {
@@ -34,13 +33,8 @@ impl Health {
     }
     pub fn connected(&mut self) {
         self.phase = Phase::Connected;
-        self.connections = self.connections.saturating_add(1);
-        self.connected_at = clock::now_ms();
-        self.last_reply = None;
-        self.pending_at = None;
-        self.pending = false;
-        self.last_ok = None;
-        self.recent.clear(); // Never present old-epoch RTTs as current measurements.
+        self.last_rtt = None; // A new socket must not display the old socket's RTT.
+        self.pending_since = None;
     }
     pub fn disconnected(&mut self, fatal: bool) {
         self.phase = if fatal {
@@ -48,120 +42,136 @@ impl Health {
         } else {
             Phase::Reconnecting
         };
-        self.pending = false;
-        self.pending_at = None;
+        self.pending_since = None;
     }
-    pub fn sent(&mut self, at: Option<u64>) {
-        self.pending = true;
-        self.pending_at = at;
+    pub fn sent(&mut self, at: Instant) {
+        self.pending_since = Some(at);
     }
-    pub fn reply(&mut self, at: Option<u64>, rtt: Duration, ok: bool) {
-        self.last_reply = at;
-        self.pending_at = None;
-        self.pending = false;
-        self.last_ok = Some(ok);
-        if self.recent.len() == RECENT_SAMPLES {
-            self.recent.pop_front();
-        }
-        self.recent.push_back(rtt);
+    pub fn reply(&mut self, rtt: Duration) {
+        self.pending_since = None;
+        self.last_rtt = Some(rtt);
+    }
+    pub fn waiting_ms(&self, now: Instant) -> Option<u128> {
+        self.pending_since
+            .filter(|_| self.phase == Phase::Connected)
+            .map(|sent| now.saturating_duration_since(sent).as_millis())
     }
     pub fn color(&self) -> u32 {
         match self.phase {
-            Phase::Connected if self.last_ok != Some(false) => 0x4ade80,
-            Phase::Connected | Phase::Connecting | Phase::Reconnecting => 0xfbbf24,
+            Phase::Connected => 0x4ade80,
+            Phase::Connecting | Phase::Reconnecting => 0xfbbf24,
             Phase::Blocked => 0xffb4ab,
             Phase::Offline => 0x82909f,
         }
     }
-    pub fn details(&self, settings: &Settings, reason: &str) -> String {
+    /// Pure snapshot: callers can inject `now` for tests or a headless preview.
+    pub fn details(&self, settings: &Settings, reason: &str, now: Instant) -> String {
         let title = match self.phase {
-            Phase::Offline => "Not connected",
+            Phase::Offline => "Offline",
             Phase::Connecting => "Connecting…",
-            Phase::Connected if self.last_ok == Some(false) => {
-                "Connected · heartbeat request failed"
-            }
             Phase::Connected => "Connected",
             Phase::Reconnecting => "Reconnecting…",
             Phase::Blocked => "Connection blocked",
         };
-        // Display only the origin, never credentials, query strings, fragments or
-        // potentially token-bearing paths (even if saved settings are invalid).
-        let endpoint = url::Url::parse(&settings.server_url)
-            .ok()
-            .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
         let mut lines = vec![title.into()];
-        if let Some(url) = endpoint {
-            lines.push(url.origin().ascii_serialization());
-            lines.push(
-                if url.scheme() == "https" {
-                    "WebSocket · TLS"
-                } else {
-                    "WebSocket · no TLS (HTTP)"
-                }
-                .into(),
-            );
+        // Show only the origin, never a token-bearing path, query, fragment or userinfo.
+        if let Some(origin) = url::Url::parse(&settings.server_url)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+            .map(|url| url.origin().ascii_serialization())
+        {
+            lines.push(origin);
         }
-        if self.phase != Phase::Connected {
-            if matches!(self.phase, Phase::Blocked | Phase::Reconnecting) {
-                lines.push(reason.into());
-            }
-            if self.last_reply.is_some() {
+        if self.phase == Phase::Connected {
+            lines.push(match self.last_rtt {
+                Some(rtt) => format!("RTT: {} ms", rtt.as_millis()),
+                None => "RTT: —".into(),
+            });
+            if let Some(sent) = self.pending_since {
                 lines.push(format!(
-                    "Last confirmed reply: {}",
-                    clock::label(self.last_reply)
+                    "Waiting: {} ms",
+                    now.saturating_duration_since(sent).as_millis()
                 ));
             }
-            return lines.join("\n");
+        } else if matches!(self.phase, Phase::Blocked | Phase::Reconnecting) && !reason.is_empty() {
+            lines.push(reason.into());
         }
-        if let Some(last) = self.recent.back() {
-            lines.push(format!(
-                "Heartbeat RTT: {}",
-                millis(last.as_secs_f64() * 1000.)
-            ));
-            if self.recent.len() > 1 {
-                let avg = self.recent.iter().map(Duration::as_secs_f64).sum::<f64>() * 1000.
-                    / self.recent.len() as f64;
-                let min = self.recent.iter().min().unwrap().as_secs_f64() * 1000.;
-                let max = self.recent.iter().max().unwrap().as_secs_f64() * 1000.;
-                lines.push(format!(
-                    "Recent {}: avg {} · {}–{}",
-                    self.recent.len(),
-                    millis(avg),
-                    millis(min),
-                    millis(max)
-                ));
-            }
-            // Absolute times remain accurate while the on-demand UI is asleep;
-            // no once-per-second redraw timer is needed for an aging counter.
-            lines.push(format!("Last reply: {}", clock::label(self.last_reply)));
-        } else {
-            lines.push("Heartbeat RTT: not measured yet".into());
-        }
-        if self.pending {
-            lines.push(format!(
-                "Awaiting reply · sent {}",
-                clock::label(self.pending_at)
-            ));
-        }
-        lines.push(format!(
-            "Connected since: {}",
-            clock::label(self.connected_at)
-        ));
-        lines.push(format!(
-            "Reconnects: {} · probe every {}s",
-            self.connections.saturating_sub(1),
-            HEARTBEAT_INTERVAL.as_secs()
-        ));
-        lines.push(
-            "RTT includes daemon/client processing.\nNot transfer speed or packet loss.".into(),
-        );
         lines.join("\n")
     }
 }
-fn millis(ms: f64) -> String {
-    if ms < 10. {
-        format!("{ms:.1} ms")
-    } else {
-        format!("{ms:.0} ms")
+
+/// Wake only while an awaiting counter is visible. The on-demand renderer stays
+/// asleep when the card is hidden or the ping has completed; dropping the sender
+/// stops the worker. No frame-rate redraw loop runs in the normal UI.
+pub struct CounterTicker {
+    tx: mpsc::Sender<bool>,
+    active: bool,
+}
+impl CounterTicker {
+    pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("tau-connection-counter".into())
+            .spawn(move || {
+                let mut active = false;
+                loop {
+                    let message = if active {
+                        rx.recv_timeout(COUNTER_REFRESH)
+                    } else {
+                        rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                    };
+                    match message {
+                        Ok(next) => active = next,
+                        Err(mpsc::RecvTimeoutError::Timeout) => wake(),
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            })
+            .expect("start connection counter");
+        Self { tx, active: false }
+    }
+    pub fn sync(&mut self, active: bool) {
+        if self.active != active {
+            self.active = active;
+            let _ = self.tx.send(active);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_use_monotonic_elapsed_time_and_hide_credentials() {
+        let now = Instant::now();
+        let settings = Settings {
+            server_url: "https://user:secret@example.com:8443/private?key=hidden#frag".into(),
+            token: "bearer-secret".into(),
+        };
+        let mut health = Health::connecting();
+        health.connected();
+        assert!(health.details(&settings, "", now).contains("RTT: —"));
+        health.sent(now);
+        let waiting = health.details(&settings, "", now + Duration::from_millis(347));
+        assert_eq!(
+            waiting,
+            "Connected\nhttps://example.com:8443\nRTT: —\nWaiting: 347 ms"
+        );
+        assert!(!waiting.contains("secret"));
+        health.reply(Duration::from_millis(32));
+        assert_eq!(
+            health.details(&settings, "", now),
+            "Connected\nhttps://example.com:8443\nRTT: 32 ms"
+        );
+        health.sent(now);
+        health.disconnected(false);
+        assert_eq!(health.waiting_ms(now), None);
+        assert_eq!(
+            health.details(&settings, "Socket closed", now),
+            "Reconnecting…\nhttps://example.com:8443\nSocket closed"
+        );
+        health.connected();
+        assert!(health.details(&settings, "", now).contains("RTT: —"));
     }
 }

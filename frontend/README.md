@@ -19,6 +19,8 @@ ANDROID_ABI=arm64-v8a frontend/android/build.sh
 Desktop development can seed connection settings with `TAU2_SERVER` and `TAU2_TOKEN`;
 `TAU2_DATA_DIR` isolates local data. `target/debug/tau --screenshot PATH [--phone]`
 renders the explicitly offline demo through the real GPU shader path.
+`target/debug/tau --screenshot PATH --connection-preview` pins a mocked
+in-flight connection card (no network connection, no credentials).
 
 ## UI and ownership
 
@@ -26,7 +28,10 @@ renders the explicitly offline demo through the real GPU shader path.
 - Unknown sends remain visible and are never automatically replayed.
 - Per-section first-observed timestamps; Details copies only its own content.
 - Estimated provider cache TTL rings, independent of runtime idle policy.
-- Actual heartbeat RTT/endpoint health; contextual, target-bound chat controls.
+- WebSocket Ping/Pong RTT every 2s, with a 5s reply deadline. The connection
+  card shows a live millisecond waiting counter only while a ping is in flight;
+  otherwise rendering stays on-demand. No session-list requests for probes.
+  Contextual, target-bound chat controls.
 - New chats use the last explicit model choice. Quick favorites never set that default.
 - Settings → Daemon / agent settings edits the full revisioned document. Save uses
   CAS, keeps edits on conflict, distinguishes built-in/null from custom empty prompts,

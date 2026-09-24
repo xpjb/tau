@@ -1,3 +1,16 @@
+# Connection status follow-up
+
+The connection card now shows state, safe endpoint origin, latest WebSocket
+Ping/Pong RTT and, while awaiting a pong, elapsed milliseconds since sending.
+Probes run every 2s with a separate 5s timeout; they do not request session
+lists or mark ordinary commands as probes. The counter schedules a 50ms redraw
+only while the card is visible and waiting. Epoch changes clear the old RTT;
+late/unmatched pongs are ignored. The scripted WebSocket tests cover successful
+and stalled probes; `tau --screenshot PATH --connection-preview` renders a
+mocked in-flight card headlessly, without a network account.
+
+The older acceptance notes below describe the original 20s diagnostic design.
+
 # 0.7.0 integrated beta acceptance
 
 The user explicitly authorized native integration, cleanup, remote `tau2`, a separate
