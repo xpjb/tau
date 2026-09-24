@@ -234,6 +234,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                         ClientCommand::ListSessions => match manager.sessions_message().await {
                             Ok(message) => {
                                 if !queue_server(&response_outbound,&message).await { return; }
+                                match manager.projects_message().await {
+                                    Ok(projects) => { if !queue_server(&response_outbound,&projects).await { return; } }
+                                    Err(error) => { queue_server(&response_outbound,&ServerMessage::command_failure(request_id,error)).await; return; }
+                                }
                                 ServerMessage::success(request_id,None,None)
                             }
                             Err(error) => ServerMessage::command_failure(request_id,error),
@@ -251,13 +255,29 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
-                        ClientCommand::CreateSession { keep_session_id } => match manager.create_session(keep_session_id.as_deref()).await {
+                        ClientCommand::CreateSession { keep_session_id, project_id } => match manager.create_session(keep_session_id.as_deref(), &project_id).await {
                             Ok(session_id) => ServerMessage::success(
                                 request_id,
                                 Some(session_id),
                                 None,
                             ),
                             Err(error) => ServerMessage::command_failure(request_id, error),
+                        },
+                        ClientCommand::CreateProject { project_id, name, prompt } => match manager.create_project(project_id,name,prompt).await {
+                            Ok(()) => ServerMessage::success(request_id,None,None),
+                            Err(error) => ServerMessage::command_failure(request_id,error),
+                        },
+                        ClientCommand::UpdateProject { project_id, revision, name, prompt } => match manager.update_project(project_id,revision,name,prompt).await {
+                            Ok(()) => ServerMessage::success(request_id,None,None),
+                            Err(error) => ServerMessage::command_failure(request_id,error),
+                        },
+                        ClientCommand::DeleteProject { project_id, revision, mode } => match manager.delete_project(project_id,revision,mode).await {
+                            Ok(()) => ServerMessage::success(request_id,None,None),
+                            Err(error) => ServerMessage::command_failure(request_id,error),
+                        },
+                        ClientCommand::MoveSession { session_id, project_id } => match manager.move_session(&session_id,project_id).await {
+                            Ok(()) => ServerMessage::success(request_id,Some(session_id),None),
+                            Err(error) => ServerMessage::command_failure(request_id,error),
                         },
                         ClientCommand::OpenSession { .. } => unreachable!("open requests own their transcript feed"),
                         ClientCommand::GetHistory { session_id, generation, before } => {
@@ -741,8 +761,8 @@ mod tests {
 
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
-        let id = manager.create_session(None).await.unwrap();
-        let other = manager.create_session(Some(&id)).await.unwrap();
+        let id = manager.create_session(None, "general").await.unwrap();
+        let other = manager.create_session(Some(&id), "general").await.unwrap();
         let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
             transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();

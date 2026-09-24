@@ -52,12 +52,20 @@ pub fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Account {
+    pub projects: Vec<Project>,
+    pub selected_project: String,
     pub sessions: Vec<SessionSummary>,
     pub selected: Option<String>,
     pub read_at: BTreeMap<String, u64>,
+}
+impl Default for Account {
+    fn default() -> Self {
+        Self { projects: vec![Project::general()], selected_project: general_project_id(),
+            sessions: vec![], selected: None, read_at: BTreeMap::new() }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalFile {

@@ -138,6 +138,7 @@ impl AgentManager {
 
     async fn run_agent(&self, id: &str, runtime: &Arc<SessionRuntime>) -> Result<()> {
         let mut compacted = false;
+        let mut project_prompt = None;
         loop {
             let settings = self.inner.settings.get();
             let (selected, thinking, cancel, messages, tokens) = {
@@ -160,6 +161,9 @@ impl AgentManager {
                 let requests = queue.requests.drain(..count).collect::<Vec<_>>();
                 let entries = requests.into_iter().map(|request| json!({"type":"message","origin":{"requestId":request.request_id,"requestRevision":request.revision},
                     "message":{"role":"user","content":request.text,"timestamp":request.timestamp_ms}})).collect::<Vec<_>>();
+                if project_prompt.is_none() || !entries.is_empty() {
+                    project_prompt = Some(self.inner.state.project_prompt(id).await?);
+                }
                 if !entries.is_empty() {
                     if let Some(control) = &mut queue.control && control.action == "prefix" && control.status == "waiting" { control.status = "applied".into(); queue.paused = true; }
                 } else if !content.agent.as_ref().unwrap().needs_turn { return Ok(()); }
@@ -168,14 +172,16 @@ impl AgentManager {
                 content.commit(id,entries,Some(queue),None).await?;
                 let agent = content.agent.as_ref().unwrap();
                 let entries = agent.store.context(id,&agent.model).await?;
-                let messages = history::messages(&entries,settings.system_prompt(&agent.model, &self.inner.config.cwd).await?, &agent.model, &self.inner.config.attachment_root).await?;
+                let mut system = settings.system_prompt(&agent.model, &self.inner.config.cwd).await?;
+                if let Some(prompt) = project_prompt.as_ref().filter(|p| !p.is_empty()) { system.push_str("\n\n"); system.push_str(prompt); }
+                let messages = history::messages(&entries,system, &agent.model, &self.inner.config.attachment_root).await?;
                 (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), messages, agent.tokens)
             };
             let context_window = settings.model(&selected)?.context_window;
             let estimated = messages.iter().map(history::estimate_tokens).sum::<u64>();
             if settings.agent.compaction.enabled && context_window.is_some_and(|window| tokens.unwrap_or(estimated).max(estimated) > window.saturating_sub(settings.agent.compaction.reserve_tokens)) {
                 if compacted { bail!("Context is still too large after compaction; reduce the queued input or fork an earlier turn"); }
-                self.compact(id, runtime, "").await?;
+                self.compact_with_project(id, runtime, "", project_prompt.as_deref()).await?;
                 compacted = true;
                 continue;
             }
@@ -304,6 +310,9 @@ impl AgentManager {
     }
 
     pub(crate) async fn compact(&self, id: &str, runtime: &Arc<SessionRuntime>, instructions: &str) -> Result<()> {
+        self.compact_with_project(id, runtime, instructions, None).await
+    }
+    async fn compact_with_project(&self, id: &str, runtime: &Arc<SessionRuntime>, instructions: &str, project: Option<&str>) -> Result<()> {
         let settings = self.inner.settings.get();
         let (selected, thinking, cancel, first_kept, prefix, before_tokens) = {
             let content = runtime.content.lock().await; let agent = content.agent.as_ref().unwrap();
@@ -324,7 +333,10 @@ impl AgentManager {
         settings.model(&selected)?;
         self.set_runtime_state(id, runtime, SessionStatus::Running, Some("Compacting context".into()), None);
         let native = settings.agent.compaction.native_codex && settings.providers[&selected.provider].api == crate::settings::Api::Codex;
-        let mut messages = history::messages(&prefix,settings.system_prompt(&selected, &self.inner.config.cwd).await?, &selected, &self.inner.config.attachment_root).await?;
+        let mut system = settings.system_prompt(&selected, &self.inner.config.cwd).await?;
+        let prompt = match project { Some(prompt) => prompt.to_owned(), None => self.inner.state.project_prompt(id).await? };
+        if !prompt.is_empty() { system.push_str("\n\n"); system.push_str(&prompt); }
+        let mut messages = history::messages(&prefix,system, &selected, &self.inner.config.attachment_root).await?;
         if !native { messages.push(json!({"role":"user","content":format!("Summarize this conversation for another coding agent. Preserve goals, decisions, files changed, commands run, pending work, and important constraints. Do not continue the task. {instructions}")})); }
         else if !instructions.is_empty() { messages.push(json!({"role":"user","content":format!("Compaction instructions: {instructions}")})); }
         let (updates, _receiver) = mpsc::channel(1);

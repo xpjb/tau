@@ -2,10 +2,11 @@
 use sanscale::{Rect, Vec2};
 use std::time::Instant;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
     Transcript,
     Sidebar,
+    Projects,
     Horizontal,
 }
 pub struct Wheel {

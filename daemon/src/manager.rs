@@ -26,6 +26,7 @@ pub(crate) struct ManagerInner {
     pub settings: SettingsStore,
     pub http: reqwest::Client,
     pub auth: AuthStore,
+    pub projects: Mutex<()>,
     pub runtimes: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     pub events: broadcast::Sender<ServerMessage>,
     pub shutting_down: AtomicBool,
@@ -56,24 +57,25 @@ impl AgentManager {
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
         Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
-            runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false) }) })
+            projects: Mutex::new(()), runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false) }) })
     }
     pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> { self.inner.events.subscribe() }
     pub async fn sessions_message(&self) -> Result<ServerMessage> {
         let runtimes = self.inner.runtimes.lock().await;
         Ok(ServerMessage::Sessions { sessions: self.inner.state.list().await?.into_iter().map(|(id, s)| {
             let runtime = runtimes.get(&id).map(|r| r.snapshot()).unwrap_or_default();
-            SessionSummary { id, title:s.title, starter:s.starter, status:runtime.status, detail:runtime.detail, context_usage:runtime.context_usage,
+            SessionSummary { id, project_id:s.project_id, title:s.title, starter:s.starter, status:runtime.status, detail:runtime.detail, context_usage:runtime.context_usage,
                 model:Some(s.model), parent_id:s.parent_id, created_at_ms:s.created_at_ms, updated_at_ms:s.updated_at_ms }
         }).collect() })
     }
-    pub async fn create_session(&self, keep_session_id: Option<&str>) -> Result<String> {
+    pub async fn create_session(&self, keep_session_id: Option<&str>, project_id: &str) -> Result<String> {
+        let _gate = self.inner.projects.lock().await;
         if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
         let settings = self.inner.settings.get(); let model = settings.agent.model.clone();
         let thinking = settings.agent.model_thinking_levels.get(&format!("{}/{}",model.provider,model.model_id)).unwrap_or(&settings.agent.thinking_level).clone();
         let mut keep=keep_session_id.map(str::to_owned);
         loop {
-            let id = self.inner.state.create(model.clone(),thinking.clone(),keep.take()).await?;
+            let id = self.inner.state.create(model.clone(),thinking.clone(),keep.take(),project_id.into()).await?;
             let runtime = self.runtime(&id).await?; let _guard = runtime.operation.lock().await;
             let mut content=runtime.content.lock().await;
             self.ensure_loaded(&id,&runtime,&mut content).await?;
@@ -215,7 +217,7 @@ impl AgentManager {
         self.retire_session(id, &runtime).await;
         self.broadcast_sessions().await; Ok(())
     }
-    async fn retire_session(&self, id: &str, runtime: &Arc<SessionRuntime>) {
+    pub(crate) async fn retire_session(&self, id: &str, runtime: &Arc<SessionRuntime>) {
         let task = {
             let mut content = runtime.content.lock().await;
             content.agent.as_mut().and_then(|agent| { agent.cancel.cancel(); agent.task.take() })
@@ -227,6 +229,7 @@ impl AgentManager {
         self.set_runtime_state(id, runtime, SessionStatus::Sleeping, None, Some(None));
     }
     pub async fn delete_session(&self, id: &str) -> Result<()> {
+        let _gate = self.inner.projects.lock().await;
         let runtime = self.runtime(id).await?;
         if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); }
         let _guard = runtime.operation.lock().await;
@@ -246,6 +249,7 @@ impl AgentManager {
     pub async fn fork_session(&self, id: &str, entry_id: &str) -> Result<(String, Option<String>)> { self.branch_session(id, Some(entry_id)).await }
     pub async fn clone_session(&self, id: &str) -> Result<String> { Ok(self.branch_session(id, None).await?.0) }
     async fn branch_session(&self, id: &str, entry_id: Option<&str>) -> Result<(String, Option<String>)> {
+        let _gate = self.inner.projects.lock().await;
         let runtime = self.runtime(id).await?; let _guard = runtime.operation.lock().await;
         let _content = runtime.content.lock().await;
         let result = self.inner.state.branch(id,entry_id).await?;
