@@ -1947,11 +1947,17 @@ impl App {
             8. * s,
             layer.control_color(indicator, color(0x0e141b)),
         );
-        layer.rounded_rect(
-            Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s),
-            4. * s,
-            color(self.controller.health.color()),
-        );
+        let dot = Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s);
+        layer.rounded_rect(dot, 4. * s, color(self.controller.health.color()));
+        if self.controller.epoch.is_none() {
+            // A hollow connection dot distinguishes no socket from a live one;
+            // chat rows still report their last known worker status.
+            layer.rounded_rect(
+                Rect::new(dot.x + 2. * s, dot.y + 2. * s, 4. * s, 4. * s),
+                2. * s,
+                layer.control_color(indicator, color(0x0e141b)),
+            );
+        }
         self.hits.push(Hit {
             rect: indicator,
             action: Action::Info(Info::Connection),
@@ -2054,15 +2060,11 @@ impl App {
             let status = format!(
                 "{}{}",
                 if unread { "●  " } else { "" },
-                if self.controller.epoch.is_none() {
-                    "Offline"
-                } else {
-                    match session.status {
-                        SessionStatus::Running => "Working",
-                        SessionStatus::Error => "Error",
-                        SessionStatus::Idle => "Ready",
-                        SessionStatus::Sleeping => "Sleeping",
-                    }
+                match session.status {
+                    SessionStatus::Running => "Working",
+                    SessionStatus::Error => "Error",
+                    SessionStatus::Idle => "Ready",
+                    SessionStatus::Sleeping => "Sleeping",
                 }
             );
             self.renderer.clipped_label(
@@ -2070,7 +2072,7 @@ impl App {
                 &status,
                 Rect::new(rect.x + 12. * s, y + 58. * s, rect.width - 24. * s, 18. * s),
                 12. * s,
-                color(if self.controller.epoch.is_some() && session.status == SessionStatus::Running {
+                color(if session.status == SessionStatus::Running {
                     0x67d4ff
                 } else {
                     0x82909f

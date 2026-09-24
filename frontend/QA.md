@@ -7,8 +7,10 @@ lists or mark ordinary commands as probes. The counter schedules a 50ms redraw
 only while the card is visible and waiting. Epoch changes clear the old RTT;
 late/unmatched pongs are ignored. The scripted WebSocket tests cover successful
 and stalled probes; `tau --screenshot PATH --connection-preview [waiting|disconnected]`
-renders either mocked card headlessly, without a network account. While the
-socket is down, cached chat rows show Offline rather than stale Working/Ready.
+renders either mocked card headlessly, without a network account. Chat rows
+retain their last known state while the client reconnects: a disconnected
+client does not imply the daemon stopped working. The dot beside Tau is hollow
+without a socket and solid while connected; its color still carries the phase.
 
 The older acceptance notes below describe the original 20s diagnostic design.
 

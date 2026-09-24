@@ -103,9 +103,17 @@ fn connection_counter_repaints_while_visible_and_stops_after_reply() {
         "Reconnecting…\nhttps://tau.example.invalid\nPing timed out"
     );
     assert_eq!(app.controller.health.color(), 0xfbbf24);
+    let disconnected = ctx.read_rgba8().unwrap();
     assert_ne!(
-        first,
-        ctx.read_rgba8().unwrap(),
+        first, disconnected,
         "disconnected card must render on the GPU"
     );
+    let pixel = |image: &[u8], x, y| {
+        let offset = ((y * ctx.size().0 + x) * 4) as usize;
+        image[offset..offset + 3].to_vec()
+    };
+    // Only the connection dot becomes hollow. The chat's cached Working label remains.
+    assert_ne!(pixel(&first, 86, 39), pixel(&first, 95, 39));
+    assert_eq!(pixel(&disconnected, 86, 39), pixel(&disconnected, 95, 39));
+    assert_ne!(pixel(&disconnected, 83, 39), pixel(&disconnected, 95, 39));
 }
