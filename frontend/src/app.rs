@@ -229,6 +229,7 @@ pub struct App {
     pinch: Option<(u64, Vec2)>,
     velocity: f32,
     viewer: Option<Viewer>,
+    viewer_image: Option<Rect>,
     selecting: bool,
     field_selection: Option<Rect>,
     platform: Vec<PlatformAction>,
@@ -293,6 +294,7 @@ impl App {
             pinch: None,
             velocity: 0.,
             viewer: None,
+            viewer_image: None,
             selecting: false,
             field_selection: None,
             platform: vec![],
@@ -616,6 +618,7 @@ impl App {
         }
         self.focus = None;
         if self.viewer.take().is_some() {
+            self.viewer_image = None;
         } else if self.modal.is_some() {
             self.activate(Action::CancelModal);
         } else if !self.show_chats && self.size.0 as f32 / self.scale < 760. {
@@ -970,7 +973,16 @@ impl App {
         let p = self.pointer.take().unwrap();
         self.scroll_drag = None;
         if !p.dragged {
-            if p.touch
+            if self.viewer.is_some() {
+                if let Some(hit) = self.hits.iter().rev().find(|h|
+                    contains(h.rect, point) && contains(h.rect, p.start)) {
+                    self.activate(hit.action.clone());
+                } else if self.viewer_image.is_none_or(|image|
+                    !contains(image, p.start) && !contains(image, point)) {
+                    self.viewer = None;
+                    self.viewer_image = None;
+                }
+            } else if p.touch
                 && p.started.elapsed().as_millis() > 450
                 && (contains(self.transcript, point)
                     || self
@@ -1674,6 +1686,7 @@ impl App {
                 )?;
                 if path.is_file() {
                     if image {
+                        self.viewer_image = None;
                         self.viewer = Some(Viewer {
                             path,
                             name,
@@ -1745,6 +1758,7 @@ impl App {
             for (_, editor, _) in &mut modal.fields { editor.hide(); }
         }
         self.renderer.clear_scenes();
+        self.viewer_image = None;
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
         let side = if wide { 300. * s } else { 0. };
@@ -1826,21 +1840,20 @@ impl App {
                     let fit = (bounds.width / w as f32).min((bounds.height - 100. * s) / h as f32);
                     let width = w as f32 * fit * zoom;
                     let height = h as f32 * fit * zoom;
-                    overlay.images.push((
-                        path.clone(),
-                        Rect::new(
-                            bounds.x + (bounds.width - width) / 2. + pan.x,
-                            bounds.y + 60. * s + (bounds.height - 100. * s - height) / 2. + pan.y,
-                            width,
-                            height,
-                        ),
-                        Rect::new(
-                            bounds.x,
-                            bounds.y + 56. * s,
-                            bounds.width,
-                            bounds.height - 100. * s,
-                        ),
-                    ));
+                    let image = Rect::new(
+                        bounds.x + (bounds.width - width) / 2. + pan.x,
+                        bounds.y + 60. * s + (bounds.height - 100. * s - height) / 2. + pan.y,
+                        width,
+                        height,
+                    );
+                    let clip = Rect::new(
+                        bounds.x,
+                        bounds.y + 56. * s,
+                        bounds.width,
+                        bounds.height - 100. * s,
+                    );
+                    self.viewer_image = Some(crate::render::intersect(image, clip));
+                    overlay.images.push((path.clone(), image, clip));
                 }
                 Err(e) => {
                     self.renderer.label(
@@ -4304,3 +4317,5 @@ mod control_tests;
 mod icon_controls_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod hover_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod viewer_tests;
