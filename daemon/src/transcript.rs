@@ -136,6 +136,24 @@ impl EventProjection for Event {
             _ => {}
         }
         if events.is_empty() { events.push(template); }
+        // Older Codex entries stored adjacent summary parts without separators.
+        // Repair only when their saved, visible thinking text exactly matches the
+        // concatenated public summary text; never project encrypted reasoning or
+        // guess boundaries in a partial/other provider response.
+        if !live && let Some(items) = message.pointer("/tauModelMessage/codex_output").and_then(Value::as_array) {
+            let parts = items.iter().filter(|item| item["type"] == "reasoning")
+                .flat_map(|item| item["summary"].as_array().into_iter().flatten())
+                .filter(|part| part["type"] == "summary_text")
+                .filter_map(|part| part["text"].as_str()).collect::<Vec<_>>();
+            if parts.len() > 1 {
+                let joined = parts.concat();
+                for event in &mut events {
+                    if event.kind == EventKind::Thinking && event.text == joined {
+                        event.text = parts.join("\n\n");
+                    }
+                }
+            }
+        }
         for (index, event) in events.iter_mut().enumerate() { event.id = format!("{base}:{index}"); }
         if !live && let Some(request) = attachment_request(raw) {
             events[0].attachment = request.path.file_name().map(|name| ChatAttachment {
@@ -257,3 +275,7 @@ impl Transcript {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "transcript_legacy_test.rs"]
+mod legacy_test;

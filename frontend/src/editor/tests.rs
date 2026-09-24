@@ -22,6 +22,45 @@ impl Fixture {
 }
 
 #[test]
+fn composer_centers_one_visual_line_without_changing_multiline_editors() {
+    let mut f = Fixture::new();
+    let mut e = Editor::composer("hello".into());
+    f.view(&mut e, 30., 2., false); // 56px field, matching the composer minimum.
+    let view = e.view.unwrap();
+    let inner = view.inner();
+    let layout = f.layout(&e);
+    assert_eq!(layout.line_count(), 1);
+    let origin = e.origin(layout, view);
+    assert!((origin.y + layout.height_em() * view.size / 2. - (inner.y + inner.height / 2.)).abs() < 0.01);
+    let caret = e.ime_rect(&f.text).unwrap();
+    assert!((caret.y + caret.height / 2. - (inner.y + inner.height / 2.)).abs() < 2.);
+    e.hit(&mut f.text, f.chain, Vec2::new(inner.x + 1., inner.y + inner.height / 2.), false);
+    assert_eq!(e.caret.byte_index, 0, "clicks use the same centered origin as drawing");
+
+    let mut ordinary = Editor::new("hello".into());
+    f.view(&mut ordinary, 30., 2., false);
+    assert_eq!(ordinary.origin(f.layout(&ordinary), ordinary.view.unwrap()).y,
+        ordinary.view.unwrap().inner().y, "large multiline editors keep their original top alignment");
+
+    for (value, width) in [("hello\nworld", 30.), ("hello world", 4.)] {
+        let mut e = Editor::composer(value.into());
+        f.view(&mut e, width, 8., false);
+        let layout = f.layout(&e);
+        assert!(layout.line_count() > 1);
+        let view = e.view.unwrap();
+        assert_eq!(e.origin(layout, view).y, view.inner().y,
+            "hard lines and wraps stay top-aligned");
+    }
+    e.replace("\nworld");
+    f.view(&mut e, 30., 8., false);
+    assert_eq!(e.origin(f.layout(&e), e.view.unwrap()).y, e.view.unwrap().inner().y);
+    assert!(f.key(&mut e, "z", true, false));
+    f.view(&mut e, 30., 2., false);
+    let view = e.view.unwrap();
+    assert!(e.origin(f.layout(&e), view).y > view.inner().y, "undo recenters one line");
+}
+
+#[test]
 fn up_down_keep_the_goal_across_short_lines_and_do_no_shaping_or_text_edits() {
     let mut f = Fixture::new();
     let mut e = Editor::new("abcdefghij\nab\nabcdefghij".into());

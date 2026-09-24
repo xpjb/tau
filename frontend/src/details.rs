@@ -2,7 +2,7 @@
 //! Tool results are paired by call ID, including results whose call is not in the loaded page.
 use crate::store::LocalChat;
 use std::collections::{HashMap, HashSet};
-use tau_protocol::{Event, EventKind, EventPhase, EventRole};
+use tau_protocol::{Event, EventKind, EventRole};
 
 #[derive(Clone)]
 pub struct Line {
@@ -117,11 +117,9 @@ impl<'a> Tools<'a> {
                     lines.push(Line {
                         key: format!("thinking:{}", e.id),
                         label: String::new(),
-                        source: if e.phase == EventPhase::Saved {
-                            e.text.clone()
-                        } else {
-                            crate::app::literal(&e.text)
-                        },
+                        // Live prefixes are Markdown too; completed syntax can
+                        // render before the event is saved or the line ends.
+                        source: e.text.clone(),
                         indent: 0.,
                         toggle: None,
                         code: false,

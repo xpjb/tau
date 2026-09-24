@@ -18,6 +18,8 @@ use std::{
     path::PathBuf,
     time::Instant,
 };
+mod ripple;
+use ripple::Ripple;
 use tau_protocol::*;
 
 mod projects;
@@ -158,6 +160,17 @@ impl MessageArea {
         contains(self.clip, point) && contains_rounded(self.rect, self.corners, point)
     }
 }
+struct DetailArea {
+    key: String,
+    rect: Rect,
+    corners: [f32; 4],
+    clip: Rect,
+}
+impl DetailArea {
+    fn contains(&self, point: Vec2) -> bool {
+        contains(self.clip, point) && contains_rounded(self.rect, self.corners, point)
+    }
+}
 struct Pointer {
     id: u64,
     start: Vec2,
@@ -204,6 +217,8 @@ pub struct App {
     context_rect: Rect,
     menu_viewport: Rect,
     message_areas: Vec<MessageArea>,
+    detail_areas: Vec<DetailArea>,
+    ripple: Option<Ripple>,
     chat_areas: Vec<(Rect, String)>,
     project_areas: Vec<(Rect, String)>,
     projects_rect: Rect,
@@ -243,6 +258,7 @@ pub struct App {
     pinch: Option<(u64, Vec2)>,
     velocity: f32,
     viewer: Option<Viewer>,
+    viewer_image: Option<Rect>,
     selecting: bool,
     field_selection: Option<Rect>,
     platform: Vec<PlatformAction>,
@@ -253,7 +269,7 @@ impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
         let controller = Controller::new(store, wake)?;
         let composer_session = controller.account.selected.clone();
-        let composer = Editor::new(
+        let composer = Editor::composer(
             controller
                 .selected()
                 .map(|c| c.local.draft.clone())
@@ -275,6 +291,8 @@ impl App {
             context_rect: Rect::new(0., 0., 0., 0.),
             menu_viewport: Rect::new(0., 0., 0., 0.),
             message_areas: vec![],
+            detail_areas: vec![],
+            ripple: None,
             chat_areas: vec![],
             project_areas: vec![],
             projects_rect: Rect::new(0., 0., 0., 0.),
@@ -314,6 +332,7 @@ impl App {
             pinch: None,
             velocity: 0.,
             viewer: None,
+            viewer_image: None,
             selecting: false,
             field_selection: None,
             platform: vec![],
@@ -379,10 +398,8 @@ impl App {
         };
         self.dirty |= on_bar(self.hover) != on_bar(point);
         if self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none() {
-            let section_at = |p: Option<Vec2>| {
-                p.and_then(|p| self.message_areas.iter().position(|a| a.contains(p)))
-            };
-            self.dirty |= section_at(self.hover) != section_at(point);
+            self.dirty |= self.hover.and_then(|p| self.section_at(p).map(|(key, _)| key))
+                != point.and_then(|p| self.section_at(p).map(|(key, _)| key));
         }
         self.hover = point;
         if self.context_menu.as_ref().is_some_and(|m| m.parent.is_none())
@@ -471,7 +488,7 @@ impl App {
             self.scroll = 0.;
             self.horizontal = 0.;
             self.velocity = 0.;
-            self.composer = Editor::new(
+            self.composer = Editor::composer(
                 self.controller
                     .selected()
                     .map(|c| c.local.draft.clone())
@@ -482,7 +499,7 @@ impl App {
         } else if let Some(chat) = self.controller.selected()
             && self.composer.value != chat.local.draft
         {
-            self.composer = Editor::new(chat.local.draft.clone());
+            self.composer = Editor::composer(chat.local.draft.clone());
             self.dirty = true;
         }
         if self.waiting_settings
@@ -602,9 +619,24 @@ impl App {
         }
         let waiting_hold = self.pointer.as_ref().is_some_and(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() < 450)
             && self.modal.is_none() && self.context_menu.is_none() && self.viewer.is_none();
+        if let Some(ripple) = &self.ripple {
+            let now = Instant::now();
+            if ripple.finished(now) {
+                self.ripple = None;
+                self.dirty = true;
+            } else if ripple.animating(now) {
+                self.dirty = true;
+            }
+        }
         let dirty = self.dirty;
         self.dirty = false;
         dirty || self.velocity.abs() > 4. || self.project_velocity.abs() > 4. || waiting_hold
+    }
+    fn section_at(&self, point: Vec2) -> Option<(&str, Rect)> {
+        self.detail_areas.iter().rev().find(|a| a.contains(point))
+            .map(|a| (a.key.as_str(), a.rect))
+            .or_else(|| self.message_areas.iter().rev().find(|a| a.contains(point))
+                .map(|a| (a.key.as_str(), a.rect)))
     }
     pub fn save(&mut self) -> Result<()> {
         self.remember_scroll();
@@ -651,6 +683,7 @@ impl App {
         }
         self.focus = None;
         if self.viewer.take().is_some() {
+            self.viewer_image = None;
         } else if self.modal.is_some() {
             self.activate(Action::CancelModal);
         } else if !self.show_chats && self.size.0 as f32 / self.scale < 760. {
@@ -832,6 +865,7 @@ impl App {
         self.history_attempt = None;
         self.velocity = 0.;
         self.project_velocity = 0.;
+        self.ripple = None;
         if self.pointer.is_some() {
             if self.viewer.is_some() && touch {
                 self.pinch = Some((id, point));
@@ -907,6 +941,9 @@ impl App {
             dragged: false,
             touch,
         });
+        self.ripple = if self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none() {
+            self.section_at(point).map(|(key, rect)| Ripple::new(key.to_owned(), rect, point))
+        } else { None };
         self.dirty = true;
     }
     pub fn motion(&mut self, id: u64, point: Vec2) {
@@ -956,6 +993,7 @@ impl App {
             }
             p.dragged |=
                 (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 4. * self.scale;
+            if p.dragged { self.ripple = None; }
             p.last = point;
             self.dirty = true;
             return;
@@ -1001,6 +1039,7 @@ impl App {
                 }
             }
         }
+        if p.dragged { self.ripple = None; }
         p.last = point;
         p.at = Instant::now();
         self.remember_scroll();
@@ -1018,7 +1057,16 @@ impl App {
         let p = self.pointer.take().unwrap();
         self.scroll_drag = None;
         if !p.dragged {
-            if p.touch
+            if self.viewer.is_some() {
+                if let Some(hit) = self.hits.iter().rev().find(|h|
+                    contains(h.rect, point) && contains(h.rect, p.start)) {
+                    self.activate(hit.action.clone());
+                } else if self.viewer_image.is_none_or(|image|
+                    !contains(image, p.start) && !contains(image, point)) {
+                    self.viewer = None;
+                    self.viewer_image = None;
+                }
+            } else if p.touch
                 && p.started.elapsed().as_millis() > 450
                 && self.context_menu.is_none()
                 && (self.project_areas.iter().any(|(r,_)| contains(*r, point) && contains(*r, p.start))
@@ -1053,6 +1101,8 @@ impl App {
                     .extend_selection(crate::render::TextPoint { key, byte: end });
             }
         }
+        if p.dragged { self.ripple = None; }
+        else if let Some(ripple) = &mut self.ripple { ripple.release(); }
         self.selecting = false;
         self.field_selection = None;
         if p.at.elapsed().as_millis() > 150 {
@@ -1073,6 +1123,7 @@ impl App {
         self.scroll_drag = None;
         self.expansion_pin = None;
         self.pointer = None;
+        self.ripple = None;
         self.pinch = None;
         self.velocity = 0.;
         self.project_velocity = 0.;
@@ -1720,7 +1771,7 @@ impl App {
             Action::Restore(id) => {
                 self.controller.restore_pending(&id)?;
                 self.composer =
-                    Editor::new(self.controller.selected().unwrap().local.draft.clone());
+                    Editor::composer(self.controller.selected().unwrap().local.draft.clone());
             }
             Action::Dismiss(id) => self.controller.dismiss_pending(&id)?,
             Action::Queue(operation) => {
@@ -1752,6 +1803,7 @@ impl App {
                 )?;
                 if path.is_file() {
                     if image {
+                        self.viewer_image = None;
                         self.viewer = Some(Viewer {
                             path,
                             name,
@@ -1777,7 +1829,7 @@ impl App {
                 }
             }
             Action::Suggest(text) => {
-                self.composer = Editor::new(text.clone());
+                self.composer = Editor::composer(text.clone());
                 self.controller.draft(text)?;
             }
         }
@@ -1813,6 +1865,7 @@ impl App {
         self.hits.clear();
         self.scrollbars.clear();
         self.message_areas.clear();
+        self.detail_areas.clear();
         self.chat_areas.clear();
         self.project_areas.clear();
         self.projects_rect = Rect::new(0.,0.,0.,0.);
@@ -1826,6 +1879,7 @@ impl App {
             for (_, editor, _) in &mut modal.fields { editor.hide(); }
         }
         self.renderer.clear_scenes();
+        self.viewer_image = None;
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
         let side = if wide { 300. * s } else { 0. };
@@ -1907,21 +1961,20 @@ impl App {
                     let fit = (bounds.width / w as f32).min((bounds.height - 100. * s) / h as f32);
                     let width = w as f32 * fit * zoom;
                     let height = h as f32 * fit * zoom;
-                    overlay.images.push((
-                        path.clone(),
-                        Rect::new(
-                            bounds.x + (bounds.width - width) / 2. + pan.x,
-                            bounds.y + 60. * s + (bounds.height - 100. * s - height) / 2. + pan.y,
-                            width,
-                            height,
-                        ),
-                        Rect::new(
-                            bounds.x,
-                            bounds.y + 56. * s,
-                            bounds.width,
-                            bounds.height - 100. * s,
-                        ),
-                    ));
+                    let image = Rect::new(
+                        bounds.x + (bounds.width - width) / 2. + pan.x,
+                        bounds.y + 60. * s + (bounds.height - 100. * s - height) / 2. + pan.y,
+                        width,
+                        height,
+                    );
+                    let clip = Rect::new(
+                        bounds.x,
+                        bounds.y + 56. * s,
+                        bounds.width,
+                        bounds.height - 100. * s,
+                    );
+                    self.viewer_image = Some(crate::render::intersect(image, clip));
+                    overlay.images.push((path.clone(), image, clip));
                 }
                 Err(e) => {
                     self.renderer.label(
@@ -2031,15 +2084,15 @@ impl App {
             color(0xe5eaf0),
             true,
         );
-        button(
-            &mut self.renderer,
+        self.icon_button(
+            ctx,
             layer,
-            &mut self.hits,
-            Rect::new(b.x + b.width - 104. * s, b.y + 16. * s, 88. * s, 40. * s),
-            "Settings",
+            Rect::new(b.x + b.width - 56. * s, b.y + 16. * s, 40. * s, 40. * s),
+            Icon::Gear,
+            22.,
             Action::Settings,
-            s,
             false,
+            true,
         );
         button(
             &mut self.renderer,
@@ -2357,6 +2410,7 @@ impl App {
     }
     fn chat(&mut self, ctx: &impl RenderContext, layer: &mut Layer, chrome: &mut Layer, b: Rect) {
         let s = self.scale;
+        let paint_at = Instant::now();
         let wide = self.size.0 as f32 / s >= 760.;
         let Some(session) = self.controller.account.selected.clone() else {
             return;
@@ -2395,8 +2449,9 @@ impl App {
         let running = summary
             .as_ref()
             .is_some_and(|s| s.status == SessionStatus::Running);
+        let paused = self.controller.chats[&session].feed.queue.paused;
         let title_width =
-            (b.x + b.width - if running { 64. * s } else { 12. * s } - title_x).max(1.);
+            (b.x + b.width - if running || paused { 64. * s } else { 12. * s } - title_x).max(1.);
         self.chat_areas.push((
             Rect::new(title_x, b.y, title_width, header.height),
             session.clone(),
@@ -2449,11 +2504,10 @@ impl App {
             .composer
             .height(&mut self.renderer, width - 132. * s, 16. * s);
         let queue = &self.controller.chats[&session].feed.queue;
-        let controls = queue.paused
-            || queue
-                .control
-                .as_ref()
-                .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
+        let controls = queue
+            .control
+            .as_ref()
+            .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
         let composer_h = editor_h
             + (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
         let bottom = b.y + b.height;
@@ -2692,6 +2746,9 @@ impl App {
                         text_width - line.indent * s + 8. * s,
                         *h,
                     );
+                    let line_key = format!("{session}/{}", line.key);
+                    let inner_corners = [4. * s; 4];
+                    self.detail_areas.push(DetailArea { key: line_key.clone(), rect: line_rect, corners: inner_corners, clip: viewport });
                     if line.tool {
                         layer.clipped_rect(line_rect, color(0x111922), viewport);
                     }
@@ -2742,8 +2799,13 @@ impl App {
                             viewport,
                         );
                     }
+                    layer.surface_highlight(line_rect, inner_corners, viewport, false, true,
+                        self.ripple.as_ref().and_then(|r| r.paint(&line_key, line_rect, paint_at)));
                 }
-                layer.surface_highlight(rect, corners, viewport, pinned);
+                let inner_hover = layer.interaction.hover.is_some_and(|point|
+                    self.detail_areas.iter().any(|area| area.contains(point)));
+                layer.surface_highlight(rect, corners, viewport, pinned, !inner_hover,
+                    self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
                 continue;
             }
             let label_rect = Rect::new(x + 14. * s, top + 28. * s, text_width, 20. * s);
@@ -2903,7 +2965,8 @@ impl App {
                 }
                 ax += width + 5. * s;
             }
-            layer.surface_highlight(rect, corners, viewport, pinned);
+            layer.surface_highlight(rect, corners, viewport, pinned, true,
+                self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
         }
         self.scrollbar(chrome, Lane::Transcript, viewport);
         chrome.rect(
@@ -3034,7 +3097,14 @@ impl App {
             true,
             can_send,
         );
-        if running {
+        if running || paused {
+            let (icon, action) = if running {
+                (Icon::Stop, Action::Abort)
+            } else {
+                (Icon::Play, Action::Queue(QueueOperation::Resume {
+                    run_id: self.controller.chats[&session].feed.queue.run_id.clone(),
+                }))
+            };
             self.icon_button(
                 ctx,
                 chrome,
@@ -3044,46 +3114,27 @@ impl App {
                     40. * s,
                     40. * s,
                 ),
-                Icon::Stop,
+                icon,
                 20.,
-                Action::Abort,
+                action,
                 false,
                 connected,
             );
         }
         let controls_y = field.y + field.height + 4. * s;
         if self.scroll + 24. * s < self.max_scroll {
-            button(
-                &mut self.renderer,
+            self.icon_button(
+                ctx,
                 chrome,
-                &mut self.hits,
-                Rect::new(
-                    x + width - 78. * s,
-                    composer_top - 38. * s,
-                    78. * s,
-                    30. * s,
-                ),
-                "↓ Latest",
+                Rect::new(x + width - 40. * s, composer_top - 48. * s, 40. * s, 40. * s),
+                Icon::ChevronDown,
+                20.,
                 Action::Tail,
-                s,
+                true,
                 true,
             );
         }
         let queue = &self.controller.chats[&session].feed.queue;
-        if queue.paused {
-            button(
-                &mut self.renderer,
-                chrome,
-                &mut self.hits,
-                Rect::new(x, controls_y, 82. * s, 30. * s),
-                "Resume",
-                Action::Queue(QueueOperation::Resume {
-                    run_id: queue.run_id.clone(),
-                }),
-                s,
-                false,
-            );
-        }
         if let Some(control) = &queue.control
             && matches!(control.status.as_str(), "waiting" | "applying")
         {
@@ -3091,7 +3142,7 @@ impl App {
                 &mut self.renderer,
                 chrome,
                 &mut self.hits,
-                Rect::new(x + 92. * s, controls_y, 100. * s, 30. * s),
+                Rect::new(x, controls_y, 100. * s, 30. * s),
                 "Cancel control",
                 Action::Queue(QueueOperation::Cancel {
                     control_id: control.command_id.clone(),
@@ -3415,7 +3466,7 @@ impl App {
         enabled: bool,
     ) {
         let hovered = layer.interaction.hover.is_some_and(|p| contains(r, p));
-        let tonal = matches!(icon, Icon::Stop);
+        let tonal = matches!(icon, Icon::Stop | Icon::Play);
         if primary || tonal || enabled && hovered {
             layer.rounded_rect(
                 r,
@@ -4341,6 +4392,15 @@ fn count(n: u64) -> String {
 
 #[cfg(all(test, not(target_os = "android")))]
 mod editor_tests;
-
 #[cfg(all(test, not(target_os = "android")))]
 mod project_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod thinking_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod control_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod icon_controls_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod hover_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod viewer_tests;
