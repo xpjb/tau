@@ -1909,15 +1909,15 @@ impl App {
             color(0xe5eaf0),
             true,
         );
-        button(
-            &mut self.renderer,
+        self.icon_button(
+            ctx,
             layer,
-            &mut self.hits,
-            Rect::new(b.x + b.width - 104. * s, b.y + 16. * s, 88. * s, 40. * s),
-            "Settings",
+            Rect::new(b.x + b.width - 56. * s, b.y + 16. * s, 40. * s, 40. * s),
+            Icon::Gear,
+            22.,
             Action::Settings,
-            s,
             false,
+            true,
         );
         button(
             &mut self.renderer,
@@ -2939,19 +2939,14 @@ impl App {
         }
         let controls_y = field.y + field.height + 4. * s;
         if self.scroll + 24. * s < self.max_scroll {
-            button(
-                &mut self.renderer,
+            self.icon_button(
+                ctx,
                 chrome,
-                &mut self.hits,
-                Rect::new(
-                    x + width - 78. * s,
-                    composer_top - 38. * s,
-                    78. * s,
-                    30. * s,
-                ),
-                "↓ Latest",
+                Rect::new(x + width - 40. * s, composer_top - 48. * s, 40. * s, 40. * s),
+                Icon::ChevronDown,
+                20.,
                 Action::Tail,
-                s,
+                true,
                 true,
             );
         }
@@ -4255,3 +4250,5 @@ mod editor_tests;
 mod thinking_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod control_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod icon_controls_tests;

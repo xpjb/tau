@@ -6,6 +6,8 @@ pub enum Icon {
     Send,
     Stop,
     Play,
+    ChevronDown,
+    Gear,
     Context(Option<f32>),
     CacheTtl(Option<f32>),
 }
@@ -16,6 +18,8 @@ impl Icon {
             Self::Send => "send",
             Self::Stop => "stop",
             Self::Play => "play",
+            Self::ChevronDown => "chevron-down",
+            Self::Gear => "gear",
             Self::Context(_) => "context",
             Self::CacheTtl(_) => "cache-ttl",
         }
@@ -83,6 +87,58 @@ impl Icon {
                 p.line_to(19., 12.);
                 p.line_to(7., 19.5);
                 p.close();
+            }
+            Self::ChevronDown => {
+                p.move_to(5.5, 9.);
+                p.line_to(12., 15.5);
+                p.line_to(18.5, 9.);
+                pixmap.stroke_path(
+                    &p.finish().unwrap(),
+                    &paint,
+                    &Stroke {
+                        width: 2.5,
+                        line_cap: LineCap::Round,
+                        ..Default::default()
+                    },
+                    transform,
+                    None,
+                );
+                return straight_alpha(pixmap);
+            }
+            Self::Gear => {
+                // Eight squared-off teeth and a cut-out center, sharing the
+                // same 24-unit canvas as the other header controls.
+                let mut first = true;
+                for tooth in 0..8 {
+                    for (angle, radius) in [
+                        (-22.5, 8.),
+                        (-14., 8.),
+                        (-14., 10.),
+                        (14., 10.),
+                        (14., 8.),
+                        (22.5, 8.),
+                    ] {
+                        let angle =
+                            (-90. + tooth as f32 * 45. + angle) * std::f32::consts::PI / 180.;
+                        let (x, y) = (12. + radius * angle.cos(), 12. + radius * angle.sin());
+                        if first {
+                            p.move_to(x, y);
+                            first = false;
+                        } else {
+                            p.line_to(x, y);
+                        }
+                    }
+                }
+                p.close();
+                p.push_circle(12., 12., 3.2);
+                pixmap.fill_path(
+                    &p.finish().unwrap(),
+                    &paint,
+                    FillRule::EvenOdd,
+                    transform,
+                    None,
+                );
+                return straight_alpha(pixmap);
             }
             Self::Context(ratio) | Self::CacheTtl(ratio) => {
                 // 20dp circle, 2dp stroke, like Tau 1. Coordinates below use 24 units.
