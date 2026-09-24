@@ -1,16 +1,22 @@
 # Connection status follow-up
 
-The connection card now shows state, safe endpoint origin, latest WebSocket
-Ping/Pong RTT and, while awaiting a pong, elapsed milliseconds since sending.
-Probes run every 2s with a separate 5s timeout; they do not request session
-lists or mark ordinary commands as probes. The counter schedules a 50ms redraw
-only while the card is visible and waiting. Epoch changes clear the old RTT;
-late/unmatched pongs are ignored. The scripted WebSocket tests cover successful
-and stalled probes; `tau --screenshot PATH --connection-preview [waiting|disconnected]`
-renders either mocked card headlessly, without a network account. Chat rows
-retain their last known state while the client reconnects: a disconnected
-client does not imply the daemon stopped working. The dot beside Tau is hollow
-without a socket and solid while connected; its color still carries the phase.
+The connection card shows state, min/max acknowledged Ping/Pong RTT across the
+last ten *attempts*, and a live `received:` or `waiting:` millisecond counter.
+Failed attempts take a slot but never fabricate an RTT. No server URL appears;
+that belongs in Settings. The last reply age and samples survive automatic
+reconnects to the same server, but changing settings resets them. Pong receipt
+is timestamped on the network thread, not when UI events are drained.
+
+Probes run every 2s with a separate 5s timeout and no session-list requests.
+The visible counter redraws every 50ms; with the card hidden, at most three
+threshold wakes update the dot while a ping is pending. Latest RTT/pending wait
+is green through 250ms, yellow through 1000ms, orange through 3000ms and red
+above; no reply yet isn't green, and a lost/unconfigured connection is red.
+Late/unmatched pongs are ignored. The scripted socket and headless GPU tests
+cover these states. `tau --screenshot PATH --connection-preview
+[received|waiting|disconnected|unconfigured]` renders mocked cards without a
+network account. Chat rows keep their last known worker state and unread dot;
+the Tau connection dot remains solid.
 
 The older acceptance notes below describe the original 20s diagnostic design.
 

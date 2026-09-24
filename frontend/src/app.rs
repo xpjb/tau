@@ -1,6 +1,6 @@
 use crate::{
     clock,
-    connection::CounterTicker,
+    connection::{CounterTicker, COUNTER_REFRESH},
     controller::Controller,
     details::{Line as DetailLine, Tools},
     editor::Editor,
@@ -174,8 +174,10 @@ struct Viewer {
 #[cfg(not(target_os = "android"))]
 #[derive(Clone, Copy)]
 pub enum ConnectionPreview {
+    Received,
     Waiting,
     Disconnected,
+    Unconfigured,
 }
 pub struct App {
     pub controller: Controller,
@@ -197,6 +199,7 @@ pub struct App {
     info_areas: Vec<(Rect, Info)>,
     connection_counter: CounterTicker,
     counter_bucket: Option<u128>,
+    dot_color: u32,
     connection_visible: bool,
     composer_session: Option<String>,
     show_chats: bool,
@@ -233,6 +236,7 @@ pub struct App {
 impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
         let controller = Controller::new(store, wake.clone())?;
+        let dot_color = controller.health.color(Instant::now());
         let composer_session = controller.account.selected.clone();
         let composer = Editor::new(
             controller
@@ -262,6 +266,7 @@ impl App {
             info_areas: vec![],
             connection_counter: CounterTicker::new(wake.clone()),
             counter_bucket: None,
+            dot_color,
             connection_visible: true,
             composer_session,
             show_chats,
@@ -300,22 +305,39 @@ impl App {
         }
         Ok(app)
     }
-    /// Headless-only state injection; never starts a socket or uses saved credentials.
+    /// Headless-only heartbeat injection; never starts a socket or uses credentials.
     #[cfg(not(target_os = "android"))]
     pub fn preview_connection(&mut self, preview: ConnectionPreview) {
-        self.controller.settings.server_url = "https://tau.example.invalid/private?token=hidden".into();
+        use std::time::Duration;
+        let now = Instant::now();
+        self.controller.health = crate::connection::Health::default();
+        if !matches!(preview, ConnectionPreview::Unconfigured) {
+            self.controller.health.connected();
+            for (ms, ago) in [(420, 8000), (123, 6000)] {
+                self.controller.health.sent(now - Duration::from_millis(ago + ms));
+                self.controller.health.reply(Duration::from_millis(ms), now - Duration::from_millis(ago));
+            }
+        }
         match preview {
-            ConnectionPreview::Waiting => {
-                self.controller.connection = "Connected".into();
+            ConnectionPreview::Received => {
                 self.controller.epoch = Some(1);
-                self.controller.health.connected();
-                self.controller.health.reply(std::time::Duration::from_millis(32));
-                self.controller.health.sent(Instant::now() - std::time::Duration::from_millis(347));
+                self.controller.connection = "Connected".into();
+                self.controller.health.sent(now - Duration::from_millis(1357));
+                self.controller.health.reply(Duration::from_millis(123), now - Duration::from_millis(1234));
+            }
+            ConnectionPreview::Waiting => {
+                self.controller.epoch = Some(1);
+                self.controller.connection = "Connected".into();
+                self.controller.health.sent(now - Duration::from_millis(4321));
             }
             ConnectionPreview::Disconnected => {
-                self.controller.connection = "Ping timed out. Reconnecting…".into();
                 self.controller.epoch = None;
+                self.controller.connection = "Ping timed out. Reconnecting…".into();
                 self.controller.health.disconnected(false);
+            }
+            ConnectionPreview::Unconfigured => {
+                self.controller.epoch = None;
+                self.controller.connection = "Not connected".into();
             }
         }
         self.info_target = Info::Connection;
@@ -326,7 +348,7 @@ impl App {
     pub fn set_connection_visible(&mut self, visible: bool) {
         self.connection_visible = visible;
         if !visible {
-            self.connection_counter.sync(false);
+            self.connection_counter.sync(None);
             self.counter_bucket = None;
         }
     }
@@ -529,16 +551,26 @@ impl App {
             self.autoscroll = None;
             self.wheel = None;
         }
-        let counter_bucket = (self.connection_visible
+        let now = Instant::now();
+        let dot_color = self.controller.health.color(now);
+        self.dirty |= self.dot_color != dot_color;
+        self.dot_color = dot_color;
+        let card_visible = self.connection_visible
             && self.info_target == Info::Connection
             && self.info_tip.progress > 0.
             && self.info_tip.region.width > 0.
-            && self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none())
-            .then(|| self.controller.health.waiting_ms(Instant::now()))
-            .flatten()
-            .map(|ms| ms / 50);
-        self.connection_counter.sync(counter_bucket.is_some());
-        // Wake at 50ms while visible; repaint only when the displayed counter changes.
+            && self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none();
+        let counter_bucket = card_visible.then(|| self.controller.health.counter(now))
+            .flatten().map(|(_, ms)| ms / COUNTER_REFRESH.as_millis());
+        let next_wake = if !self.connection_visible || self.modal.is_some() || self.viewer.is_some() {
+            None
+        } else if card_visible && counter_bucket.is_some() {
+            Some(COUNTER_REFRESH)
+        } else {
+            self.controller.health.next_color_wake(now)
+        };
+        self.connection_counter.sync(next_wake);
+        // Redraw only when the visible counter or dot actually changes.
         self.dirty |= self.counter_bucket != counter_bucket;
         self.counter_bucket = counter_bucket;
         if let Some(mut wheel) = self.wheel.take() {
@@ -1947,17 +1979,11 @@ impl App {
             8. * s,
             layer.control_color(indicator, color(0x0e141b)),
         );
-        let dot = Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s);
-        layer.rounded_rect(dot, 4. * s, color(self.controller.health.color()));
-        if self.controller.epoch.is_none() {
-            // A hollow connection dot distinguishes no socket from a live one;
-            // chat rows still report their last known worker status.
-            layer.rounded_rect(
-                Rect::new(dot.x + 2. * s, dot.y + 2. * s, 4. * s, 4. * s),
-                2. * s,
-                layer.control_color(indicator, color(0x0e141b)),
-            );
-        }
+        layer.rounded_rect(
+            Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s),
+            4. * s,
+            color(self.controller.health.color(Instant::now())),
+        );
         self.hits.push(Hit {
             rect: indicator,
             action: Action::Info(Info::Connection),
@@ -3488,7 +3514,7 @@ impl App {
             Info::Connection => self
                 .controller
                 .health
-                .details(&self.controller.settings, &self.controller.connection, Instant::now()),
+                .details(&self.controller.connection, Instant::now()),
             Info::CacheTtl(id) => {
                 let Some(session) = self
                     .controller
@@ -3506,7 +3532,10 @@ impl App {
         };
         let s = self.scale;
         let margin = 8. * s;
-        let w = (360. * s).min((bounds.width - margin * 2.).max(1.));
+        // Cover the New chat button below, rather than leave its bright edge
+        // peeking out from behind a narrow connection card.
+        let width = if self.info_target == Info::Connection { 300. } else { 360. };
+        let w = (width * s).min((bounds.width - margin * 2.).max(1.));
         let h = (self.renderer.label_height(
             &self.info_tip.text,
             (w - 20. * s).max(1.),

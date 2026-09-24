@@ -44,7 +44,7 @@ pub enum Command {
 pub enum Event {
     Ready(u64),
     HeartbeatSent { epoch: u64, at: Instant },
-    HeartbeatReply { epoch: u64, rtt: Duration },
+    HeartbeatReply { epoch: u64, at: Instant, rtt: Duration },
     Message(u64, Box<ServerMessage>),
     Disconnected(String),
     Fatal(String),
@@ -323,7 +323,8 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             Message::Pong(payload) => {
                                 if waiting.as_ref().is_some_and(|(bytes, _)| bytes.as_slice() == payload.as_ref()) {
                                     let (_, sent) = waiting.take().unwrap();
-                                    if !events.send(Event::HeartbeatReply { epoch, rtt: sent.elapsed() }).await { return Ok(()); }
+                                    let at = Instant::now();
+                                    if !events.send(Event::HeartbeatReply { epoch, at, rtt: at.duration_since(sent) }).await { return Ok(()); }
                                 }
                             }
                             Message::Close(_) => bail!("Connection closed"),

@@ -298,7 +298,9 @@ pub fn run() -> Result<(), String> {
     if args.first().map(String::as_str) == Some("--screenshot") {
         let preview = args.iter().position(|a| a == "--connection-preview")
             .map(|i| match args.get(i + 1).map(String::as_str) {
+                Some("received") => Ok(ConnectionPreview::Received),
                 Some("disconnected") => Ok(ConnectionPreview::Disconnected),
+                Some("unconfigured") => Ok(ConnectionPreview::Unconfigured),
                 Some("waiting" | "--phone") | None => Ok(ConnectionPreview::Waiting),
                 Some(mode) => Err(format!("Unknown connection preview: {mode}")),
             }).transpose()?;

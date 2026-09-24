@@ -78,7 +78,13 @@ async fn probe_uses_ping_pong_not_session_list_and_reports_measured_rtt() {
     };
     assert!(started.elapsed() >= HEARTBEAT_INTERVAL - Duration::from_millis(100));
     let rtt = match event(&mut network).await {
-        Event::HeartbeatReply { epoch: 1, rtt } => rtt,
+        Event::HeartbeatReply { epoch: 1, at, rtt } => {
+            assert!(
+                at >= sent && at <= Instant::now(),
+                "pong timestamp must be taken at receipt"
+            );
+            rtt
+        }
         _ => panic!("expected matching pong"),
     };
     assert!(rtt <= sent.elapsed() && rtt < HEARTBEAT_TIMEOUT);
