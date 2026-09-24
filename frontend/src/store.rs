@@ -167,6 +167,11 @@ pub struct Store {
     pub root: PathBuf,
 }
 impl Store {
+    pub fn block_cache(&self, identity: &str) -> Result<crate::blocks::Cache> {
+        use sha2::Digest;
+        let key = format!("{:x}",sha2::Sha256::digest(identity.as_bytes()));
+        crate::blocks::Cache::open(&self.root.join("blocks").join(format!("{key}.sqlite3")))
+    }
     pub fn open(root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&root)?;
         #[cfg(unix)]

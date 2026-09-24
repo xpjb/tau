@@ -47,7 +47,7 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 #[derive(Clone)]
-pub struct StateStore { connection: Arc<Mutex<Connection>>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>> }
+pub struct StateStore { connection: Arc<Mutex<Connection>>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>>, pub(crate) block_changes: tokio::sync::watch::Sender<u64> }
 
 impl StateStore {
     pub async fn load(path: PathBuf) -> Result<Self> {
@@ -64,7 +64,7 @@ impl StateStore {
             db.busy_timeout(std::time::Duration::from_secs(5))?;
             db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
             let version: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version > 2 { bail!("Unsupported Tau database version {version}"); }
+            if version > 3 { bail!("Unsupported Tau database version {version}"); }
             if version == 0 {
                 let tx = db.transaction()?;
                 tx.execute_batch(include_str!("schema.sql"))?;
@@ -75,15 +75,29 @@ impl StateStore {
                 tx.execute_batch(include_str!("schema_projects.sql"))?;
                 tx.commit()?;
             }
+            if version < 3 {
+                let tx = db.transaction()?;
+                tau_blocks::initialize(&tx)?;
+                crate::blocks::project_existing(&tx)?;
+                tx.execute_batch("PRAGMA user_version=3")?;
+                tx.commit()?;
+            }
             if let Some(parent) = location.parent() { std::fs::File::open(parent)?.sync_all()?; }
             Ok(db)
         }).await??;
-        Ok(Self { connection:Arc::new(Mutex::new(connection)), path, flag_gate:Arc::new(tokio::sync::Mutex::new(())) })
+        Ok(Self { connection:Arc::new(Mutex::new(connection)), path, flag_gate:Arc::new(tokio::sync::Mutex::new(())), block_changes:tokio::sync::watch::channel(0).0 })
     }
     pub(crate) async fn access<T: Send + 'static>(&self, action: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static) -> Result<T> {
         // Wait asynchronously; don't fill the blocking pool with database lock waiters.
         let mut connection = self.connection.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || action(&mut connection)).await?
+        let changes = self.block_changes.clone();
+        tokio::task::spawn_blocking(move || {
+            let before = tau_blocks::cursor(&connection)?.sequence;
+            let result = action(&mut connection);
+            let after = tau_blocks::cursor(&connection)?.sequence;
+            if after != before { changes.send_replace(after); }
+            result
+        }).await?
     }
     pub async fn get(&self, id: &str) -> Result<Option<StoredSession>> {
         let id = id.to_owned();
@@ -152,6 +166,7 @@ impl StateStore {
                     disposition:PromptDisposition::Handled, finished:true, notice:None, error:None };
                 tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
             }
+            crate::blocks::queue(&tx,&id,&QueueState::native())?;
             tx.commit()?; Ok(id)
         }).await
     }
@@ -191,6 +206,7 @@ impl StateStore {
                 if !matches!(receipt.disposition, PromptDisposition::Handled) { session.starter = false; }
             }
             if let Some(mut queue) = queue {
+                crate::blocks::queue(&tx,&id,&queue)?;
                 if queue.requests.len() > 256 || queue.requests.iter().map(|r| r.text.len()).sum::<usize>() > 4 * 1024 * 1024 { bail!("Pending queue exceeds its limit"); }
                 let ids = queue.requests.iter().map(|r| &r.request_id).collect::<Vec<_>>();
                 tx.execute("DELETE FROM queue WHERE session_id=?1 AND request_id NOT IN (SELECT value FROM json_each(?2))",params![id,serde_json::to_string(&ids)?])?;
@@ -210,6 +226,7 @@ impl StateStore {
                 session.head = Some(entry_id.into());
             }
             for event in events {
+                crate::blocks::event(&tx,&id,&event)?;
                 session.next_order = session.next_order.max(event.order + 1);
                 tx.execute("INSERT INTO events(session_id,position,id,entry_id,data) VALUES(?1,?2,?3,?4,?5)",
                     params![id,event.order,event.id,event.entry_id,serde_json::to_string(&event)?])?;
@@ -314,6 +331,12 @@ impl StateStore {
             session.needs_turn = false;
             if let Some(raw) = message { apply_entry(&mut session,&json!({"type":"message","message":serde_json::from_str::<Value>(&raw)?}))?; }
             tx.execute("UPDATE sessions SET data=?2 WHERE id=?1",params![child,serde_json::to_string(&session)?])?;
+            let mut projected = tx.prepare("SELECT data FROM events WHERE session_id=?1 ORDER BY position")?;
+            for raw in projected.query_map([&child],|r|r.get::<_,String>(0))? {
+                crate::blocks::event(&tx,&child,&serde_json::from_str(&raw?)?)?;
+            }
+            drop(projected);
+            crate::blocks::queue(&tx,&child,&QueueState::native())?;
             tx.commit()?; Ok((child,draft))
         }).await
     }
@@ -321,6 +344,7 @@ impl StateStore {
         let id = id.to_owned();
         self.access(move |db| {
             let tx = db.transaction()?;
+            tau_blocks::remove_scope(&tx,&id)?;
             if tx.execute("DELETE FROM sessions WHERE id=?1",[&id])? != 1 { bail!("Unknown session"); }
             tx.execute("UPDATE sessions SET data=json_set(data,'$.parent_id',NULL) WHERE json_extract(data,'$.parent_id')=?1",[&id])?;
             tx.commit()?; Ok(())
@@ -386,6 +410,7 @@ impl StateStore {
                 }
                 tx.execute("UPDATE sessions SET data=?2 WHERE id=?1",params![id,serde_json::to_string(&session)?])?;
             }
+            crate::blocks::project_existing(&tx)?;
             tx.commit()?; Ok(sessions.len())
         }).await
     }

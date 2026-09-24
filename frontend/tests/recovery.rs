@@ -209,10 +209,15 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
             let request:Value=serde_json::from_str(&text).unwrap();
             match request["type"].as_str().unwrap() {
                 "prompt"=>{peer.prompts.fetch_add(1,Ordering::SeqCst);*peer.id.lock().unwrap()=Some(request["id"].as_str().unwrap().into());let _=socket.close().await;return;}
-                "open_session"=>{
-                    let mut cut=serde_json::to_value(snapshot(vec![],None,0)).unwrap();
-                    if peer.deliver.load(Ordering::SeqCst){cut["delivered"]=json!([peer.id.lock().unwrap().clone().unwrap()]);}
-                    socket.send(axum::extract::ws::Message::Text(json!({"type":"transcript_snapshot","sessionId":"chat","snapshot":cut}).to_string().into())).await.unwrap();
+                "get_session"=>{
+                    socket.send(axum::extract::ws::Message::Text(json!({"type":"response","requestId":request["id"],"ok":true,"uncertain":false}).to_string().into())).await.unwrap();
+                }
+                "get_receipts"=>{
+                    if peer.deliver.load(Ordering::SeqCst) {
+                        socket.send(axum::extract::ws::Message::Text(json!({"type":"receipts","sessionId":"chat","reports":[{
+                            "id":peer.id.lock().unwrap().clone().unwrap(),"accepted":true,"complete":true,"error":null,"notice":null
+                        }]}).to_string().into())).await.unwrap();
+                    }
                 }
                 _=>{},
             }
@@ -258,7 +263,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     }
     wait(&mut c, |c| c.epoch.is_some()).await;
     c.select("chat").unwrap();
-    wait(&mut c, |c| c.selected().unwrap().feed.synchronized).await;
+    wait(&mut c, |c| c.epoch.is_some() && !c.selected().unwrap().feed.opening).await;
     c.draft("send exactly once, even if the ack is lost".into())
         .unwrap();
     c.send_prompt().unwrap();
@@ -270,7 +275,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     drop(c);
     let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     assert_eq!(c.selected().unwrap().local.pending[0].request.id, original);
-    wait(&mut c, |c| c.selected().unwrap().feed.synchronized).await;
+    wait(&mut c, |c| c.epoch.is_some() && !c.selected().unwrap().feed.opening).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     c.poll();
     assert_eq!(peer.prompts.load(Ordering::SeqCst), 1);

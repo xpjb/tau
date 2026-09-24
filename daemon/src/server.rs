@@ -38,7 +38,7 @@ struct AppState {
 }
 
 pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::TcpListener) -> Result<()> {
-    let transfers = Arc::new(tau_transfer::TransferProvider::bind(config.transfer_bind).await?);
+    let transfers = Arc::new(tau_transfer::TransferProvider::bind_with_blocks(config.transfer_bind, Arc::new(manager.clone())).await?);
     let state = AppState {
         config: config.clone(),
         manager: manager.clone(),
@@ -196,6 +196,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                     }
                 };
                 let manager = state.manager.clone();
+                let transfers = state.transfers.clone();
                 let response_outbound = outbound_tx.clone();
                 if let ClientCommand::OpenSession { session_id, requests } = &request.command {
                     if let Some(task) = subscriptions.remove(session_id) { task.abort(); let _ = task.await; }
@@ -231,6 +232,23 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 tokio::spawn(async move {
                     let request_id = request.id;
                     let response = match request.command {
+                        ClientCommand::ConnectBlocks { node_id } => {
+                            match manager.inner.state.block_cursor().await.and_then(|cursor| transfers.block_offer(&node_id,cursor.lineage)) {
+                                Ok(offer) => {
+                                    queue_server(&response_outbound,&ServerMessage::BlockConnection { offer }).await;
+                                    ServerMessage::success(request_id,None,None)
+                                }
+                                Err(error) => ServerMessage::command_failure(request_id,error),
+                            }
+                        }
+                        ClientCommand::GetSession { session_id } => match manager.session_state_message(&session_id).await {
+                            Ok(message) => { queue_server(&response_outbound,&message).await; ServerMessage::success(request_id,Some(session_id),None) }
+                            Err(error) => ServerMessage::command_failure(request_id,error),
+                        },
+                        ClientCommand::GetReceipts { session_id,requests } => match manager.receipt_message(&session_id,&requests).await {
+                            Ok(message) => { queue_server(&response_outbound,&message).await; ServerMessage::success(request_id,Some(session_id),None) }
+                            Err(error) => ServerMessage::command_failure(request_id,error),
+                        },
                         ClientCommand::ListSessions => match manager.sessions_message().await {
                             Ok(message) => {
                                 if !queue_server(&response_outbound,&message).await { return; }

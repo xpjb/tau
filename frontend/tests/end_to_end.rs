@@ -189,6 +189,8 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     .unwrap();
     until(&mut c, |c| {
         c.selected().unwrap().feed.queue.requests[0].text == "edited queue"
+            && c.selected().unwrap().local.pending.iter().all(|p|!matches!(&p.request.command,
+                ClientCommand::QueueControl { operation:QueueOperation::Edit {..},.. }))
     })
     .await;
     assert!(c.selected().unwrap().local.pending.iter().all(|p| !matches!(
@@ -324,8 +326,8 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
         Controller::new(Store::open(local.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     assert_eq!(c.selected().unwrap().local.draft, "durable unsent draft 🦀");
     assert!(
-        c.selected().unwrap().feed.events.is_empty(),
-        "Remote history must not become a second writable local store"
+        !c.selected().unwrap().feed.events.is_empty(),
+        "Verified remote blocks must render from cache before the network reconnects"
     );
     until(&mut c, |c| {
         c.selected().unwrap().feed.synchronized && !c.selected().unwrap().feed.events.is_empty()
@@ -383,7 +385,9 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     assert_eq!(previous["model"],"gpt-6-astra");
     let payload = tokio::time::timeout(Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
     assert_eq!(payload["model"],"unlisted-exact-id");
-    until(&mut c, |c| c.account.sessions.iter().any(|s| s.id == starter && s.status == SessionStatus::Idle)).await;
+    // Control status can arrive before the separately streamed display state.
+    until(&mut c, |c| c.account.sessions.iter().any(|s| s.id == starter && s.status == SessionStatus::Idle)
+        && c.chats[&starter].local.pending.is_empty()).await;
     assert!(c.chats[&starter].local.pending.is_empty());
     c.request(ClientCommand::DeleteSession { session_id:starter.clone() }).unwrap();
     until(&mut c, |c| !c.account.sessions.iter().any(|s| s.id == starter)).await;
@@ -396,106 +400,83 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_grant_to_native_quic_and_offline_cache() {
-    use axum::{
-        Json, Router,
-        extract::{Query, State},
-        http::{HeaderMap, StatusCode},
-        routing::get,
-    };
-    use std::collections::HashMap;
-    #[derive(Clone)]
-    struct Grant {
-        provider: Arc<tau_transfer::TransferProvider>,
-        source: std::path::PathBuf,
-        hits: Arc<std::sync::atomic::AtomicUsize>,
+async fn files_share_native_blocks_authorization_and_verified_offline_cache() {
+    use axum::{Router,extract::{State,WebSocketUpgrade},http::{HeaderMap,StatusCode},routing::get};
+    use futures_util::FutureExt;
+    use std::sync::{Mutex,atomic::{AtomicUsize,Ordering}};
+    use tau_transfer::blocks::{Backend,Server};
+    use tau_blocks::*;
+    struct Data {db:Arc<Mutex<rusqlite::Connection>>,changes:tokio::sync::watch::Sender<u64>,reads:AtomicUsize}
+    impl Backend for Data {
+        fn feed(&self, req:FeedRequest) -> futures_util::future::BoxFuture<'static,anyhow::Result<FeedPage>> {
+            let db=self.db.clone(); async move {tau_blocks::feed(&db.lock().unwrap(),&req)}.boxed()
+        }
+        fn read(&self, req:BlockRequest) -> futures_util::future::BoxFuture<'static,anyhow::Result<ContentRange>> {
+            self.reads.fetch_add(1,Ordering::SeqCst);
+            let db=self.db.clone(); async move {tau_blocks::read(&db.lock().unwrap(),&req)}.boxed()
+        }
+        fn changes(&self) -> tokio::sync::watch::Receiver<u64> {self.changes.subscribe()}
     }
-    async fn grant(
-        State(state): State<Grant>,
-        headers: HeaderMap,
-        Query(query): Query<HashMap<String, String>>,
-    ) -> Result<Json<tau_transfer::TransferOffer>, StatusCode> {
-        assert_eq!(headers["authorization"], "Bearer fixture-token");
-        state.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(Json(
-            state
-                .provider
-                .offer(
-                    std::fs::File::open(state.source).unwrap(),
-                    &query["transferNode"],
-                    50_000_000,
-                )
-                .await
-                .unwrap(),
-        ))
+    let root=tempfile::tempdir().unwrap();
+    let bytes=(0..150_000).map(|n|(n%251)as u8).collect::<Vec<_>>();
+    let mut db=rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&db).unwrap();
+    use sha2::Digest;
+    let tx=db.transaction().unwrap();
+    for entry in ["entry?escaped","second"] {
+        tau_blocks::put(&tx,"chat/escaped",BlockHeader {id:format!("file:{entry}"),parent:None,order:0,kind:BlockKind::File,
+            meta:serde_json::json!({"sha256":format!("{:x}",sha2::Sha256::digest(&bytes))}),version:0,length:0,sealed:true,revision:0},&bytes).unwrap();
     }
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("original");
-    let bytes = (0..150_000).map(|n| (n % 251) as u8).collect::<Vec<_>>();
-    std::fs::write(&source, &bytes).unwrap();
-    let provider = Arc::new(
-        tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap(),
-    );
-    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let app = Router::new()
-        .route("/v1/sessions/{session}/attachments/{entry}", get(grant))
-        .with_state(Grant {
-            provider: provider.clone(),
-            source,
-            hits: hits.clone(),
-        });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    // The production download path shares its event loop with a real protocol peer.
-    async fn ws(ws: axum::extract::WebSocketUpgrade) -> impl axum::response::IntoResponse {
-        ws.on_upgrade(|mut ws| async move {
-            ws.send(axum::extract::ws::Message::Text(
-                serde_json::to_string(&tau_protocol::ServerMessage::Hello {
-                    protocol_version: tau_protocol::PROTOCOL_VERSION,
-                    daemon_version: "fixture".into(),
-                })
-                .unwrap()
-                .into(),
-            ))
-            .await
-            .unwrap();
-            while ws.recv().await.is_some() {}
+    tx.commit().unwrap();
+    let lineage=tau_blocks::cursor(&db).unwrap().lineage;
+    let data=Arc::new(Data {db:Arc::new(Mutex::new(db)),changes:tokio::sync::watch::channel(0).0,reads:AtomicUsize::new(0)});
+    let bulk=Arc::new(Server::bind("127.0.0.1:0".parse().unwrap(),data.clone()).await.unwrap());
+    #[derive(Clone)] struct Peer {bulk:Arc<Server>,lineage:String,grants:Arc<AtomicUsize>,http:Arc<AtomicUsize>}
+    async fn ws(State(peer):State<Peer>, headers:HeaderMap, ws:WebSocketUpgrade) -> impl axum::response::IntoResponse {
+        assert_eq!(headers["authorization"],"Bearer fixture-token");
+        ws.on_upgrade(move |mut ws|async move {
+            ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into()}).unwrap().into())).await.unwrap();
+            while let Some(Ok(frame))=ws.recv().await {
+                let axum::extract::ws::Message::Text(text)=frame else {continue;};
+                let req:ClientRequest=serde_json::from_str(&text).unwrap();
+                if let ClientCommand::ConnectBlocks {node_id}=req.command {
+                    peer.grants.fetch_add(1,Ordering::SeqCst);
+                    let offer=peer.bulk.authorize(&node_id,peer.lineage.clone()).unwrap();
+                    ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::BlockConnection {offer}).unwrap().into())).await.unwrap();
+                }
+            }
         })
     }
-    let app = app.route("/v1/ws", get(ws));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let store = Store::open(root.path().join("local")).unwrap();
-    store
-        .put(
-            "",
-            "settings",
-            &Settings {
-                server_url: format!("http://{address}"),
-                token: "fixture-token".into(),
-            },
-        )
-        .unwrap();
-    let mut c = Controller::new(store, Arc::new(|| {})).unwrap();
-    until(&mut c, |c| c.epoch.is_some()).await;
-    let target = c
-        .download("chat/escaped", "entry?escaped", 50_000_000)
-        .unwrap();
-    until(&mut c, |c| c.downloads.values().any(|d| d.status.done)).await;
-    let d = c.downloads.values().next().unwrap();
-    assert!(d.status.failure.is_none(), "{:?}", d.status.failure);
-    assert_eq!(std::fs::read(&target).unwrap(), bytes);
-    c.epoch = None;
-    assert_eq!(
-        c.download("chat/escaped", "entry?escaped", 50_000_000)
-            .unwrap(),
-        target
-    );
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
-    drop(c);
-    server.abort();
-    provider.shutdown().await;
+    async fn forbidden(State(peer):State<Peer>) -> StatusCode {peer.http.fetch_add(1,Ordering::SeqCst);StatusCode::GONE}
+    let peer=Peer {bulk:bulk.clone(),lineage,grants:Arc::new(AtomicUsize::new(0)),http:Arc::new(AtomicUsize::new(0))};
+    let app=Router::new().route("/v1/ws",get(ws)).route("/v1/sessions/{session}/attachments/{entry}",get(forbidden)).with_state(peer.clone());
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+    let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
+    let store=Store::open(root.path().join("local")).unwrap();
+    store.put("","settings",&Settings {server_url:format!("http://{address}"),token:"fixture-token".into()}).unwrap();
+    let mut c=Controller::new(store,Arc::new(||{})).unwrap();
+    until(&mut c,|c|c.epoch.is_some() && c.content_authorized()).await;
+    assert_eq!(data.reads.load(Ordering::SeqCst),0,"Authorization alone must not read a file");
+    for entry in ["entry?escaped","second"] {
+        let target=c.download("chat/escaped",entry,50_000_000).unwrap();
+        let key=Controller::download_key("chat/escaped",entry);
+        until(&mut c,|c|c.downloads.get(&key).is_some_and(|d|d.status.done)).await;
+        assert!(c.downloads[&key].status.failure.is_none(),"{:?}",c.downloads[&key].status.failure);
+        assert_eq!(std::fs::read(&target).unwrap(),bytes);
+    }
+    assert_eq!(peer.grants.load(Ordering::SeqCst),1,"Both files reuse the authenticated endpoint");
+    assert_eq!(peer.http.load(Ordering::SeqCst),0,"Files do not use the old HTTP/per-file grant path");
+    let target=c.attachment_path("chat/escaped","entry?escaped");
+    c.epoch=None;
+    assert_eq!(c.download("chat/escaped","entry?escaped",50_000_000).unwrap(),target);
+    // An exported file is not trusted merely because its size is unchanged.
+    std::fs::write(&target,vec![0;bytes.len()]).unwrap();
+    let before=data.reads.load(Ordering::SeqCst);
+    c.download("chat/escaped","entry?escaped",50_000_000).unwrap();
+    until(&mut c,|c|c.downloads[&Controller::download_key("chat/escaped","entry?escaped")].status.done).await;
+    assert_eq!(std::fs::read(&target).unwrap(),bytes);
+    assert_eq!(data.reads.load(Ordering::SeqCst),before,"Repair an exported file from verified cache, without network reads");
+    drop(c);server.abort();bulk.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

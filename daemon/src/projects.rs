@@ -81,6 +81,9 @@ impl StateStore {
                     tx.execute("UPDATE sessions SET starter=0,data=json_set(data,'$.project_id','general','$.project_prompt',(SELECT prompt FROM projects WHERE id='general'),'$.starter',json('false')) WHERE json_extract(data,'$.project_id')=?1", [&id])?;
                 }
                 DeleteProjectMode::DeleteChats => {
+                    let ids = tx.prepare("SELECT id FROM sessions WHERE json_extract(data,'$.project_id')=?1")?
+                        .query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                    for scope in ids { tau_blocks::remove_scope(&tx,&scope)?; }
                     tx.execute("DELETE FROM sessions WHERE json_extract(data,'$.project_id')=?1", [&id])?;
                     tx.execute("UPDATE sessions SET data=json_set(data,'$.parent_id',NULL) WHERE json_extract(data,'$.parent_id') IS NOT NULL AND NOT EXISTS
                         (SELECT 1 FROM sessions parent WHERE parent.id=json_extract(sessions.data,'$.parent_id'))", [])?;
@@ -181,7 +184,7 @@ mod tests {
         let again = StateStore::load(path).await.unwrap();
         assert_eq!(again.project_prompt(&chat).await.unwrap(),"Pinned");
         again.access(|db| {
-            assert_eq!(db.query_row("PRAGMA user_version",[],|r|r.get::<_,u32>(0))?,2);
+            assert_eq!(db.query_row("PRAGMA user_version",[],|r|r.get::<_,u32>(0))?,3);
             assert_eq!(db.query_row("SELECT count(*) FROM entries WHERE session_id='old'",[],|r|r.get::<_,u32>(0))?,1);
             Ok(())
         }).await.unwrap();

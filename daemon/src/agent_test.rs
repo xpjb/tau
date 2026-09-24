@@ -244,6 +244,17 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
         assert_eq!(attachment["attachment"]["kind"], kind);
         manager.resolve_attachment(&id, attachment["entryId"].as_str().unwrap()).await.unwrap();
     }
+    // The native file primitive materializes only after an explicit body read.
+    let native_file=crate::blocks::file_id(attachment["entryId"].as_str().unwrap());
+    let scope=id.clone();let file_id=native_file.clone();
+    let before=manager.inner.state.access(move |db|Ok(tau_blocks::header(db,&scope,&file_id)?.unwrap())).await.unwrap();
+    assert!(!before.sealed);assert_eq!(before.length,0);
+    use tau_transfer::blocks::Backend;
+    let range=manager.read(tau_blocks::BlockRequest {scope:id.clone(),id:native_file.clone(),version:0,offset:0,follow:false}).await.unwrap();
+    assert_eq!(range.bytes,b"beta\n");assert!(range.header.sealed);assert_eq!(range.header.version,before.version);
+    assert!(range.header.meta["sha256"].is_string());
+    let end=manager.read(tau_blocks::BlockRequest {scope:id.clone(),id:native_file,version:range.header.version,offset:5,follow:false}).await.unwrap();
+    assert!(end.bytes.is_empty());
     let staged = events.iter().find(|event| event["attachment"]["fileName"] == "outside.txt").unwrap();
     assert_eq!(staged["attachment"]["caption"], "Report");
     tokio::fs::write(root.path().join("outside.txt"), "changed").await.unwrap();

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tau-blocks = { path = "../blocks" }
+futures-util = "0.3"
+zstd = { version = "0.13", default-features = false }
 anyhow = "1"
 bao-tree = { version = "0.15.1", default-features = false, features = ["tokio_fsm", "validate"] }
 blake3 = "1.8"
@@ -19,4 +22,5 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi
 tokio-util = "0.7"
 
 [dev-dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"

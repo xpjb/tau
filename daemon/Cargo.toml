@@ -4,6 +4,7 @@ version = "0.7.2"
 edition = "2024"
 
 [dependencies]
+tau-blocks = { path = "../blocks" }
 tau-protocol = { path = "../protocol" }
 anyhow = "1"
 base64 = "0.22"

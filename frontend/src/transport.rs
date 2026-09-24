@@ -21,6 +21,7 @@ use tokio_tungstenite::{
 
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 pub enum Command {
+    Blocks(crate::blocks::Command),
     Request {
         epoch: u64,
         request: ClientRequest,
@@ -77,9 +78,13 @@ impl Events {
 pub struct Network {
     tx: mpsc::Sender<Command>,
     pub events: mpsc::Receiver<Event>,
+    pub blocks: mpsc::Receiver<crate::blocks::Notice>,
 }
 impl Network {
-    pub fn start(settings: Settings, wake: Wake) -> Self {
+    pub fn start(settings: Settings, wake: Wake) -> Self { Self::start_inner(settings,wake,None) }
+    pub fn start_cached(settings: Settings, wake: Wake, cache: crate::blocks::Cache) -> Self { Self::start_inner(settings,wake,Some(cache)) }
+    fn start_inner(settings: Settings, wake: Wake, cache: Option<crate::blocks::Cache>) -> Self {
+        let (block_notices,blocks) = mpsc::channel(32);
         let (tx, rx) = mpsc::channel(64);
         let (events, incoming) = mpsc::channel(256);
         std::thread::Builder::new()
@@ -91,7 +96,7 @@ impl Network {
                     .enable_all()
                     .build()
                 {
-                    Ok(rt) => rt.block_on(run(settings, rx, sink)),
+                    Ok(rt) => rt.block_on(run(settings, rx, sink, cache, block_notices)),
                     Err(_) => {
                         let _ = sink
                             .tx
@@ -104,6 +109,7 @@ impl Network {
         Self {
             tx,
             events: incoming,
+            blocks,
         }
     }
     pub fn send(&self, command: Command) -> Result<()> {
@@ -197,7 +203,9 @@ impl std::fmt::Display for HeartbeatTimeout {
 }
 impl std::error::Error for HeartbeatTimeout {}
 
-async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: Events) {
+async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: Events, cache: Option<crate::blocks::Cache>, block_notices:mpsc::Sender<crate::blocks::Notice>) {
+    let block_service = cache.map(|cache|crate::blocks::Service::start(cache,events.wake.clone(),block_notices));
+    let mut block_identity = block_service.as_ref().map(|s|s.node.clone());
     let setup = (|| -> Result<_> {
         let mut url = endpoint(&settings, &["v1", "ws"])?;
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
@@ -222,7 +230,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
     let mut epoch = 0u64;
     let mut delay = 1;
     let mut jobs = tokio::task::JoinSet::new();
-    let mut downloads = HashMap::<String, Arc<tau_transfer::TransferDownload>>::new();
+    let mut downloads = HashMap::<String, tokio::sync::watch::Sender<bool>>::new();
     loop {
         let connection =
             tokio::time::timeout(Duration::from_secs(20), connect_async(request.clone()));
@@ -232,7 +240,11 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                 result = &mut connection => break result,
                 command = commands.recv() => match command {
                     None => return,
-                    Some(Command::CancelDownload(key)) => { if let Some(d) = downloads.remove(&key) { d.cancel(); } }
+                    Some(Command::Blocks(command)) => { if let Some(service) = &block_service { service.send(command); } }
+                    Some(Command::CancelDownload(key)) => { if let Some(cancel) = downloads.remove(&key) { cancel.send_replace(true); } }
+                    Some(Command::Download { key,session,entry,target,limit }) => {
+                        start_download(&mut jobs,&mut downloads,block_service.as_ref(),key,session,entry,target,limit,&events).await;
+                    }
                     Some(command) => { reject_offline(command, &events).await; }
                 },
                 _ = jobs.join_next(), if !jobs.is_empty() => {},
@@ -248,6 +260,10 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                 commands.close();
                 return Ok(());
             }
+            if let Some(identity) = &mut block_identity && let Some(node_id) = identity.borrow_and_update().clone() {
+                let request = ClientRequest { id:"block-connection".into(),command:ClientCommand::ConnectBlocks { node_id } };
+                socket.send(Message::Text(serde_json::to_string(&request)?.into())).await?;
+            }
             epoch += 1;
             delay = 1;
             if !events.send(Event::Ready(epoch)).await { return Ok(()); }
@@ -255,6 +271,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                 tokio::time::Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut waiting: Option<(Vec<u8>, Instant)> = None;
+            let mut renew_blocks=Instant::now()+Duration::from_secs(1800);
             loop {
                 let deadline = waiting.as_ref().map(|(_, at)|
                     tokio::time::Instant::from_std(*at + HEARTBEAT_TIMEOUT));
@@ -265,6 +282,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                     } => return Err(HeartbeatTimeout.into()),
                     command = commands.recv() => match command {
                         None => return Ok(()),
+                        Some(Command::Blocks(command)) => { if let Some(service) = &block_service { service.send(command); } }
                         Some(Command::Request { epoch: requested, request }) => {
                             if requested != epoch { events.send(Event::NotSent(request.id, "Connection changed; not sent".into())).await; continue; }
                             let encoded = serde_json::to_string(&request)?;
@@ -280,43 +298,33 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                 events.send(Event::Prepared { epoch: requested, id, result }).await;
                             });
                         }
-                        Some(Command::CancelDownload(key)) => { if let Some(d) = downloads.remove(&key) { d.cancel(); } }
+                    Some(Command::CancelDownload(key)) => { if let Some(cancel) = downloads.remove(&key) { cancel.send_replace(true); } }
                         Some(Command::Download { key, session, entry, target, limit }) => {
-                            downloads.retain(|_, d| !d.status().done);
-                            if downloads.contains_key(&key) { continue; }
-                            let d = Arc::new(tau_transfer::TransferDownload::new());
-                            let capacity = downloads.len() < 2;
-                            if capacity { downloads.insert(key.clone(), d.clone()); }
-                            let (settings, client, events) = (settings.clone(), client.clone(), events.clone());
-                            jobs.spawn(async move {
-                                let result: Result<()> = async {
-                                    ensure!(capacity, "Only two downloads can run at once");
-                                    tokio::fs::create_dir_all(target.parent().context("Invalid download path")?).await?;
-                                    let mut url = endpoint(&settings, &["v1", "sessions", &session, "attachments", &entry])?;
-                                    url.query_pairs_mut().append_pair("transferNode", &d.node_id());
-                                    let response = client.get(url).bearer_auth(&settings.token).send().await?;
-                                    let offer = String::from_utf8(bounded_body(response, 4096).await?)?;
-                                    let host = settings.url()?.host_str().context("Missing host")?.to_owned();
-                                    d.start(offer, host, target.to_string_lossy().into_owned(), limit)?;
-                                    loop {
-                                        let status = d.status(); let done = status.done;
-                                        if !events.send(Event::Download { key: key.clone(), status, path: target.clone() }).await { d.cancel(); return Ok(()); }
-                                        if done { return Ok(()); }
-                                        tokio::time::sleep(Duration::from_millis(100)).await;
-                                    }
-                                }.await;
-                                if let Err(error) = result {
-                                    let status = tau_transfer::TransferStatus { transferred: 0, total: 0, network_bytes: 0, done: true, failure: Some(format!("Download failed: {}", error.without_url())) };
-                                    events.send(Event::Download { key, status, path: target }).await;
-                                }
-                            });
+                            start_download(&mut jobs,&mut downloads,block_service.as_ref(),key,session,entry,target,limit,&events).await;
                         }
                     },
+                    identity_changed = async {
+                        if let Some(identity) = &mut block_identity { identity.changed().await.is_ok() }
+                        else { std::future::pending::<bool>().await }
+                    } => {
+                        if !identity_changed {block_identity=None;}
+                        if let Some(identity) = &mut block_identity && let Some(node_id) = identity.borrow_and_update().clone() {
+                            let request = ClientRequest { id:"block-connection".into(),command:ClientCommand::ConnectBlocks { node_id } };
+                            socket.send(Message::Text(serde_json::to_string(&request)?.into())).await?;
+                        }
+                    }
                     frame = socket.next() => {
                         match frame.context("Connection closed")?? {
                             Message::Text(text) => {
                                 ensure!(text.len() <= 16 * 1024 * 1024, "Tau frame is too large");
                                 let message: ServerMessage = serde_json::from_str(&text).context("Invalid Tau message")?;
+                                if let ServerMessage::BlockConnection { offer } = message {
+                                    if let Some(service) = &block_service {
+                                        let host = settings.url()?.host_str().context("Missing host")?.to_owned();
+                                        service.send(crate::blocks::Command::Configure(offer,host));
+                                    }
+                                    continue;
+                                }
                                 if !events.send(Event::Message(epoch, Box::new(message))).await { return Ok(()); }
                             }
                             Message::Ping(payload) => { tokio::time::timeout(Duration::from_secs(15), socket.send(Message::Pong(payload))).await??; }
@@ -338,6 +346,13 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                         let sent = Instant::now();
                         waiting = Some((payload, sent));
                         if !events.send(Event::HeartbeatSent { epoch, at: sent }).await { return Ok(()); }
+                        if sent>=renew_blocks {
+                            if let Some(identity)=&block_identity && let Some(node_id)=identity.borrow().clone() {
+                                let request=ClientRequest {id:"block-connection".into(),command:ClientCommand::ConnectBlocks {node_id}};
+                                socket.send(Message::Text(serde_json::to_string(&request)?.into())).await?;
+                            }
+                            renew_blocks=sent+Duration::from_secs(1800);
+                        }
                     },
                     _ = jobs.join_next(), if !jobs.is_empty() => {},
                 }
@@ -389,16 +404,30 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                 _ = &mut wait => break,
                 command = commands.recv() => match command {
                     None => return,
-                    Some(Command::CancelDownload(key)) => { if let Some(d) = downloads.remove(&key) { d.cancel(); } }
+                    Some(Command::Blocks(command)) => { if let Some(service) = &block_service { service.send(command); } }
+                    Some(Command::CancelDownload(key)) => { if let Some(cancel) = downloads.remove(&key) { cancel.send_replace(true); } }
+                    Some(Command::Download { key,session,entry,target,limit }) => {
+                        start_download(&mut jobs,&mut downloads,block_service.as_ref(),key,session,entry,target,limit,&events).await;
+                    }
                     Some(command) => { reject_offline(command, &events).await; }
                 },
                 _ = jobs.join_next(), if !jobs.is_empty() => {},
             }
         }
     }
-    for d in downloads.values() {
-        d.cancel();
-    }
+    for cancel in downloads.values() { cancel.send_replace(true); }
+}
+async fn start_download(jobs:&mut tokio::task::JoinSet<()>, downloads:&mut HashMap<String,tokio::sync::watch::Sender<bool>>, service:Option<&crate::blocks::Service>, key:String, session:String, entry:String, target:PathBuf, limit:u64, events:&Events) {
+    downloads.retain(|_,cancel|cancel.receiver_count()>0);
+    if downloads.contains_key(&key) {return;}
+    let Some(service)=service.filter(|_|downloads.len()<2) else {
+        events.send(Event::Download {key,path:target,status:tau_transfer::TransferStatus {transferred:0,total:0,network_bytes:0,done:true,
+            failure:Some("Content service unavailable or two downloads are already active".into())}}).await;
+        return;
+    };
+    let (cancel,cancellation)=tokio::sync::watch::channel(false); downloads.insert(key.clone(),cancel);
+    let context=service.downloads();
+    jobs.spawn(context.run(key,session,format!("file:{entry}"),target,limit,cancellation));
 }
 async fn reject_offline(command: Command, events: &Events) {
     match command {
@@ -433,15 +462,6 @@ async fn reject_offline(command: Command, events: &Events) {
                 })
                 .await;
         }
-        Command::CancelDownload(_) => {}
-    }
-}
-// Request errors may embed URLs; only static, non-sensitive details leave this layer.
-trait SafeError {
-    fn without_url(&self) -> &str;
-}
-impl SafeError for anyhow::Error {
-    fn without_url(&self) -> &str {
-        "check the connection and retry (partial data is retained)"
+        Command::CancelDownload(_) | Command::Blocks(_) => {}
     }
 }

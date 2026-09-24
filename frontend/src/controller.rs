@@ -3,7 +3,7 @@ use crate::{
     store::*,
     transport::{self, Command, Network, Wake},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -37,6 +37,10 @@ pub struct Controller {
     pub health: crate::connection::Health,
     pub epoch: Option<u64>,
     pub notice: Option<String>,
+    remote: crate::blocks::Cache,
+    block_plan: Option<crate::blocks::Plan>,
+    copy:Option<(String,Vec<String>)>,
+    pub copied:Option<String>,
     network: Option<Network>,
     requests: HashMap<String, ClientCommand>,
     project_deletions: HashMap<String, Vec<String>>,
@@ -49,6 +53,7 @@ impl Controller {
         let identity = settings.identity();
         let account = store.get(&identity, "account")?;
         let model_preferences = store.get(&identity, "quick-models")?;
+        let remote = store.block_cache(&identity)?;
         let mut c = Self {
             store,
             settings,
@@ -65,6 +70,9 @@ impl Controller {
             health: crate::connection::Health::default(),
             epoch: None,
             notice: None,
+            remote,
+            block_plan: None,
+            copy:None, copied:None,
             network: None,
             requests: HashMap::new(),
             project_deletions: HashMap::new(),
@@ -83,7 +91,8 @@ impl Controller {
         self.epoch = None;
         self.connection = "Connecting…".into();
         self.health = crate::connection::Health::connecting();
-        self.network = Some(Network::start(self.settings.clone(), self.wake.clone()));
+        self.block_plan = None;
+        self.network = Some(Network::start_cached(self.settings.clone(), self.wake.clone(),self.remote.clone()));
     }
     pub fn configure(&mut self, settings: Settings) -> Result<()> {
         let settings = settings.normalized();
@@ -92,6 +101,9 @@ impl Controller {
         self.network = None;
         self.settings = settings;
         self.identity = self.settings.identity();
+        self.remote = self.store.block_cache(&self.identity)?;
+        self.block_plan = None;
+        self.copy=None;self.copied=None;
         self.account = self.store.get(&self.identity, "account")?;
         self.model_preferences = self.store.get(&self.identity, "quick-models")?;
         self.chats.clear();
@@ -118,11 +130,13 @@ impl Controller {
     pub fn ensure_chat(&mut self, id: &str) -> Result<()> {
         if !self.chats.contains_key(id) {
             let local = self.store.load_chat(&self.identity, id)?;
+            let mut feed = Feed::default();
+            if let Some(view) = self.remote.snapshot(id)? {feed.snapshot(view.snapshot)?;feed.block_lengths=view.lengths;feed.incomplete=view.incomplete;feed.block_states=view.states;feed.synchronized=false;}
             self.chats.insert(
                 id.to_owned(),
                 Chat {
                     local,
-                    feed: Feed::default(),
+                    feed,
                     commands: vec![],
                     commands_loaded: false,
                     model_request: None,
@@ -589,16 +603,9 @@ impl Controller {
         if self.chats[id].feed.opening {
             return Ok(());
         }
-        let requests = self.chats[id]
-            .local
-            .pending
-            .iter()
-            .map(|p| p.request.id.clone())
-            .collect();
-        self.request(ClientCommand::OpenSession {
-            session_id: id.into(),
-            requests,
-        })?;
+        let requests = self.chats[id].local.pending.iter().map(|p|p.request.id.clone()).collect::<Vec<_>>();
+        self.request(ClientCommand::GetSession { session_id:id.into() })?;
+        for batch in requests.chunks(4) { self.request(ClientCommand::GetReceipts {session_id:id.into(),requests:batch.to_vec()})?; }
         self.chats.get_mut(id).unwrap().feed.opening = true;
         Ok(())
     }
@@ -610,12 +617,8 @@ impl Controller {
         if feed.loading || !feed.synchronized {
             return Ok(());
         }
-        if let Some(before) = feed.before {
-            self.request(ClientCommand::GetHistory {
-                session_id: id.clone(),
-                generation: feed.generation.clone(),
-                before,
-            })?;
+        if let Some(before) = self.remote.history_cursor(&id)? {
+            self.network.as_ref().ok_or_else(||anyhow::anyhow!("Not connected"))?.send(transport::Command::Blocks(crate::blocks::Command::History { scope:id.clone(),before }))?;
             self.chats.get_mut(&id).unwrap().feed.loading = true;
         }
         Ok(())
@@ -623,15 +626,16 @@ impl Controller {
     pub fn download_key(session: &str, entry: &str) -> String {
         format!("{}:{}", session.len(), session) + entry
     }
+    /// The data endpoint is authorized independently of control readiness.
+    pub fn content_authorized(&self) -> bool { self.remote.authorized() }
+    pub fn attachment_path(&self, session:&str, entry:&str) -> PathBuf {
+        let source=self.remote.lineage().unwrap_or_default();
+        self.store.attachment_path(&format!("{}:{source}",self.identity),session,entry)
+    }
     pub fn download(&mut self, session: &str, entry: &str, limit: u64) -> Result<PathBuf> {
-        let path = self.store.attachment_path(&self.identity, session, entry);
-        if path
-            .metadata()
-            .is_ok_and(|m| m.is_file() && m.len() <= limit)
-        {
-            return Ok(path);
-        }
-        ensure!(self.epoch.is_some(), "Connect to download this file");
+        let path = self.attachment_path(session,entry);
+        if self.remote.file_ready(session,&format!("file:{entry}"),&path,limit)? {return Ok(path);}
+        ensure!(self.network.is_some() && (self.remote.authorized() || self.remote.has_file(session,&format!("file:{entry}"))), "Content connection is not authorized yet");
         let key = Self::download_key(session, entry);
         if self.downloads.get(&key).is_some_and(|d| !d.status.done) {
             return Ok(path);
@@ -699,7 +703,69 @@ impl Controller {
                 self.notice = Some(error.to_string());
             }
         }
+        let mut scopes = std::collections::HashSet::new();
+        for _ in 0..256 {
+            let Some(notice) = self.network.as_mut().and_then(|n|n.blocks.try_recv().ok()) else { break; };
+            changed = true;
+            if let Some((key,path,status))=notice.transfer {
+                if let Err(error)=self.network_event(transport::Event::Download {key,path,status}) {self.notice=Some(error.to_string());}
+            } else if let Some(error) = notice.error { self.notice = Some(error); }
+            else { scopes.insert(notice.scope); }
+        }
+        for scope in scopes {
+            if self.chats.contains_key(&scope) && let Err(error) = self.refresh_blocks(&scope) { self.notice = Some(error.to_string()); }
+        }
+        if let Err(error) = self.watch_blocks() { self.notice = Some(error.to_string()); }
         changed
+    }
+    fn refresh_blocks(&mut self, scope: &str) -> Result<()> {
+        if let Some(view) = self.remote.snapshot(scope)? {
+            let snapshot=view.snapshot;
+            let chat = self.chats.get_mut(scope).context("Unknown cached chat")?;
+            let delivered = snapshot.events.iter().filter(|e|e.phase == EventPhase::Saved).filter_map(|e|e.origin.request_id.clone()).collect::<Vec<_>>();
+            chat.feed.snapshot(snapshot)?;
+            chat.feed.block_lengths = view.lengths;
+            chat.feed.incomplete=view.incomplete;
+            chat.feed.block_states=view.states;
+            chat.feed.synchronized = chat.feed.queue.available;
+            chat.feed.opening = false;
+            let before = chat.local.pending.len();
+            chat.local.reconcile(&chat.feed.queue, &delivered);
+            if chat.local.pending.len() != before { self.store.save_chat(&self.identity,scope,&chat.local)?; }
+        }
+        Ok(())
+    }
+    pub fn cancel_copy(&mut self) {self.copy=None;self.copied=None;}
+    pub fn copy_details(&mut self, scope:&str, ids:Vec<String>) -> Result<()> {
+        self.cancel_copy();
+        // Local demo/renderer fixtures have complete events without a remote
+        // cache. Native views fetch missing bytes as an explicit copy interest.
+        if self.remote.snapshot(scope)?.is_none() {
+            let chat=self.chats.get(scope).context("Unknown chat")?;
+            let tools=crate::details::Tools::new(chat.feed.events.values());
+            self.copied=Some(tools.copy(&ids.iter().filter_map(|id|chat.feed.event(id)).collect::<Vec<_>>()));
+        } else {
+            self.copy=Some((scope.into(),ids));self.notice=Some("Fetching details to copy…".into());
+            self.watch_blocks()?;
+        }
+        Ok(())
+    }
+    fn watch_blocks(&mut self) -> Result<()> {
+        if self.copy.as_ref().is_some_and(|(scope,_)|self.account.selected.as_ref()!=Some(scope)) {self.cancel_copy();}
+        if let Some((scope,ids))=&self.copy {
+            match self.remote.copy_ready(scope,ids) {
+                Ok(Some(text))=>{self.copied=Some(text);self.copy=None;self.notice=Some("Details copied".into());}
+                Ok(None)=>{},
+                Err(error)=>{self.copy=None;return Err(error);}
+            }
+        }
+        let next = self.account.selected.as_ref().filter(|id|!self.is_creating(id)).and_then(|id|self.chats.get(id).map(|chat|(id,chat)))
+            .map(|(id,chat)|self.remote.plan(id,&chat.local,self.copy.as_ref().map_or(&[],|(_,ids)|ids.as_slice()))).transpose()?;
+        if next != self.block_plan && let Some(network) = &self.network {
+            network.send(transport::Command::Blocks(crate::blocks::Command::Plan(next.clone())))?;
+            self.block_plan = next;
+        }
+        Ok(())
     }
     fn network_event(&mut self, event: transport::Event) -> Result<()> {
         let fatal = matches!(&event, transport::Event::Fatal(_));
@@ -811,6 +877,19 @@ impl Controller {
     }
     pub fn message(&mut self, message: ServerMessage) -> Result<()> {
         match message {
+            ServerMessage::BlockConnection { .. } => {}, // Owned by the network block service.
+            ServerMessage::Receipts {session_id,reports} => {
+                self.ensure_chat(&session_id)?;
+                let chat = self.chats.get_mut(&session_id).unwrap();
+                for report in reports {
+                    if let Some(pending) = chat.local.pending.iter_mut().find(|p|p.request.id == report.id) {
+                        if let Some(error) = report.error { pending.status = Delivery::Rejected; pending.detail = Some(error); }
+                        else if report.accepted && !report.complete { pending.status = Delivery::Accepted; pending.detail = Some("Accepted; awaiting outcome".into()); }
+                        else if report.accepted { chat.local.pending.retain(|p|p.request.id != report.id); }
+                    }
+                }
+                self.store.save_chat(&self.identity,&session_id,&chat.local)?;
+            }
             ServerMessage::Projects { projects } => {
                 self.account.projects = projects;
                 if !self.account.projects.iter().any(|p| p.id == self.account.selected_project) {
@@ -854,20 +933,6 @@ impl Controller {
                     if self.viewing_chat { self.account.read_at.insert(id.clone(), s.updated_at_ms); }
                 }
                 self.store.put(&self.identity, "account", &self.account)?;
-                // Bounded recent/unread/running warming, never starts a worker.
-                let warm = self
-                    .account
-                    .sessions
-                    .iter()
-                    .filter(|s| !self.chats.contains_key(&s.id))
-                    .take(8usize.saturating_sub(self.chats.len()))
-                    .map(|s| s.id.clone())
-                    .collect::<Vec<_>>();
-                if self.epoch.is_some() {
-                    for id in warm {
-                        if !self.is_creating(&id) { self.open(&id)?; }
-                    }
-                }
             }
             ServerMessage::TranscriptSnapshot {
                 session_id,
@@ -1033,6 +1098,7 @@ impl Controller {
                 }
                 let create_reply = self.is_creating(&request_id);
                 let command = self.requests.remove(&request_id);
+                if let Some(ClientCommand::GetSession {session_id}) = &command && let Some(chat) = self.chats.get_mut(session_id) { chat.feed.opening = false; }
                 if let Some(deleted) = self.project_deletions.remove(&request_id) && ok && !uncertain {
                     for id in deleted {
                         self.store.delete_chat(&self.identity, &id)?;

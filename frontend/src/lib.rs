@@ -1,3 +1,4 @@
+pub mod blocks;
 pub mod feed;
 pub mod store;
 pub mod transport;

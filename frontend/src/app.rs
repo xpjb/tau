@@ -539,6 +539,7 @@ impl App {
         let visible = (self.size.0 as f32 / self.scale >= 760. || !self.show_chats) && self.modal.is_none() && self.viewer.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.notice = Some(error.to_string()); }
         self.dirty |= self.controller.poll();
+        if let Some(text)=self.controller.copied.take() && !text.is_empty() {self.platform.push(PlatformAction::Copy(text));self.dirty=true;}
         self.dirty |= self.usage.tick();
         self.dirty |= self.info_tip.tick();
         if self.connecting && self.controller.epoch.is_some() {
@@ -1835,21 +1836,10 @@ impl App {
                 self.remember_scroll();
             }
             Action::DismissNotice => self.controller.notice = None,
-            Action::Copy(text) => self.platform.push(PlatformAction::Copy(text)),
-            Action::CopyDetails(session, ids) => {
-                if let Some(chat) = self.controller.chats.get(&session) {
-                    let tools = Tools::new(chat.feed.events.values());
-                    let group = ids
-                        .iter()
-                        .filter_map(|id| chat.feed.event(id))
-                        .collect::<Vec<_>>();
-                    let text = tools.copy(&group);
-                    if !text.is_empty() {
-                        self.platform.push(PlatformAction::Copy(text));
-                    }
-                }
-            }
+            Action::Copy(text) => {self.controller.cancel_copy();self.platform.push(PlatformAction::Copy(text));}
+            Action::CopyDetails(session, ids) => self.controller.copy_details(&session,ids)?,
             Action::CopySelection => {
+                self.controller.cancel_copy();
                 if let Some(text) = self.renderer.selected_text() {
                     self.platform.push(PlatformAction::Copy(text));
                 }
@@ -2353,7 +2343,7 @@ impl App {
     }
     fn rows(&self, session: &str) -> Vec<Row> {
         let chat = &self.controller.chats[session];
-        let tools = Tools::new(chat.feed.events.values());
+        let tools = Tools::new(chat.feed.events.values()).with_lengths(&chat.feed.block_lengths).with_states(&chat.feed.block_states);
         let events = chat
             .feed
             .events
@@ -2428,7 +2418,7 @@ impl App {
                     }
                 )
             };
-            let mut actions = vec![("Copy message".into(), Action::Copy(e.text.clone()))];
+            let mut actions = if chat.feed.incomplete.contains(&e.id) {vec![]} else {vec![("Copy message".into(), Action::Copy(e.text.clone()))]};
             if e.phase == EventPhase::Saved {
                 actions.push(("Fork here".into(), Action::Fork(e.entry_id.clone())));
             }
@@ -2487,8 +2477,9 @@ impl App {
         }
         for (i, q) in chat.feed.queue.requests.iter().enumerate() {
             let state = &chat.feed.queue;
-            let mut actions = vec![("Copy message".into(), Action::Copy(q.text.clone()))];
-            if state.capabilities.iter().any(|c| c == "queue_edit") {
+            let complete=!chat.feed.incomplete.contains(&format!("queued:{}",q.request_id));
+            let mut actions = if complete {vec![("Copy message".into(), Action::Copy(q.text.clone()))]} else {vec![]};
+            if complete && state.capabilities.iter().any(|c| c == "queue_edit") {
                 actions.push((
                     "Edit".into(),
                     Action::EditQueue(q.request_id.clone(), q.revision, q.text.clone()),
@@ -2503,7 +2494,7 @@ impl App {
                     }),
                 ));
             }
-            if state.capabilities.iter().any(|c| c == "queue_run_prefix")
+            if state.available && state.capabilities.iter().any(|c| c == "queue_run_prefix")
                 && let Some(boundary) = state
                     .boundaries
                     .iter()
@@ -2755,10 +2746,7 @@ impl App {
             }
             let attachment = if let Some((entry, a)) = &row.attachment {
                 (96. + if a.kind == AttachmentKind::Image
-                    && self
-                        .controller
-                        .store
-                        .attachment_path(&self.controller.identity, &session, entry)
+                    && self.controller.attachment_path(&session,entry)
                         .is_file()
                 {
                     240.
@@ -2999,11 +2987,7 @@ impl App {
             let mut actions: Vec<(String, Action)> = vec![];
             if let Some((entry, attachment)) = &row.attachment {
                 let image = attachment.kind == AttachmentKind::Image;
-                let path = self.controller.store.attachment_path(
-                    &self.controller.identity,
-                    &session,
-                    entry,
-                );
+                let path = self.controller.attachment_path(&session,entry);
                 let key = Controller::download_key(&session, entry);
                 if image && path.is_file() {
                     let preview = crate::render::intersect(

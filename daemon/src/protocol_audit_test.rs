@@ -10,9 +10,9 @@ fn content() -> SessionContent {
     SessionContent { transcript:Some(transcript), ..Default::default() }
 }
 
-#[test]
-fn audit_streaming_wire_costs_distinguish_text_deltas_from_growing_tools() {
-    fn measure(kind: &str) -> usize {
+#[tokio::test]
+async fn audit_streaming_wire_costs_distinguish_text_deltas_from_growing_tools() {
+    async fn measure(kind: &str) -> usize {
         let mut content = content();
         let mut messages = content.events.subscribe();
         let mut bytes = 0;
@@ -24,26 +24,26 @@ fn audit_streaming_wire_costs_distinguish_text_deltas_from_growing_tools() {
                 "tool" => json!({"type":"toolCall","id":"call","name":"write","partialArguments":text}),
                 _ => unreachable!(),
             };
-            content.live("chat", "stream", json!({"role":"assistant","content":[block]})).unwrap();
+            content.live("chat", "stream", json!({"role":"assistant","content":[block]})).await.unwrap();
             let message = messages.try_recv().unwrap();
             bytes += serde_json::to_vec(message.as_ref()).unwrap().len();
         }
         bytes
     }
-    let text = measure("text");
-    let thinking = measure("thinking");
-    let tool = measure("tool");
+    let text = measure("text").await;
+    let thinking = measure("thinking").await;
+    let tool = measure("tool").await;
     println!("128 updates ending at 32768 content bytes: text={text}, thinking={thinking}, tool={tool} JSON bytes");
     assert!(text < 70_000 && thinking < 70_000, "Single text/thinking blocks already use deltas");
-    assert!(tool > 2_000_000 && tool > text * 20, "Tool prefixes are currently retransmitted, not appended");
+    assert!(tool < 70_000, "Tool input now uses append deltas too");
 }
 
-#[test]
-fn audit_page_budget_is_not_a_hard_frame_limit() {
+#[tokio::test]
+async fn audit_page_budget_is_not_a_hard_frame_limit() {
     let mut content = content();
     content.live("chat", "stream", json!({"role":"assistant","content":[
         {"type":"toolCall","id":"call","name":"write","partialArguments":"x".repeat(PAGE_BYTES * 2)}
-    ]})).unwrap();
+    ]})).await.unwrap();
     let transcript = content.transcript.as_ref().unwrap();
     let page = transcript.page(None);
     assert_eq!(page.events.len(),1);

@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 pub mod settings;
+pub mod blocks;
 mod transcript;
 pub use transcript::*;
 
-// Protocol 15 includes topics, optional context capacity and durable local intent.
-pub const PROTOCOL_VERSION: u32 = 15;
+// Protocol 16 separates durable block synchronization from control and receipts.
+pub const PROTOCOL_VERSION: u32 = 16;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -48,6 +49,9 @@ pub struct ClientRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum ClientCommand {
+    ConnectBlocks { node_id: String },
+    GetSession { session_id: String },
+    GetReceipts { session_id: String, requests: Vec<String> },
     ListSessions,
     CreateProject { project_id: String, name: String, prompt: String },
     UpdateProject { project_id: String, revision: u64, name: String, prompt: String },
@@ -146,6 +150,8 @@ pub enum QueueOperation {
     rename_all_fields = "camelCase"
 )]
 pub enum ServerMessage {
+    BlockConnection { offer: blocks::BulkOffer },
+    Receipts { session_id: String, reports: Vec<OperationReceipt> },
     Hello {
         protocol_version: u32,
         daemon_version: String,
@@ -397,3 +403,8 @@ impl std::str::FromStr for SessionModel {
         Ok(Self { provider: provider.into(), model_id: model.into() })
     }
 }
+
+/// Durable intent outcome, independent of display blocks and transcript windows.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct OperationReceipt { pub id:String, pub accepted:bool, pub complete:bool, pub error:Option<String>, pub notice:Option<String> }

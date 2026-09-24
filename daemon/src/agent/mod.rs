@@ -65,14 +65,17 @@ impl SessionContent {
     pub async fn save_queue(&mut self, id: &str, queue: QueueState, receipt: Option<Receipt>) -> Result<()> {
         self.commit(id,Vec::new(),Some(queue),receipt).await
     }
-    pub fn live(&mut self, id: &str, stream: &str, message: Value) -> Result<()> {
+    pub async fn live(&mut self, id: &str, stream: &str, message: Value) -> Result<()> {
         let transcript = self.transcript.as_mut().unwrap();
         let mut change = transcript.project(&json!({"streamId":stream,"parentId":transcript.head,"message":message}), true)?;
-        // Emit a delta for the common single growing block; avoid resending the whole response.
+        if let Some(agent) = &self.agent {
+            agent.store.project_live(id,change.events.clone(),change.removed.clone()).await?;
+        }
+        // Internal runtime updates also append tool input rather than re-copy it.
         change.events.retain(|event| transcript.event(&event.id).is_none_or(|old| old != event));
         if change.events.len() == 1 && let Some(old) = transcript.event(&change.events[0].id) {
             let event = &change.events[0];
-            if old.kind == event.kind && matches!(event.kind, crate::transcript::EventKind::Text | crate::transcript::EventKind::Thinking)
+            if old.kind == event.kind && matches!(event.kind, crate::transcript::EventKind::Text | crate::transcript::EventKind::Thinking | crate::transcript::EventKind::Tool)
                 && let Some(delta) = event.text.strip_prefix(&old.text) {
                 change.delta = Some(crate::transcript::TextDelta { event_id:event.id.clone(), text:delta.into() }); change.events.clear();
             }
@@ -133,7 +136,10 @@ impl AgentManager {
                 let mut event = event.clone(); event.phase = crate::transcript::EventPhase::Interrupted;
                 interrupted.events.push(event);
             }
-            if !interrupted.events.is_empty() { let _ = content.publish(&id, interrupted); }
+            if !interrupted.events.is_empty() {
+                if let Some(agent) = &content.agent { let _ = agent.store.project_live(&id,interrupted.events.clone(),vec![]).await; }
+                let _ = content.publish(&id, interrupted);
+            }
             manager.set_runtime_state(&id, &runtime, if result.is_err() && !cancelled { SessionStatus::Error } else { SessionStatus::Idle },
                 result.err().map(|e| bounded(&e.to_string(), 480)), Some(usage));
             drop(content);
@@ -208,7 +214,7 @@ impl AgentManager {
                     _ = cancel.cancelled() => break Err(anyhow::anyhow!("Aborted")),
                     Some(message) = receiver.recv() => {
                         partial = message;
-                        runtime.content.lock().await.live(id, &stream, assistant_message(&partial, &selected, "", &mut started))?;
+                        runtime.content.lock().await.live(id, &stream, assistant_message(&partial, &selected, "", &mut started)).await?;
                     }
                     result = &mut generation => break result,
                 }

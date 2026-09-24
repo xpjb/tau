@@ -1,3 +1,5 @@
+pub mod blocks;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -85,16 +87,26 @@ pub struct TransferProvider {
     endpoint: Endpoint,
     grants: Arc<Mutex<HashMap<NodeId, Source>>>,
     imports: Semaphore,
+    blocks: Option<blocks::Acceptor>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl TransferProvider {
-    pub async fn bind(address: SocketAddrV4) -> Result<Self> {
+    pub async fn bind(address: SocketAddrV4) -> Result<Self> { Self::bind_service(address,None).await }
+    pub async fn bind_with_blocks(address: SocketAddrV4, backend: Arc<dyn blocks::Backend>) -> Result<Self> {
+        Self::bind_service(address,Some(blocks::Acceptor::new(backend))).await
+    }
+    pub fn block_offer(&self, node: &str, lineage: String) -> Result<tau_blocks::BulkOffer> {
+        self.blocks.as_ref().context("Block service is not enabled")?.authorize(&self.endpoint,node,lineage)
+    }
+    async fn bind_service(address: SocketAddrV4, blocks: Option<blocks::Acceptor>) -> Result<Self> {
+        let mut alpns = vec![iroh_blobs::ALPN.to_vec()];
+        if blocks.is_some() { alpns.push(blocks::ALPN.to_vec()); }
         let endpoint = Endpoint::builder()
             .bind_addr_v4(address)
             .bind_addr_v6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0))
             .relay_mode(RelayMode::Disabled)
-            .alpns(vec![iroh_blobs::ALPN.to_vec()])
+            .alpns(alpns)
             .transport_config(transport_config())
             .bind().await?;
         if address.port() != 0 && endpoint.bound_sockets().0.port() != address.port() {
@@ -104,6 +116,7 @@ impl TransferProvider {
         let grants = Arc::new(Mutex::new(HashMap::<NodeId, Source>::new()));
         let acceptor = endpoint.clone();
         let allowed = grants.clone();
+        let block_service = blocks.clone();
         let task = tokio::spawn(async move {
             let pool = LocalPool::single();
             let connections = Arc::new(Semaphore::new(16));
@@ -119,9 +132,14 @@ impl TransferProvider {
                         };
                         let allowed = allowed.clone();
                         let pool = pool.handle().clone();
+                        let blocks = block_service.clone();
                         tasks.spawn(async move {
                             let _permit = permit;
                             let Ok(Ok(connection)) = tokio::time::timeout(Duration::from_secs(10), incoming).await else { return; };
+                            if connection.alpn().as_deref() == Some(blocks::ALPN) {
+                                if let Some(blocks) = blocks { blocks.accept(connection).await; }
+                                return;
+                            }
                             let source = connection.remote_node_id().ok().and_then(|id| {
                                 allowed.lock().unwrap().get(&id).filter(|s| s.expires > Instant::now()).cloned()
                             });
@@ -144,7 +162,7 @@ impl TransferProvider {
             while tasks.join_next().await.is_some() {}
             pool.shutdown().await;
         });
-        Ok(Self { endpoint, grants, imports: Semaphore::new(2), task: Mutex::new(Some(task)) })
+        Ok(Self { endpoint, grants, imports: Semaphore::new(2), blocks, task: Mutex::new(Some(task)) })
     }
 
     pub async fn offer(&self, mut file: File, client_id: &str, limit: u64) -> Result<TransferOffer> {
@@ -200,7 +218,7 @@ impl Drop for TransferProvider {
 fn transport_config() -> TransportConfig {
     let mut config = TransportConfig::default();
     config.initial_mtu(1200).min_mtu(1200).mtu_discovery_config(None);
-    config.max_concurrent_bidi_streams(4u32.into()).max_concurrent_uni_streams(0u32.into());
+    config.max_concurrent_bidi_streams(16u32.into()).max_concurrent_uni_streams(0u32.into());
     config.max_idle_timeout(Some(STALL_TIMEOUT.try_into().unwrap()));
     config.keep_alive_interval(Some(Duration::from_secs(5)));
     config

@@ -30,6 +30,7 @@ pub(crate) struct ManagerInner {
     pub projects: Mutex<()>,
     pub catalog: ModelCatalog,
     pub catalog_requests: Semaphore,
+    pub block_imports: Semaphore,
     pub runtimes: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     pub events: broadcast::Sender<ServerMessage>,
     pub shutting_down: AtomicBool,
@@ -56,12 +57,13 @@ impl SessionRuntime {
 }
 impl AgentManager {
     pub async fn new(config: Config, state: StateStore) -> Result<Self> {
+        state.recover_blocks().await?;
         let settings = SettingsStore::load(&config, crate::state::DEFAULT_TITLE_PROMPT.into()).await?;
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
         let catalog = ModelCatalog::load(config.settings_path.with_file_name("model-catalog.json")).await;
         Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
-            projects: Mutex::new(()), catalog, catalog_requests: Semaphore::new(2),
+            projects: Mutex::new(()), catalog, catalog_requests: Semaphore::new(2), block_imports: Semaphore::new(2),
             runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false) }) })
     }
     pub(crate) fn context_window(&self, settings: &Settings, model: &SessionModel) -> Option<u64> {
@@ -164,6 +166,27 @@ impl AgentManager {
             drop(content); self.broadcast_sessions().await; return Ok(id);
         }
     }
+    /// Viewing persisted state never loads an agent or waits for a provider.
+    pub async fn session_state_message(&self, id: &str) -> Result<ServerMessage> {
+        let stored = self.inner.state.get(id).await?.context("Unknown session")?;
+        let state = self.inner.runtimes.lock().await.get(id).map(|runtime|runtime.snapshot());
+        let usage = self.context_usage(&self.inner.settings.get(),&stored.model,stored.tokens);
+        Ok(ServerMessage::SessionState { session_id:id.into(),status:state.as_ref().map_or(SessionStatus::Sleeping,|s|s.status),
+            detail:state.as_ref().and_then(|s|s.detail.clone()),context_usage:state.map_or(usage,|s|s.context_usage) })
+    }
+    pub async fn receipt_message(&self, id: &str, requests: &[String]) -> Result<ServerMessage> {
+        anyhow::ensure!(requests.len() <= 4,"Receipt requests are limited to four IDs");
+        anyhow::ensure!(self.inner.state.get(id).await?.is_some(),"Unknown session");
+        let mut reports = vec![];
+        for request in requests {
+            anyhow::ensure!(!request.is_empty() && request.len() <= 128,"Invalid request ID");
+            let receipt = self.inner.state.receipt(id,request).await?;
+            let short = |s:String| { let mut n=s.len().min(384); while !s.is_char_boundary(n) {n-=1;} s[..n].to_owned() };
+            reports.push(crate::protocol::OperationReceipt { id:request.clone(),accepted:receipt.is_some(),complete:receipt.as_ref().is_some_and(|r|r.finished),
+                error:receipt.as_ref().and_then(|r|r.error.clone()).map(short),notice:receipt.and_then(|r|r.notice).map(short) });
+        }
+        Ok(ServerMessage::Receipts { session_id:id.into(),reports })
+    }
     pub async fn open_session(&self, id: &str, requests: &[String]) -> Result<SessionFeed> {
         let runtime = self.runtime(id).await?;
         let mut content = runtime.content.lock().await;
@@ -205,6 +228,7 @@ impl AgentManager {
                 drop(content);
                 let result = self.run_builtin_command(id, &runtime, name, args.trim()).await;
                 self.inner.state.finish_command(id,receipt,&result).await?;
+                if let Ok(report) = self.receipt_message(id,&[request_id.into()]).await { let _ = self.inner.events.send(report); }
                 return result;
             }
             if ["settings", "login", "logout", "reload", "tau-fork-at", "tree", "new", "resume", "fork", "clone", "scoped-models", "export", "import", "share", "copy", "session", "changelog", "hotkeys", "trust", "quit"].contains(&name) {
@@ -361,12 +385,14 @@ impl AgentManager {
         let stored = self.inner.state.get(id).await?.context("Unknown session")?;
         let settings = self.inner.settings.get();
         let mut queue = self.inner.state.queue(id).await?;
-        queue.run_id = None; queue.control = None;
+        queue.run_id = None;
         if !queue.requests.is_empty() || stored.needs_turn { queue.paused = true; }
         let detail = (queue.paused && (stored.needs_turn || !queue.requests.is_empty())).then(|| "Pending work is paused; resume when ready".to_owned());
         let usage = self.context_usage(&settings, &stored.model, stored.tokens);
         let page = self.inner.state.page(id,None).await?;
-        content.transcript = Some(Transcript::new(page,stored.head,stored.next_order,queue));
+        let mut transcript = Transcript::new(page,stored.head,stored.next_order,queue);
+        transcript.generation = format!("{}:{id}",self.inner.state.block_cursor().await?.lineage);
+        content.transcript = Some(transcript);
         content.agent = Some(AgentSession { store:self.inner.state.clone(), revision:stored.revision, model:stored.model, thinking:stored.thinking,
             running:false, cancel:tokio_util::sync::CancellationToken::new(), task:None, tokens:stored.tokens, needs_turn:stored.needs_turn });
         let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id:Some(id.into()) }));
