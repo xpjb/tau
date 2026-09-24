@@ -68,6 +68,7 @@ struct Vertex {
     local: [f32; 2],
     half_size: [f32; 2],
     corners: [f32; 4],
+    ripple: [f32; 4],
 }
 #[derive(Clone, Copy, Default)]
 pub struct Interaction {
@@ -80,6 +81,7 @@ struct Shape {
     clip: Rect,
     color: Color,
     corners: [f32; 4],
+    ripple: Option<(Vec2, f32)>,
 }
 #[derive(Default)]
 pub struct Layer {
@@ -115,23 +117,43 @@ impl Layer {
                 clip,
                 color,
                 corners: corners.map(|r| r.clamp(0., rect.width.min(rect.height) * 0.5)),
+                ripple: None,
             });
         }
     }
     pub fn control_color(&self, rect: Rect, base: Color) -> Color {
         self.surface_color(rect, [0.; 4], rect, base)
     }
-    /// Tint the entire section after its panels, but below text/images. Using
-    /// the same full shape prevents square hover patches at rounded corners.
-    pub fn surface_highlight(&mut self, rect: Rect, corners: [f32; 4], clip: Rect, pinned: bool) {
-        let strength = if pinned {
-            0.035
-        } else {
-            self.surface_color(rect, corners, clip, Color([0., 0., 0., 1.]))
-                .0[0]
-        };
+    /// Draws beneath text/images. Hover is quiet; a press is an expanding,
+    /// rounded-surface-clipped circle instead of brightening the entire panel.
+    pub fn surface_highlight(
+        &mut self,
+        rect: Rect,
+        corners: [f32; 4],
+        clip: Rect,
+        pinned: bool,
+        hoverable: bool,
+        ripple: Option<(Vec2, f32, f32)>,
+    ) {
+        let inside = |p| contains(clip, p) && contains_rounded(rect, corners, p);
+        let hovering = hoverable && self.interaction.hover.is_some_and(inside)
+            && (!self.interaction.held || self.interaction.pressed.is_some_and(inside));
+        let strength = if pinned { 0.035 } else if hovering { 0.018 } else { 0. };
         if strength > 0. {
             self.clipped_corners(rect, corners, Color([1., 1., 1., strength]), clip);
+        }
+        if let Some((center, radius, opacity)) = ripple.filter(|(_, radius, opacity)| *radius > 0. && *opacity > 0.) {
+            let circle = Rect::new(center.x - radius, center.y - radius, radius * 2., radius * 2.);
+            let visible = intersect(intersect(rect, clip), circle);
+            if visible.width > 0. && visible.height > 0. {
+                self.rects.push(Shape {
+                    rect,
+                    clip: visible,
+                    color: Color([1., 1., 1., opacity]),
+                    corners: corners.map(|r| r.clamp(0., rect.width.min(rect.height) * 0.5)),
+                    ripple: Some((center, radius)),
+                });
+            }
         }
     }
     pub fn surface_color(
@@ -147,7 +169,7 @@ impl Layer {
             let mix = if input.pressed.is_some_and(inside) {
                 0.09
             } else if !input.held {
-                0.035
+                0.018
             } else {
                 0.
             };
@@ -240,7 +262,7 @@ impl Renderer {
                     buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32x4],
                     })],
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -732,6 +754,12 @@ impl Renderer {
                         ],
                         half_size: [full.width * 0.5, full.height * 0.5],
                         corners: shape.corners,
+                        ripple: shape.ripple.map_or([0.; 4], |(center, radius)| [
+                            center.x - full.x - full.width * 0.5,
+                            center.y - full.y - full.height * 0.5,
+                            radius,
+                            1.,
+                        ]),
                     });
                 }
             }
@@ -845,11 +873,12 @@ struct Out {
     @location(1) local: vec2<f32>,
     @location(2) half_size: vec2<f32>,
     @location(3) corners: vec4<f32>,
+    @location(4) ripple: vec4<f32>,
 }
 @vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>,
               @location(2) local: vec2<f32>, @location(3) half_size: vec2<f32>,
-              @location(4) corners: vec4<f32>) -> Out {
-    return Out(vec4<f32>(pos,0.,1.), color, local, half_size, corners);
+              @location(4) corners: vec4<f32>, @location(5) ripple: vec4<f32>) -> Out {
+    return Out(vec4<f32>(pos,0.,1.), color, local, half_size, corners, ripple);
 }
 @fragment fn fs(in: Out) -> @location(0) vec4<f32> {
     let top = select(in.corners.x, in.corners.y, in.local.x > 0.);
@@ -858,7 +887,9 @@ struct Out {
     let q = abs(in.local) - in.half_size + vec2<f32>(radius);
     let distance = length(max(q, vec2<f32>(0.))) + min(max(q.x, q.y), 0.) - radius;
     let coverage = clamp(0.5 - distance / max(fwidth(distance), 1.), 0., 1.);
-    return vec4<f32>(in.color.rgb, in.color.a * select(1., coverage, radius > 0.));
+    let circle_distance = length(in.local - in.ripple.xy) - in.ripple.z;
+    let circle = clamp(0.5 - circle_distance / max(fwidth(circle_distance), 1.), 0., 1.);
+    return vec4<f32>(in.color.rgb, in.color.a * select(1., coverage, radius > 0.) * select(1., circle, in.ripple.w > 0.));
 }
 "#;
 const IMAGE_SHADER: &str = r#"
@@ -868,3 +899,27 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
 @vertex fn vs(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> Out { return Out(vec4<f32>(pos,0.,1.),uv); }
 @fragment fn fs(in: Out) -> @location(0) vec4<f32> { return textureSample(image,image_sampler,in.uv); }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn subtle_hover_and_circle_have_separate_clipped_shapes() {
+        let rect = Rect::new(10., 10., 120., 80.);
+        let mut layer = Layer::new(Interaction { hover: Some(Vec2::new(30., 40.)), ..Default::default() });
+        layer.surface_highlight(rect, [12.; 4], rect, false, true, None);
+        assert_eq!(layer.rects.len(), 1);
+        assert_eq!(layer.rects[0].color.0[3], 0.018);
+        layer.surface_highlight(rect, [12.; 4], rect, false, false, None);
+        assert_eq!(layer.rects.len(), 1, "a nested section suppresses the parent hover");
+        layer.surface_highlight(rect, [12.; 4], Rect::new(20., 20., 100., 60.), false, false,
+            Some((Vec2::new(30., 40.), 15., 0.11)));
+        let ripple = layer.rects.last().unwrap();
+        assert_eq!(ripple.clip.x, 20.);
+        assert_eq!(ripple.clip.y, 25.);
+        assert_eq!(ripple.clip.width, 25.);
+        assert_eq!(ripple.clip.height, 30.);
+        assert_eq!(ripple.ripple.unwrap().1, 15.);
+        assert_eq!(ripple.corners, [12.; 4]);
+    }
+}

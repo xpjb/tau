@@ -18,6 +18,8 @@ use std::{
     path::PathBuf,
     time::Instant,
 };
+mod ripple;
+use ripple::Ripple;
 use tau_protocol::*;
 
 #[derive(Clone)]
@@ -138,6 +140,17 @@ impl MessageArea {
         contains(self.clip, point) && contains_rounded(self.rect, self.corners, point)
     }
 }
+struct DetailArea {
+    key: String,
+    rect: Rect,
+    corners: [f32; 4],
+    clip: Rect,
+}
+impl DetailArea {
+    fn contains(&self, point: Vec2) -> bool {
+        contains(self.clip, point) && contains_rounded(self.rect, self.corners, point)
+    }
+}
 struct Pointer {
     id: u64,
     start: Vec2,
@@ -183,6 +196,8 @@ pub struct App {
     context_menu: Option<ContextMenu>,
     context_rect: Rect,
     message_areas: Vec<MessageArea>,
+    detail_areas: Vec<DetailArea>,
+    ripple: Option<Ripple>,
     chat_areas: Vec<(Rect, String)>,
     usage: Tooltip,
     info_tip: Tooltip,
@@ -245,6 +260,8 @@ impl App {
             context_menu: None,
             context_rect: Rect::new(0., 0., 0., 0.),
             message_areas: vec![],
+            detail_areas: vec![],
+            ripple: None,
             chat_areas: vec![],
             usage: Tooltip::default(),
             info_tip: Tooltip::default(),
@@ -340,10 +357,8 @@ impl App {
         };
         self.dirty |= on_bar(self.hover) != on_bar(point);
         if self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none() {
-            let section_at = |p: Option<Vec2>| {
-                p.and_then(|p| self.message_areas.iter().position(|a| a.contains(p)))
-            };
-            self.dirty |= section_at(self.hover) != section_at(point);
+            self.dirty |= self.hover.and_then(|p| self.section_at(p).map(|(key, _)| key))
+                != point.and_then(|p| self.section_at(p).map(|(key, _)| key));
         }
         self.hover = point;
         self.dirty |= old != new;
@@ -542,9 +557,24 @@ impl App {
             self.remember_scroll();
             self.dirty = true;
         }
+        if let Some(ripple) = &self.ripple {
+            let now = Instant::now();
+            if ripple.finished(now) {
+                self.ripple = None;
+                self.dirty = true;
+            } else if ripple.animating(now) {
+                self.dirty = true;
+            }
+        }
         let dirty = self.dirty;
         self.dirty = false;
         dirty || self.velocity.abs() > 4.
+    }
+    fn section_at(&self, point: Vec2) -> Option<(&str, Rect)> {
+        self.detail_areas.iter().rev().find(|a| a.contains(point))
+            .map(|a| (a.key.as_str(), a.rect))
+            .or_else(|| self.message_areas.iter().rev().find(|a| a.contains(point))
+                .map(|a| (a.key.as_str(), a.rect)))
     }
     pub fn save(&mut self) -> Result<()> {
         self.remember_scroll();
@@ -757,6 +787,7 @@ impl App {
         self.expansion_pin = None;
         self.history_attempt = None;
         self.velocity = 0.;
+        self.ripple = None;
         if self.pointer.is_some() {
             if self.viewer.is_some() && touch {
                 self.pinch = Some((id, point));
@@ -832,6 +863,9 @@ impl App {
             dragged: false,
             touch,
         });
+        self.ripple = if self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none() {
+            self.section_at(point).map(|(key, rect)| Ripple::new(key.to_owned(), rect, point))
+        } else { None };
         self.dirty = true;
     }
     pub fn motion(&mut self, id: u64, point: Vec2) {
@@ -881,6 +915,7 @@ impl App {
             }
             p.dragged |=
                 (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 4. * self.scale;
+            if p.dragged { self.ripple = None; }
             p.last = point;
             self.dirty = true;
             return;
@@ -917,6 +952,7 @@ impl App {
                 }
             }
         }
+        if p.dragged { self.ripple = None; }
         p.last = point;
         p.at = Instant::now();
         self.remember_scroll();
@@ -965,6 +1001,8 @@ impl App {
                     .extend_selection(crate::render::TextPoint { key, byte: end });
             }
         }
+        if p.dragged { self.ripple = None; }
+        else if let Some(ripple) = &mut self.ripple { ripple.release(); }
         self.selecting = false;
         self.field_selection = None;
         if p.at.elapsed().as_millis() > 150 {
@@ -984,6 +1022,7 @@ impl App {
         self.scroll_drag = None;
         self.expansion_pin = None;
         self.pointer = None;
+        self.ripple = None;
         self.pinch = None;
         self.velocity = 0.;
         self.selecting = false;
@@ -1696,6 +1735,7 @@ impl App {
         self.hits.clear();
         self.scrollbars.clear();
         self.message_areas.clear();
+        self.detail_areas.clear();
         self.chat_areas.clear();
         self.info_areas.clear();
         self.usage.region = Rect::new(0., 0., 0., 0.);
@@ -2236,6 +2276,7 @@ impl App {
     }
     fn chat(&mut self, ctx: &impl RenderContext, layer: &mut Layer, chrome: &mut Layer, b: Rect) {
         let s = self.scale;
+        let paint_at = Instant::now();
         let wide = self.size.0 as f32 / s >= 760.;
         let Some(session) = self.controller.account.selected.clone() else {
             return;
@@ -2571,6 +2612,9 @@ impl App {
                         text_width - line.indent * s + 8. * s,
                         *h,
                     );
+                    let line_key = format!("{session}/{}", line.key);
+                    let inner_corners = [4. * s; 4];
+                    self.detail_areas.push(DetailArea { key: line_key.clone(), rect: line_rect, corners: inner_corners, clip: viewport });
                     if line.tool {
                         layer.clipped_rect(line_rect, color(0x111922), viewport);
                     }
@@ -2621,8 +2665,13 @@ impl App {
                             viewport,
                         );
                     }
+                    layer.surface_highlight(line_rect, inner_corners, viewport, false, true,
+                        self.ripple.as_ref().and_then(|r| r.paint(&line_key, line_rect, paint_at)));
                 }
-                layer.surface_highlight(rect, corners, viewport, pinned);
+                let inner_hover = layer.interaction.hover.is_some_and(|point|
+                    self.detail_areas.iter().any(|area| area.contains(point)));
+                layer.surface_highlight(rect, corners, viewport, pinned, !inner_hover,
+                    self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
                 continue;
             }
             let label_rect = Rect::new(x + 14. * s, top + 28. * s, text_width, 20. * s);
@@ -2782,7 +2831,8 @@ impl App {
                 }
                 ax += width + 5. * s;
             }
-            layer.surface_highlight(rect, corners, viewport, pinned);
+            layer.surface_highlight(rect, corners, viewport, pinned, true,
+                self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
         }
         self.scrollbar(chrome, Lane::Transcript, viewport);
         chrome.rect(
@@ -4252,3 +4302,5 @@ mod thinking_tests;
 mod control_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod icon_controls_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod hover_tests;
