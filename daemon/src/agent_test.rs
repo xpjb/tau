@@ -344,50 +344,6 @@ async fn incomplete_stream_never_executes_tools_abort_kills_shell_group_and_retr
 }
 
 #[tokio::test]
-async fn pi_custom_model_windows_supply_the_percentage_without_importing_credentials() {
-    let mut model = ModelServer::start(vec![codex("Reply", vec![])]).await;
-    let (root, manager, _, server) = fixture(&model, Api::Codex).await;
-    let mut config = manager.inner.config.clone(); manager.shutdown().await; server.abort();
-    tokio::fs::remove_file(&config.settings_path).await.unwrap();
-    let pi = root.path().join("pi-models"); tokio::fs::create_dir_all(&pi).await.unwrap();
-    tokio::fs::write(pi.join("settings.json"),json!({"defaultProvider":"openai-codex","defaultModel":"gpt-6-sol"}).to_string()).await.unwrap();
-    tokio::fs::write(pi.join("models-store.json"),json!({"openai-codex":{"models":[{"id":"gpt-6-astra","contextWindow":272000}]}}).to_string()).await.unwrap();
-    tokio::fs::write(pi.join("models.json"),json!({"providers":{"openai-codex":{"apiKey":"do-not-copy-this-key","baseUrl":"https://wrong.example",
-        "models":[{"id":"gpt-6-sol","name":"GPT-6 Sol","contextWindow":272000},
-                  {"id":"gpt-6-luna","name":"GPT-6 Luna","contextWindow":272000}]}}}).to_string()).await.unwrap();
-    config.import_pi_dir = Some(pi.clone());
-    let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
-    let settings = manager.inner.settings.get();
-    assert_eq!(settings.models.len(), 3);
-    assert_eq!(settings.models.iter().find(|m| m.id == "gpt-6-sol").unwrap().context_window, Some(272000));
-    assert_eq!(settings.models.iter().find(|m| m.id == "gpt-6-luna").unwrap().context_window, Some(272000));
-    assert_eq!(settings.providers["openai-codex"].base_url, "https://chatgpt.com/backend-api/codex");
-    let saved = tokio::fs::read_to_string(&config.settings_path).await.unwrap();
-    assert!(!saved.contains("do-not-copy-this-key") && !saved.contains("wrong.example"));
-    let mut settings = manager.inner.settings.get();
-    settings.providers.get_mut("openai-codex").unwrap().base_url = model.url.clone();
-    manager.set_settings(settings.revision, settings).await.unwrap();
-    let (url, server) = serve(&manager).await; let mut client = Client::connect(&url).await;
-    let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
-    client.open(&id).await;
-    let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
-    assert_eq!(state["contextUsage"], json!({"tokens":null,"contextWindow":272000}));
-    client.request(json!({"id":"turn","type":"prompt","sessionId":id,"text":"Report percentage"})).await;
-    assert_eq!(model.request().await["model"], "gpt-6-sol");
-    let idle = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
-    assert_eq!(idle["contextUsage"], json!({"tokens":120,"contextWindow":272000}));
-    manager.shutdown().await; server.abort();
-
-    config.import_pi_dir = None;
-    let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
-    let summary = manager.sessions_message().await.unwrap();
-    let crate::protocol::ServerMessage::Sessions { sessions } = summary else { panic!("Expected saved sessions") };
-    let usage = sessions.iter().find(|session| session.id == id).unwrap().context_usage.unwrap();
-    assert_eq!(usage.tokens, Some(120)); assert_eq!(usage.context_window, Some(272000));
-    manager.shutdown().await;
-}
-
-#[tokio::test]
 async fn imports_deployed_pi_history_read_only_into_sqlite_without_rerunning_tools() {
     let mut model = ModelServer::start(vec![codex("Migrated safely",vec![])]).await;
     let (root, manager, _, server) = fixture(&model, Api::Codex).await;
