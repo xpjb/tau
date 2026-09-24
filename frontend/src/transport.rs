@@ -1,8 +1,7 @@
 //! Authenticated HTTP/WebSocket + direct Rust Iroh transfers. Requests carry a
 //! connection epoch: commands queued for a dead socket can never run on its successor.
 use crate::{
-    clock,
-    connection::HEARTBEAT_INTERVAL,
+    connection::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
     store::{LocalFile, Settings},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -44,16 +43,8 @@ pub enum Command {
 }
 pub enum Event {
     Ready(u64),
-    HeartbeatSent {
-        epoch: u64,
-        at: Option<u64>,
-    },
-    HeartbeatReply {
-        epoch: u64,
-        at: Option<u64>,
-        rtt: Duration,
-        ok: bool,
-    },
+    HeartbeatSent { epoch: u64, at: Instant },
+    HeartbeatReply { epoch: u64, at: Instant, rtt: Duration },
     Message(u64, Box<ServerMessage>),
     Disconnected(String),
     Fatal(String),
@@ -201,7 +192,7 @@ async fn upload(
 struct HeartbeatTimeout;
 impl std::fmt::Display for HeartbeatTimeout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Tau heartbeat timed out")
+        f.write_str("WebSocket ping timed out")
     }
 }
 impl std::error::Error for HeartbeatTimeout {}
@@ -260,12 +251,18 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             epoch += 1;
             delay = 1;
             if !events.send(Event::Ready(epoch)).await { return Ok(()); }
-            let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+            let mut heartbeat = tokio::time::interval_at(
+                tokio::time::Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            heartbeat.tick().await;
-            let mut waiting: Option<(String, Instant)> = None;
+            let mut waiting: Option<(Vec<u8>, Instant)> = None;
             loop {
+                let deadline = waiting.as_ref().map(|(_, at)|
+                    tokio::time::Instant::from_std(*at + HEARTBEAT_TIMEOUT));
                 tokio::select! {
+                    _ = async {
+                        if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; }
+                        else { std::future::pending::<()>().await; }
+                    } => return Err(HeartbeatTimeout.into()),
                     command = commands.recv() => match command {
                         None => return Ok(()),
                         Some(Command::Request { epoch: requested, request }) => {
@@ -320,29 +317,27 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             Message::Text(text) => {
                                 ensure!(text.len() <= 16 * 1024 * 1024, "Tau frame is too large");
                                 let message: ServerMessage = serde_json::from_str(&text).context("Invalid Tau message")?;
-                                if let ServerMessage::Response { request_id, ok, .. } = &message
-                                    && waiting.as_ref().is_some_and(|(id, _)| id == request_id) {
-                                    let (_, sent) = waiting.take().unwrap();
-                                    let rtt = sent.elapsed();
-                                    if !events.send(Event::HeartbeatReply { epoch, at: clock::now_ms(), rtt, ok: *ok }).await { return Ok(()); }
-                                    continue;
-                                }
                                 if !events.send(Event::Message(epoch, Box::new(message))).await { return Ok(()); }
                             }
                             Message::Ping(payload) => { tokio::time::timeout(Duration::from_secs(15), socket.send(Message::Pong(payload))).await??; }
+                            Message::Pong(payload) => {
+                                if waiting.as_ref().is_some_and(|(bytes, _)| bytes.as_slice() == payload.as_ref()) {
+                                    let (_, sent) = waiting.take().unwrap();
+                                    let at = Instant::now();
+                                    if !events.send(Event::HeartbeatReply { epoch, at, rtt: at.duration_since(sent) }).await { return Ok(()); }
+                                }
+                            }
                             Message::Close(_) => bail!("Connection closed"),
                             _ => {},
                         }
                     },
                     _ = heartbeat.tick() => {
-                        if waiting.is_some() { return Err(HeartbeatTimeout.into()); }
-                        let id = format!("heartbeat-{}", uuid::Uuid::new_v4());
-                        let request = ClientRequest { id: id.clone(), command: ClientCommand::ListSessions };
+                        if waiting.is_some() { continue; } // Timeout is independent of the probe cadence.
+                        let payload = uuid::Uuid::new_v4().as_bytes().to_vec();
+                        tokio::time::timeout(Duration::from_secs(15), socket.send(Message::Ping(payload.clone().into()))).await??;
                         let sent = Instant::now();
-                        let at = clock::now_ms();
-                        tokio::time::timeout(Duration::from_secs(15), socket.send(Message::Text(serde_json::to_string(&request)?.into()))).await??;
-                        waiting = Some((id, sent));
-                        if !events.send(Event::HeartbeatSent { epoch, at }).await { return Ok(()); }
+                        waiting = Some((payload, sent));
+                        if !events.send(Event::HeartbeatSent { epoch, at: sent }).await { return Ok(()); }
                     },
                     _ = jobs.join_next(), if !jobs.is_empty() => {},
                 }
@@ -354,7 +349,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         // Classify without printing headers, request bodies, or token-bearing URLs.
         let error = outcome.unwrap_err();
         let detail = if error.is::<HeartbeatTimeout>() {
-            "Heartbeat reply timed out. Reconnecting…"
+            "Ping timed out. Reconnecting…"
         } else if let Some(error) = error.downcast_ref::<tokio_tungstenite::tungstenite::Error>() {
             use tokio_tungstenite::tungstenite::Error;
             match error {

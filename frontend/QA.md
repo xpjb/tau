@@ -36,6 +36,29 @@ clients; SQLite schema 2 must not be opened by the old daemon.
 
 ---
 
+# Connection status follow-up
+
+The connection card omits the redundant Connected title. It shows min/max
+acknowledged Ping/Pong RTT across the last ten *attempts* and a live `received:`
+or `waiting:` millisecond counter; explicit state remains for connection failure.
+Failed attempts take a slot but never fabricate an RTT. No server URL appears;
+that belongs in Settings. The last reply age and samples survive automatic
+reconnects to the same server, but changing settings resets them. Pong receipt
+is timestamped on the network thread, not when UI events are drained.
+
+Probes run every 2s with a separate 5s timeout and no session-list requests.
+The visible counter redraws every 50ms; with the card hidden, at most three
+threshold wakes update the dot while a ping is pending. Latest RTT/pending wait
+is green through 250ms, yellow through 1000ms, orange through 3000ms and red
+above; no reply yet isn't green, and a lost/unconfigured connection is red.
+Late/unmatched pongs are ignored. The scripted socket and headless GPU tests
+cover these states. `tau --screenshot PATH --connection-preview
+[received|waiting|disconnected|unconfigured]` renders mocked cards without a
+network account. Chat rows keep their last known worker state and unread dot;
+the Tau connection dot remains solid.
+
+The older acceptance notes below describe the original 20s diagnostic design.
+
 # 0.7.0 integrated beta acceptance
 
 The user explicitly authorized native integration, cleanup, remote `tau2`, a separate

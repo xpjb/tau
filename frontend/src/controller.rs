@@ -650,10 +650,8 @@ impl Controller {
             transport::Event::HeartbeatSent { epoch, at } if self.epoch == Some(epoch) => {
                 self.health.sent(at)
             }
-            transport::Event::HeartbeatReply { epoch, at, rtt, ok }
-                if self.epoch == Some(epoch) =>
-            {
-                self.health.reply(at, rtt, ok)
+            transport::Event::HeartbeatReply { epoch, at, rtt } if self.epoch == Some(epoch) => {
+                self.health.reply(rtt, at)
             }
             transport::Event::NotSent(id, detail) => self.not_sent(&id, &detail)?,
             transport::Event::Prepared { epoch, id, result } => {

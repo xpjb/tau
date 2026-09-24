@@ -276,12 +276,14 @@ impl chad::android::App for Android {
         self.actions(ctx);
     }
     fn suspended(&mut self, _: &mut Ctx) {
+        self.app.set_connection_visible(false);
         self.app.cancel_pointer();
         let result = self.app.save();
         self.app.report(result);
     }
     fn resumed(&mut self, ctx: &mut Ctx) {
         self.layout(ctx);
+        self.app.set_connection_visible(true);
         ctx.window.request_redraw();
     }
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
