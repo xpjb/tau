@@ -2274,8 +2274,9 @@ impl App {
         let running = summary
             .as_ref()
             .is_some_and(|s| s.status == SessionStatus::Running);
+        let paused = self.controller.chats[&session].feed.queue.paused;
         let title_width =
-            (b.x + b.width - if running { 64. * s } else { 12. * s } - title_x).max(1.);
+            (b.x + b.width - if running || paused { 64. * s } else { 12. * s } - title_x).max(1.);
         self.chat_areas.push((
             Rect::new(title_x, b.y, title_width, header.height),
             session.clone(),
@@ -2328,11 +2329,10 @@ impl App {
             .composer
             .height(&mut self.renderer, width - 132. * s, 16. * s);
         let queue = &self.controller.chats[&session].feed.queue;
-        let controls = queue.paused
-            || queue
-                .control
-                .as_ref()
-                .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
+        let controls = queue
+            .control
+            .as_ref()
+            .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
         let composer_h = editor_h
             + (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
         let bottom = b.y + b.height;
@@ -2913,7 +2913,14 @@ impl App {
             true,
             can_send,
         );
-        if running {
+        if running || paused {
+            let (icon, action) = if running {
+                (Icon::Stop, Action::Abort)
+            } else {
+                (Icon::Play, Action::Queue(QueueOperation::Resume {
+                    run_id: self.controller.chats[&session].feed.queue.run_id.clone(),
+                }))
+            };
             self.icon_button(
                 ctx,
                 chrome,
@@ -2923,9 +2930,9 @@ impl App {
                     40. * s,
                     40. * s,
                 ),
-                Icon::Stop,
+                icon,
                 20.,
-                Action::Abort,
+                action,
                 false,
                 connected,
             );
@@ -2949,20 +2956,6 @@ impl App {
             );
         }
         let queue = &self.controller.chats[&session].feed.queue;
-        if queue.paused {
-            button(
-                &mut self.renderer,
-                chrome,
-                &mut self.hits,
-                Rect::new(x, controls_y, 82. * s, 30. * s),
-                "Resume",
-                Action::Queue(QueueOperation::Resume {
-                    run_id: queue.run_id.clone(),
-                }),
-                s,
-                false,
-            );
-        }
         if let Some(control) = &queue.control
             && matches!(control.status.as_str(), "waiting" | "applying")
         {
@@ -2970,7 +2963,7 @@ impl App {
                 &mut self.renderer,
                 chrome,
                 &mut self.hits,
-                Rect::new(x + 92. * s, controls_y, 100. * s, 30. * s),
+                Rect::new(x, controls_y, 100. * s, 30. * s),
                 "Cancel control",
                 Action::Queue(QueueOperation::Cancel {
                     control_id: control.command_id.clone(),
@@ -3333,7 +3326,7 @@ impl App {
         enabled: bool,
     ) {
         let hovered = layer.interaction.hover.is_some_and(|p| contains(r, p));
-        let tonal = matches!(icon, Icon::Stop);
+        let tonal = matches!(icon, Icon::Stop | Icon::Play);
         if primary || tonal || enabled && hovered {
             layer.rounded_rect(
                 r,
@@ -4260,3 +4253,5 @@ fn count(n: u64) -> String {
 mod editor_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod thinking_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod control_tests;

@@ -5,6 +5,7 @@ pub enum Icon {
     Attach,
     Send,
     Stop,
+    Play,
     Context(Option<f32>),
     CacheTtl(Option<f32>),
 }
@@ -14,6 +15,7 @@ impl Icon {
             Self::Attach => "attach",
             Self::Send => "send",
             Self::Stop => "stop",
+            Self::Play => "play",
             Self::Context(_) => "context",
             Self::CacheTtl(_) => "cache-ttl",
         }
@@ -74,6 +76,12 @@ impl Icon {
                 p.line_to(18., 6.);
                 p.line_to(18., 18.);
                 p.line_to(6., 18.);
+                p.close();
+            }
+            Self::Play => {
+                p.move_to(7., 4.5);
+                p.line_to(19., 12.);
+                p.line_to(7., 19.5);
                 p.close();
             }
             Self::Context(ratio) | Self::CacheTtl(ratio) => {
