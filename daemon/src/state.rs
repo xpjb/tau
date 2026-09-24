@@ -97,21 +97,47 @@ impl StateStore {
                 .map(|row| { let (id,data) = row?; Ok((id,serde_json::from_str(&data)?)) }).collect()
         }).await
     }
+    #[cfg(test)]
     pub async fn create(&self, model: SessionModel, thinking: String, keep: Option<String>, project_id: String) -> Result<String> {
+        self.create_requested(model, thinking, keep, project_id, None).await
+    }
+    pub async fn created_session(&self, request: &str, keep: Option<&str>, project: &str) -> Result<Option<String>> {
+        let request = request.to_owned();
+        let payload = json!({"keepSessionId":keep,"projectId":project}).to_string();
+        self.access(move |db| find_created_session(db, &request, &payload)).await
+    }
+    pub async fn create_requested(&self, model: SessionModel, thinking: String, keep: Option<String>, project_id: String, requested_id: Option<String>) -> Result<String> {
         self.access(move |db| {
             let tx = db.transaction()?;
+            let keep_receipt = json!({"keepSessionId":keep,"projectId":project_id}).to_string();
+            if let Some(id) = &requested_id {
+                uuid::Uuid::parse_str(id).context("Invalid create ID")?;
+                if let Some(session) = find_created_session(&tx, id, &keep_receipt)? {
+                    tx.commit()?; return Ok(session);
+                }
+                if tx.query_row("SELECT id FROM sessions WHERE id=?1",[id],|row|row.get::<_,String>(0)).optional()?.is_some() {
+                    bail!("Create request ID is already in use");
+                }
+            }
             let project_prompt: String = tx.query_row("SELECT prompt FROM projects WHERE id=?1", [&project_id], |r| r.get(0)).context("Unknown topic")?;
             if let Some(id) = keep {
                 let data: String = tx.query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| row.get(0)).context("Unknown session")?;
                 let mut session: StoredSession = serde_json::from_str(&data)?; session.starter = false;
                 tx.execute("UPDATE sessions SET starter=0,data=?2 WHERE id=?1", params![id,serde_json::to_string(&session)?])?;
             }
-            // Reuse an untouched tile only if its creation-time instructions still
-            // match. Preserve older tiles/drafts rather than rewriting their prompt.
+            // Reuse only a starter in the requested topic with the same captured
+            // instructions; never replace an older chat or its local draft.
             tx.execute("UPDATE sessions SET starter=0,data=json_set(data,'$.starter',json('false')) WHERE starter=1 AND json_extract(data,'$.project_id')=?1
                 AND coalesce(json_extract(data,'$.project_prompt'),'')!=?2", params![project_id,project_prompt])?;
-            if let Some(id) = tx.query_row("SELECT id FROM sessions WHERE starter=1 AND json_extract(data,'$.project_id')=?1", [&project_id], |row| row.get(0)).optional()? { tx.commit()?; return Ok(id); }
-            let id = uuid::Uuid::new_v4().to_string();
+            if let Some(id) = tx.query_row("SELECT id FROM sessions WHERE starter=1 AND json_extract(data,'$.project_id')=?1", [&project_id], |row| row.get(0)).optional()? {
+                if let Some(request) = requested_id {
+                    let receipt = Receipt { id:request.clone(), command:Some("create_session".into()), text:keep_receipt,
+                        disposition:PromptDisposition::Handled, finished:true, notice:None, error:None };
+                    tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
+                }
+                tx.commit()?; return Ok(id);
+            }
+            let id = requested_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let now = activity(&tx)?;
             let mut session = StoredSession { title:"New chat".into(), project_id, project_prompt, starter:true, parent_id:None, model:model.clone(), thinking:thinking.clone(),
                 created_at_ms:now, updated_at_ms:now, tokens:None, needs_turn:false, head:None, next_order:0, revision:0 };
@@ -121,6 +147,11 @@ impl StateStore {
             tx.execute("INSERT INTO sessions(id,starter,activity,data,queue) VALUES(?1,1,?2,?3,?4)",
                 params![id,now,serde_json::to_string(&session)?,serde_json::to_string(&QueueState::native())?])?;
             tx.execute("INSERT INTO entries(session_id,id,kind,data) VALUES(?1,?2,'model_change',?3)",params![id,entry["id"].as_str(),entry.to_string()])?;
+            if let Some(request) = requested_id {
+                let receipt = Receipt { id:request.clone(), command:Some("create_session".into()), text:keep_receipt,
+                    disposition:PromptDisposition::Handled, finished:true, notice:None, error:None };
+                tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
+            }
             tx.commit()?; Ok(id)
         }).await
     }
@@ -388,6 +419,16 @@ impl StateStore {
         }
         Ok(flag)
     }
+}
+
+fn find_created_session(db: &Connection, request: &str, payload: &str) -> Result<Option<String>> {
+    let previous: Option<(String, String)> = db.query_row(
+        "SELECT session_id,data FROM receipts WHERE request_id=?1 AND json_extract(data,'$.command')='create_session' LIMIT 1",
+        [request], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    let Some((session, raw)) = previous else { return Ok(None); };
+    let receipt: Receipt = serde_json::from_str(&raw)?;
+    if receipt.text != payload { bail!("Create request ID was used for another chat or topic"); }
+    Ok(Some(session))
 }
 
 fn apply_entry(session: &mut StoredSession, entry: &Value) -> Result<()> {

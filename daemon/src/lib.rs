@@ -1,4 +1,5 @@
 mod attachments;
+mod catalog;
 mod commands;
 mod config;
 mod manager;

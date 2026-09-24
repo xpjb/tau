@@ -4,7 +4,8 @@ pub mod settings;
 mod transcript;
 pub use transcript::*;
 
-pub const PROTOCOL_VERSION: u32 = 14;
+// Protocol 15 includes topics, optional context capacity and durable local intent.
+pub const PROTOCOL_VERSION: u32 = 15;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -54,6 +55,7 @@ pub enum ClientCommand {
     MoveSession { session_id: String, project_id: String },
     GetSettings,
     SetSettings { revision: u64, settings: Box<settings::Settings> },
+    RefreshModelCatalog { provider: String },
     CreateSession {
         #[serde(default = "general_project_id")]
         project_id: String,
@@ -295,8 +297,9 @@ pub enum SessionStatus {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
+    /// Last provider-reported turn total. This is not a live tokenizer count.
     pub tokens: Option<u64>,
-    pub context_window: u64,
+    pub context_window: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

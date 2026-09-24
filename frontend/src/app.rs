@@ -39,6 +39,7 @@ enum Action {
     ContextBack,
     MoveChat(String, String),
     Noop,
+    RetryCreate,
     Settings,
     ModelSettings,
     ResetModels,
@@ -55,6 +56,7 @@ enum Action {
     Confirm,
     CancelModal,
     DaemonSettings,
+    RefreshCatalog,
     SettingsSection(usize),
     SettingsField(bool),
     SettingToggle,
@@ -101,6 +103,7 @@ enum ModalKind {
     Rename(String),
     Delete(String),
     Daemon,
+    RefreshCatalog,
     AgentCommand(String, String),
     QueueEdit(String, u64),
     ConfirmLink(String),
@@ -1470,7 +1473,9 @@ impl App {
             Action::New => {
                 self.controller.new_chat()?;
                 self.show_chats = false;
+                self.focus = Some(None);
             }
+            Action::RetryCreate => self.controller.retry_create_manually()?,
             Action::Back => self.back(),
             Action::ModelSettings => {
                 self.controller.notice = None;
@@ -1639,6 +1644,13 @@ impl App {
                         self.focus = None;
                         return Ok(());
                     }
+                    ModalKind::RefreshCatalog => {
+                        let provider = values[0].trim();
+                        anyhow::ensure!(!provider.is_empty() && provider.len() <= 120 && !provider.chars().any(char::is_whitespace),
+                            "Enter a configured provider name");
+                        self.controller.notice = Some(format!("Refreshing {provider} model catalog…"));
+                        self.controller.request(ClientCommand::RefreshModelCatalog { provider: provider.into() })?;
+                    }
                     ModalKind::AgentCommand(session, command) => {
                         self.apply(Action::AgentCommand(
                             session,
@@ -1665,6 +1677,16 @@ impl App {
                 self.saving_settings = None;
                 self.modal = None;
                 self.focus = None;
+            }
+            Action::RefreshCatalog => {
+                let provider = self.controller.daemon_settings.as_ref().map(|settings| settings.agent.model.provider.clone())
+                    .or_else(|| selected.as_ref().and_then(|id| self.controller.account.sessions.iter().find(|s| &s.id == id))
+                        .and_then(|s| s.model.as_ref().map(|m| m.provider.clone())))
+                    .unwrap_or_else(|| "openai-codex".into());
+                self.modal = Some(Modal { kind: ModalKind::RefreshCatalog, title: "Refresh model catalog".into(),
+                    fields: vec![("Provider name".into(), Editor::line(provider), false)],
+                    options: vec![("Refresh".into(), Action::Confirm), ("Cancel".into(), Action::CancelModal)] });
+                self.focus = Some(Some(0));
             }
             Action::DaemonSettings => {
                 self.controller.notice = None;
@@ -2281,12 +2303,14 @@ impl App {
             let status = format!(
                 "{}{}",
                 if unread { "●  " } else { "" },
-                match session.status {
+                if self.controller.is_creating(&session.id) { "Creating…" }
+                else if self.controller.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) { "Paused" }
+                else { match session.status {
                     SessionStatus::Running => "Working",
                     SessionStatus::Error => "Error",
                     SessionStatus::Idle => "Ready",
                     SessionStatus::Sleeping => "Sleeping",
-                }
+                }}
             );
             self.renderer.clipped_label(
                 layer,
@@ -2608,8 +2632,12 @@ impl App {
         );
         self.renderer.label(
             chrome,
-            if self.controller.epoch.is_none() {
+            if self.controller.is_creating(&session) {
+                if self.controller.epoch.is_none() { "Saved locally · offline" } else { "Creating…" }
+            } else if self.controller.epoch.is_none() {
                 "Offline"
+            } else if self.controller.chats[&session].feed.queue.paused {
+                "Paused · resume needed"
             } else if summary
                 .as_ref()
                 .is_some_and(|s| s.status == SessionStatus::Running)
@@ -3110,14 +3138,23 @@ impl App {
             .and_then(|s| s.model.as_ref())
             .map(|m| format!("{}/{}", m.provider, m.model_id))
             .unwrap_or_else(|| "Model loads when the worker starts".into());
+        let creating = self.controller.is_creating(&session);
+        let choosing = self.controller.chats[&session].model_request.is_some();
         self.renderer.label(
             chrome,
-            &model,
-            Rect::new(x, composer_top + 10. * s, width, 20. * s),
+            if creating { "Creating chat… Sends are saved locally." }
+                else if choosing { "Selecting model… Sends are saved locally." }
+                else { &model },
+            Rect::new(x, composer_top + 10. * s, (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s),
             12. * s,
             color(0x82909f),
             false,
         );
+        if creating && self.controller.epoch.is_some() {
+            button(&mut self.renderer, chrome, &mut self.hits,
+                Rect::new(x + width - 88. * s, composer_top + 6. * s, 88. * s, 24. * s),
+                "Retry", Action::RetryCreate, s, false);
+        }
         chrome.rect(Rect::new(b.x, composer_top, b.width, s), color(0x2a3541));
         let field = Rect::new(x, composer_top + 32. * s, width, editor_h);
         let edge = if self.focus == Some(None) { 2. * s } else { s };
@@ -3170,15 +3207,11 @@ impl App {
             22.,
             Action::Attach,
             false,
-            connected,
+            true,
         );
         let usage_rect = Rect::new(field.x + field.width - 84. * s, iy, 40. * s, 40. * s);
         let usage = summary.as_ref().and_then(|s| s.context_usage);
-        let capacity = usage.map(|u| u.context_window).filter(|n| *n > 0);
-        let used = usage.and_then(|u| u.tokens);
-        let ratio = capacity
-            .zip(used)
-            .map(|(capacity, used)| used as f32 / capacity as f32);
+        let (ratio, usage_text) = context_usage_display(usage);
         self.icon_button(
             ctx,
             chrome,
@@ -3190,24 +3223,8 @@ impl App {
             true,
         );
         self.usage.region = usage_rect;
-        self.usage.text = if let Some(capacity) = capacity {
-            if let Some(used) = used {
-                format!(
-                    "Estimated context usage: {:.0}%\n{} of {} tokens",
-                    ratio.unwrap() * 100.,
-                    count(used),
-                    count(capacity)
-                )
-            } else {
-                format!(
-                    "Context usage unknown\nCapacity: {} tokens",
-                    count(capacity)
-                )
-            }
-        } else {
-            "Context usage unavailable".into()
-        };
-        if capacity.is_some()
+        self.usage.text = usage_text;
+        if usage.is_some()
             && (!connected
                 || !self.controller.chats[&session].feed.synchronized
                 || summary.as_ref().is_none_or(|s| {
@@ -3216,9 +3233,7 @@ impl App {
         {
             self.usage.text.push_str("\nLast known value");
         }
-        let choosing = self.controller.chats[&session].model_request.is_some();
-        let can_send =
-            connected && !choosing && (!self.composer.value.trim().is_empty() || !files.is_empty());
+        let can_send = !self.composer.value.trim().is_empty() || !files.is_empty();
         self.icon_button(
             ctx,
             chrome,
@@ -3924,9 +3939,19 @@ impl App {
                     &mut self.renderer,
                     layer,
                     &mut self.hits,
-                    Rect::new(x, y, 168. * s, 32. * s),
+                    Rect::new(x, y, (inner_w - 8. * s) / 2., 32. * s),
                     "Open settings",
                     Action::DaemonSettings,
+                    s,
+                    false,
+                );
+                button(
+                    &mut self.renderer,
+                    layer,
+                    &mut self.hits,
+                    Rect::new(x + (inner_w + 8. * s) / 2., y, (inner_w - 8. * s) / 2., 32. * s),
+                    "Refresh models",
+                    Action::RefreshCatalog,
                     s,
                     false,
                 );
@@ -4513,6 +4538,21 @@ pub(crate) fn code(text: &str) -> String {
     format!("{fence}\n{text}\n{fence}")
 }
 
+fn context_usage_display(usage: Option<ContextUsage>) -> (Option<f32>, String) {
+    match usage {
+        Some(ContextUsage { tokens: Some(used), context_window: Some(capacity), .. }) if capacity > 0 => {
+            let ratio = used as f32 / capacity as f32;
+            (Some(ratio), format!("Estimated context usage: {:.0}%\n{} of {} tokens", ratio * 100., count(used), count(capacity)))
+        }
+        Some(ContextUsage { tokens: Some(used), .. }) =>
+            (None, format!("Estimated context used: {} tokens\nCapacity unknown", count(used))),
+        Some(ContextUsage { context_window: Some(capacity), .. }) if capacity > 0 =>
+            (None, format!("Context usage unknown\nCapacity: {} tokens", count(capacity))),
+        Some(_) => (None, "Context usage unknown\nCapacity unknown".into()),
+        None => (None, "Context usage unavailable".into()),
+    }
+}
+
 fn count(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
@@ -4543,3 +4583,25 @@ mod hover_tests;
 mod viewer_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod scroll_tests;
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn token_usage_does_not_require_a_guessed_context_window() {
+        let unknown_capacity = Some(ContextUsage { tokens: Some(1_024), context_window: None });
+        let (ring, text) = context_usage_display(unknown_capacity);
+        assert_eq!(ring, None);
+        assert_eq!(text, "Estimated context used: 1,024 tokens\nCapacity unknown");
+        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: None })).1,
+            "Context usage unknown\nCapacity unknown");
+        assert_eq!(context_usage_display(None).1, "Context usage unavailable");
+
+        let (ring, text) = context_usage_display(Some(ContextUsage { tokens: Some(1_024), context_window: Some(4_096) }));
+        assert_eq!(ring, Some(0.25));
+        assert_eq!(text, "Estimated context usage: 25%\n1,024 of 4,096 tokens");
+        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: Some(4_096) })).1,
+            "Context usage unknown\nCapacity: 4,096 tokens");
+    }
+}

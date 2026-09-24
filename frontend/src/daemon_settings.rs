@@ -175,7 +175,7 @@ pub fn fields(section: usize) -> &'static [Field] {
             "Optional model metadata",
             "/models",
             Json,
-            "Optional name, contextWindow and thinkingLevelMap for each provider/id. This is not an allowlist. Unknown capacity stays unknown; automatic compaction needs a known contextWindow."
+            "Optional name and thinkingLevelMap suggestions for each provider/id. Not an allowlist. Context limits come only from Tau's saved authenticated provider catalog. Refresh it from Connection settings."
         )],
     }
 }

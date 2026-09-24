@@ -58,6 +58,60 @@ network account. Chat rows keep their last known worker state and unread dot;
 the Tau connection dot remains solid.
 
 The older acceptance notes below describe the original 20s diagnostic design.
+# Immediate new-chat and send intent (unreleased, atop protocol 15)
+
+The client now saves and selects a provisional **Creating chat…** immediately,
+including offline. Drafts, staged files and sends persist before an acknowledgement;
+sends wait locally until creation confirms. Existing chats accept offline sends
+without a network round-trip; sends during model selection wait for its confirmation
+and never run under the previous model. On failed/uncertain selection, the authored
+send remains recoverable rather than being replayed under a different model. Client-named UUIDs and transactional
+creation receipts let the daemon return the same session on retry, including if an
+untouched starter was reused and subsequently became active. A reused starter
+receives the provisional draft/files/sends without losing existing local work.
+New work accepted into a paused queue replaces the stale Error badge with a
+paused/ready detail immediately, without awaiting a model turn. A sent prompt
+whose acknowledgement was lost remains unconfirmed and is reconciled by request
+ID from the daemon on reconnect; it is not blindly replayed.
+
+Managed all-target workspace check and nextest **70/70 passed**. Offline local
+restart, a real controller/daemon with a gated local provider, coalesced starters
+with files, duplicate create receipts, queued model selection and paused-error
+acknowledgement were exercised without a billed model call. No physical Windows/Android UI acceptance,
+merge, package or deployment is claimed. This branch builds on the separate
+context-catalog branch and needs matched client/daemon integration.
+
+---
+
+# Context-usage follow-up (unreleased, protocol 15 branch)
+
+Tau 2 previously discarded provider-reported tokens whenever the selected model
+was absent from optional metadata. The tooltip now shows the last reported turn
+total, including when capacity is unknown. For percentages and compaction the
+selected provider's authenticated model catalog is the only source: Codex
+`context_window` (or `max_context_window`) and OpenRouter `context_length` for
+an **exact** ID. The bounded, private `model-catalog.json` is loaded at startup
+after credential/endpoint identity validation. Missing/invalid cache triggers
+an asynchronous provider GET; a failure alerts connected clients. Explicit
+**Refresh models** in Connection settings replaces only on success and exposes
+new model IDs as suggestions. No Pi metadata fallback, 1-hour expiration,
+automatic guess, or rewriting the daemon settings document. A catalog missing
+the selected model leaves capacity unknown. Sleeping/unopened chats recover saved
+token counts.
+Model changes clear the old count. Protocol 15 needs matched clients and daemon;
+protocol 14 is reserved for Projects. Not yet merged, deployed, or packaged.
+
+Managed all-target workspace check passed; nextest **67/67 passed**. Scripted
+Codex and Chat Completions catalog/turn requests checked exact authenticated GET
+paths, identity/originator, missing-file alerts, explicit refresh, failure preserving
+the last good file, restart without a new GET, and unknown-model behavior through
+WebSocket state/list, sleep, restart, and model switches. Read-only
+live Codex catalog GET (September 24, 2026) using the beta's shared account access
+and Tau's inference originator reported 272,000 for GPT-6 Sol, Luna and Astra with
+catalog client version 0.156.1. No paid completion, credential copy/refresh, GUI
+or physical-device acceptance is claimed.
+
+---
 
 # 0.7.0 integrated beta acceptance
 
@@ -351,3 +405,26 @@ restart; stable's process/start/executable were unchanged. No backup or activity
 check, as explicitly requested. Full checksums and deployment evidence are in
 ../INTEGRATION.md. No new Android package, test-suite rerun or physical GUI/input
 acceptance is claimed by this delivery.
+
+
+## Intent/topics integration validation — 2026-09-25
+
+Merged `fix/tau2-immediate-intent` (`5c5ef4d`) into the current `tau2` lineage
+(`6d30668`), retaining topic isolation, immediate queued-edit receipts and the
+2-second connection probes. Protocol 15 includes the context-catalog ancestry.
+Create receipts now bind the original keep-chat and topic payload, including
+aliases of reused starters; retries cannot silently retarget a topic or refresh
+an existing chat's captured instructions. Provisional topic selection/history
+survives restart and late acknowledgements without stealing the current topic.
+
+Validation on the combined source:
+
+- Managed `cargo check --locked --workspace --all-targets`: passed.
+- Managed `cargo nextest run --locked --workspace`: **99 passed, 0 skipped**.
+- Added cross-topic create-ID conflict/replay and provisional-chat topic/restart
+  regression coverage. Existing queue acknowledgement, connection probe and
+  real two-client topic tests also passed.
+- No deployment. `tau2-beta.service` remains stopped; stable Tau is untouched.
+
+These checks validate the merge, not bulk-network behavior or the protocol
+redesign being audited separately.

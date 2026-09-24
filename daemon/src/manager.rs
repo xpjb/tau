@@ -1,22 +1,23 @@
-use crate::settings::SettingsExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use tokio::fs;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, Semaphore, broadcast};
 use tracing::warn;
 
 use crate::agent::{AgentSession, auth::AuthStore};
 use crate::config::Config;
+use crate::catalog::ModelCatalog;
 use crate::protocol::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, SessionSummary, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
 use crate::settings::{SettingsStore, Settings};
-use crate::state::{StateStore, Receipt};
+use crate::state::{StateStore, Receipt, SessionModel};
 use crate::transcript::{QueuedRequest, QueueControl, Transcript};
 
 const EVENT_BUFFER: usize = 2048;
+
 pub struct PromptOutcome { pub disposition: PromptDisposition, pub notice: Option<String> }
 #[derive(Clone)]
 pub struct AgentManager { pub(crate) inner: Arc<ManagerInner> }
@@ -27,6 +28,8 @@ pub(crate) struct ManagerInner {
     pub http: reqwest::Client,
     pub auth: AuthStore,
     pub projects: Mutex<()>,
+    pub catalog: ModelCatalog,
+    pub catalog_requests: Semaphore,
     pub runtimes: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     pub events: broadcast::Sender<ServerMessage>,
     pub shutting_down: AtomicBool,
@@ -56,30 +59,105 @@ impl AgentManager {
         let settings = SettingsStore::load(&config, crate::state::DEFAULT_TITLE_PROMPT.into()).await?;
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
+        let catalog = ModelCatalog::load(config.settings_path.with_file_name("model-catalog.json")).await;
         Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
-            projects: Mutex::new(()), runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false) }) })
+            projects: Mutex::new(()), catalog, catalog_requests: Semaphore::new(2),
+            runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false) }) })
+    }
+    pub(crate) fn context_window(&self, settings: &Settings, model: &SessionModel) -> Option<u64> {
+        self.inner.catalog.capacity(settings, model)
+    }
+    pub(crate) fn context_usage(&self, settings: &Settings, model: &SessionModel, tokens: Option<u64>) -> Option<ContextUsage> {
+        let context_window = self.inner.catalog.capacity(settings, model);
+        (tokens.is_some() || context_window.is_some()).then_some(ContextUsage { tokens, context_window })
+    }
+    pub(crate) fn schedule_catalog(&self, provider: &str) {
+        if self.inner.shutting_down.load(Ordering::Acquire) { return; }
+        let settings = self.inner.settings.get();
+        let Some(config) = settings.providers.get(provider) else { return; };
+        if !self.inner.catalog.begin(provider, config, false) { return; }
+        let config = config.clone(); let provider = provider.to_owned(); let manager = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = manager.resolve_catalog(&provider, &config, false).await {
+                warn!(%provider, reason = %error.root_cause(), "model catalog unavailable");
+                let message = format!("Could not load {provider} model catalog: {error}. Refresh from daemon settings after checking provider access.");
+                let _ = manager.inner.events.send(ServerMessage::Notice { session_id:String::new(), message:bounded(&message, 320) });
+            }
+            manager.broadcast_sessions().await;
+        });
+    }
+    async fn resolve_catalog(&self, provider: &str, config: &crate::settings::ProviderSettings, force: bool) -> Result<usize> {
+        let _permit = self.inner.catalog_requests.acquire().await?;
+        if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        let result: Result<usize> = async {
+            let (key, account, identity) = crate::catalog::authorize(&self.inner.auth, provider, config).await?;
+            let cached = self.inner.catalog.restore(provider, config, &identity);
+            if cached && !force {
+                self.inner.catalog.restored(provider);
+                return Ok(self.inner.catalog.models(&self.inner.settings.get(), provider).len());
+            }
+            let windows = crate::catalog::fetch(&self.inner.http, config, &key, account.as_deref()).await?;
+            self.inner.catalog.save(provider, config, identity, windows).await
+        }.await;
+        if result.is_err() { self.inner.catalog.failed(provider); }
+        result
+    }
+    pub async fn refresh_model_catalog(&self, provider: &str) -> Result<String> {
+        let settings = self.inner.settings.get();
+        let config = settings.providers.get(provider).context("Configure this provider in daemon settings first")?.clone();
+        if !self.inner.catalog.begin(provider, &config, true) { bail!("Model catalog refresh is already in progress"); }
+        let count = self.resolve_catalog(provider, &config, true).await?;
+        self.broadcast_sessions().await;
+        Ok(format!("Refreshed {provider} model catalog: {count} models"))
     }
     pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> { self.inner.events.subscribe() }
     pub async fn sessions_message(&self) -> Result<ServerMessage> {
         let runtimes = self.inner.runtimes.lock().await;
-        Ok(ServerMessage::Sessions { sessions: self.inner.state.list().await?.into_iter().map(|(id, s)| {
+        let settings = self.inner.settings.get();
+        let sessions = self.inner.state.list().await?;
+        let mut providers = HashSet::new();
+        for (_, s) in &sessions {
+            if providers.len() >= 8 { break; }
+            if providers.insert(&s.model.provider) { self.schedule_catalog(&s.model.provider); }
+        }
+        Ok(ServerMessage::Sessions { sessions: sessions.into_iter().map(|(id, s)| {
             let runtime = runtimes.get(&id).map(|r| r.snapshot()).unwrap_or_default();
-            SessionSummary { id, project_id:s.project_id, title:s.title, starter:s.starter, status:runtime.status, detail:runtime.detail, context_usage:runtime.context_usage,
+            // Sleeping chats (including those never opened since restart) retain the
+            // last saved value; active chats may have newer in-memory turn usage.
+            let tokens = if runtime.status == SessionStatus::Sleeping { s.tokens } else { runtime.context_usage.and_then(|usage| usage.tokens) };
+            let context_usage = self.context_usage(&settings, &s.model, tokens);
+            SessionSummary { id, project_id:s.project_id, title:s.title, starter:s.starter, status:runtime.status, detail:runtime.detail, context_usage,
                 model:Some(s.model), parent_id:s.parent_id, created_at_ms:s.created_at_ms, updated_at_ms:s.updated_at_ms }
         }).collect() })
     }
+    #[cfg(test)]
     pub async fn create_session(&self, keep_session_id: Option<&str>, project_id: &str) -> Result<String> {
+        self.create_session_requested(keep_session_id, project_id, None).await
+    }
+    pub async fn create_session_requested(&self, keep_session_id: Option<&str>, project_id: &str, requested_id: Option<&str>) -> Result<String> {
         let _gate = self.inner.projects.lock().await;
         if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        if let Some(request) = requested_id
+            && let Some(id) = self.inner.state.created_session(request, keep_session_id, project_id).await? {
+            // Reconcile both client-named chats and reused starters without changing
+            // their model or topic after an acknowledgement was lost.
+            return Ok(id);
+        }
         let settings = self.inner.settings.get(); let model = settings.agent.model.clone();
         let thinking = settings.agent.model_thinking_levels.get(&format!("{}/{}",model.provider,model.model_id)).unwrap_or(&settings.agent.thinking_level).clone();
         let mut keep=keep_session_id.map(str::to_owned);
         loop {
-            let id = self.inner.state.create(model.clone(),thinking.clone(),keep.take(),project_id.into()).await?;
+            let id = self.inner.state.create_requested(model.clone(),thinking.clone(),keep.take(),project_id.into(),requested_id.map(str::to_owned)).await?;
             let runtime = self.runtime(&id).await?; let _guard = runtime.operation.lock().await;
             let mut content=runtime.content.lock().await;
             self.ensure_loaded(&id,&runtime,&mut content).await?;
-            if !self.inner.state.get(&id).await?.is_some_and(|s|s.starter) { continue; }
+            if !self.inner.state.get(&id).await?.is_some_and(|s|s.starter) {
+                if let Some(request) = requested_id
+                    && self.inner.state.receipt(&id,request).await?.is_some_and(|r| r.command.as_deref() == Some("create_session")) {
+                    return Ok(id);
+                }
+                continue;
+            }
             if content.agent.as_ref().is_some_and(|agent|agent.model != model || agent.thinking != thinking) {
                 content.append(&id,json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":thinking})).await?;
             }
@@ -93,8 +171,11 @@ impl AgentManager {
         let mut snapshot = content.transcript.as_ref().unwrap().snapshot();
         snapshot.delivered = self.inner.state.delivered(id,requests).await?;
         let state = runtime.snapshot();
+        let agent = content.agent.as_ref().unwrap();
+        self.schedule_catalog(&agent.model.provider);
+        let usage = self.context_usage(&self.inner.settings.get(), &agent.model, agent.tokens);
         Ok(SessionFeed { initial: vec![ServerMessage::TranscriptSnapshot { session_id:id.into(), snapshot },
-            ServerMessage::SessionState { session_id:id.into(), status:state.status, detail:state.detail, context_usage:state.context_usage }], events:content.events.subscribe() })
+            ServerMessage::SessionState { session_id:id.into(), status:state.status, detail:state.detail, context_usage:usage }], events:content.events.subscribe() })
     }
     pub async fn history_page(&self, id: &str, generation: &str, before: u64) -> Result<crate::transcript::HistoryPage> {
         let runtime = self.runtime(id).await?; let content = runtime.content.lock().await;
@@ -136,7 +217,14 @@ impl AgentManager {
         queue.requests.push(QueuedRequest { request_id:request_id.into(), revision:0, kind:"steer".into(), text:text.into(), images:0, timestamp_ms:Some(crate::agent::now_ms()) });
         content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:None,text:text.into(),disposition,finished:true,notice:None,error:None })).await?;
         // Queue, receipt and retained session metadata commit together before acknowledgement.
+        let paused = content.transcript.as_ref().unwrap().queue.paused && !content.agent.as_ref().unwrap().running;
         self.start_run(id, &runtime, &mut content);
+        if paused {
+            // A newly accepted send must not leave the UI displaying an old
+            // provider error while the durable queue waits for explicit Resume.
+            self.set_runtime_state(id, &runtime, SessionStatus::Idle,
+                Some("Pending work is paused; resume when ready".into()), None);
+        }
         drop(content);
         let manager = self.clone(); let session = id.to_owned(); let text = text.to_owned();
         tokio::spawn(async move { manager.title_after_prompt(&session, &text).await; });
@@ -224,9 +312,10 @@ impl AgentManager {
         };
         if let Some(task) = task && let Err(error) = task.await { warn!(%error, "Agent task stopped unexpectedly"); }
         let mut content = runtime.content.lock().await;
+        let usage = content.agent.as_ref().and_then(|agent| self.context_usage(&self.inner.settings.get(), &agent.model, agent.tokens));
         content.agent = None; content.transcript = None;
         let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id:Some(id.into()) }));
-        self.set_runtime_state(id, runtime, SessionStatus::Sleeping, None, Some(None));
+        self.set_runtime_state(id, runtime, SessionStatus::Sleeping, None, Some(usage));
     }
     pub async fn delete_session(&self, id: &str) -> Result<()> {
         let _gate = self.inner.projects.lock().await;
@@ -275,7 +364,7 @@ impl AgentManager {
         queue.run_id = None; queue.control = None;
         if !queue.requests.is_empty() || stored.needs_turn { queue.paused = true; }
         let detail = (queue.paused && (stored.needs_turn || !queue.requests.is_empty())).then(|| "Pending work is paused; resume when ready".to_owned());
-        let usage = settings.model(&stored.model).ok().and_then(|model| model.context_window).map(|context_window| ContextUsage { tokens:stored.tokens,context_window });
+        let usage = self.context_usage(&settings, &stored.model, stored.tokens);
         let page = self.inner.state.page(id,None).await?;
         content.transcript = Some(Transcript::new(page,stored.head,stored.next_order,queue));
         content.agent = Some(AgentSession { store:self.inner.state.clone(), revision:stored.revision, model:stored.model, thinking:stored.thinking,
@@ -309,7 +398,12 @@ impl AgentManager {
     pub(crate) async fn broadcast_sessions(&self) {
         match self.sessions_message().await { Ok(message) => { let _ = self.inner.events.send(message); }, Err(error) => warn!(%error,"Could not read session list") }
     }
-    pub async fn set_settings(&self, revision: u64, settings: Settings) -> Result<Settings> { self.inner.settings.set(revision, settings).await }
+    pub async fn set_settings(&self, revision: u64, settings: Settings) -> Result<Settings> {
+        let updated = self.inner.settings.set(revision, settings).await?;
+        // Capacity edits should update open and sleeping chat summaries immediately.
+        self.broadcast_sessions().await;
+        Ok(updated)
+    }
 }
 pub(crate) fn safe_file_name(file_name: &str) -> String {
     let safe = file_name.rsplit(['/', '\\']).next().unwrap_or_default().chars()

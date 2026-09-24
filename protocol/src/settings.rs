@@ -105,6 +105,6 @@ impl Default for Settings {
             ("openai-codex".into(), ProviderSettings { api: Api::Codex, base_url: "https://chatgpt.com/backend-api/codex".into(), api_key_env: None, web_search: true }),
             ("openrouter".into(), ProviderSettings { api: Api::ChatCompletions, base_url: "https://openrouter.ai/api/v1".into(), api_key_env: Some("OPENROUTER_API_KEY".into()), web_search: true }),
         ]),
-        models: vec![ModelSettings { provider: "openai-codex".into(), id: "gpt-6-astra".into(), name: "GPT-6 Astra".into(), context_window: Some(272000), thinking_level_map: BTreeMap::new() }],
+        models: vec![ModelSettings { provider: "openai-codex".into(), id: "gpt-6-astra".into(), name: "GPT-6 Astra".into(), context_window: None, thinking_level_map: BTreeMap::new() }],
     } }
 }

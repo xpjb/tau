@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
 };
 use tau_protocol::*;
@@ -62,11 +62,12 @@ pub struct Account {
     pub sessions: Vec<SessionSummary>,
     pub selected: Option<String>,
     pub read_at: BTreeMap<String, u64>,
+    pub pending_create: Option<ClientRequest>,
 }
 impl Default for Account {
     fn default() -> Self {
         Self { projects: vec![Project::general()], selected_project: general_project_id(),
-            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, read_at: BTreeMap::new() }
+            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, read_at: BTreeMap::new(), pending_create: None }
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -79,6 +80,9 @@ pub struct LocalFile {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Delivery {
+    WaitingForChat,
+    WaitingForConnection,
+    WaitingForModel,
     Preparing,
     Sending,
     Accepted,
@@ -88,6 +92,9 @@ pub enum Delivery {
 impl Delivery {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::WaitingForChat => "Waiting for chat creation",
+            Self::WaitingForConnection => "Waiting for connection",
+            Self::WaitingForModel => "Waiting for model selection",
             Self::Preparing => "Preparing attachments",
             Self::Sending => "Sending",
             Self::Accepted => "Accepted",
@@ -206,6 +213,9 @@ impl Store {
                     "The app stopped before confirmation. Check history before sending again."
                         .into(),
                 );
+            } else if p.status == Delivery::WaitingForModel {
+                p.status = Delivery::Rejected;
+                p.detail = Some("Model selection was not confirmed; check the current model, then restore this draft".into());
             }
         }
         Ok(chat)
@@ -266,6 +276,50 @@ impl Store {
             size,
             path,
         })
+    }
+    /// Move an optimistic chat's local intent to the daemon-confirmed ID.
+    /// Copy attachment bytes before changing the SQLite record; a failure leaves
+    /// the original local record and files intact for recovery.
+    pub fn merge_chat(&self, account: &str, from: &str, into: &str,
+        source: &LocalChat, loaded_target: Option<&LocalChat>) -> Result<LocalChat> {
+        let mut source = source.clone();
+        // A live chat's Sending receipts must not be reclassified as uncertain
+        // merely because this local-only merge read them from disk.
+        let mut target = if let Some(chat) = loaded_target { chat.clone() } else { self.load_chat(account, into)? };
+        let files = self.root.join("files").join(hash(account)).join(hash(into));
+        let copy = |file: &mut LocalFile| -> Result<()> {
+            let dest = files.join(&file.id);
+            if dest != file.path {
+                std::fs::create_dir_all(&files)?;
+                if !dest.exists() { std::fs::copy(&file.path, &dest)?; }
+                file.path = dest;
+            }
+            Ok(())
+        };
+        for file in &mut source.files { copy(file)?; }
+        for pending in &mut source.pending {
+            for file in &mut pending.files { copy(file)?; }
+            if let ClientCommand::Prompt { session_id, .. } = &mut pending.request.command { *session_id = into.into(); }
+        }
+        if !source.draft.is_empty() {
+            if target.draft.is_empty() { target.draft = source.draft; }
+            else if target.draft != source.draft {
+                // Keep both authored drafts without silently merging their text.
+                target.pending.push(Pending { request: ClientRequest { id:uuid::Uuid::new_v4().to_string(),
+                    command:ClientCommand::Prompt { session_id:into.into(), text:source.draft.clone() } },
+                    started_at_ms:None, text:source.draft, files:vec![], status:Delivery::Rejected,
+                    detail:Some("Another local draft was present; restore this draft explicitly".into()) });
+            }
+        }
+        let file_ids: HashSet<_> = target.files.iter().map(|f| f.id.clone()).collect();
+        target.files.extend(source.files.into_iter().filter(|file| !file_ids.contains(&file.id)));
+        let pending_ids: HashSet<_> = target.pending.iter().map(|p| p.request.id.clone()).collect();
+        target.pending.extend(source.pending.into_iter().filter(|p| !pending_ids.contains(&p.request.id)));
+        self.save_chat(account, into, &target)?;
+        self.db.execute("DELETE FROM local WHERE account=?1 AND key=?2", params![account,format!("chat:{from}")])?;
+        let old = self.root.join("files").join(hash(account)).join(hash(from));
+        if old.exists() { let _ = std::fs::remove_dir_all(old); }
+        Ok(target)
     }
     pub fn delete_chat(&self, account: &str, session: &str) -> Result<()> {
         self.db.execute(
