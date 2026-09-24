@@ -2,18 +2,25 @@
 
 Tau 2 previously discarded provider-reported tokens whenever the selected model
 was absent from optional metadata. The tooltip now shows the last reported turn
-total without a context window; the ring percentage remains unknown until a real
-`contextWindow` is configured. Sleeping/unopened chats recover their saved last
-value after restart. Model changes clear the old count, and adding/removing model
-metadata changes capacity without inventing one. Protocol 15 needs matched client
-and daemon builds; protocol 14 is reserved for the in-progress Projects integration.
-This branch has not been merged, deployed, or packaged for devices.
+total, including when capacity is unknown. For percentages and compaction the
+selected provider's authenticated model catalog takes priority: Codex
+`context_window` (or `max_context_window`) and OpenRouter `context_length` for
+an **exact** ID. Catalog limits are cached for one hour, matched to the configured
+endpoint, and refreshed asynchronously. A successful catalog missing the model
+leaves capacity unknown. Previously Pi-imported `contextWindow` values are no
+longer trusted by default; an explicit opt-in permits a visibly unverified fallback
+only if discovery fails. Sleeping/unopened chats recover their saved token count.
+Model changes clear the old count. Protocol 15 needs matched clients and daemon;
+protocol 14 is reserved for Projects. Not yet merged, deployed, or packaged.
 
-Managed all-target workspace check passed; nextest **66/66 passed**. Isolated
-Codex and Chat Completions provider fixtures exercised the actual WebSocket state,
-list, sleep, restart, settings edits, and model switch; the tooltip's unknown and
-known-capacity states were checked without a GUI. No paid completion or physical
-device acceptance is claimed.
+Managed all-target workspace check passed; nextest **68/68 passed**. Scripted
+Codex and Chat Completions catalog/turn requests checked exact authenticated GET
+paths, identity/originator, catalog precedence and unknown-model behavior through
+WebSocket state/list, sleep, restart, settings edits, and model switches. Read-only
+live Codex catalog GET (September 24, 2026) using the beta's shared account access
+and Tau's inference originator reported 272,000 for GPT-6 Sol, Luna and Astra with
+catalog client version 0.156.1. No paid completion, credential copy/refresh, GUI
+or physical-device acceptance is claimed.
 
 ---
 

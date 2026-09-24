@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use crate::manager::{AgentManager, SessionContent, SessionRuntime, bounded, context_usage};
+use crate::manager::{AgentManager, SessionContent, SessionRuntime, bounded};
 use crate::protocol::{ServerMessage, SessionStatus};
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, TranscriptChange};
@@ -113,7 +113,7 @@ impl AgentManager {
             let agent = content.agent.as_mut().unwrap();
             agent.running = false;
             let settings = manager.inner.settings.get();
-            let usage = context_usage(&settings, &agent.model, agent.tokens);
+            let usage = manager.context_usage(&settings, &agent.model, agent.tokens);
             let mut queue = content.transcript.as_ref().unwrap().queue.clone();
             queue.run_id = None;
             if cancelled || result.is_err() { queue.paused = true; }
@@ -171,7 +171,8 @@ impl AgentManager {
                 let messages = history::messages(&entries,settings.system_prompt(&agent.model, &self.inner.config.cwd).await?, &agent.model, &self.inner.config.attachment_root).await?;
                 (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), messages, agent.tokens)
             };
-            let context_window = settings.model(&selected)?.context_window;
+            settings.model(&selected)?;
+            let context_window = self.context_window(&settings, &selected);
             let estimated = messages.iter().map(history::estimate_tokens).sum::<u64>();
             if settings.agent.compaction.enabled && context_window.is_some_and(|window| tokens.unwrap_or(estimated).max(estimated) > window.saturating_sub(settings.agent.compaction.reserve_tokens)) {
                 if compacted { bail!("Context is still too large after compaction; reduce the queued input or fork an earlier turn"); }
@@ -267,7 +268,7 @@ impl AgentManager {
                 runtime.content.lock().await.append(id, json!({"type":"message","message":result})).await?;
             }
             for attachment in attachments { runtime.content.lock().await.append(id, attachment).await?; }
-            self.set_runtime_state(id, runtime, SessionStatus::Running, None, Some(context_usage(&self.inner.settings.get(), &selected, completion.tokens)));
+            self.set_runtime_state(id, runtime, SessionStatus::Running, None, Some(self.context_usage(&self.inner.settings.get(), &selected, completion.tokens)));
         }
     }
 

@@ -269,9 +269,15 @@ pub enum SessionStatus {
 pub struct ContextUsage {
     /// Last provider-reported turn total. This is not a live tokenizer count.
     pub tokens: Option<u64>,
-    /// Only known when the selected model has explicit context-window metadata.
     pub context_window: Option<u64>,
+    /// Distinguish the provider's live catalog from an unverified settings fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ContextCapacitySource>,
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCapacitySource { Provider, Configured }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

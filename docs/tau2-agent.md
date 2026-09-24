@@ -265,6 +265,22 @@ exercised locally. Physical Windows/Android acceptance remains device QA. An acc
 on an encrypted checkpoint fails explicitly; use the original account or fork
 before that checkpoint. There is no silent lossy fallback.
 
+## Provider context limits (unreleased protocol-15 branch)
+
+The first beta imported optional model metadata from Pi, but that is not an
+independent source for a percentage. Tau 2 now makes a bounded, read-only GET
+against its configured inference provider, with the same authentication and
+Codex originator. Codex `/models` supplies `context_window` (falling back to
+`max_context_window`); OpenRouter-compatible `/models` supplies `context_length`.
+Only an exact model ID from a nonempty catalog with valid limits is accepted.
+Successful catalogs missing the selected model do not inherit settings metadata;
+errors or unsupported catalogs leave capacity unknown by default. Catalogs are
+kept in memory for one hour, with a one-minute retry delay on failure. A separate
+settings opt-in permits a clearly labeled, unverified configured limit only when
+catalog discovery is unavailable. The same resolved capacity gates automatic
+compaction. The public OpenAI `/v1/models` listing is not used as a source of
+context windows. No Pi worker, Pi settings mirror, or guessed ID aliases are used.
+
 ## Unshipped settings update
 
 See `tau2-backlog/README.md` for the 0.7.1/protocol-13 handoff. The live daemon remains

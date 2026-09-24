@@ -2,7 +2,7 @@ use crate::settings::SettingsExt;
 use std::sync::Arc;
 use anyhow::{Result, bail};
 use serde_json::json;
-use crate::manager::{AgentManager, PromptOutcome, SessionRuntime, context_usage};
+use crate::manager::{AgentManager, PromptOutcome, SessionRuntime};
 use crate::protocol::{PromptDisposition, SessionStatus, SlashCommand, SlashCommandArgument, SlashCommandSource};
 use crate::state::SessionModel;
 
@@ -30,7 +30,8 @@ impl AgentManager {
                 let settings = self.inner.settings.get();
                 let level = settings.agent.model_thinking_levels.get(arguments).unwrap_or(&settings.agent.thinking_level).clone();
                 content.append(id,json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":level})).await?;
-                let usage = context_usage(&settings, &model, None);
+                self.schedule_catalog(&model.provider);
+                let usage = self.context_usage(&settings, &model, None);
                 self.set_runtime_state(id, runtime, SessionStatus::Idle, None, Some(usage));
                 format!("Model set to {arguments}. New chats will use it too.")
             }

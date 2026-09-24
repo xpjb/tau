@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
-use axum::{Router, Json, body::Body, extract::State, http::StatusCode, response::Response, routing::post};
+use axum::{Router, Json, body::Body, extract::State, http::{StatusCode, HeaderMap, Uri}, response::{IntoResponse, Response}, routing::post};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -9,10 +9,11 @@ use tokio_tungstenite::{connect_async, tungstenite::{Message, client::IntoClient
 use crate::{Config, manager::AgentManager, settings::{Api, Settings}, state::StateStore};
 
 struct Reply { status: u16, bytes: Vec<u8>, gate: Option<Arc<Notify>>, body_gate: Option<(usize, Arc<Notify>)> }
-struct ModelServer { url: String, requests: mpsc::UnboundedReceiver<Value>, task: tokio::task::JoinHandle<()> }
+struct ModelServer { url: String, requests: mpsc::UnboundedReceiver<Value>, catalogs: mpsc::UnboundedReceiver<Value>, task: tokio::task::JoinHandle<()> }
 impl ModelServer {
-    async fn start(replies: Vec<Reply>) -> Self {
-        #[derive(Clone)] struct Script { replies: Arc<Mutex<VecDeque<Reply>>>, requests: mpsc::UnboundedSender<Value> }
+    async fn start(replies: Vec<Reply>) -> Self { Self::with_catalog(replies, None).await }
+    async fn with_catalog(replies: Vec<Reply>, catalog: Option<Value>) -> Self {
+        #[derive(Clone)] struct Script { replies: Arc<Mutex<VecDeque<Reply>>>, requests: mpsc::UnboundedSender<Value>, catalog:Option<Value>, catalogs:mpsc::UnboundedSender<Value> }
         async fn respond(State(script): State<Script>, Json(body): Json<Value>) -> Response {
             script.requests.send(body).unwrap();
             let reply = script.replies.lock().await.pop_front().expect("Unexpected extra provider request");
@@ -26,13 +27,22 @@ impl ModelServer {
             Response::builder().status(StatusCode::from_u16(reply.status).unwrap()).header("content-type", "text/event-stream")
                 .body(Body::from_stream(body)).unwrap()
         }
+        async fn reply_catalog(State(script): State<Script>, uri: Uri, headers: HeaderMap) -> Response {
+            script.catalogs.send(json!({"path":uri.path(), "query":uri.query(),
+                "authorization":headers.get("authorization").and_then(|v|v.to_str().ok()),
+                "account":headers.get("chatgpt-account-id").and_then(|v|v.to_str().ok()),
+                "originator":headers.get("originator").and_then(|v|v.to_str().ok())})).unwrap();
+            match &script.catalog { Some(data) => Json(data.clone()).into_response(), None => StatusCode::NOT_FOUND.into_response() }
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, requests) = mpsc::unbounded_channel();
-        let app = Router::new().route("/{*path}", post(respond)).with_state(Script { replies:Arc::new(Mutex::new(replies.into())), requests:tx });
-        Self { url, requests, task:tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); }) }
+        let (catalog_tx, catalogs) = mpsc::unbounded_channel();
+        let app = Router::new().route("/{*path}", post(respond).get(reply_catalog)).with_state(Script { replies:Arc::new(Mutex::new(replies.into())), requests:tx, catalog, catalogs:catalog_tx });
+        Self { url, requests, catalogs, task:tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); }) }
     }
     async fn request(&mut self) -> Value { tokio::time::timeout(Duration::from_secs(10), self.requests.recv()).await.unwrap().unwrap() }
+    async fn catalog_request(&mut self) -> Value { tokio::time::timeout(Duration::from_secs(10), self.catalogs.recv()).await.unwrap().unwrap() }
 }
 impl Drop for ModelServer { fn drop(&mut self) { self.task.abort(); } }
 fn completion(text: &str, calls: Vec<Value>) -> Reply {
@@ -773,6 +783,54 @@ async fn model_prompt_overrides_and_unlisted_ids_reach_both_providers_and_surviv
 }
 
 #[tokio::test]
+async fn provider_catalog_outweighs_configured_limits_and_uses_exact_authenticated_model() {
+    for api in [Api::Codex, Api::ChatCompletions] {
+        let window = if api == Api::Codex { 320_000 } else { 64_000 };
+        let catalog = if api == Api::Codex {
+            json!({"models":[{"slug":"gpt-6-sol","context_window":window,"max_context_window":500000},
+                             {"slug":"gpt-6-luna","max_context_window":270000}]})
+        } else { json!({"data":[{"id":"gpt-6-sol","context_length":window}]}) };
+        let mut model = ModelServer::with_catalog(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }], Some(catalog)).await;
+        let (_root, manager, url, server) = fixture(&model, api).await;
+        let mut settings = manager.inner.settings.get();
+        settings.agent.allow_configured_context_fallback = true;
+        settings.models.push(crate::settings::ModelSettings { provider:"openai-codex".into(), id:"gpt-6-sol".into(),
+            context_window:Some(272_000), ..Default::default() });
+        let path = if api == Api::Codex { "backend-api/codex" } else { "api/v1" };
+        settings.providers.get_mut("openai-codex").unwrap().base_url = format!("{}/{path}",model.url);
+        manager.set_settings(settings.revision, settings).await.unwrap();
+        let mut client = Client::connect(&url).await;
+        let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        let call = model.catalog_request().await;
+        assert_eq!(call["path"], format!("/{path}/models"));
+        assert_eq!(call["authorization"], if api == Api::Codex { "Bearer fixture-access" } else { "Bearer fixture-key" });
+        if api == Api::Codex {
+            assert_eq!(call["account"], "fixture-account");
+            assert_eq!(call["originator"], "tau");
+            assert_eq!(call["query"],"client_version=0.156.1");
+        } else { assert!(call["account"].is_null() && call["originator"].is_null()); }
+        client.until(|m| m["type"] == "sessions" && m["sessions"].as_array().is_some_and(|list| list.iter().any(|s| s["id"] == id && s["contextUsage"].is_null()))).await;
+        client.open(&id).await;
+        let initial = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+        // An authoritative catalog without Astra must not borrow Astra's
+        // configured 272K limit from the imported metadata.
+        assert!(initial["contextUsage"].is_null());
+        assert_eq!(client.request(json!({"id":"model","type":"prompt","sessionId":id,"text":"/model openai-codex/gpt-6-sol"})).await["ok"],true);
+        client.open(&id).await;
+        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+        assert_eq!(state["contextUsage"],json!({"tokens":null,"contextWindow":window,"source":"provider"}));
+        client.request(json!({"id":"turn","type":"prompt","sessionId":id,"text":"Use this catalog"})).await;
+        assert_eq!(model.request().await["model"],"gpt-6-sol");
+        let idle = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
+        assert_eq!(idle["contextUsage"],json!({"tokens":if api == Api::Codex {120} else {1024},"contextWindow":window,"source":"provider"}));
+        client.request(json!({"id":"list","type":"list_sessions"})).await;
+        let summary = client.seen.iter().rev().find(|m| m["type"] == "sessions").unwrap()["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
+        assert_eq!(summary["contextUsage"],idle["contextUsage"]);
+        manager.shutdown().await; server.abort();
+    }
+}
+
+#[tokio::test]
 async fn provider_usage_without_model_capacity_survives_sleep_restart_and_metadata_edits() {
     for api in [Api::Codex, Api::ChatCompletions] {
         let mut model = ModelServer::start(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }]).await;
@@ -816,11 +874,12 @@ async fn provider_usage_without_model_capacity_survives_sleep_restart_and_metada
         assert_eq!(state["contextUsage"], summary["contextUsage"]);
 
         let mut settings = manager.inner.settings.get();
+        settings.agent.allow_configured_context_fallback = true;
         settings.models.push(crate::settings::ModelSettings { provider:"openai-codex".into(), id:"gpt-6-sol".into(), context_window:Some(200_000), ..Default::default() });
         assert_eq!(client.request(json!({"id":"capacity","type":"set_settings","revision":settings.revision,"settings":settings})).await["ok"],true);
         client.request(json!({"id":"list-known","type":"list_sessions"})).await;
         let summary = client.seen.iter().rev().find(|m| m["type"] == "sessions").unwrap()["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
-        let expected = json!({"tokens":tokens,"contextWindow":200_000});
+        let expected = json!({"tokens":tokens,"contextWindow":200_000,"source":"configured"});
         assert_eq!(summary["contextUsage"],expected);
         client.open(&id).await;
         let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();

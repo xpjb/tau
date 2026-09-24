@@ -33,14 +33,25 @@ part of the wire settings document.
 
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
-context capacity stays unknown: the context tooltip shows the last provider-reported
-turn total in tokens even when the selected model has no `contextWindow` metadata.
-The percentage/ring fill and threshold-based auto-compaction still need an explicitly
-configured capacity; a missing window is never guessed. Sleeping chats retain the
-last saved token count, marked as last known. This protocol-15 change needs matching
-client and daemon builds and has not been deployed. The title model is separately
-configurable; unset uses the chat model. Cache rings are estimates from existing reply timestamps, not native
-runtime idle timeouts. Chat context menus target the clicked chat and expose model,
+context capacity comes from the **selected provider's own catalog** when available:
+Codex's authenticated `/models` response (`context_window`, falling back to
+`max_context_window`) with the same account and originator as inference, or
+OpenRouter's `/models` `context_length`. Exact model IDs only; no Pi model file,
+name matching, or guessed capacity. The catalog is cached in memory for one hour
+and discovery never blocks a chat. On September 24, 2026 a read-only Codex catalog
+request with Tau's originator and Codex catalog client version 0.156.1 reported
+272,000 for GPT-6 Sol, Luna and Astra. A provider can later change these limits.
+
+The tooltip shows last provider-reported turn tokens even when capacity is unknown.
+The ring percentage and threshold-based auto-compaction need a known limit. An
+existing `contextWindow` in model metadata is **not trusted by default**; the
+advanced opt-in "Use configured context limits when catalog unavailable" permits
+an explicitly labeled, unverified fallback only if discovery fails. A successful
+catalog missing the exact model never uses a fallback. Sleeping chats retain the
+last saved token count, marked as last known. This protocol-15 change needs matched
+client/daemon builds and has not been deployed. The title model is separately
+configurable; unset uses the chat model. Cache rings are estimates from existing
+reply timestamps, not native runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.
 
 ## Build and validate
