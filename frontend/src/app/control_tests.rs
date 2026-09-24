@@ -29,6 +29,22 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         };
 
         frame(&mut app);
+        // Saving an edit is a queue operation, not a new user turn. Show the
+        // locally authored candidate inline while the provider is still gated.
+        {
+            let chat = app.controller.chats.get_mut("demo").unwrap();
+            chat.feed.queue.requests.push(QueuedRequest { request_id:"queued".into(), revision:0,
+                kind:"steer".into(), text:"old text".into(), images:0, timestamp_ms:None });
+            chat.local.pending.push(crate::store::Pending { request:ClientRequest { id:"edit".into(),
+                command:ClientCommand::QueueControl { session_id:"demo".into(), generation:"demo".into(),
+                    operation:QueueOperation::Edit { request_id:"queued".into(), revision:0, text:"new text".into() } } },
+                started_at_ms:None, text:"new text".into(), files:vec![], status:crate::store::Delivery::Sending, detail:None });
+        }
+        let rows = app.rows("demo");
+        assert!(rows.iter().any(|r| r.key == "queue:queued" && r.source == literal("new text") && r.title.contains("saving")));
+        assert!(!rows.iter().any(|r| r.key == "pending:edit" || r.source.contains("Control requested")));
+        let chat = app.controller.chats.get_mut("demo").unwrap();
+        chat.local.pending.clear(); chat.feed.queue.requests.clear();
         let stop = app
             .hits
             .iter()

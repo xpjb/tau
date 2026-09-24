@@ -2432,35 +2432,33 @@ impl App {
             i += 1;
         }
         for p in &chat.local.pending {
+            let edit = matches!(&p.request.command, ClientCommand::QueueControl { operation: QueueOperation::Edit { .. }, .. });
+            let delete = matches!(&p.request.command, ClientCommand::QueueControl { operation: QueueOperation::Delete { .. }, .. });
+            let control = matches!(&p.request.command, ClientCommand::QueueControl { .. } | ClientCommand::Abort { .. });
+            let in_queue = chat.feed.queue.requests.iter().any(|q| match &p.request.command {
+                ClientCommand::QueueControl { operation: QueueOperation::Edit { request_id, revision, .. }
+                    | QueueOperation::Delete { request_id, revision }, .. } => q.request_id == *request_id && q.revision == *revision,
+                _ => false,
+            });
+            // The queue row owns an in-flight edit/delete. Never represent it as
+            // a new user message; an unresolved control remains visible by itself
+            // only if its target disappeared or it was explicitly rejected.
+            if (edit || delete) && in_queue && !matches!(p.status, crate::store::Delivery::Rejected | crate::store::Delivery::Accepted) { continue; }
+            let mut actions = vec![("Copy text".into(), Action::Copy(p.text.clone()))];
+            if !control { actions.push(("Restore draft".into(), Action::Restore(p.request.id.clone()))); }
+            actions.push(("Dismiss".into(), Action::Dismiss(p.request.id.clone())));
             rows.push(Row {
-                details: vec![],
-                header: true,
-                key: format!("pending:{}", p.request.id),
-                title: p.status.label().into(),
+                details: vec![], header: true, key: format!("pending:{}", p.request.id),
+                title: if edit { format!("Queue edit · {}", p.status.label()) }
+                    else if delete { format!("Queue delete · {}", p.status.label()) }
+                    else if control { format!("Queue action · {}", p.status.label()) }
+                    else { p.status.label().into() },
                 timestamp: clock::label(p.started_at_ms),
-                sender: EventRole::User,
-                source: literal(&format!(
-                    "{}{}",
-                    p.text,
-                    p.detail
-                        .as_ref()
-                        .map(|s| format!("\n{s}"))
-                        .unwrap_or_default()
-                )),
-                user: true,
-                error: matches!(
-                    p.status,
-                    crate::store::Delivery::Rejected | crate::store::Delivery::Unconfirmed
-                ),
-                actions: vec![
-                    ("Copy message".into(), Action::Copy(p.text.clone())),
-                    (
-                        "Restore draft".into(),
-                        Action::Restore(p.request.id.clone()),
-                    ),
-                    ("Dismiss".into(), Action::Dismiss(p.request.id.clone())),
-                ],
-                attachment: None,
+                sender: if control { EventRole::System } else { EventRole::User },
+                source: literal(&format!("{}{}", p.text, p.detail.as_ref().map(|s| format!("\n{s}")).unwrap_or_default())),
+                user: !control,
+                error: matches!(p.status, crate::store::Delivery::Rejected | crate::store::Delivery::Unconfirmed),
+                actions, attachment: None,
             });
         }
         for (i, q) in chat.feed.queue.requests.iter().enumerate() {
@@ -2503,14 +2501,35 @@ impl App {
                     }),
                 ));
             }
+            let pending = chat.local.pending.iter().rev().find(|p| {
+                let target = match &p.request.command {
+                    ClientCommand::QueueControl { operation: QueueOperation::Edit { request_id, revision, .. }
+                        | QueueOperation::Delete { request_id, revision }, .. } =>
+                        request_id == &q.request_id && *revision == q.revision,
+                    _ => false,
+                };
+                target && matches!(p.status, crate::store::Delivery::Sending | crate::store::Delivery::Unconfirmed)
+            });
+            let editing = pending.and_then(|p| match &p.request.command {
+                ClientCommand::QueueControl { operation: QueueOperation::Edit { text, .. }, .. } => Some(text.as_str()),
+                _ => None,
+            });
+            if pending.is_some() {
+                // A second edit/delete using the old revision would race this
+                // one. Wait for the durable receipt before offering actions.
+                actions = vec![("Copy message".into(), Action::Copy(editing.unwrap_or(&q.text).into()))];
+            }
             rows.push(Row {
                 details: vec![],
                 header: true,
                 key: format!("queue:{}", q.request_id),
-                title: format!("Queued{}", if state.paused { " · held" } else { "" }),
+                title: if let Some(p) = pending {
+                    format!("{} · {}", if editing.is_some() { "Queue edit" } else { "Queue delete" },
+                        if p.status == crate::store::Delivery::Unconfirmed { "unconfirmed · not resent" } else { "saving…" })
+                } else { format!("Queued{}", if state.paused { " · held" } else { "" }) },
                 timestamp: clock::label(q.timestamp_ms),
                 sender: EventRole::User,
-                source: literal(&q.text),
+                source: literal(editing.unwrap_or(&q.text)),
                 user: true,
                 error: false,
                 actions,

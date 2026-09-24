@@ -193,6 +193,10 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
         c.selected().unwrap().feed.queue.requests[0].text == "edited queue"
     })
     .await;
+    assert!(c.selected().unwrap().local.pending.iter().all(|p| !matches!(
+        &p.request.command,
+        ClientCommand::QueueControl { operation: QueueOperation::Edit { .. }, .. }
+    )), "The durable edit receipt must settle before the gated model responds");
     let revision = c.selected().unwrap().feed.queue.requests[0].revision;
     c.control(ClientCommand::QueueControl {
         session_id: session.clone(),

@@ -380,7 +380,11 @@ impl Controller {
             started_at_ms: crate::clock::now_ms(),
             text: match &request.command {
                 ClientCommand::Prompt { text, .. } => text.clone(),
-                _ => "Control requested".into(),
+                ClientCommand::QueueControl { operation: QueueOperation::Edit { text, .. }, .. } => text.clone(),
+                ClientCommand::QueueControl { operation: QueueOperation::Delete { .. }, .. } => "Delete queued message".into(),
+                ClientCommand::QueueControl { .. } => "Queue action".into(),
+                ClientCommand::Abort { .. } => "Stop requested".into(),
+                _ => unreachable!("Only durable controls reach this path"),
             },
             files: vec![],
             status: Delivery::Sending,

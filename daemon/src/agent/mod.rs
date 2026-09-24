@@ -44,7 +44,14 @@ impl SessionContent {
             change.head = next.head; change.bumps_chat |= next.bumps_chat; entries.push(entry);
         }
         change.queue = queue.clone();
+        // A receipt and queue become durable in the same SQLite commit. Publish
+        // confirmation immediately; neither a model turn nor the WebSocket
+        // response frame is needed to settle a pending edit/send on the client.
+        let receipt_id = receipt.as_ref().filter(|r| r.finished).map(|r| r.id.clone());
         let saved = agent.store.commit(id,agent.revision,entries,change.events.clone(),queue,receipt).await?;
+        if let Some(receipt_id) = receipt_id && !change.delivered.contains(&receipt_id) {
+            change.delivered.push(receipt_id);
+        }
         agent.revision = saved.revision; agent.model = saved.model; agent.thinking = saved.thinking;
         agent.tokens = saved.tokens; agent.needs_turn = saved.needs_turn;
         self.publish(id,change)

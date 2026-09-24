@@ -154,6 +154,10 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
         ("delete", json!({"type":"delete","requestId":"deleted","revision":0})),
         ("pause", json!({"type":"pause","runId":run,"boundary":"turn"})),
     ] { assert_eq!(client.request(json!({"id":id_cmd,"type":"queue_control","sessionId":id,"generation":generation,"operation":operation})).await["ok"], true); }
+    let delivered_edit = |m: &Value| m["type"] == "transcript_update" && m["sessionId"] == id
+        && m["change"]["delivered"].as_array().is_some_and(|ids| ids.contains(&json!("edit")));
+    if !client.seen.iter().any(delivered_edit) { client.until(delivered_edit).await; }
+    assert!(client.seen.iter().any(delivered_edit), "The edit receipt must publish while the model response is gated");
     assert_eq!(client.request(json!({"id":"stale","type":"queue_control","sessionId":id,"generation":generation,"operation":{"type":"edit","requestId":"queued","revision":0,"text":"Stale"}})).await["ok"], false);
     // Full settings, stale revisions, and secrets stay on the same real wire.
     client.request(json!({"id":"get","type":"get_settings"})).await;
