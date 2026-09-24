@@ -485,3 +485,71 @@ async fn http_grant_to_native_quic_and_offline_cache() {
     server.abort();
     provider.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn projects_sync_between_real_clients_preserve_drafts_and_recover_selection() {
+    let server = tempfile::tempdir().unwrap();
+    let root = server.path();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let config = taud::Config { bind:port, transfer_bind:"127.0.0.1:0".parse().unwrap(), token:Arc::from("local-project-fixture"),
+        settings_path:root.join("settings.json"), import_pi_dir:None, codex_auth_source:None, cwd:root.into(), database_path:root.join("tau.sqlite3"),
+        telemetry_path:root.join("crashes.jsonl"), attachment_root:root.join("outbox"), upload_root:root.join("uploads") };
+    let task = tokio::spawn(taud::run(config));
+    let a_root = tempfile::tempdir().unwrap(); let b_root = tempfile::tempdir().unwrap();
+    let connect = |path: &std::path::Path| {
+        let store = Store::open(path.into()).unwrap();
+        store.put("","settings",&Settings { server_url:format!("http://{port}"),token:"local-project-fixture".into() }).unwrap();
+        Controller::new(store,Arc::new(|| {})).unwrap()
+    };
+    let mut a = connect(a_root.path()); let mut b = connect(b_root.path());
+    until(&mut a, |c| c.epoch.is_some()).await; until(&mut b, |c| c.epoch.is_some()).await;
+    a.new_chat().unwrap();
+    until(&mut a, |c| c.selected().is_some_and(|chat| chat.feed.synchronized) && c.account.sessions.len() == 1).await;
+    let general = a.account.selected.clone().unwrap();
+    a.draft("Do not lose this unsent draft".into()).unwrap();
+    let file = root.join("draft.txt"); std::fs::write(&file,"attachment").unwrap(); a.attach(&file,None).unwrap();
+    let project = uuid::Uuid::new_v4().to_string();
+    a.request(ClientCommand::CreateProject { project_id:project.clone(),name:"Build".into(),prompt:"Exact\n  project text\n".into() }).unwrap();
+    until(&mut a, |c| c.account.selected_project == project && c.account.projects.iter().any(|p| p.id == project)).await;
+    until(&mut b, |c| c.account.projects.iter().any(|p| p.id == project)).await;
+    a.new_chat().unwrap();
+    until(&mut a, |c| c.selected().is_some_and(|chat| chat.feed.synchronized) && c.account.sessions.len() == 2).await;
+    let work = a.account.selected.clone().unwrap(); assert_ne!(general,work);
+    assert_eq!(a.account.sessions.iter().find(|s| s.id == work).unwrap().project_id,project);
+    a.request(ClientCommand::MoveSession { session_id:general.clone(),project_id:project.clone() }).unwrap();
+    until(&mut a, |c| c.account.sessions.iter().filter(|s| s.project_id == project).count() == 2).await;
+    assert_eq!(a.account.selected.as_deref(),Some(work.as_str()),"Moving a clicked chat must not retarget the selected chat");
+    assert_eq!(a.chats[&general].local.draft,"Do not lose this unsent draft");
+    assert_eq!(a.chats[&general].local.files.len(),1);
+    a.request(ClientCommand::RenameSession { session_id:work.clone(),title:"Work started".into() }).unwrap();
+    until(&mut b, |c| c.account.sessions.iter().any(|s| s.id == work && s.title == "Work started") && c.account.sessions.iter().all(|s| s.project_id == project)).await;
+    assert!(b.project_unread(&project));
+    b.select_project(&project).unwrap(); assert!(b.project_unread(&project),"Opening the tab does not mark its chats read");
+    b.select(&general).unwrap(); b.select(&work).unwrap(); assert!(!b.project_unread(&project));
+    b.request(ClientCommand::UpdateProject { project_id:project.clone(),revision:0,name:"Build renamed".into(),prompt:"Revised".into() }).unwrap();
+    until(&mut a, |c| c.account.projects.iter().any(|p| p.id == project && p.revision == 1)).await;
+    a.request(ClientCommand::UpdateProject { project_id:project.clone(),revision:0,name:"Stale".into(),prompt:"Wrong".into() }).unwrap();
+    until(&mut a, |c| c.project_result.as_ref().is_some_and(|(_,ok)| !ok)).await;
+    assert_eq!(a.account.projects.iter().find(|p| p.id == project).unwrap().prompt,"Revised");
+    drop(b);
+    let mut b = connect(b_root.path());
+    assert_eq!(b.account.selected_project,project);
+    until(&mut b, |c| c.epoch.is_some() && c.selected().is_some_and(|chat| chat.feed.synchronized)).await;
+    a.request(ClientCommand::DeleteProject { project_id:project.clone(),revision:1,mode:DeleteProjectMode::MoveToGeneral }).unwrap();
+    until(&mut b, |c| c.account.projects.len() == 1 && c.account.sessions.iter().all(|s| s.project_id == GENERAL_PROJECT_ID)).await;
+    until(&mut a, |c| c.account.projects.len() == 1 && c.account.sessions.iter().all(|s| s.project_id == GENERAL_PROJECT_ID)).await;
+    assert_eq!(b.account.selected_project,GENERAL_PROJECT_ID);
+    assert_eq!(a.chats[&general].local.files.len(),1);
+    a.request(ClientCommand::CreateProject { project_id:project.clone(),name:"Temporary".into(),prompt:String::new() }).unwrap();
+    until(&mut a, |c| c.account.projects.len() == 2 && c.account.selected_project == project).await;
+    a.request(ClientCommand::MoveSession { session_id:general.clone(),project_id:project.clone() }).unwrap();
+    until(&mut a, |c| c.account.sessions.iter().any(|s| s.id == general && s.project_id == project)).await;
+    until(&mut b, |c| c.account.sessions.iter().any(|s| s.id == general && s.project_id == project)).await;
+    b.select(&general).unwrap();
+    a.request(ClientCommand::DeleteProject { project_id:project.clone(),revision:0,mode:DeleteProjectMode::DeleteChats }).unwrap();
+    until(&mut a, |c| c.account.projects.len() == 1 && c.project_result.as_ref().is_some_and(|(_,ok)| *ok) && !c.chats.contains_key(&general)).await;
+    until(&mut b, |c| c.account.selected.is_none() && c.account.sessions.len() == 1).await;
+    assert!(!a.store.load_chat(&a.identity,&general).unwrap().has_work());
+    assert_eq!(b.account.sessions[0].id,work,"Unrelated General chats survive");
+    drop(a); drop(b); task.abort(); let _ = task.await;
+}

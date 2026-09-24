@@ -29,6 +29,8 @@ pub struct Controller {
     pub model_preferences: crate::models::Preferences,
     pub chats: HashMap<String, Chat>,
     pub downloads: HashMap<String, Download>,
+    pub viewing_chat: bool,
+    pub project_result: Option<(String, bool)>,
     pub settings_result: Option<(String, bool)>,
     pub daemon_settings: Option<tau_protocol::settings::Settings>,
     pub connection: String,
@@ -37,6 +39,7 @@ pub struct Controller {
     pub notice: Option<String>,
     network: Option<Network>,
     requests: HashMap<String, ClientCommand>,
+    project_deletions: HashMap<String, Vec<String>>,
     wake: Wake,
 }
 impl Controller {
@@ -53,6 +56,8 @@ impl Controller {
             model_preferences,
             chats: HashMap::new(),
             downloads: HashMap::new(),
+            viewing_chat: true,
+            project_result: None,
             settings_result: None,
             daemon_settings: None,
             connection: "Not connected".into(),
@@ -61,6 +66,7 @@ impl Controller {
             notice: None,
             network: None,
             requests: HashMap::new(),
+            project_deletions: HashMap::new(),
             wake,
         };
         if let Some(id) = c.account.selected.clone() {
@@ -89,8 +95,10 @@ impl Controller {
         self.chats.clear();
         self.downloads.clear();
         self.requests.clear();
+        self.project_deletions.clear();
         self.daemon_settings = None;
         self.settings_result = None;
+        self.project_result = None;
         self.notice = None;
         if let Some(id) = self.account.selected.clone() {
             self.ensure_chat(&id)?;
@@ -130,6 +138,8 @@ impl Controller {
         self.ensure_chat(id)?;
         self.account.selected = Some(id.into());
         if let Some(session) = self.account.sessions.iter().find(|s| s.id == id) {
+            self.account.selected_project = session.project_id.clone();
+            self.account.last_chat_by_project.insert(session.project_id.clone(), id.into());
             self.account
                 .read_at
                 .insert(id.into(), session.updated_at_ms);
@@ -142,6 +152,51 @@ impl Controller {
             })?;
         }
         Ok(())
+    }
+    pub fn viewing(&mut self, visible: bool) -> Result<()> {
+        let changed = visible && !self.viewing_chat;
+        self.viewing_chat = visible;
+        if changed && let Some(id) = &self.account.selected
+            && let Some(s) = self.account.sessions.iter().find(|s| &s.id == id) {
+            self.account.read_at.insert(id.clone(), s.updated_at_ms);
+            self.store.put(&self.identity, "account", &self.account)?;
+        }
+        Ok(())
+    }
+    fn last_chat_in_project(&self, project: &str) -> Option<String> {
+        self.account.last_chat_by_project.get(project)
+            .filter(|id| self.account.sessions.iter().any(|s| s.project_id == project && s.id == id.as_str()))
+            .cloned()
+            .or_else(|| self.account.sessions.iter().filter(|s| s.project_id == project)
+                .max_by_key(|s| (s.updated_at_ms, &s.id)).map(|s| s.id.clone()))
+    }
+    pub fn select_project(&mut self, id: &str) -> Result<()> {
+        // Older local accounts remember only a single selected chat; capture it
+        // before replacing the global selection with this topic's resume target.
+        if let Some(current) = &self.account.selected
+            && let Some(session) = self.account.sessions.iter().find(|s| &s.id == current) {
+            self.account.last_chat_by_project.insert(session.project_id.clone(), current.clone());
+        }
+        self.account.selected_project = id.into();
+        self.account.selected = self.last_chat_in_project(id);
+        // Tab selection itself is not a read receipt. The app marks the chat
+        // read only when its pane is actually visible (including after restart).
+        self.viewing_chat = false;
+        self.store.put(&self.identity, "account", &self.account)?;
+        if let Some(chat) = self.account.selected.clone() {
+            self.ensure_chat(&chat)?;
+            if self.epoch.is_some() {
+                self.open(&chat)?;
+                self.request(ClientCommand::GetCommands { session_id: chat })?;
+            }
+        }
+        Ok(())
+    }
+    pub fn unread(&self, session: &SessionSummary) -> bool {
+        !session.starter && self.account.read_at.get(&session.id).copied().unwrap_or(0) < session.updated_at_ms
+    }
+    pub fn project_unread(&self, id: &str) -> bool {
+        self.account.sessions.iter().any(|s| s.project_id == id && self.unread(s))
     }
     pub fn draft(&mut self, value: String) -> Result<()> {
         let id = self
@@ -295,6 +350,9 @@ impl Controller {
             epoch,
             request: request.clone(),
         })?;
+        if let ClientCommand::DeleteProject { project_id, mode: DeleteProjectMode::DeleteChats, .. } = &request.command {
+            self.project_deletions.insert(request.id.clone(), self.account.sessions.iter().filter(|s| &s.project_id == project_id).map(|s| s.id.clone()).collect());
+        }
         self.requests.insert(request.id.clone(), request.command);
         Ok(request.id)
     }
@@ -432,7 +490,7 @@ impl Controller {
             .selected
             .clone()
             .filter(|id| self.chats.get(id).is_some_and(|c| c.local.has_work()));
-        self.request(ClientCommand::CreateSession { keep_session_id })?;
+        self.request(ClientCommand::CreateSession { keep_session_id, project_id: self.account.selected_project.clone() })?;
         Ok(())
     }
     pub fn open(&mut self, id: &str) -> Result<()> {
@@ -516,6 +574,7 @@ impl Controller {
             .send(Command::CancelDownload(key.into()))
     }
     fn not_sent(&mut self, id: &str, detail: &str) -> Result<()> {
+        self.project_deletions.remove(id);
         for (session, chat) in &mut self.chats {
             if chat
                 .model_request
@@ -530,7 +589,10 @@ impl Controller {
                 self.store.save_chat(&self.identity, session, &chat.local)?;
             }
         }
-        if self.requests.remove(id).is_some() {
+        if let Some(command) = self.requests.remove(id) {
+            if matches!(command, ClientCommand::CreateProject { .. } | ClientCommand::UpdateProject { .. } | ClientCommand::DeleteProject { .. }) {
+                self.project_result = Some((id.into(), false));
+            }
             self.notice = Some(detail.into());
         }
         Ok(())
@@ -568,6 +630,7 @@ impl Controller {
                 self.connection = detail;
                 self.health.disconnected(fatal);
                 self.requests.clear();
+                self.project_deletions.clear();
                 for (session, chat) in &mut self.chats {
                     if chat.model_request.take().is_some() {
                         self.notice = Some("Model change unconfirmed; check the current model after reconnecting. It was not resent.".into());
@@ -648,12 +711,33 @@ impl Controller {
     }
     pub fn message(&mut self, message: ServerMessage) -> Result<()> {
         match message {
+            ServerMessage::Projects { projects } => {
+                self.account.projects = projects;
+                if !self.account.projects.iter().any(|p| p.id == self.account.selected_project) {
+                    self.account.selected_project = general_project_id();
+                }
+                self.store.put(&self.identity, "account", &self.account)?;
+            }
             ServerMessage::Sessions { sessions } => {
+                // A remote deletion must remove stale selection without discarding
+                // unsent local drafts/files. Only explicit local delete clears them.
+                if self.account.selected.as_ref().is_some_and(|id| !sessions.iter().any(|s| &s.id == id)) {
+                    self.account.selected = None;
+                }
+                // Empty reusable chats are not unread messages. Keep their initial
+                // activity read even if a move later demotes a duplicate starter.
+                for s in &sessions {
+                    if s.starter { self.account.read_at.insert(s.id.clone(), s.updated_at_ms); }
+                }
                 self.account.sessions = sessions;
+                self.account.last_chat_by_project.retain(|project, chat| self.account.sessions.iter()
+                    .any(|s| s.project_id == *project && s.id == *chat));
                 if let Some(id) = &self.account.selected
                     && let Some(s) = self.account.sessions.iter().find(|s| &s.id == id)
                 {
-                    self.account.read_at.insert(id.clone(), s.updated_at_ms);
+                    self.account.selected_project = s.project_id.clone();
+                    self.account.last_chat_by_project.insert(s.project_id.clone(), id.clone());
+                    if self.viewing_chat { self.account.read_at.insert(id.clone(), s.updated_at_ms); }
                 }
                 self.store.put(&self.identity, "account", &self.account)?;
                 // Bounded recent/unread/running warming, never starts a worker.
@@ -834,6 +918,19 @@ impl Controller {
                     }
                 }
                 let command = self.requests.remove(&request_id);
+                if let Some(deleted) = self.project_deletions.remove(&request_id) && ok && !uncertain {
+                    for id in deleted {
+                        self.store.delete_chat(&self.identity, &id)?;
+                        self.chats.remove(&id);
+                        self.account.read_at.remove(&id);
+                        self.account.sessions.retain(|s| s.id != id);
+                        if self.account.selected.as_ref() == Some(&id) { self.account.selected = None; }
+                    }
+                    self.store.put(&self.identity, "account", &self.account)?;
+                }
+                if matches!(command, Some(ClientCommand::CreateProject { .. } | ClientCommand::UpdateProject { .. } | ClientCommand::DeleteProject { .. })) {
+                    self.project_result = Some((request_id.clone(), ok && !uncertain));
+                }
                 if matches!(
                     command,
                     Some(ClientCommand::SetSettings { .. } | ClientCommand::GetSettings)
@@ -854,11 +951,31 @@ impl Controller {
                     }
                 } else {
                     match command {
-                        Some(
-                            ClientCommand::CreateSession { .. }
-                            | ClientCommand::ForkSession { .. }
-                            | ClientCommand::CloneSession { .. },
-                        ) => {
+                        Some(ClientCommand::CreateProject { project_id, .. }) => {
+                            self.select_project(&project_id)?;
+                        }
+                        Some(ClientCommand::MoveSession { session_id, project_id }) => {
+                            // The clicked chat, not the selected chat, owns this action.
+                            if let Some(session) = self.account.sessions.iter_mut().find(|s| s.id == session_id) {
+                                session.project_id = project_id;
+                            }
+                            self.store.put(&self.identity, "account", &self.account)?;
+                        }
+                        Some(ClientCommand::DeleteProject { project_id, mode, .. }) => {
+                            if self.account.selected_project == project_id {
+                                self.account.selected_project = general_project_id();
+                            }
+                            if mode == DeleteProjectMode::MoveToGeneral {
+                                for s in &mut self.account.sessions {
+                                    if s.project_id == project_id { s.project_id = general_project_id(); }
+                                }
+                            }
+                            self.store.put(&self.identity, "account", &self.account)?;
+                        }
+                        Some(command @ (ClientCommand::CreateSession { .. } | ClientCommand::ForkSession { .. } | ClientCommand::CloneSession { .. })) => {
+                            if let ClientCommand::CreateSession { project_id, .. } = command {
+                                self.account.selected_project = project_id;
+                            }
                             if let Some(id) = session_id {
                                 self.select(&id)?;
                                 if let Some(draft) = draft {
@@ -872,6 +989,7 @@ impl Controller {
                             if self.account.selected.as_ref() == Some(&session_id) {
                                 self.account.selected = None;
                             }
+                            self.account.last_chat_by_project.retain(|_, chat| chat != &session_id);
                             self.store.put(&self.identity, "account", &self.account)?;
                         }
                         _ => {}

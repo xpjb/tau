@@ -4,10 +4,32 @@ pub mod settings;
 mod transcript;
 pub use transcript::*;
 
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
+pub const GENERAL_PROJECT_ID: &str = "general";
+pub const MAX_PROJECT_NAME_CHARS: usize = 48;
+pub const MAX_PROJECT_PROMPT_CHARS: usize = 64 * 1024;
+pub fn general_project_id() -> String { GENERAL_PROJECT_ID.into() }
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    pub revision: u64,
+}
+impl Project {
+    pub fn general() -> Self {
+        Self { id: general_project_id(), name: "General".into(), prompt: String::new(), revision: 0 }
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteProjectMode { MoveToGeneral, DeleteChats }
+
 pub const MAX_CRASH_BYTES: usize = 24 * 1024;
 pub const MAX_UPLOAD_BYTES: usize = 50_000_000;
 
@@ -26,9 +48,15 @@ pub struct ClientRequest {
 )]
 pub enum ClientCommand {
     ListSessions,
+    CreateProject { project_id: String, name: String, prompt: String },
+    UpdateProject { project_id: String, revision: u64, name: String, prompt: String },
+    DeleteProject { project_id: String, revision: u64, mode: DeleteProjectMode },
+    MoveSession { session_id: String, project_id: String },
     GetSettings,
     SetSettings { revision: u64, settings: Box<settings::Settings> },
     CreateSession {
+        #[serde(default = "general_project_id")]
+        project_id: String,
         #[serde(default)]
         keep_session_id: Option<String>,
     },
@@ -143,6 +171,7 @@ pub enum ServerMessage {
         commands: Vec<SlashCommand>,
     },
     Notice { session_id: String, message: String },
+    Projects { projects: Vec<Project> },
     Sessions {
         sessions: Vec<SessionSummary>,
     },
@@ -274,6 +303,8 @@ pub struct ContextUsage {
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     pub id: String,
+    #[serde(default = "general_project_id")]
+    pub project_id: String,
     pub title: String,
     pub starter: bool,
     pub status: SessionStatus,

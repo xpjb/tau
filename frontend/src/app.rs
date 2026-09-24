@@ -19,12 +19,26 @@ use std::{
     path::PathBuf,
     time::Instant,
 };
+mod ripple;
+use ripple::Ripple;
 use tau_protocol::*;
+
+mod projects;
 
 #[derive(Clone)]
 enum Action {
     Select(String),
     New,
+    SelectProject(String),
+    NewProject,
+    RenameProject(String),
+    ProjectPrompt(String),
+    DeleteProject(String),
+    RemoveProject(DeleteProjectMode),
+    MoveMenu(String),
+    ContextBack,
+    MoveChat(String, String),
+    Noop,
     Settings,
     ModelSettings,
     ResetModels,
@@ -78,6 +92,11 @@ enum Info {
 #[derive(Clone)]
 enum ModalKind {
     Settings,
+    NewProject(String),
+    RenameProject(Project),
+    ProjectPrompt(Project),
+    DeleteProject(Project),
+    DeleteProjectChoice(Project),
     Models,
     Rename(String),
     Delete(String),
@@ -120,12 +139,15 @@ struct Placed {
     top: f32,
     height: f32,
 }
+#[derive(Clone)]
 struct ContextMenu {
     at: Vec2,
     section: Option<String>,
     chat: Option<String>,
     options: Vec<(String, Action)>,
     selected: usize,
+    scroll: f32,
+    parent: Option<Box<ContextMenu>>,
 }
 struct MessageArea {
     key: String,
@@ -135,6 +157,17 @@ struct MessageArea {
     options: Vec<(String, Action)>,
 }
 impl MessageArea {
+    fn contains(&self, point: Vec2) -> bool {
+        contains(self.clip, point) && contains_rounded(self.rect, self.corners, point)
+    }
+}
+struct DetailArea {
+    key: String,
+    rect: Rect,
+    corners: [f32; 4],
+    clip: Rect,
+}
+impl DetailArea {
     fn contains(&self, point: Vec2) -> bool {
         contains(self.clip, point) && contains_rounded(self.rect, self.corners, point)
     }
@@ -191,8 +224,19 @@ pub struct App {
     modal: Option<Modal>,
     context_menu: Option<ContextMenu>,
     context_rect: Rect,
+    menu_viewport: Rect,
     message_areas: Vec<MessageArea>,
+    detail_areas: Vec<DetailArea>,
+    ripple: Option<Ripple>,
     chat_areas: Vec<(Rect, String)>,
+    project_areas: Vec<(Rect, String)>,
+    projects_rect: Rect,
+    list_rect: Rect,
+    project_scroll: f32,
+    max_project_scroll: f32,
+    project_velocity: f32,
+    revealed_project: String,
+    saving_project: Option<String>,
     usage: Tooltip,
     info_tip: Tooltip,
     info_target: Info,
@@ -227,6 +271,7 @@ pub struct App {
     pinch: Option<(u64, Vec2)>,
     velocity: f32,
     viewer: Option<Viewer>,
+    viewer_image: Option<Rect>,
     selecting: bool,
     field_selection: Option<Rect>,
     platform: Vec<PlatformAction>,
@@ -238,7 +283,7 @@ impl App {
         let controller = Controller::new(store, wake.clone())?;
         let dot_color = controller.health.color(Instant::now());
         let composer_session = controller.account.selected.clone();
-        let composer = Editor::new(
+        let composer = Editor::composer(
             controller
                 .selected()
                 .map(|c| c.local.draft.clone())
@@ -258,8 +303,19 @@ impl App {
             modal: None,
             context_menu: None,
             context_rect: Rect::new(0., 0., 0., 0.),
+            menu_viewport: Rect::new(0., 0., 0., 0.),
             message_areas: vec![],
+            detail_areas: vec![],
+            ripple: None,
             chat_areas: vec![],
+            project_areas: vec![],
+            projects_rect: Rect::new(0., 0., 0., 0.),
+            list_rect: Rect::new(0., 0., 0., 0.),
+            project_scroll: 0.,
+            max_project_scroll: 0.,
+            project_velocity: 0.,
+            revealed_project: String::new(),
+            saving_project: None,
             usage: Tooltip::default(),
             info_tip: Tooltip::default(),
             info_target: Info::Connection,
@@ -294,6 +350,7 @@ impl App {
             pinch: None,
             velocity: 0.,
             viewer: None,
+            viewer_image: None,
             selecting: false,
             field_selection: None,
             platform: vec![],
@@ -355,6 +412,7 @@ impl App {
     pub fn resize(&mut self, size: (u32, u32), scale: f32, origin: Vec2) {
         if self.size != size || self.scale != scale || self.origin != origin {
             self.cancel_pointer();
+            self.revealed_project.clear();
             self.size = size;
             self.scale = scale;
             self.origin = origin;
@@ -405,12 +463,14 @@ impl App {
         };
         self.dirty |= on_bar(self.hover) != on_bar(point);
         if self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none() {
-            let section_at = |p: Option<Vec2>| {
-                p.and_then(|p| self.message_areas.iter().position(|a| a.contains(p)))
-            };
-            self.dirty |= section_at(self.hover) != section_at(point);
+            self.dirty |= self.hover.and_then(|p| self.section_at(p).map(|(key, _)| key))
+                != point.and_then(|p| self.section_at(p).map(|(key, _)| key));
         }
         self.hover = point;
+        if self.context_menu.as_ref().is_some_and(|m| m.parent.is_none())
+            && let Some(Action::MoveMenu(id)) = point.and_then(|p| self.hits.iter().rev().find(|h| contains(h.rect, p))).map(|h| h.action.clone()) {
+            self.move_menu(&id);
+        }
         self.dirty |= old != new;
     }
     #[cfg(not(target_os = "android"))]
@@ -471,6 +531,8 @@ impl App {
         self.dirty = true;
     }
     pub fn tick(&mut self, dt: f32) -> bool {
+        let visible = (self.size.0 as f32 / self.scale >= 760. || !self.show_chats) && self.modal.is_none() && self.viewer.is_none();
+        if let Err(error) = self.controller.viewing(visible) { self.controller.notice = Some(error.to_string()); }
         self.dirty |= self.controller.poll();
         self.dirty |= self.usage.tick();
         self.dirty |= self.info_tip.tick();
@@ -480,6 +542,7 @@ impl App {
             self.focus = None;
             self.dirty = true;
         }
+        self.project_result();
         let selected = self.controller.account.selected.clone();
         if selected != self.composer_session {
             self.cancel_pointer();
@@ -490,7 +553,7 @@ impl App {
             self.scroll = 0.;
             self.horizontal = 0.;
             self.velocity = 0.;
-            self.composer = Editor::new(
+            self.composer = Editor::composer(
                 self.controller
                     .selected()
                     .map(|c| c.local.draft.clone())
@@ -501,7 +564,7 @@ impl App {
         } else if let Some(chat) = self.controller.selected()
             && self.composer.value != chat.local.draft
         {
-            self.composer = Editor::new(chat.local.draft.clone());
+            self.composer = Editor::composer(chat.local.draft.clone());
             self.dirty = true;
         }
         if self.waiting_settings
@@ -629,9 +692,38 @@ impl App {
             self.remember_scroll();
             self.dirty = true;
         }
+        if self.pointer.is_none() && self.project_velocity.abs() > 4. {
+            let old = self.project_scroll;
+            self.project_scroll = (old + self.project_velocity * dt.min(0.05)).clamp(0., self.max_project_scroll);
+            self.project_velocity *= (-9. * dt).exp();
+            if (old - self.project_scroll).abs() < 0.1 { self.project_velocity = 0.; }
+            self.dirty = true;
+        }
+        if let Some(point) = self.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
+            && self.modal.is_none() && self.context_menu.is_none() && self.viewer.is_none()
+            && (self.project_areas.iter().any(|(r,_)| contains(*r, point)) || self.chat_areas.iter().any(|(r,_)| contains(*r, point))) {
+            self.context_at(point);
+        }
+        let waiting_hold = self.pointer.as_ref().is_some_and(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() < 450)
+            && self.modal.is_none() && self.context_menu.is_none() && self.viewer.is_none();
+        if let Some(ripple) = &self.ripple {
+            let now = Instant::now();
+            if ripple.finished(now) {
+                self.ripple = None;
+                self.dirty = true;
+            } else if ripple.animating(now) {
+                self.dirty = true;
+            }
+        }
         let dirty = self.dirty;
         self.dirty = false;
-        dirty || self.velocity.abs() > 4.
+        dirty || self.velocity.abs() > 4. || self.project_velocity.abs() > 4. || waiting_hold
+    }
+    fn section_at(&self, point: Vec2) -> Option<(&str, Rect)> {
+        self.detail_areas.iter().rev().find(|a| a.contains(point))
+            .map(|a| (a.key.as_str(), a.rect))
+            .or_else(|| self.message_areas.iter().rev().find(|a| a.contains(point))
+                .map(|a| (a.key.as_str(), a.rect)))
     }
     pub fn save(&mut self) -> Result<()> {
         self.remember_scroll();
@@ -671,8 +763,14 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.context_menu.is_some() {
+            self.context_menu = self.context_menu.take().and_then(|m| m.parent.map(|p| *p));
+            self.dirty = true;
+            return;
+        }
         self.focus = None;
         if self.viewer.take().is_some() {
+            self.viewer_image = None;
         } else if self.modal.is_some() {
             self.activate(Action::CancelModal);
         } else if !self.show_chats && self.size.0 as f32 / self.scale < 760. {
@@ -686,6 +784,7 @@ impl App {
         match lane {
             Lane::Transcript => (self.scroll, self.max_scroll),
             Lane::Sidebar => (self.list_scroll, self.max_list_scroll),
+            Lane::Projects => (self.project_scroll, self.max_project_scroll),
             Lane::Horizontal => (self.horizontal, self.max_horizontal),
         }
     }
@@ -696,6 +795,7 @@ impl App {
                 self.remember_scroll();
             }
             Lane::Sidebar => self.list_scroll = value.clamp(0., self.max_list_scroll),
+            Lane::Projects => self.project_scroll = value.clamp(0., self.max_project_scroll),
             Lane::Horizontal => self.horizontal = value.clamp(0., self.max_horizontal),
         }
     }
@@ -738,7 +838,12 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn wheel(&mut self, amount: f32, horizontal: bool, point: Vec2) {
+        if self.context_menu.is_some() && contains(self.context_rect, point) {
+            self.scroll_menu(amount);
+            return;
+        }
         self.context_menu = None;
+        self.project_velocity = 0.;
         self.usage.dismiss();
         self.info_tip.dismiss();
         self.cancel_autoscroll();
@@ -757,7 +862,9 @@ impl App {
         if let Some(v) = &mut self.viewer {
             v.zoom = (v.zoom * (-amount * 0.002).exp()).clamp(1., 16.);
         } else if self.modal.is_none() {
-            let lane = if horizontal {
+            let lane = if contains(self.projects_rect, point) {
+                Lane::Projects
+            } else if horizontal {
                 Lane::Horizontal
             } else if self.show_chats
                 || self.size.0 as f32 / self.scale >= 760.
@@ -844,6 +951,8 @@ impl App {
         self.expansion_pin = None;
         self.history_attempt = None;
         self.velocity = 0.;
+        self.project_velocity = 0.;
+        self.ripple = None;
         if self.pointer.is_some() {
             if self.viewer.is_some() && touch {
                 self.pinch = Some((id, point));
@@ -919,6 +1028,9 @@ impl App {
             dragged: false,
             touch,
         });
+        self.ripple = if self.modal.is_none() && self.viewer.is_none() && self.context_menu.is_none() {
+            self.section_at(point).map(|(key, rect)| Ripple::new(key.to_owned(), rect, point))
+        } else { None };
         self.dirty = true;
     }
     pub fn motion(&mut self, id: u64, point: Vec2) {
@@ -968,6 +1080,7 @@ impl App {
             }
             p.dragged |=
                 (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 4. * self.scale;
+            if p.dragged { self.ripple = None; }
             p.last = point;
             self.dirty = true;
             return;
@@ -983,12 +1096,21 @@ impl App {
         let dx = point.x - p.last.x;
         p.dragged |= (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 7. * self.scale;
         if p.dragged {
+            if self.context_menu.is_some() {
+                p.last = point;
+                p.at = Instant::now();
+                self.scroll_menu(-dy);
+                return;
+            }
             if let Some(v) = &mut self.viewer {
                 v.pan.x += dx;
                 v.pan.y += dy;
             } else if self.modal.is_none() {
-                if self.show_chats {
-                    self.list_scroll = (self.list_scroll - dy).max(0.);
+                if contains(self.projects_rect, p.start) {
+                    self.project_scroll = (self.project_scroll - dx).clamp(0., self.max_project_scroll);
+                    if p.touch { self.project_velocity = (-dx / p.at.elapsed().as_secs_f32().max(0.008)).clamp(-3000. * self.scale, 3000. * self.scale); }
+                } else if contains(self.list_rect, p.start) {
+                    self.list_scroll = (self.list_scroll - dy).clamp(0., self.max_list_scroll);
                 } else if contains(self.transcript, p.start)
                     && self.max_horizontal > 0.
                     && (point.x - p.start.x).abs() > 1.5 * (point.y - p.start.y).abs()
@@ -1004,6 +1126,7 @@ impl App {
                 }
             }
         }
+        if p.dragged { self.ripple = None; }
         p.last = point;
         p.at = Instant::now();
         self.remember_scroll();
@@ -1021,9 +1144,20 @@ impl App {
         let p = self.pointer.take().unwrap();
         self.scroll_drag = None;
         if !p.dragged {
-            if p.touch
+            if self.viewer.is_some() {
+                if let Some(hit) = self.hits.iter().rev().find(|h|
+                    contains(h.rect, point) && contains(h.rect, p.start)) {
+                    self.activate(hit.action.clone());
+                } else if self.viewer_image.is_none_or(|image|
+                    !contains(image, p.start) && !contains(image, point)) {
+                    self.viewer = None;
+                    self.viewer_image = None;
+                }
+            } else if p.touch
                 && p.started.elapsed().as_millis() > 450
-                && (contains(self.transcript, point)
+                && self.context_menu.is_none()
+                && (self.project_areas.iter().any(|(r,_)| contains(*r, point) && contains(*r, p.start))
+                    || contains(self.transcript, point)
                     || self
                         .chat_areas
                         .iter()
@@ -1037,6 +1171,8 @@ impl App {
                 .find(|h| contains(h.rect, point) && contains(h.rect, p.start))
             {
                 self.activate(hit.action.clone());
+            } else if self.context_menu.is_some() {
+                // Empty menu space never activates the transcript behind it.
             } else if let Some(link) = self.renderer.hit_link(point) {
                 self.activate(Action::Link(link));
             } else if p.touch
@@ -1052,10 +1188,13 @@ impl App {
                     .extend_selection(crate::render::TextPoint { key, byte: end });
             }
         }
+        if p.dragged { self.ripple = None; }
+        else if let Some(ripple) = &mut self.ripple { ripple.release(); }
         self.selecting = false;
         self.field_selection = None;
         if p.at.elapsed().as_millis() > 150 {
             self.velocity = 0.;
+            self.project_velocity = 0.;
         }
         let result = self.save();
         self.report(result);
@@ -1071,8 +1210,10 @@ impl App {
         self.scroll_drag = None;
         self.expansion_pin = None;
         self.pointer = None;
+        self.ripple = None;
         self.pinch = None;
         self.velocity = 0.;
+        self.project_velocity = 0.;
         self.selecting = false;
         self.field_selection = None;
     }
@@ -1162,7 +1303,9 @@ impl App {
         }
         if let Some(menu) = &mut self.context_menu {
             match key {
-                "Escape" => self.context_menu = None,
+                "Escape" | "ArrowLeft" => {
+                    self.context_menu = self.context_menu.take().and_then(|m| m.parent.map(|p| *p));
+                }
                 "ArrowUp" => {
                     self.hover = None;
                     menu.selected = (menu.selected + menu.options.len() - 1) % menu.options.len()
@@ -1171,12 +1314,13 @@ impl App {
                     self.hover = None;
                     menu.selected = (menu.selected + 1) % menu.options.len();
                 }
-                "Enter" => {
+                "Enter" | "ArrowRight" => {
                     let action = menu.options[menu.selected].1.clone();
-                    self.activate(action);
+                    if key == "Enter" || matches!(action, Action::MoveMenu(_)) { self.activate(action); }
                 }
                 _ => {}
             }
+            self.reveal_menu_selection();
             self.dirty = true;
             return;
         }
@@ -1255,9 +1399,32 @@ impl App {
     }
     fn apply(&mut self, action: Action) -> Result<()> {
         self.cancel_preedit();
+        if let Action::MoveMenu(ref id) = action { self.move_menu(id); return Ok(()); }
+        if matches!(action, Action::ContextBack) {
+            self.context_menu = self.context_menu.take().and_then(|m| m.parent.map(|p| *p));
+            return Ok(());
+        }
+        if matches!(action, Action::Noop) { return Ok(()); }
         self.context_menu = None;
         let selected = self.controller.account.selected.clone();
         match action {
+            Action::SelectProject(id) => {
+                if self.controller.account.selected_project == id
+                    && self.controller.account.selected.as_ref().is_some_and(|chat|
+                        self.controller.account.sessions.iter().any(|s| s.id == chat.as_str() && s.project_id == id)) {
+                    return Ok(());
+                }
+                self.save()?;
+                self.controller.select_project(&id)?;
+                self.list_scroll = 0.;
+                self.show_chats = self.controller.account.selected.is_none();
+                self.focus = None;
+            }
+            Action::NewProject | Action::RenameProject(_) | Action::ProjectPrompt(_) | Action::DeleteProject(_) | Action::RemoveProject(_) => self.project_action(action)?,
+            Action::MoveChat(session_id, project_id) => {
+                self.controller.request(ClientCommand::MoveSession { session_id, project_id })?;
+            }
+            Action::MoveMenu(_) | Action::ContextBack | Action::Noop => {}
             Action::Select(id) => {
                 self.controller.select(&id)?;
                 self.show_chats = false;
@@ -1403,6 +1570,10 @@ impl App {
                     .map(|(_, e, _)| e.value.clone())
                     .collect::<Vec<_>>();
                 match modal.kind.clone() {
+                    ModalKind::NewProject(_) | ModalKind::RenameProject(_) | ModalKind::ProjectPrompt(_) | ModalKind::DeleteProject(_) | ModalKind::DeleteProjectChoice(_) => {
+                        self.confirm_project()?;
+                        return Ok(());
+                    }
                     ModalKind::Settings => {
                         if self.connecting && self.controller.connection == "Connecting…" {
                             return Ok(());
@@ -1473,6 +1644,7 @@ impl App {
             }
             Action::CancelModal => {
                 self.connecting = false;
+                self.saving_project = None;
                 self.waiting_settings = false;
                 self.daemon_draft = None;
                 self.saving_settings = None;
@@ -1690,7 +1862,7 @@ impl App {
             Action::Restore(id) => {
                 self.controller.restore_pending(&id)?;
                 self.composer =
-                    Editor::new(self.controller.selected().unwrap().local.draft.clone());
+                    Editor::composer(self.controller.selected().unwrap().local.draft.clone());
             }
             Action::Dismiss(id) => self.controller.dismiss_pending(&id)?,
             Action::Queue(operation) => {
@@ -1722,6 +1894,7 @@ impl App {
                 )?;
                 if path.is_file() {
                     if image {
+                        self.viewer_image = None;
                         self.viewer = Some(Viewer {
                             path,
                             name,
@@ -1747,7 +1920,7 @@ impl App {
                 }
             }
             Action::Suggest(text) => {
-                self.composer = Editor::new(text.clone());
+                self.composer = Editor::composer(text.clone());
                 self.controller.draft(text)?;
             }
         }
@@ -1783,7 +1956,12 @@ impl App {
         self.hits.clear();
         self.scrollbars.clear();
         self.message_areas.clear();
+        self.detail_areas.clear();
         self.chat_areas.clear();
+        self.project_areas.clear();
+        self.projects_rect = Rect::new(0.,0.,0.,0.);
+        self.list_rect = Rect::new(0.,0.,0.,0.);
+        self.transcript = Rect::new(0.,0.,0.,0.);
         self.info_areas.clear();
         self.usage.region = Rect::new(0., 0., 0., 0.);
         self.info_tip.region = Rect::new(0., 0., 0., 0.);
@@ -1792,6 +1970,7 @@ impl App {
             for (_, editor, _) in &mut modal.fields { editor.hide(); }
         }
         self.renderer.clear_scenes();
+        self.viewer_image = None;
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
         let side = if wide { 300. * s } else { 0. };
@@ -1852,13 +2031,18 @@ impl App {
                 radius - 2. * s,
                 color(0x18212b),
             );
-            self.renderer.label(
+            let icon_size = 24. * s;
+            self.renderer.icon(
+                ctx,
                 &mut overlay,
-                "↕",
-                Rect::new(a.x - 7. * s, a.y - 12. * s, 18. * s, 26. * s),
-                22. * s,
-                color(0x67d4ff),
-                false,
+                Icon::Autoscroll,
+                Rect::new(
+                    a.x - icon_size / 2.,
+                    a.y - icon_size / 2.,
+                    icon_size,
+                    icon_size,
+                ),
+                0x67d4ff,
             );
         }
         if let Some(viewer) = &self.viewer {
@@ -1873,21 +2057,20 @@ impl App {
                     let fit = (bounds.width / w as f32).min((bounds.height - 100. * s) / h as f32);
                     let width = w as f32 * fit * zoom;
                     let height = h as f32 * fit * zoom;
-                    overlay.images.push((
-                        path.clone(),
-                        Rect::new(
-                            bounds.x + (bounds.width - width) / 2. + pan.x,
-                            bounds.y + 60. * s + (bounds.height - 100. * s - height) / 2. + pan.y,
-                            width,
-                            height,
-                        ),
-                        Rect::new(
-                            bounds.x,
-                            bounds.y + 56. * s,
-                            bounds.width,
-                            bounds.height - 100. * s,
-                        ),
-                    ));
+                    let image = Rect::new(
+                        bounds.x + (bounds.width - width) / 2. + pan.x,
+                        bounds.y + 60. * s + (bounds.height - 100. * s - height) / 2. + pan.y,
+                        width,
+                        height,
+                    );
+                    let clip = Rect::new(
+                        bounds.x,
+                        bounds.y + 56. * s,
+                        bounds.width,
+                        bounds.height - 100. * s,
+                    );
+                    self.viewer_image = Some(crate::render::intersect(image, clip));
+                    overlay.images.push((path.clone(), image, clip));
                 }
                 Err(e) => {
                     self.renderer.label(
@@ -1945,13 +2128,15 @@ impl App {
             Some(ModalKind::Daemon)
         ) {
             self.daemon_settings_frame(&mut overlay, bounds);
+        } else if self.modal.as_ref().is_some_and(|m| projects::is_project_modal(&m.kind)) {
+            self.project_modal_frame(&mut overlay, bounds);
         } else if self.modal.is_some() {
             self.modal_frame(&mut overlay, bounds);
         }
         if !matches!(
             self.modal.as_ref().map(|m| &m.kind),
             Some(ModalKind::Settings | ModalKind::Models | ModalKind::Daemon)
-        ) {
+        ) && !self.modal.as_ref().is_some_and(|m| projects::is_project_modal(&m.kind)) {
             self.notice_frame(&mut overlay, bounds);
         }
         if self.selecting
@@ -1971,7 +2156,6 @@ impl App {
             Rect::new(b.x + b.width - s, b.y, s, b.height),
             color(0x2a3541),
         );
-        layer.rect(Rect::new(b.x, b.y + 140. * s, b.width, s), color(0x2a3541));
         let indicator = Rect::new(b.x + 72. * s, b.y + 22. * s, 28. * s, 34. * s);
         self.info_areas.push((indicator, Info::Connection));
         layer.rounded_rect(
@@ -1996,15 +2180,15 @@ impl App {
             color(0xe5eaf0),
             true,
         );
-        button(
-            &mut self.renderer,
+        self.icon_button(
+            ctx,
             layer,
-            &mut self.hits,
-            Rect::new(b.x + b.width - 104. * s, b.y + 16. * s, 88. * s, 40. * s),
-            "Settings",
+            Rect::new(b.x + b.width - 56. * s, b.y + 16. * s, 40. * s, 40. * s),
+            Icon::Gear,
+            22.,
             Action::Settings,
-            s,
             false,
+            true,
         );
         button(
             &mut self.renderer,
@@ -2016,11 +2200,14 @@ impl App {
             s,
             true,
         );
-        let clip = Rect::new(b.x, b.y + 148. * s, b.width, (b.height - 156. * s).max(0.));
+        self.project_tabs(layer, Rect::new(b.x, b.y + 140. * s, b.width, 34. * s));
+        let clip = Rect::new(b.x, b.y + 182. * s, b.width, (b.height - 190. * s).max(0.));
+        self.list_rect = clip;
+        let sessions = self.controller.account.sessions.iter().filter(|c| c.project_id == self.controller.account.selected_project);
         self.max_list_scroll =
-            (self.controller.account.sessions.len() as f32 * 90. * s - clip.height).max(0.);
+            (sessions.clone().count() as f32 * 90. * s - clip.height).max(0.);
         self.list_scroll = self.list_scroll.min(self.max_list_scroll);
-        for (i, session) in self.controller.account.sessions.iter().enumerate() {
+        for (i, session) in sessions.enumerate() {
             let y = clip.y + i as f32 * 90. * s - self.list_scroll;
             let rect = Rect::new(b.x + 8. * s, y, b.width - 16. * s, 84. * s);
             if y + rect.height < clip.y || y > clip.y + clip.height {
@@ -2048,14 +2235,7 @@ impl App {
             );
             let rect = crate::render::intersect(rect, clip);
             self.chat_areas.push((rect, session.id.clone()));
-            let unread = self
-                .controller
-                .account
-                .read_at
-                .get(&session.id)
-                .copied()
-                .unwrap_or(0)
-                < session.updated_at_ms;
+            let unread = self.controller.unread(session);
             let title = if session.starter {
                 "New chat"
             } else if session.title.is_empty() {
@@ -2126,6 +2306,9 @@ impl App {
                     action: Action::Info(info),
                 });
             }
+        }
+        if self.max_list_scroll == 0. && !self.controller.account.sessions.iter().any(|c| c.project_id == self.controller.account.selected_project) {
+            self.renderer.clipped_label(layer, "No chats in this topic yet", Rect::new(b.x + 20. * s, clip.y + 20. * s, b.width - 40. * s, 40. * s), 13. * s, color(0x82909f), false, clip);
         }
         self.scrollbar(layer, Lane::Sidebar, clip);
     }
@@ -2323,6 +2506,7 @@ impl App {
     }
     fn chat(&mut self, ctx: &impl RenderContext, layer: &mut Layer, chrome: &mut Layer, b: Rect) {
         let s = self.scale;
+        let paint_at = Instant::now();
         let wide = self.size.0 as f32 / s >= 760.;
         let Some(session) = self.controller.account.selected.clone() else {
             return;
@@ -2361,8 +2545,9 @@ impl App {
         let running = summary
             .as_ref()
             .is_some_and(|s| s.status == SessionStatus::Running);
+        let paused = self.controller.chats[&session].feed.queue.paused;
         let title_width =
-            (b.x + b.width - if running { 64. * s } else { 12. * s } - title_x).max(1.);
+            (b.x + b.width - if running || paused { 64. * s } else { 12. * s } - title_x).max(1.);
         self.chat_areas.push((
             Rect::new(title_x, b.y, title_width, header.height),
             session.clone(),
@@ -2415,11 +2600,10 @@ impl App {
             .composer
             .height(&mut self.renderer, width - 132. * s, 16. * s);
         let queue = &self.controller.chats[&session].feed.queue;
-        let controls = queue.paused
-            || queue
-                .control
-                .as_ref()
-                .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
+        let controls = queue
+            .control
+            .as_ref()
+            .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
         let composer_h = editor_h
             + (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
         let bottom = b.y + b.height;
@@ -2658,6 +2842,9 @@ impl App {
                         text_width - line.indent * s + 8. * s,
                         *h,
                     );
+                    let line_key = format!("{session}/{}", line.key);
+                    let inner_corners = [4. * s; 4];
+                    self.detail_areas.push(DetailArea { key: line_key.clone(), rect: line_rect, corners: inner_corners, clip: viewport });
                     if line.tool {
                         layer.clipped_rect(line_rect, color(0x111922), viewport);
                     }
@@ -2708,8 +2895,13 @@ impl App {
                             viewport,
                         );
                     }
+                    layer.surface_highlight(line_rect, inner_corners, viewport, false, true,
+                        self.ripple.as_ref().and_then(|r| r.paint(&line_key, line_rect, paint_at)));
                 }
-                layer.surface_highlight(rect, corners, viewport, pinned);
+                let inner_hover = layer.interaction.hover.is_some_and(|point|
+                    self.detail_areas.iter().any(|area| area.contains(point)));
+                layer.surface_highlight(rect, corners, viewport, pinned, !inner_hover,
+                    self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
                 continue;
             }
             let label_rect = Rect::new(x + 14. * s, top + 28. * s, text_width, 20. * s);
@@ -2869,7 +3061,8 @@ impl App {
                 }
                 ax += width + 5. * s;
             }
-            layer.surface_highlight(rect, corners, viewport, pinned);
+            layer.surface_highlight(rect, corners, viewport, pinned, true,
+                self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
         }
         self.scrollbar(chrome, Lane::Transcript, viewport);
         chrome.rect(
@@ -3000,7 +3193,14 @@ impl App {
             true,
             can_send,
         );
-        if running {
+        if running || paused {
+            let (icon, action) = if running {
+                (Icon::Stop, Action::Abort)
+            } else {
+                (Icon::Play, Action::Queue(QueueOperation::Resume {
+                    run_id: self.controller.chats[&session].feed.queue.run_id.clone(),
+                }))
+            };
             self.icon_button(
                 ctx,
                 chrome,
@@ -3010,46 +3210,27 @@ impl App {
                     40. * s,
                     40. * s,
                 ),
-                Icon::Stop,
+                icon,
                 20.,
-                Action::Abort,
+                action,
                 false,
                 connected,
             );
         }
         let controls_y = field.y + field.height + 4. * s;
         if self.scroll + 24. * s < self.max_scroll {
-            button(
-                &mut self.renderer,
+            self.icon_button(
+                ctx,
                 chrome,
-                &mut self.hits,
-                Rect::new(
-                    x + width - 78. * s,
-                    composer_top - 38. * s,
-                    78. * s,
-                    30. * s,
-                ),
-                "↓ Latest",
+                Rect::new(x + width - 40. * s, composer_top - 48. * s, 40. * s, 40. * s),
+                Icon::ChevronDown,
+                20.,
                 Action::Tail,
-                s,
+                true,
                 true,
             );
         }
         let queue = &self.controller.chats[&session].feed.queue;
-        if queue.paused {
-            button(
-                &mut self.renderer,
-                chrome,
-                &mut self.hits,
-                Rect::new(x, controls_y, 82. * s, 30. * s),
-                "Resume",
-                Action::Queue(QueueOperation::Resume {
-                    run_id: queue.run_id.clone(),
-                }),
-                s,
-                false,
-            );
-        }
         if let Some(control) = &queue.control
             && matches!(control.status.as_str(), "waiting" | "applying")
         {
@@ -3057,7 +3238,7 @@ impl App {
                 &mut self.renderer,
                 chrome,
                 &mut self.hits,
-                Rect::new(x + 92. * s, controls_y, 100. * s, 30. * s),
+                Rect::new(x, controls_y, 100. * s, 30. * s),
                 "Cancel control",
                 Action::Queue(QueueOperation::Cancel {
                     control_id: control.command_id.clone(),
@@ -3291,6 +3472,10 @@ impl App {
         {
             return;
         }
+        if let Some(id) = self.project_areas.iter().find(|(r,_)| contains(*r, point)).map(|(_,id)| id.clone()) {
+            self.project_context(&id, point);
+            return;
+        }
         let mut chat = self
             .chat_areas
             .iter()
@@ -3344,6 +3529,7 @@ impl App {
                     "Codex priority…".into(),
                     Action::AgentSetting(id.clone(), "fast".into()),
                 ),
+                ("Move to topic  ›".into(), Action::MoveMenu(id.clone())),
                 ("Rename…".into(), Action::Rename(id.clone())),
                 ("Clone chat".into(), Action::Clone(id.clone())),
                 ("Release idle runtime".into(), Action::Sleep(id.clone())),
@@ -3356,56 +3542,12 @@ impl App {
             chat,
             options,
             selected: 0,
+            scroll: 0.,
+            parent: None,
         });
         self.pointer = None;
         self.selecting = false;
         self.dirty = true;
-    }
-    fn context_frame(&mut self, layer: &mut Layer, bounds: Rect) {
-        let Some(menu) = &self.context_menu else {
-            return;
-        };
-        let s = self.scale;
-        let w = (240. * s).min(bounds.width);
-        let h = (menu.options.len() as f32 * 36. + 8.) * s;
-        let rect = Rect::new(
-            menu.at
-                .x
-                .clamp(bounds.x, (bounds.x + bounds.width - w).max(bounds.x)),
-            menu.at
-                .y
-                .clamp(bounds.y, (bounds.y + bounds.height - h).max(bounds.y)),
-            w,
-            h,
-        );
-        self.context_rect = rect;
-        self.hits.clear();
-        layer.rounded_rect(rect, 8. * s, color(0x36343b));
-        for (i, (label, action)) in menu.options.iter().enumerate() {
-            let r = Rect::new(
-                rect.x + 4. * s,
-                rect.y + (4. + i as f32 * 36.) * s,
-                w - 8. * s,
-                36. * s,
-            );
-            if self.hover.is_some_and(|p| contains(r, p))
-                || self.hover.is_none() && menu.selected == i
-            {
-                layer.rounded_rect(r, 4. * s, color(0x494750));
-            }
-            self.renderer.label(
-                layer,
-                label,
-                Rect::new(r.x + 12. * s, r.y + 9. * s, r.width - 24. * s, 22. * s),
-                14. * s,
-                color(0xe5eaf0),
-                false,
-            );
-            self.hits.push(Hit {
-                rect: r,
-                action: action.clone(),
-            });
-        }
     }
     #[allow(clippy::too_many_arguments)]
     fn icon_button(
@@ -3420,7 +3562,7 @@ impl App {
         enabled: bool,
     ) {
         let hovered = layer.interaction.hover.is_some_and(|p| contains(r, p));
-        let tonal = matches!(icon, Icon::Stop);
+        let tonal = matches!(icon, Icon::Stop | Icon::Play);
         if primary || tonal || enabled && hovered {
             layer.rounded_rect(
                 r,
@@ -4282,10 +4424,11 @@ fn button(
     if rect.width <= 0. || rect.height <= 0. {
         return;
     }
+    let destructive = matches!(action, Action::RemoveProject(DeleteProjectMode::DeleteChats));
     layer.rounded_rect(
         rect,
         rect.height * 0.5,
-        layer.control_color(rect, color(if primary { 0x67d4ff } else { 0x18212b })),
+        layer.control_color(rect, color(if destructive { 0x402b30 } else if primary { 0x67d4ff } else { 0x18212b })),
     );
     let style = sanscale::Style {
         chain: renderer.faces.prose[0],
@@ -4304,7 +4447,7 @@ fn button(
                 rect.y + (rect.height - layout.height_em() * size) / 2.,
             ),
             size,
-            color: color(if primary { 0x003546 } else { 0x67d4ff }),
+            color: color(if destructive { 0xffb4ab } else if primary { 0x003546 } else { 0x67d4ff }),
             clip: Some(rect),
             ..Default::default()
         });
@@ -4350,3 +4493,15 @@ fn count(n: u64) -> String {
 mod editor_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod connection_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod project_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod thinking_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod control_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod icon_controls_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod hover_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod viewer_tests;

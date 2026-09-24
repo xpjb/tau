@@ -1,5 +1,27 @@
 # Beta packaging sizes
 
+## 0.7.2 topics beta
+
+| Measured component | MiB |
+|---|---:|
+| Windows x64 installer | **9.39** |
+| Windows native app | **30.85** |
+| Android ARM64 APK | **11.29** |
+| Android extracted native library | **26.46** |
+
+Built sequentially with managed Cargo, one Cargo job and one Rayon thread. Java
+packaging tools used one active processor. Windows archive has exactly the fresh
+`app/Tau Beta.exe`; the compressed bytes were verified inside the installer. No JVM,
+font, PDB or extra runtime bundle. Windows linker warnings concern absent Microsoft
+static-library debug PDBs, not missing runtime DLLs.
+
+Android package `app.tau.rust`, versionCode **7**, versionName **0.7.2-beta**, not
+debuggable. V3 signing certificate matches the existing beta APK. ZIP CRC, stripped
+ARM64 native payload identity, ZIP alignment and **16 KiB** ELF LOAD alignment passed.
+The APK is directly installable, compressed/extracted normally, and development-key
+signed for beta updates. Physical Windows/Android rendering is not claimed by these
+build/package checks. Both packages were sent through Tau.
+
 ## 0.7.0 integrated beta
 
 | Measured component | MiB |

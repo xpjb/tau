@@ -4,7 +4,8 @@ Rust client, daemon, coding agent, shared protocol, Markdown and verified file t
 No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Python title
 helper. Android retains a small Java bridge for Android OS APIs.
 
-**0.7.1 beta · protocol 13.** Beta daemon and Windows x64 installer delivered.
+**0.7.2 beta · protocol 14 (topics).**
+Beta daemon deployed; Windows x64 installer and Android ARM64 APK delivered.
 This is a separate installation, not a stable-Tau cutover.
 The maintained frontend branch is `tau2-rust-frontend`; the integrated release
 branch is `tau2`. Frontend work lands on the frontend branch before integration.
@@ -27,7 +28,9 @@ Settings → **Daemon settings** exposes daemon, agent, prompt, provider and opt
 model-metadata configuration. Edits use revision compare-and-swap; conflicts
 retain your edits instead of overwriting another client's changes. The prompt chain has exactly two levels: **model override → default system prompt**.
 Both are ordinary text, including empty text. A missing model override inherits;
-there is no project/provider/built-in fallback. Prompt fields use the shared editor;
+there is no provider/built-in fallback. A chat’s captured topic prompt is appended
+after this resolved prompt and working-directory instructions, not used as a fallback.
+Prompt fields use the shared editor;
 advanced provider/metadata structures use JSON editors; credentials are never
 part of the wire settings document.
 
@@ -37,6 +40,36 @@ context capacity stays unknown. The title model is separately configurable; unse
 uses the chat model. Cache rings are estimates from existing reply timestamps, not native
 runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.
+
+## Topics
+
+Small, horizontally scrolling topic tabs sit above the chat list. General is
+permanent and holds existing chats after the SQLite migration. The trailing **+**
+creates a topic; right-click or touch-and-hold a tab to rename it, edit its prompt,
+or delete it. Deletion first confirms the topic, then offers **Move chats to
+General**, **Delete topic and its chats**, or **Cancel**. General’s prompt can be
+edited, but General cannot be renamed or deleted.
+
+Chat context menus have a scrollable **Move to topic** submenu. New chats use the
+selected topic; cloning/forking preserves membership and captured instructions.
+Topic prompts are captured when a chat is created. Editing a topic affects only
+future chats. Moving a chat replaces its captured topic portion of the system
+prompt with the destination’s current prompt (including empty). A running provider
+turn/tool continuation finishes with its existing instructions; the next turn uses
+the replacement. No history rewrite, appended context messages, or apply-latest
+control. Moves may invalidate the provider’s prefix cache.
+
+Tabs accept vertical mouse-wheel input, horizontal trackpad scrolling, and touch or
+mouse dragging. The selected tab is bold and underlined; unread dots aggregate the
+chat list’s unread state. Switching topics resumes that topic’s last-open chat
+(or its newest available chat); only a chat actually shown is marked read. Empty
+topics show the chat list without inventing a selection. Topics and membership
+are daemon-owned, durable, and shared across devices; per-topic last selections,
+drafts, and read markers remain account-scoped client state. Existing `projectId`
+wire fields and SQLite names remain unchanged so beta history stays compatible.
+Concurrent topic edits
+use revision checks and preserve the losing editor’s text. Both clients and daemon
+must be updated for protocol 14. The beta service is updated; stable Tau is unchanged.
 
 ## Build and validate
 

@@ -1,10 +1,14 @@
-//! The same 24×24 paths as Tau 1, rasterized at the current physical pixel size.
+//! Native 24×24 UI glyphs, rasterized at the current physical pixel size.
 use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 #[derive(Clone, Copy, Debug)]
 pub enum Icon {
     Attach,
     Send,
     Stop,
+    Play,
+    ChevronDown,
+    Gear,
+    Autoscroll,
     Context(Option<f32>),
     CacheTtl(Option<f32>),
 }
@@ -14,6 +18,10 @@ impl Icon {
             Self::Attach => "attach",
             Self::Send => "send",
             Self::Stop => "stop",
+            Self::Play => "play",
+            Self::ChevronDown => "chevron-down",
+            Self::Gear => "gear",
+            Self::Autoscroll => "autoscroll",
             Self::Context(_) => "context",
             Self::CacheTtl(_) => "cache-ttl",
         }
@@ -76,6 +84,76 @@ impl Icon {
                 p.line_to(6., 18.);
                 p.close();
             }
+            Self::Play => {
+                p.move_to(7., 4.5);
+                p.line_to(19., 12.);
+                p.line_to(7., 19.5);
+                p.close();
+            }
+            Self::ChevronDown => {
+                p.move_to(5.5, 9.);
+                p.line_to(12., 15.5);
+                p.line_to(18.5, 9.);
+                pixmap.stroke_path(
+                    &p.finish().unwrap(),
+                    &paint,
+                    &Stroke {
+                        width: 2.5,
+                        line_cap: LineCap::Round,
+                        ..Default::default()
+                    },
+                    transform,
+                    None,
+                );
+                return straight_alpha(pixmap);
+            }
+            Self::Autoscroll => {
+                // A centered up/down scroll marker, not a font-dependent arrow.
+                p.move_to(12., 3.5);
+                p.line_to(6.7, 9.5);
+                p.line_to(17.3, 9.5);
+                p.close();
+                p.move_to(6.7, 14.5);
+                p.line_to(12., 20.5);
+                p.line_to(17.3, 14.5);
+                p.close();
+                p.push_circle(12., 12., 1.3);
+            }
+            Self::Gear => {
+                // Eight squared-off teeth and a cut-out center, sharing the
+                // same 24-unit canvas as the other header controls.
+                let mut first = true;
+                for tooth in 0..8 {
+                    for (angle, radius) in [
+                        (-22.5, 8.),
+                        (-14., 8.),
+                        (-14., 10.),
+                        (14., 10.),
+                        (14., 8.),
+                        (22.5, 8.),
+                    ] {
+                        let angle =
+                            (-90. + tooth as f32 * 45. + angle) * std::f32::consts::PI / 180.;
+                        let (x, y) = (12. + radius * angle.cos(), 12. + radius * angle.sin());
+                        if first {
+                            p.move_to(x, y);
+                            first = false;
+                        } else {
+                            p.line_to(x, y);
+                        }
+                    }
+                }
+                p.close();
+                p.push_circle(12., 12., 3.2);
+                pixmap.fill_path(
+                    &p.finish().unwrap(),
+                    &paint,
+                    FillRule::EvenOdd,
+                    transform,
+                    None,
+                );
+                return straight_alpha(pixmap);
+            }
             Self::Context(ratio) | Self::CacheTtl(ratio) => {
                 // 20dp circle, 2dp stroke, like Tau 1. Coordinates below use 24 units.
                 let stroke = Stroke {
@@ -136,4 +214,33 @@ fn straight_alpha(pixmap: Pixmap) -> Vec<u8> {
         }
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Icon;
+
+    #[test]
+    fn autoscroll_arrows_and_center_dot_are_centered_at_multiple_scales() {
+        for size in [24, 48] {
+            let pixels = Icon::Autoscroll.pixels(size, 0x67d4ff);
+            let mut weight = 0f64;
+            let (mut x, mut y) = (0f64, 0f64);
+            for row in 0..size as usize {
+                for column in 0..size as usize {
+                    let alpha = pixels[(row * size as usize + column) * 4 + 3] as f64;
+                    weight += alpha;
+                    x += (column as f64 + 0.5) * alpha;
+                    y += (row as f64 + 0.5) * alpha;
+                }
+            }
+            assert!(weight > 0.);
+            assert!((x / weight - size as f64 / 2.).abs() < 0.2);
+            assert!((y / weight - size as f64 / 2.).abs() < 0.2);
+            let alpha = |column: u32, row: u32| pixels[((row * size + column) * 4 + 3) as usize];
+            assert!(alpha(size / 2, size / 2) > 0, "center dot is visible");
+            assert!(alpha(size / 2, size / 4) > 0, "up arrow is visible");
+            assert!(alpha(size / 2, size * 3 / 4) > 0, "down arrow is visible");
+        }
+    }
 }

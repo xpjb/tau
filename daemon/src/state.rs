@@ -20,6 +20,10 @@ pub use tau_protocol::SessionModel;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredSession {
     pub title: String,
+    #[serde(default = "tau_protocol::general_project_id")]
+    pub project_id: String,
+    #[serde(default)]
+    pub project_prompt: String,
     pub starter: bool,
     pub parent_id: Option<String>,
     pub model: SessionModel,
@@ -60,10 +64,15 @@ impl StateStore {
             db.busy_timeout(std::time::Duration::from_secs(5))?;
             db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
             let version: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version > 1 { bail!("Unsupported Tau database version {version}"); }
+            if version > 2 { bail!("Unsupported Tau database version {version}"); }
             if version == 0 {
                 let tx = db.transaction()?;
                 tx.execute_batch(include_str!("schema.sql"))?;
+                tx.commit()?;
+            }
+            if version < 2 {
+                let tx = db.transaction()?;
+                tx.execute_batch(include_str!("schema_projects.sql"))?;
                 tx.commit()?;
             }
             if let Some(parent) = location.parent() { std::fs::File::open(parent)?.sync_all()?; }
@@ -88,18 +97,23 @@ impl StateStore {
                 .map(|row| { let (id,data) = row?; Ok((id,serde_json::from_str(&data)?)) }).collect()
         }).await
     }
-    pub async fn create(&self, model: SessionModel, thinking: String, keep: Option<String>) -> Result<String> {
+    pub async fn create(&self, model: SessionModel, thinking: String, keep: Option<String>, project_id: String) -> Result<String> {
         self.access(move |db| {
             let tx = db.transaction()?;
+            let project_prompt: String = tx.query_row("SELECT prompt FROM projects WHERE id=?1", [&project_id], |r| r.get(0)).context("Unknown topic")?;
             if let Some(id) = keep {
                 let data: String = tx.query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| row.get(0)).context("Unknown session")?;
                 let mut session: StoredSession = serde_json::from_str(&data)?; session.starter = false;
                 tx.execute("UPDATE sessions SET starter=0,data=?2 WHERE id=?1", params![id,serde_json::to_string(&session)?])?;
             }
-            if let Some(id) = tx.query_row("SELECT id FROM sessions WHERE starter=1", [], |row| row.get(0)).optional()? { tx.commit()?; return Ok(id); }
+            // Reuse an untouched tile only if its creation-time instructions still
+            // match. Preserve older tiles/drafts rather than rewriting their prompt.
+            tx.execute("UPDATE sessions SET starter=0,data=json_set(data,'$.starter',json('false')) WHERE starter=1 AND json_extract(data,'$.project_id')=?1
+                AND coalesce(json_extract(data,'$.project_prompt'),'')!=?2", params![project_id,project_prompt])?;
+            if let Some(id) = tx.query_row("SELECT id FROM sessions WHERE starter=1 AND json_extract(data,'$.project_id')=?1", [&project_id], |row| row.get(0)).optional()? { tx.commit()?; return Ok(id); }
             let id = uuid::Uuid::new_v4().to_string();
             let now = activity(&tx)?;
-            let mut session = StoredSession { title:"New chat".into(), starter:true, parent_id:None, model:model.clone(), thinking:thinking.clone(),
+            let mut session = StoredSession { title:"New chat".into(), project_id, project_prompt, starter:true, parent_id:None, model:model.clone(), thinking:thinking.clone(),
                 created_at_ms:now, updated_at_ms:now, tokens:None, needs_turn:false, head:None, next_order:0, revision:0 };
             let entry = json!({"id":uuid::Uuid::new_v4().to_string(),"type":"model_change","parentId":null,
                 "timestamp":chrono::Utc::now().to_rfc3339(),"provider":model.provider,"modelId":model.model_id,"thinkingLevel":thinking});
@@ -295,7 +309,7 @@ impl StateStore {
                 uuid::Uuid::parse_str(id).context("Legacy session ID is invalid")?;
                 let model = old.get("model").filter(|model| !model.is_null()).map(|model| serde_json::from_value(model.clone())).transpose()?.unwrap_or_else(|| settings.agent.model.clone());
                 let thinking = settings.agent.model_thinking_levels.get(&format!("{}/{}",model.provider,model.model_id)).unwrap_or(&settings.agent.thinking_level).clone();
-                let mut session = StoredSession { title:old["title"].as_str().unwrap_or("Unnamed chat").into(),starter:false,
+                let mut session = StoredSession { title:old["title"].as_str().unwrap_or("Unnamed chat").into(),project_id:tau_protocol::general_project_id(),project_prompt:String::new(),starter:false,
                     parent_id:old["parent_id"].as_str().filter(|parent| sessions.contains_key(*parent)).map(str::to_owned),model,thinking,
                     created_at_ms:old["created_at_ms"].as_u64().unwrap_or(0),updated_at_ms:old["updated_at_ms"].as_u64().unwrap_or(0),tokens:None,needs_turn:false,head:None,next_order:0,revision:0 };
                 let mut records = HashMap::new(); let mut head = None;

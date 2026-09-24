@@ -1,3 +1,41 @@
+# Topics — 0.7.2 beta acceptance (protocol 14)
+
+Topic-label and layout follow-up: tabs are shorter and less padded; desktop/mobile
+native UI tests cover restoring each topic’s last-open chat, first-visit fallback,
+local SQLite persistence, and stale selections after delete/move. Wire fields and
+SQLite table names stay `projectId`/`projects` for compatibility. The reported
+intermittent black frame has no reproducible trigger yet and is **not claimed fixed**.
+
+- Managed workspace all-target compiler check and nextest: **69/69 tests passed**.
+  Feature validation used isolated databases/providers with no paid provider calls.
+  Release builds and beta deployment were checked separately below.
+- Actual controller/transport against the native daemon with two clients covers
+  topic creation, selection, per-topic starters, cross-client edits/conflicts,
+  restart, unread aggregation, moves without losing drafts/files, and both delete
+  choices. Cancel is exercised through actual native UI hit testing.
+- Scripted Codex and Chat Completions provider requests verify exact captured topic
+  prompt text, edits leaving old chats unchanged, new chats receiving edits, direct
+  system-prompt replacement on moves, and clone/restart persistence. A gated tool run
+  verifies moving/editing does not alter its continuation, but the next user turn
+  receives the destination snapshot. Deletion cancels running work; an injected SQL
+  failure rolls back the complete topic deletion and leaves transcripts intact.
+- A real version-1 SQLite fixture migrates to General without changing old history,
+  activity, revisions or instructions; starters are unique per topic afterward.
+- Headless native GPU rendering at 1000×800 and 360×720 exercises clipped tabs,
+  wheel/trackpad-axis routing, touch dragging and hold, selected-tab reveal, read dots,
+  target-bound nested context menus, keyboard/submenu scrolling through 25 topics,
+  exact-text prompt editing and the two-stage delete dialog. Rendered desktop/phone
+  frames were inspected. This is not physical Windows or Android device acceptance.
+
+Windows x64 and Android ARM64 release builds and package verification passed.
+The isolated beta was deployed and its live protocol-14 topic operations verified,
+with a consistent pre-migration backup and unchanged original history. Stable Tau
+was untouched. See `INTEGRATION.md` and `PACKAGING.md` for release evidence. Physical
+touch/IME and DirectX/DPI acceptance remain unclaimed. Protocol 14 requires matched
+clients; SQLite schema 2 must not be opened by the old daemon.
+
+---
+
 # Connection status follow-up
 
 The connection card omits the redundant Connected title. It shows min/max

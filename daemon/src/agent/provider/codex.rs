@@ -28,13 +28,28 @@ impl Decoder for Codex {
                 } else {
                     "reasoning"
                 };
+                let segment = (kind == "response.reasoning_summary_text.delta",
+                    event.get("output_index").and_then(Value::as_u64),
+                    event.get("summary_index").and_then(Value::as_u64));
+                let boundary = key == "reasoning" && !text.is_empty()
+                    && stream.reasoning_segment.is_some_and(|previous| previous != segment);
                 let Value::String(assembled) = stream.message.entry(key)
                     .or_insert_with(|| Value::String(String::new()))
                 else {
                     bail!("assembled Codex text had the wrong type");
                 };
+                if boundary && !assembled.is_empty() {
+                    // A lone LF is a Markdown soft break, so adjacent summary
+                    // headings would still display on the same line. Separate
+                    // parts (not SSE chunks) as paragraphs, preserving any LF
+                    // already supplied by the model on either side.
+                    let breaks = assembled.bytes().rev().take_while(|&b| b == b'\n').count()
+                        + text.bytes().take_while(|&b| b == b'\n').count();
+                    for _ in breaks..2 { assembled.push('\n'); }
+                }
                 assembled.push_str(text);
                 if !text.is_empty() {
+                    if key == "reasoning" { stream.reasoning_segment = Some(segment); }
                     stream.progress_events += 1;
                 }
             }
@@ -222,6 +237,21 @@ impl Decoder for Codex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reasoning_summary_parts_are_lines_but_transport_chunks_are_not() {
+        let mut stream = Stream::new(&Codex);
+        for (index, text) in [(0, "Check"), (0, " the data"), (1, "Compare"), (1, " results")] {
+            Codex.decode(&json!({"type":"response.reasoning_summary_text.delta",
+                "output_index":0,"summary_index":index,"delta":text}), &mut stream).unwrap();
+        }
+        assert_eq!(stream.assistant_message()["reasoning"], "Check the data\n\nCompare results");
+        Codex.decode(&json!({"type":"response.reasoning_summary_text.delta",
+            "output_index":1,"summary_index":0,"delta":"Final check"}), &mut stream).unwrap();
+        assert_eq!(stream.assistant_message()["reasoning"], "Check the data\n\nCompare results\n\nFinal check");
+        Codex.decode(&json!({"type":"response.reasoning_summary_text.delta",
+            "output_index":1,"summary_index":1,"delta":"\nAlready separated"}), &mut stream).unwrap();
+        assert_eq!(stream.assistant_message()["reasoning"], "Check the data\n\nCompare results\n\nFinal check\n\nAlready separated");
+    }
     #[test]
     fn generated_images_enforce_encoding_format_individual_cumulative_and_count_bounds() {
         let image = |id: &str, result: String| json!({"type":"image_generation_call","id":id,"status":"completed","result":result});

@@ -5,6 +5,7 @@ use tau_protocol::*;
 pub fn populate(c: &mut Controller) -> Result<()> {
     c.account.sessions = vec![SessionSummary {
         id: "demo".into(),
+        project_id: general_project_id(),
         title: "A native Tau frontend".into(),
         starter: false,
         status: SessionStatus::Running,

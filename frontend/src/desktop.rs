@@ -119,12 +119,12 @@ impl ChadApp for Desktop {
                 self.app.context_at(self.cursor);
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let amount = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -y * 48. * ctx.scale_factor() as f32,
-                    MouseScrollDelta::PixelDelta(p) => -p.y as f32,
+                let (x, y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (-x * 48. * ctx.scale_factor() as f32, -y * 48. * ctx.scale_factor() as f32),
+                    MouseScrollDelta::PixelDelta(p) => (-p.x as f32, -p.y as f32),
                 };
-                self.app
-                    .wheel(amount, self.modifiers.shift_key(), self.cursor);
+                let horizontal = x.abs() > y.abs();
+                self.app.wheel(if horizontal { x } else { y }, horizontal || self.modifiers.shift_key(), self.cursor);
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Ime(Ime::Commit(text)) => self.app.input(text),
