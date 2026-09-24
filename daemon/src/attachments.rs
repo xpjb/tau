@@ -6,62 +6,17 @@ use tokio_util::sync::CancellationToken;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::manager::{AgentManager, safe_file_name};
-use crate::protocol::{UploadedFile, MAX_UPLOAD_BYTES};
+use crate::manager::AgentManager;
 use crate::transcript::{AttachmentKind, AttachmentRequest, attachment_request, FILE_LIMIT, IMAGE_LIMIT};
 
 pub struct ResolvedAttachment {
     pub file: fs::File,
-    pub file_name: String,
     pub mime_type: &'static str,
+    #[cfg(test)]
     pub size: u64,
 }
 
 impl AgentManager {
-    pub async fn store_upload(
-        &self,
-        id: &str,
-        file_name: &str,
-        bytes: &[u8],
-    ) -> Result<UploadedFile> {
-        if bytes.is_empty() {
-            bail!("attached file is empty");
-        }
-        if bytes.len() > MAX_UPLOAD_BYTES {
-            bail!("attached file exceeds Tau's upload limit");
-        }
-        let runtime = self.runtime(id).await?;
-        let _guard = runtime.operation.lock().await;
-        if self.inner.state.get(id).await?.is_none() {
-            bail!("unknown session {id}");
-        }
-
-        let safe_name = safe_file_name(file_name);
-
-        fs::create_dir_all(&self.inner.config.upload_root).await?;
-        let root = fs::canonicalize(&self.inner.config.upload_root).await?;
-        let directory = root.join(id);
-        fs::create_dir_all(&directory).await?;
-        let directory = fs::canonicalize(directory).await?;
-        if !directory.starts_with(&root) || directory == root {
-            bail!("unsafe Tau upload directory");
-        }
-        let path = directory.join(format!("{}-{safe_name}", uuid::Uuid::new_v4()));
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .await?;
-        file.write_all(bytes).await?;
-        file.flush().await?;
-        file.sync_all().await?;
-        Ok(UploadedFile {
-            name: safe_name,
-            path: path.to_string_lossy().into_owned(),
-            size: bytes.len().try_into().unwrap_or(u64::MAX),
-        })
-    }
-
     pub async fn resolve_attachment(
         &self,
         id: &str,
@@ -103,8 +58,7 @@ async fn open_attachment(root: &Path, request: &AttachmentRequest) -> Result<Res
             _ => bail!("Attachment is not a supported image"),
         }
     } else { "application/octet-stream" };
-    let file_name = path.file_name().context("Attachment has no file name")?.to_string_lossy().into_owned();
-    Ok(ResolvedAttachment { file, file_name, mime_type, size })
+    Ok(ResolvedAttachment { file, mime_type, #[cfg(test)] size })
 }
 
 async fn attachment_result(path: &Path, file: &mut fs::File, caption: Option<&str>) -> Result<Value> {

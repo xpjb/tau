@@ -64,7 +64,7 @@ impl StateStore {
             db.busy_timeout(std::time::Duration::from_secs(5))?;
             db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
             let version: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version > 3 { bail!("Unsupported Tau database version {version}"); }
+            if version > 4 { bail!("Unsupported Tau database version {version}"); }
             if version == 0 {
                 let tx = db.transaction()?;
                 tx.execute_batch(include_str!("schema.sql"))?;
@@ -80,6 +80,11 @@ impl StateStore {
                 tau_blocks::initialize(&tx)?;
                 crate::blocks::project_existing(&tx)?;
                 tx.execute_batch("PRAGMA user_version=3")?;
+                tx.commit()?;
+            }
+            if version < 4 {
+                let tx=db.transaction()?;
+                tx.execute_batch("CREATE TABLE operations(id TEXT PRIMARY KEY,payload TEXT NOT NULL,response TEXT); CREATE INDEX receipts_request ON receipts(request_id); PRAGMA user_version=4;")?;
                 tx.commit()?;
             }
             if let Some(parent) = location.parent() { std::fs::File::open(parent)?.sync_all()?; }
@@ -143,13 +148,11 @@ impl StateStore {
             // instructions; never replace an older chat or its local draft.
             tx.execute("UPDATE sessions SET starter=0,data=json_set(data,'$.starter',json('false')) WHERE starter=1 AND json_extract(data,'$.project_id')=?1
                 AND coalesce(json_extract(data,'$.project_prompt'),'')!=?2", params![project_id,project_prompt])?;
-            if let Some(id) = tx.query_row("SELECT id FROM sessions WHERE starter=1 AND json_extract(data,'$.project_id')=?1", [&project_id], |row| row.get(0)).optional()? {
-                if let Some(request) = requested_id {
-                    let receipt = Receipt { id:request.clone(), command:Some("create_session".into()), text:keep_receipt,
-                        disposition:PromptDisposition::Handled, finished:true, notice:None, error:None };
-                    tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
-                }
-                tx.commit()?; return Ok(id);
+            if let Some(id) = tx.query_row("SELECT id FROM sessions WHERE starter=1 AND json_extract(data,'$.project_id')=?1", [&project_id], |row| row.get::<_,String>(0)).optional()? {
+                if requested_id.is_none() {tx.commit()?;return Ok(id);}
+                // A client-named chat keeps its exact identity. Retire the old
+                // empty tile, never alias/migrate another client's local work.
+                tx.execute("UPDATE sessions SET starter=0,data=json_set(data,'$.starter',json('false')) WHERE id=?1",[id])?;
             }
             let id = requested_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let now = activity(&tx)?;
@@ -185,13 +188,6 @@ impl StateStore {
         self.access(move |db| db.query_row("SELECT data FROM receipts WHERE session_id=?1 AND request_id=?2", params![id,request], |row| row.get::<_,String>(0)).optional()?
             .map(|data| serde_json::from_str(&data).map_err(Into::into)).transpose()).await
     }
-    pub async fn delivered(&self, id: &str, requests: &[String]) -> Result<Vec<String>> {
-        let id = id.to_owned(); let requests = serde_json::to_string(requests)?;
-        self.access(move |db| {
-            let mut query = db.prepare("SELECT request_id FROM receipts WHERE session_id=?1 AND request_id IN (SELECT value FROM json_each(?2))")?;
-            Ok(query.query_map(params![id,requests],|row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
-        }).await
-    }
     // Commit before publishing any saved transcript/queue change. The revision is
     // a database CAS, not another transcript event sequence.
     pub async fn commit(&self, id: &str, revision: u64, entries: Vec<Value>, events: Vec<Event>, queue: Option<QueueState>, receipt: Option<Receipt>) -> Result<StoredSession> {
@@ -202,6 +198,7 @@ impl StateStore {
             let mut session: StoredSession = serde_json::from_str(&raw)?;
             if session.revision != revision { bail!("Session changed in another writer; close and reopen it"); }
             if let Some(receipt) = receipt {
+                anyhow::ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1)",[&receipt.id],|r|r.get::<_,bool>(0))?,"Operation ID belongs to another control mutation");
                 tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,receipt.id,serde_json::to_string(&receipt)?])?;
                 if !matches!(receipt.disposition, PromptDisposition::Handled) { session.starter = false; }
             }

@@ -1,30 +1,27 @@
 use crate::protocol::ResponseError;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State, WebSocketUpgrade};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use serde_json::json;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, mpsc};
-use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::manager::{AgentManager, safe_file_name};
+use crate::manager::AgentManager;
 use crate::protocol::{
     ClientCommand, ClientRequest, CrashReport, MAX_CRASH_BYTES, MAX_PROMPT_CHARS,
-    MAX_REQUEST_BYTES, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, ServerMessage,
+    MAX_CONTROL_BYTES, PROTOCOL_VERSION, ServerMessage,
 };
 
 const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -34,16 +31,18 @@ struct AppState {
     config: Config,
     manager: AgentManager,
     telemetry_gate: Arc<Mutex<()>>,
-    transfers: Arc<tau_transfer::TransferProvider>,
+    transfers: Arc<tau_transfer::blocks::Server>,
+    requests: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::TcpListener) -> Result<()> {
-    let transfers = Arc::new(tau_transfer::TransferProvider::bind_with_blocks(config.transfer_bind, Arc::new(manager.clone())).await?);
+    let transfers = Arc::new(tau_transfer::blocks::Server::bind(config.transfer_bind, Arc::new(manager.clone())).await?);
     let state = AppState {
         config: config.clone(),
         manager: manager.clone(),
         telemetry_gate: Arc::new(Mutex::new(())),
         transfers: transfers.clone(),
+        requests: Arc::new(tokio::sync::Semaphore::new(32)),
     };
     let app = Router::new()
         .route("/v1/health", get(|| async { Json(json!({
@@ -52,14 +51,6 @@ pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::
             "protocolVersion": PROTOCOL_VERSION
         })) }))
         .route("/v1/ws", get(websocket))
-        .route(
-            "/v1/sessions/{session_id}/attachments/{entry_id}",
-            get(download_attachment),
-        )
-        .route(
-            "/v1/sessions/{session_id}/uploads",
-            post(upload_file).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
         .route(
             "/v1/telemetry/crash",
             post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)),
@@ -108,19 +99,24 @@ async fn websocket(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     upgrade
-        .max_message_size(MAX_REQUEST_BYTES)
+        .max_message_size(MAX_CONTROL_BYTES).max_frame_size(MAX_CONTROL_BYTES)
         .on_upgrade(move |socket| serve_socket(socket, state))
         .into_response()
 }
 
 async fn serve_socket(socket: WebSocket, state: AppState) {
     let (mut socket_tx, mut socket_rx) = socket.split();
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(512);
+    let (tx, mut outbound_rx) = mpsc::channel::<Message>(32);
+    let (health, mut health_rx) = mpsc::channel::<Message>(8);
+    let outbound_tx = Outbound {tx,state:state.manager.inner.state.clone()};
     let writer = tokio::spawn(async move {
-        while let Some(message) = outbound_rx.recv().await {
-            if socket_tx.send(message).await.is_err() {
-                break;
-            }
+        loop {
+            let message = tokio::select! {biased;
+                message = health_rx.recv() => message,
+                message = outbound_rx.recv() => message,
+            };
+            let Some(message) = message else {break;};
+            if !matches!(tokio::time::timeout(Duration::from_secs(10),socket_tx.send(message)).await,Ok(Ok(()))) {break;}
         }
     });
 
@@ -154,7 +150,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    let mut subscriptions = HashMap::<String, tokio::task::JoinHandle<()>>::new();
+    let socket_requests = Arc::new(tokio::sync::Semaphore::new(8));
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + WS_PING_INTERVAL, WS_PING_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut pending_ping = None;
@@ -164,7 +160,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
             _ = heartbeat.tick() => {
                 if pending_ping.is_some() { break; }
                 let payload = Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-                if outbound_tx.try_send(Message::Ping(payload.clone())).is_err() { break; }
+                if health.try_send(Message::Ping(payload.clone())).is_err() { break; }
                 pending_ping = Some(payload);
                 continue;
             }
@@ -179,7 +175,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
         };
         match message {
             Message::Text(text) => {
-                if text.len() > MAX_REQUEST_BYTES {
+                if text.len() > MAX_CONTROL_BYTES {
                     break;
                 }
                 let request = match serde_json::from_str::<ClientRequest>(&text) {
@@ -191,49 +187,37 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                     Ok(request) => request,
                     Err(response) => {
                         let Ok(encoded) = serde_json::to_string(&response) else { break; };
-                        if outbound_tx.try_send(Message::Text(encoded.into())).is_err() { break; }
+                        if outbound_tx.tx.try_send(Message::Text(encoded.into())).is_err() { break; }
                         continue;
                     }
                 };
                 let manager = state.manager.clone();
                 let transfers = state.transfers.clone();
                 let response_outbound = outbound_tx.clone();
-                if let ClientCommand::OpenSession { session_id, requests } = &request.command {
-                    if let Some(task) = subscriptions.remove(session_id) { task.abort(); let _ = task.await; }
-                    let session_id = session_id.clone();
-                    let requests = requests.clone();
-                    subscriptions.insert(session_id.clone(), tokio::spawn(async move {
-                        let mut feed = match manager.open_session(&session_id, &requests).await {
-                            Ok(feed) => feed,
-                            Err(error) => {
-                                let mut response = ServerMessage::command_failure(request.id, error);
-                                if let ServerMessage::Response { session_id: field, .. } = &mut response { *field = Some(session_id); }
-                                queue_server(&response_outbound, &response).await;
-                                return;
-                            }
-                        };
-                        for message in feed.initial {
-                            if !queue_server(&response_outbound, &message).await { return; }
-                        }
-                        if !queue_server(&response_outbound, &ServerMessage::success(request.id, Some(session_id.clone()), None)).await { return; }
-                        loop {
-                            match feed.events.recv().await {
-                                Ok(message) => if !queue_server(&response_outbound, &message).await { break; },
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    queue_server(&response_outbound, &ServerMessage::ResyncRequired { session_id: Some(session_id) }).await;
-                                    break;
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                    }));
+                let permits = state.requests.clone().try_acquire_owned().and_then(|global|socket_requests.clone().try_acquire_owned().map(|local|(global,local)));
+                let Ok(permits) = permits else {
+                    queue_server(&outbound_tx,&ServerMessage::failure(request.id,"Control is busy; retry the same operation ID")).await;
                     continue;
-                }
+                };
                 tokio::spawn(async move {
-                    let request_id = request.id;
-                    let response = match request.command {
+                    let _permits = permits;
+                    let request_id = request.id.clone();
+                    let request = match manager.inner.state.resolve_input(request).await {
+                        Ok(request) => request,
+                        Err(error) => {queue_server(&response_outbound,&ServerMessage::command_failure(request_id,error)).await;return;}
+                    };
+                    let journalled=request.command.journalled_control();
+                    if journalled {
+                        match manager.inner.state.reserve_operation(&request).await {
+                            Ok(Some(response))=>{queue_server(&response_outbound,&response).await;return;}
+                            Err(error)=>{queue_server(&response_outbound,&ServerMessage::command_failure(request_id,error)).await;return;}
+                            Ok(None)=>{queue_server(&response_outbound,&ServerMessage::Accepted {request_id:request_id.clone()}).await;}
+                        }
+                    }
+                    let operation_id=request_id.clone();
+                    let mut response = match request.command {
                         ClientCommand::ConnectBlocks { node_id } => {
-                            match manager.inner.state.block_cursor().await.and_then(|cursor| transfers.block_offer(&node_id,cursor.lineage)) {
+                            match manager.inner.state.block_cursor().await.and_then(|cursor| transfers.authorize(&node_id,cursor.lineage)) {
                                 Ok(offer) => {
                                     queue_server(&response_outbound,&ServerMessage::BlockConnection { offer }).await;
                                     ServerMessage::success(request_id,None,None)
@@ -248,6 +232,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                         ClientCommand::GetReceipts { session_id,requests } => match manager.receipt_message(&session_id,&requests).await {
                             Ok(message) => { queue_server(&response_outbound,&message).await; ServerMessage::success(request_id,Some(session_id),None) }
                             Err(error) => ServerMessage::command_failure(request_id,error),
+                        },
+                        ClientCommand::GetOperation {operation_id} => match manager.inner.state.operation_outcome(&operation_id).await {
+                            Ok(message)=>{queue_server(&response_outbound,&message).await;ServerMessage::success(request_id,None,None)}
+                            Err(error)=>ServerMessage::command_failure(request_id,error),
                         },
                         ClientCommand::ListSessions => match manager.sessions_message().await {
                             Ok(message) => {
@@ -308,22 +296,8 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             Ok(()) => ServerMessage::success(request_id,Some(session_id),None),
                             Err(error) => ServerMessage::command_failure(request_id,error),
                         },
-                        ClientCommand::OpenSession { .. } => unreachable!("open requests own their transcript feed"),
-                        ClientCommand::GetHistory { session_id, generation, before } => {
-                            match manager.history_page(&session_id, &generation, before).await {
-                                Ok(page) => {
-                                    if !queue_server(&response_outbound, &ServerMessage::TranscriptPage {
-                                        request_id: request_id.clone(), session_id: session_id.clone(), generation, cursor: before, page,
-                                    }).await { return; }
-                                    ServerMessage::success(request_id, Some(session_id), None)
-                                }
-                                Err(error) => {
-                                    let mut response = ServerMessage::command_failure(request_id, error);
-                                    if let ServerMessage::Response { session_id: field, .. } = &mut response { *field = Some(session_id); }
-                                    response
-                                }
-                            }
-                        }
+                        ClientCommand::Input {..} | ClientCommand::OpenSession {..} | ClientCommand::GetHistory {..} =>
+                            ServerMessage::failure(request_id,"Unsupported control command"),
                         ClientCommand::GetCommands { session_id } => {
                             match manager.commands(&session_id).await {
                                 Ok(commands) => {
@@ -434,6 +408,15 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             }
                         }
                     };
+                    if journalled {
+                        // Some operations include file cleanup or cancellation
+                        // after a DB effect. An error is not proof of no effect.
+                        if let ServerMessage::Response {ok:false,uncertain,..}=&mut response {*uncertain=true;}
+                        if let Err(error)=manager.inner.state.finish_operation(operation_id,&response).await {
+                            warn!(%error,"Could not persist operation outcome");
+                            if let ServerMessage::Response {ok,uncertain,error,..}=&mut response {*ok=false;*uncertain=true;*error=Some("Operation outcome could not be committed; reconcile before retrying".into());}
+                        }
+                    }
                     queue_server(&response_outbound, &response).await;
                 });
             }
@@ -441,125 +424,16 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 if pending_ping.as_ref() == Some(&bytes) { pending_ping = None; }
             }
             Message::Close(_) => break,
-            Message::Binary(_) | Message::Ping(_) => {}
+            Message::Ping(_) => {}, // Tungstenite queues and flushes the matching pong.
+            Message::Binary(_) => break,
         }
     }
 
     event_forwarder.abort();
     writer.abort();
-    for (_, task) in subscriptions { task.abort(); let _ = task.await; }
     drop(outbound_tx);
     let _ = event_forwarder.await;
     let _ = writer.await;
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadQuery {
-    file_name: String,
-}
-
-async fn upload_file(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath(session_id): AxumPath<String>,
-    Query(query): Query<UploadQuery>,
-    body: Bytes,
-) -> Response {
-    if !authorized(&headers, &state.config.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    if !valid_resource_key(&session_id)
-        || query.file_name.trim().is_empty()
-        || query.file_name.chars().count() > 256
-        || body.is_empty()
-    {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    match state
-        .manager
-        .store_upload(&session_id, &query.file_name, &body)
-        .await
-    {
-        Ok(file) => (StatusCode::CREATED, Json(file)).into_response(),
-        Err(error) => {
-            warn!(session = %session_id, %error, "Tau file upload failed");
-            StatusCode::BAD_REQUEST.into_response()
-        }
-    }
-}
-
-fn valid_resource_key(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AttachmentQuery {
-    transfer_node: Option<String>,
-}
-
-async fn download_attachment(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxumPath((session_id, entry_id)): AxumPath<(String, String)>,
-    Query(query): Query<AttachmentQuery>,
-) -> Response {
-    if !authorized(&headers, &state.config.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    if !valid_resource_key(&session_id) || !valid_resource_key(&entry_id) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let attachment = match state
-        .manager
-        .resolve_attachment(&session_id, &entry_id)
-        .await
-    {
-        Ok(attachment) => attachment,
-        Err(error) => {
-            warn!(session = %session_id, entry = %entry_id, %error, "Tau attachment was not available");
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    };
-    if let Some(client_id) = query.transfer_node {
-        if client_id.len() != 64 || !client_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-        return match state.transfers.offer(attachment.file.into_std().await, &client_id, attachment.size).await {
-            Ok(offer) => ([(header::CACHE_CONTROL, "no-store")], Json(offer)).into_response(),
-            Err(error) => {
-                warn!(session = %session_id, entry = %entry_id, %error, "Tau transfer setup failed");
-                StatusCode::SERVICE_UNAVAILABLE.into_response()
-            }
-        };
-    }
-    let disposition = match HeaderValue::from_str(&format!(
-        "attachment; filename=\"{}\"",
-        safe_file_name(&attachment.file_name)
-    )) {
-        Ok(value) => value,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let mut response = Response::new(Body::from_stream(ReaderStream::new(attachment.file)));
-    *response.status_mut() = StatusCode::OK;
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(attachment.mime_type),
-    );
-    response.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from_str(&attachment.size.to_string())
-            .expect("attachment length is a valid header"),
-    );
-    response
-        .headers_mut()
-        .insert(header::CONTENT_DISPOSITION, disposition);
-    response
 }
 
 async fn crash_report(
@@ -649,11 +523,28 @@ async fn crash_report(
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn queue_server(outbound: &mpsc::Sender<Message>, message: &ServerMessage) -> bool {
-    let Ok(encoded) = serde_json::to_string(message) else {
-        return false;
-    };
-    outbound.send(Message::Text(encoded.into())).await.is_ok()
+#[derive(Clone)]
+struct Outbound {tx:mpsc::Sender<Message>,state:crate::state::StateStore}
+async fn queue_server(outbound: &Outbound, message: &ServerMessage) -> bool {
+    use std::borrow::Cow;
+    let messages=if let ServerMessage::Receipts {session_id,reports}=message && reports.len()>1 {
+        reports.iter().map(|report|Cow::Owned(ServerMessage::Receipts {session_id:session_id.clone(),reports:vec![report.clone()]})).collect::<Vec<_>>()
+    } else {vec![Cow::Borrowed(message)]};
+    for message in messages {
+        let encoded = match outbound.state.control_frame(&message).await {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                warn!(%error,"Could not encode bounded control descriptor");
+                let message=if let ServerMessage::Response {request_id,..}=message.as_ref() {
+                    let mut failure=ServerMessage::failure(request_id.clone(),"Outcome details are unavailable; reconcile this operation before retrying");
+                    if let ServerMessage::Response {uncertain,..}=&mut failure {*uncertain=true;}failure
+                } else {ServerMessage::Notice {session_id:String::new(),message:"Content metadata is unavailable; refresh after checking daemon storage".into()}};
+                serde_json::to_string(&message).expect("bounded control failure")
+            }
+        };
+        if outbound.tx.send(Message::Text(encoded.into())).await.is_err() {return false;}
+    }
+    true
 }
 
 fn authorized(headers: &HeaderMap, expected: &str) -> bool {
@@ -681,7 +572,8 @@ fn authorized(headers: &HeaderMap, expected: &str) -> bool {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
 
-    use super::{authorized, safe_file_name, valid_resource_key};
+    use super::authorized;
+    use crate::manager::safe_file_name;
 
     #[tokio::test]
     async fn persists_bounded_crash_reports_with_safe_diagnostics() {
@@ -712,8 +604,8 @@ mod tests {
         };
         let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
         let app = Router::new().route("/v1/telemetry/crash", post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)))
-            .with_state(AppState { config, manager, telemetry_gate: Arc::new(Mutex::new(())),
-            transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) });
+            .with_state(AppState { config, manager:manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
+            transfers: Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)) });
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let frame = json!({"className":"example.Frame", "methodName":"draw", "fileName":"File.kt", "lineNumber":5});
         let legacy = json!({"schema":1, "reportId":"legacy", "platform":"windows", "appVersion":"0.5.12",
@@ -793,7 +685,7 @@ mod tests {
         let id = manager.create_session(None, "general").await.unwrap();
         let other = manager.create_session(Some(&id), "general").await.unwrap();
         let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
-            transfers: Arc::new(tau_transfer::TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap()) };
+            transfers: Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
         let app = Router::new().route("/", get(move |upgrade: WebSocketUpgrade| {
             let state = state.clone();
@@ -810,7 +702,7 @@ mod tests {
         let (mut quiet, _) = connect_async(&url).await.unwrap();
         let (mut wrong, _) = connect_async(&url).await.unwrap();
         for socket in [&mut healthy, &mut quiet, &mut wrong] {
-            socket.send(ClientMessage::Text(json!({"id":"open", "type":"open_session", "sessionId":id}).to_string().into())).await.unwrap();
+            socket.send(ClientMessage::Text(json!({"id":"open", "type":"get_session", "sessionId":id}).to_string().into())).await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 let mut hello = false;
                 let mut snapshot = false;
@@ -819,7 +711,7 @@ mod tests {
                     let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
                     match message["type"].as_str().unwrap() {
                         "hello" => { assert_eq!(message["protocolVersion"], PROTOCOL_VERSION); hello = true; }
-                        "transcript_snapshot" => snapshot = true,
+                        "session_state" => snapshot = true,
                         "response" => { assert_eq!(message["ok"], true); break; }
                         _ => {}
                     }
@@ -827,7 +719,7 @@ mod tests {
                 assert!(hello && snapshot);
             }).await.unwrap();
         }
-        healthy.send(ClientMessage::Text(json!({"id":"open-other", "type":"open_session", "sessionId":other}).to_string().into())).await.unwrap();
+        healthy.send(ClientMessage::Text(json!({"id":"open-other", "type":"get_session", "sessionId":other}).to_string().into())).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let message = healthy.next().await.unwrap().unwrap();
@@ -835,14 +727,6 @@ mod tests {
                 if message["requestId"] == "open-other" { assert_eq!(message["ok"], true); break; }
             }
         }).await.unwrap();
-        manager.close_session(&id).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let message = healthy.next().await.unwrap().unwrap();
-                let message: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                if message["type"] == "resync_required" { assert_eq!(message["sessionId"], id); break; }
-            }
-        }).await.expect("opening another chat must retain the first feed");
         healthy.send(ClientMessage::Ping(Bytes::from_static(b"client-ping"))).await.unwrap();
         let pong = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -924,11 +808,7 @@ mod tests {
         }
         assert_eq!(safe_file_name(&"a".repeat(200)), "a".repeat(160));
         assert_eq!(safe_file_name(&format!("{}a", ".".repeat(160))), "attachment");
-        assert!(valid_resource_key("Ab_01-xy"));
-        assert!(valid_resource_key(&"a".repeat(128)));
-        for key in ["", ".", "../chat", "a/b", "a\\b", "a b", "é", &"a".repeat(129)] {
-            assert!(!valid_resource_key(key));
-        }
+
     }
 
 

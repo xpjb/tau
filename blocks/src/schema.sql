@@ -52,3 +52,15 @@ CREATE TABLE IF NOT EXISTS block_cache_tombstones (
     revision INTEGER NOT NULL,
     PRIMARY KEY(scope,id)
 );
+CREATE TABLE IF NOT EXISTS block_usage (singleton INTEGER PRIMARY KEY CHECK(singleton=1), bytes INTEGER NOT NULL, clock INTEGER NOT NULL DEFAULT 0);
+INSERT OR IGNORE INTO block_usage(singleton,bytes) SELECT 1,coalesce(sum(length(data)),0) FROM block_chunks;
+CREATE TRIGGER IF NOT EXISTS block_bytes_insert AFTER INSERT ON block_chunks BEGIN
+    UPDATE block_usage SET bytes=bytes+length(NEW.data) WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS block_bytes_delete AFTER DELETE ON block_chunks BEGIN
+    UPDATE block_usage SET bytes=bytes-length(OLD.data) WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS block_bytes_update AFTER UPDATE OF data ON block_chunks BEGIN
+    UPDATE block_usage SET bytes=bytes+length(NEW.data)-length(OLD.data) WHERE singleton=1;
+END;
+CREATE TABLE IF NOT EXISTS block_cache_access (scope TEXT NOT NULL,id TEXT NOT NULL,touched INTEGER NOT NULL,PRIMARY KEY(scope,id),FOREIGN KEY(scope,id) REFERENCES blocks(scope,id) ON DELETE CASCADE);

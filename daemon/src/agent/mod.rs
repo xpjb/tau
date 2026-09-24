@@ -56,10 +56,9 @@ impl SessionContent {
         agent.tokens = saved.tokens; agent.needs_turn = saved.needs_turn;
         self.publish(id,change)
     }
-    pub fn publish(&mut self, id: &str, change: TranscriptChange) -> Result<()> {
+    pub fn publish(&mut self, _id: &str, change: TranscriptChange) -> Result<()> {
         let transcript = self.transcript.as_mut().unwrap();
         transcript.apply(&change)?;
-        let _ = self.events.send(Arc::new(ServerMessage::TranscriptUpdate { session_id:id.into(), generation:transcript.generation.clone(), sequence:transcript.sequence, change:change.wire }));
         Ok(())
     }
     pub async fn save_queue(&mut self, id: &str, queue: QueueState, receipt: Option<Receipt>) -> Result<()> {
@@ -69,7 +68,11 @@ impl SessionContent {
         let transcript = self.transcript.as_mut().unwrap();
         let mut change = transcript.project(&json!({"streamId":stream,"parentId":transcript.head,"message":message}), true)?;
         if let Some(agent) = &self.agent {
-            agent.store.project_live(id,change.events.clone(),change.removed.clone()).await?;
+            let values=change.events.iter().map(|event| {
+                let append=transcript.event(&event.id).filter(|old|old.kind==event.kind && event.text.starts_with(&old.text)).map(|old|old.text.len());
+                (event.clone(),append)
+            }).collect();
+            agent.store.project_live(id,values,change.removed.clone()).await?;
         }
         // Internal runtime updates also append tool input rather than re-copy it.
         change.events.retain(|event| transcript.event(&event.id).is_none_or(|old| old != event));
@@ -137,7 +140,7 @@ impl AgentManager {
                 interrupted.events.push(event);
             }
             if !interrupted.events.is_empty() {
-                if let Some(agent) = &content.agent { let _ = agent.store.project_live(&id,interrupted.events.clone(),vec![]).await; }
+                if let Some(agent) = &content.agent { let _ = agent.store.project_live(&id,interrupted.events.iter().cloned().map(|e|(e,None)).collect(),vec![]).await; }
                 let _ = content.publish(&id, interrupted);
             }
             manager.set_runtime_state(&id, &runtime, if result.is_err() && !cancelled { SessionStatus::Error } else { SessionStatus::Idle },

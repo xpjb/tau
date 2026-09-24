@@ -1,53 +1,29 @@
-//! Characterization of protocol-15 costs, not desired protocol guarantees.
-//! Replace these expectations with bounded/delta-sync guarantees in the redesign.
-use crate::manager::SessionContent;
-use crate::transcript::{HistoryPage, QueueState, Transcript, PAGE_BYTES};
+//! Acceptance tests for the protocol cutover, not legacy cost characterizations.
 use serde_json::json;
+use tau_protocol::{ClientRequest, ServerMessage, MAX_CONTROL_BYTES};
 
-fn content() -> SessionContent {
-    let mut transcript = Transcript::new(HistoryPage { events:vec![], before:None }, None, 0, QueueState::native());
-    transcript.generation = "audit-generation".into();
-    SessionContent { transcript:Some(transcript), ..Default::default() }
-}
-
-#[tokio::test]
-async fn audit_streaming_wire_costs_distinguish_text_deltas_from_growing_tools() {
-    async fn measure(kind: &str) -> usize {
-        let mut content = content();
-        let mut messages = content.events.subscribe();
-        let mut bytes = 0;
-        for n in 1..=128 {
-            let text = "x".repeat(n * 256);
-            let block = match kind {
-                "text" => json!({"type":"text","text":text}),
-                "thinking" => json!({"type":"thinking","thinking":text}),
-                "tool" => json!({"type":"toolCall","id":"call","name":"write","partialArguments":text}),
-                _ => unreachable!(),
-            };
-            content.live("chat", "stream", json!({"role":"assistant","content":[block]})).await.unwrap();
-            let message = messages.try_recv().unwrap();
-            bytes += serde_json::to_vec(message.as_ref()).unwrap().len();
-        }
-        bytes
+#[test]
+fn retired_transcript_commands_and_messages_are_not_wire_apis() {
+    for name in ["open_session","get_history"] {
+        assert!(serde_json::from_value::<ClientRequest>(json!({"id":"old","type":name,"sessionId":"chat","generation":"g","before":1})).is_err());
     }
-    let text = measure("text").await;
-    let thinking = measure("thinking").await;
-    let tool = measure("tool").await;
-    println!("128 updates ending at 32768 content bytes: text={text}, thinking={thinking}, tool={tool} JSON bytes");
-    assert!(text < 70_000 && thinking < 70_000, "Single text/thinking blocks already use deltas");
-    assert!(tool < 70_000, "Tool input now uses append deltas too");
+    for name in ["transcript_snapshot","transcript_update","transcript_page"] {
+        assert!(serde_json::from_value::<ServerMessage>(json!({"type":name})).is_err());
+    }
 }
 
 #[tokio::test]
-async fn audit_page_budget_is_not_a_hard_frame_limit() {
-    let mut content = content();
-    content.live("chat", "stream", json!({"role":"assistant","content":[
-        {"type":"toolCall","id":"call","name":"write","partialArguments":"x".repeat(PAGE_BYTES * 2)}
-    ]})).await.unwrap();
-    let transcript = content.transcript.as_ref().unwrap();
-    let page = transcript.page(None);
-    assert_eq!(page.events.len(),1);
-    let snapshot_bytes = serde_json::to_vec(&transcript.snapshot()).unwrap().len();
-    println!("Nominal page budget={PAGE_BYTES}; one-event snapshot={snapshot_bytes} JSON bytes");
-    assert!(snapshot_bytes > PAGE_BYTES * 2, "The first event can exceed the soft page budget");
+async fn large_descriptors_leave_only_bounded_references_and_receipts_on_control() {
+    let root=tempfile::tempdir().unwrap();
+    let state=crate::state::StateStore::load(root.path().join("state.db")).await.unwrap();
+    let mut response=ServerMessage::success("operation".into(),Some("chat".into()),Some("🦀".repeat(64*1024)));
+    if let ServerMessage::Response {notice,..}=&mut response {*notice=Some("\0\"\\".repeat(4096));}
+    let frame=state.control_frame(&response).await.unwrap();
+    assert!(frame.len()<=MAX_CONTROL_BYTES);
+    let ServerMessage::Data {content,reports,..}=serde_json::from_str(&frame).unwrap() else {panic!("Expected native data reference");};
+    assert_eq!(reports.len(),1);assert!(reports[0].accepted && reports[0].complete);
+    let original=serde_json::to_vec(&response).unwrap();
+    assert_eq!(content.length,original.len() as u64);
+    let bytes=state.access(move |db|tau_blocks::cached_content(db,&content.scope,&content.id)).await.unwrap();
+    assert_eq!(bytes,original,"No long field may be silently truncated");
 }

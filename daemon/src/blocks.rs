@@ -16,14 +16,27 @@ fn header(id: String, parent: Option<String>, order: u64, kind: BlockKind, meta:
     BlockHeader { id,parent,order,kind,meta,version:0,length:0,sealed,revision:0 }
 }
 
-pub fn event(db: &Connection, session: &str, value: &Event) -> Result<()> {
+pub fn event(db: &Connection, session: &str, value: &Event) -> Result<()> {event_inner(db,session,value,None)}
+fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize>)->Result<()> {
     let mut meta = value.clone(); meta.text.clear();
+    let full_meta = serde_json::to_vec(&meta)?;
+    let overflow = full_meta.len() > 2048;
+    let call_key = |call: &str| if call.len()>128 {format!("hash:{}",blake3::hash(call.as_bytes()).to_hex())} else {call.into()};
+    meta.tool_call_id = meta.tool_call_id.as_deref().map(call_key);
+    if overflow {
+        let short=|value:&mut Option<String>| {if let Some(s)=value {let mut n=s.len().min(64);while !s.is_char_boundary(n) {n-=1;}s.truncate(n);}};
+        short(&mut meta.tool_name);short(&mut meta.error_message);short(&mut meta.stop_reason);short(&mut meta.timestamp);
+        if let Some(attachment)=&mut meta.attachment {
+            short(&mut attachment.caption);attachment.source_path=None;
+            let mut n=attachment.file_name.len().min(64);while !attachment.file_name.is_char_boundary(n) {n-=1;}attachment.file_name.truncate(n);
+        }
+    }
     // Tool result children link to the original call. Imported orphan results
     // remain root blocks; no missing parent is fabricated from provider IDs.
     let parent = if value.role == EventRole::Tool {
         value.tool_call_id.as_ref().map(|call| {
             db.query_row("SELECT id FROM blocks WHERE scope=?1 AND json_extract(header,'$.kind')='tool'
-                AND json_extract(header,'$.meta.event.toolCallId')=?2 ORDER BY position DESC LIMIT 1",params![session,call],|r|r.get::<_,String>(0))
+                AND json_extract(header,'$.meta.event.toolCallId')=?2 ORDER BY position DESC LIMIT 1",params![session,call_key(call)],|r|r.get::<_,String>(0))
                 .optional()
         }).transpose()?.flatten()
     } else { None };
@@ -35,15 +48,30 @@ pub fn event(db: &Connection, session: &str, value: &Event) -> Result<()> {
         _ => BlockKind::Text,
     };
     let sealed = value.phase != EventPhase::Live;
-    let h = header(value.id.clone(),parent.clone(),value.order*2,kind,json!({"event":meta}),sealed);
+    let write=|mut h:BlockHeader,bytes:&[u8]|->Result<()> {
+        if let Some(offset)=append_from && let Some(old)=tau_blocks::header(db,session,&h.id)?
+            && !old.sealed && old.length==offset as u64 && bytes.len()>=offset {
+            let appended=tau_blocks::append(db,session,&h.id,old.version,old.length,&bytes[offset..],h.sealed)?;
+            h.version=appended.version;h.length=appended.length;h.revision=appended.revision;
+            tau_blocks::set_header(db,session,h)?;
+        } else {tau_blocks::put(db,session,h,bytes)?;}
+        Ok(())
+    };
+    let mut attributes=json!({"event":meta});
+    if overflow {attributes["fullEvent"]=json!({"id":format!("{}/meta",value.id),"hash":blake3::hash(&full_meta).to_hex().to_string()});}
+    let h = header(value.id.clone(),parent.clone(),value.order*2,kind,attributes,sealed);
     if value.kind == EventKind::Tool {
         // The card itself carries no argument bytes, even while they stream.
         tau_blocks::put(db,session,h,b"")?;
         let input = header(input_id(&value.id),Some(value.id.clone()),0,BlockKind::Code,
             json!({"inputFor":value.id,"language":"json","label":"Input"}),sealed);
-        tau_blocks::put(db,session,input,value.text.as_bytes())?;
+        write(input,value.text.as_bytes())?;
     } else {
-        tau_blocks::put(db,session,h,value.text.as_bytes())?;
+        write(h,value.text.as_bytes())?;
+    }
+    if overflow {
+        let metadata=header(format!("{}/meta",value.id),Some(value.id.clone()),2,BlockKind::State,json!({"eventMetadata":true}),true);
+        tau_blocks::put(db,session,metadata,&full_meta)?;
     }
     if let Some(parent) = parent {
         // A collapsed tool can show completion/error without downloading output.
@@ -59,7 +87,7 @@ pub fn event(db: &Connection, session: &str, value: &Event) -> Result<()> {
             let h = header(id,Some(value.id.clone()),1,match attachment.kind {
                 tau_protocol::AttachmentKind::Image => BlockKind::Image,
                 tau_protocol::AttachmentKind::File => BlockKind::File,
-            },json!({"attachment":attachment,"entry":value.entry_id,"materialized":false}),false);
+            },json!({"attachment":{"kind":attachment.kind,"size":attachment.size},"entry":value.entry_id,"materialized":false}),false);
             tau_blocks::put(db,session,h,b"")?;
         }
     }
@@ -152,13 +180,13 @@ impl StateStore {
         self.access(|db| {let tx=db.transaction()?; recover(&tx)?; tx.commit()?; Ok(())}).await
     }
     pub async fn block_cursor(&self) -> Result<tau_blocks::FeedCursor> { self.access(|db|tau_blocks::cursor(db)).await }
-    pub async fn project_live(&self, session: &str, values: Vec<Event>, removed: Vec<String>) -> Result<()> {
+    pub async fn project_live(&self, session: &str, values: Vec<(Event,Option<usize>)>, removed: Vec<String>) -> Result<()> {
         let session = session.to_owned();
         self.access(move |db| {
             let tx = db.transaction()?;
             for id in removed { tau_blocks::remove(&tx,&session,&id)?; }
-            let next = values.iter().map(|e|e.order+1).max().unwrap_or(0);
-            for value in values { event(&tx,&session,&value)?; }
+            let next = values.iter().map(|(e,_)|e.order+1).max().unwrap_or(0);
+            for (value,append_from) in values { event_inner(&tx,&session,&value,append_from)?; }
             // Reserving display positions also survives a crash before the
             // provider's final history entry has been committed.
             tx.execute("UPDATE sessions SET data=json_set(data,'$.next_order',?2) WHERE id=?1 AND json_extract(data,'$.next_order')<?2",params![session,next])?;
@@ -231,7 +259,7 @@ impl tau_transfer::blocks::Backend for AgentManager {
         async move {
             let req=request.clone();
             let ready=manager.inner.state.access(move |db| {
-                ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
+                ensure!(req.scope == tau_blocks::CONTROL_SCOPE || db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
                 let h=tau_blocks::header(db,&req.scope,&req.id)?.context("Unknown block")?;
                 if h.meta.get("materialized")==Some(&json!(false)) {Ok(None)} else {tau_blocks::read(db,&req).map(Some)}
             }).await?;
@@ -241,12 +269,32 @@ impl tau_transfer::blocks::Backend for AgentManager {
         }.boxed()
     }
     fn changes(&self) -> tokio::sync::watch::Receiver<u64> { self.inner.state.block_changes.subscribe() }
+    fn upload_begin(&self, spec: tau_blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_blocks::UploadStatus>> {
+        let manager = self.clone(); async move {manager.begin_upload(spec).await}.boxed()
+    }
+    fn upload_write(&self, spec: tau_blocks::UploadSpec, offset: u64, bytes: Vec<u8>) -> futures_util::future::BoxFuture<'static,Result<()>> {
+        let manager = self.clone(); async move {manager.write_upload(spec,offset,bytes).await}.boxed()
+    }
+    fn upload_finish(&self, spec: tau_blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_blocks::UploadStatus>> {
+        let manager = self.clone(); async move {manager.finish_upload(spec).await}.boxed()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transcript::EventProjection;
+    #[test]
+    fn oversized_metadata_is_preserved_as_a_referenced_body() {
+        let mut db=Connection::open_in_memory().unwrap();db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&db).unwrap();
+        let raw=json!({"type":"message","id":"entry","message":{"role":"assistant","content":[{"type":"text","text":"answer"}],"errorMessage":"\0🦀".repeat(5000)}});
+        let mut value=crate::transcript::Event::from_entry(&raw,false).unwrap().remove(0);value.order=1;
+        let tx=db.transaction().unwrap();event(&tx,"chat",&value).unwrap();tx.commit().unwrap();
+        let h=tau_blocks::header(&db,"chat",&value.id).unwrap().unwrap();assert!(serde_json::to_vec(&h).unwrap().len()<=tau_blocks::MAX_BLOCK_HEADER_BYTES);
+        let id=h.meta["fullEvent"]["id"].as_str().unwrap();let bytes=tau_blocks::cached_content(&db,"chat",id).unwrap();
+        let restored:Event=serde_json::from_slice(&bytes).unwrap();assert_eq!(restored.error_message,value.error_message);
+        assert_eq!(tau_blocks::cached_content(&db,"chat",&value.id).unwrap(),b"answer");
+    }
     #[test]
     fn tool_projection_keeps_raw_streamed_input_and_seals_without_replacement() {
         let mut db=Connection::open_in_memory().unwrap();db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&db).unwrap();

@@ -78,3 +78,7 @@ pub async fn export_history(config: Config, session: &str, destination: &std::pa
     if !config.database_path.is_file() { bail!("Database does not exist"); }
     StateStore::load(config.database_path).await?.export_history(session,destination).await
 }
+
+mod uploads;
+mod control;
+mod operations;

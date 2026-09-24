@@ -1,4 +1,4 @@
-//! Authenticated HTTP/WebSocket + direct Rust Iroh transfers. Requests carry a
+//! Bounded authenticated WebSocket control + one shared native data connection. Requests carry a
 //! connection epoch: commands queued for a dead socket can never run on its successor.
 use crate::{
     connection::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
@@ -15,7 +15,7 @@ use std::{
 use tau_protocol::*;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_with_config,
     tungstenite::{Message, client::IntoClientRequest},
 };
 
@@ -61,23 +61,13 @@ pub enum Event {
         path: PathBuf,
     },
 }
-#[derive(Clone)]
-struct Events {
-    tx: mpsc::Sender<Event>,
-    wake: Wake,
-}
-impl Events {
-    async fn send(&self, event: Event) -> bool {
-        if self.tx.send(event).await.is_err() {
-            return false;
-        }
-        (self.wake)();
-        true
-    }
-}
+#[path = "transport_events.rs"]
+mod event_queue;
+use event_queue::Events;
+pub use event_queue::EventReceiver;
 pub struct Network {
     tx: mpsc::Sender<Command>,
-    pub events: mpsc::Receiver<Event>,
+    pub events: EventReceiver,
     pub blocks: mpsc::Receiver<crate::blocks::Notice>,
 }
 impl Network {
@@ -86,11 +76,10 @@ impl Network {
     fn start_inner(settings: Settings, wake: Wake, cache: Option<crate::blocks::Cache>) -> Self {
         let (block_notices,blocks) = mpsc::channel(32);
         let (tx, rx) = mpsc::channel(64);
-        let (events, incoming) = mpsc::channel(256);
+        let (sink, incoming) = event_queue::channel(wake);
         std::thread::Builder::new()
             .name("tau-network".into())
             .spawn(move || {
-                let sink = Events { tx: events, wake };
                 match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
@@ -98,10 +87,7 @@ impl Network {
                 {
                     Ok(rt) => rt.block_on(run(settings, rx, sink, cache, block_notices)),
                     Err(_) => {
-                        let _ = sink
-                            .tx
-                            .blocking_send(Event::Fatal("Cannot start network runtime".into()));
-                        (sink.wake)();
+                        sink.send_now(Event::Fatal("Cannot start network runtime".into()));
                     }
                 }
             })
@@ -127,73 +113,6 @@ pub fn endpoint(settings: &Settings, parts: &[&str]) -> Result<url::Url> {
         .extend(parts.iter().copied());
     Ok(url)
 }
-fn http() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(90))
-        .build()?)
-}
-async fn bounded_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
-    let response = response.error_for_status()?;
-    ensure!(
-        response.content_length().is_none_or(|n| n <= limit as u64),
-        "Response is too large"
-    );
-    let mut result = Vec::new();
-    let mut chunks = response.bytes_stream();
-    while let Some(chunk) = chunks.next().await {
-        let chunk = chunk?;
-        ensure!(
-            result.len().saturating_add(chunk.len()) <= limit,
-            "Response is too large"
-        );
-        result.extend_from_slice(&chunk);
-    }
-    Ok(result)
-}
-async fn upload(
-    client: reqwest::Client,
-    settings: Settings,
-    session: String,
-    text: String,
-    files: Vec<LocalFile>,
-) -> Result<String> {
-    let mut text = if text.trim().is_empty() {
-        "Please inspect the attached files.".into()
-    } else {
-        text
-    };
-    if !files.is_empty() {
-        text.push_str("\n\nAttached files are available at:\n");
-    }
-    for file in files {
-        let mut url = endpoint(&settings, &["v1", "sessions", &session, "uploads"])?;
-        url.query_pairs_mut().append_pair("fileName", &file.name);
-        let meta = tokio::fs::metadata(&file.path).await?;
-        ensure!(
-            meta.is_file() && meta.len() == file.size && file.size <= MAX_UPLOAD_BYTES as u64,
-            "Attachment changed or exceeds 50 MB"
-        );
-        let bytes = tokio::fs::read(&file.path).await?;
-        ensure!(bytes.len() as u64 == file.size, "Attachment changed");
-        let response = client
-            .post(url)
-            .bearer_auth(&settings.token)
-            .header("Content-Type", "application/octet-stream")
-            .body(bytes)
-            .send()
-            .await?;
-        let uploaded: UploadedFile = serde_json::from_slice(&bounded_body(response, 16384).await?)?;
-        text.push_str(&format!("- {}: {}\n", uploaded.name, uploaded.path));
-    }
-    ensure!(
-        text.chars().count() <= MAX_PROMPT_CHARS,
-        "Prompt and attachment paths are too long"
-    );
-    Ok(text)
-}
-
 #[derive(Debug)]
 struct HeartbeatTimeout;
 impl std::fmt::Display for HeartbeatTimeout {
@@ -216,9 +135,9 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             "Authorization",
             format!("Bearer {}", settings.token).parse()?,
         );
-        Ok((request, http()?))
+        Ok(request)
     })();
-    let (request, client) = match setup {
+    let request = match setup {
         Ok(setup) => setup,
         Err(_) => {
             events
@@ -230,10 +149,14 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
     let mut epoch = 0u64;
     let mut delay = 1;
     let mut jobs = tokio::task::JoinSet::new();
+    let (prepared_tx,mut prepared_rx) = mpsc::channel::<(u64,Result<ClientRequest,(String,String)>)>(8);
+    let (resolved_tx,mut resolved_rx)=mpsc::channel::<(u64,String,u64,Result<ServerMessage>,tokio::sync::OwnedSemaphorePermit)>(8);
+    let descriptor_budget=Arc::new(tokio::sync::Semaphore::new(128*1024*1024));
+    let mut generations=HashMap::<String,u64>::new();let mut generation=0u64;
     let mut downloads = HashMap::<String, tokio::sync::watch::Sender<bool>>::new();
     loop {
         let connection =
-            tokio::time::timeout(Duration::from_secs(20), connect_async(request.clone()));
+            tokio::time::timeout(Duration::from_secs(20), connect_async_with_config(request.clone(),Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_CONTROL_BYTES)).max_frame_size(Some(MAX_CONTROL_BYTES))),false));
         tokio::pin!(connection);
         let socket = loop {
             tokio::select! {
@@ -254,6 +177,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             let (mut socket, _) = socket.context("Connection timed out")?.context("Cannot reach Tau")?;
             let hello = tokio::time::timeout(Duration::from_secs(15), socket.next()).await?.context("No hello")??;
             let Message::Text(hello) = hello else { bail!("Expected Tau hello"); };
+            ensure!(hello.len() <= MAX_CONTROL_BYTES,"Tau hello exceeds the control limit");
             let ServerMessage::Hello { protocol_version, .. } = serde_json::from_str(&hello)? else { bail!("Expected Tau hello"); };
             if protocol_version != PROTOCOL_VERSION {
                 events.send(Event::Fatal(format!("Protocol {protocol_version} requires a matching client (this client uses {PROTOCOL_VERSION})"))).await;
@@ -265,6 +189,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                 socket.send(Message::Text(serde_json::to_string(&request)?.into())).await?;
             }
             epoch += 1;
+            generations.clear();
             delay = 1;
             if !events.send(Event::Ready(epoch)).await { return Ok(()); }
             let mut heartbeat = tokio::time::interval_at(
@@ -280,21 +205,53 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                         if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; }
                         else { std::future::pending::<()>().await; }
                     } => return Err(HeartbeatTimeout.into()),
+                    Some((requested,key,serial,result,_budget)) = resolved_rx.recv() => {
+                        if requested==epoch && generations.get(&key)==Some(&serial) {
+                            match result {
+                                Ok(message)=>{if !events.send(Event::Message(epoch,Box::new(message))).await {return Ok(());}}
+                                Err(_)=>{events.send(Event::Message(epoch,Box::new(ServerMessage::ResyncRequired {session_id:None}))).await;}
+                            }
+                            if key.starts_with("receipt:") {generations.remove(&key);}
+                        }
+                    }
+                    Some((requested,result)) = prepared_rx.recv() => {
+                        match result {
+                            Ok(request) if requested == epoch => {
+                                let encoded=serde_json::to_string(&request)?;
+                                ensure!(encoded.len()<=MAX_CONTROL_BYTES,"Input reference exceeds the control limit");
+                                tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Text(encoded.into()))).await??;
+                            }
+                            Ok(request) => {events.send(Event::NotSent(request.id,"Connection changed before input submission; command was not sent".into())).await;}
+                            Err((id,error)) => {events.send(Event::NotSent(id,error)).await;}
+                        }
+                    }
                     command = commands.recv() => match command {
                         None => return Ok(()),
                         Some(Command::Blocks(command)) => { if let Some(service) = &block_service { service.send(command); } }
                         Some(Command::Request { epoch: requested, request }) => {
                             if requested != epoch { events.send(Event::NotSent(request.id, "Connection changed; not sent".into())).await; continue; }
                             let encoded = serde_json::to_string(&request)?;
-                            if encoded.len() > MAX_REQUEST_BYTES { events.send(Event::NotSent(request.id, "Request is too large".into())).await; continue; }
+                            if encoded.len() > MAX_CONTROL_BYTES {
+                                let Some(service) = block_service.as_ref().filter(|_| jobs.len() < 8) else {
+                                    events.send(Event::NotSent(request.id,"Content service is unavailable or busy".into())).await;continue;
+                                };
+                                let data = service.downloads(); let tx = prepared_tx.clone();
+                                jobs.spawn(async move {
+                                    let id = request.id.clone();
+                                    let result = data.input(request).await.map_err(|e|(id,format!("Input upload failed; command was not sent: {e}")));
+                                    let _ = tx.send((requested,result)).await;
+                                });
+                                continue;
+                            }
                             tokio::time::timeout(Duration::from_secs(15), socket.send(Message::Text(encoded.into()))).await??;
                         }
                         Some(Command::Upload { epoch: requested, id, session, text, files }) => {
                             if requested != epoch { events.send(Event::NotSent(id, "Connection changed before upload".into())).await; continue; }
                             if jobs.len() >= 4 { events.send(Event::NotSent(id, "Too many transfers; try again".into())).await; continue; }
-                            let (settings, client, events) = (settings.clone(), client.clone(), events.clone());
+                            let Some(service) = &block_service else {events.send(Event::NotSent(id,"Content service unavailable".into())).await;continue;};
+                            let data=service.downloads();let events=events.clone();
                             jobs.spawn(async move {
-                                let result = upload(client, settings, session, text, files).await.map_err(|_| "Attachment upload failed; prompt was not sent".into());
+                                let result = data.upload(session, text, files).await.map_err(|e| format!("Attachment upload failed; prompt was not sent: {e}"));
                                 events.send(Event::Prepared { epoch: requested, id, result }).await;
                             });
                         }
@@ -316,13 +273,32 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                     frame = socket.next() => {
                         match frame.context("Connection closed")?? {
                             Message::Text(text) => {
-                                ensure!(text.len() <= 16 * 1024 * 1024, "Tau frame is too large");
+                                ensure!(text.len() <= MAX_CONTROL_BYTES, "Tau control frame is too large");
                                 let message: ServerMessage = serde_json::from_str(&text).context("Invalid Tau message")?;
                                 if let ServerMessage::BlockConnection { offer } = message {
                                     if let Some(service) = &block_service {
                                         let host = settings.url()?.host_str().context("Missing host")?.to_owned();
                                         service.send(crate::blocks::Command::Configure(offer,host));
                                     }
+                                    continue;
+                                }
+                                generation+=1;
+                                if let Some(key)=message.replication_key() {generations.insert(key,generation);}
+                                if let ServerMessage::Data {content,key,session_id,reports,operation_id} = message {
+                                    if let Some(operation_id)=operation_id {
+                                        if !events.send(Event::Message(epoch,Box::new(ServerMessage::Operation {operation_id,registered:true,response:None}))).await {return Ok(());}
+                                    }
+                                    if let Some(session_id) = session_id && !reports.is_empty() {
+                                        if !events.send(Event::Message(epoch,Box::new(ServerMessage::Receipts {session_id,reports}))).await {return Ok(());}
+                                    }
+                                    let service=block_service.as_ref().context("Native descriptor without content service")?;
+                                    // Descriptor fetches run away from the WebSocket reader/heartbeat.
+                                    ensure!(jobs.len() < 64,"Too many unresolved descriptors");
+                                    let data=service.downloads();let tx=resolved_tx.clone();let serial=generation;let budget=descriptor_budget.clone();
+                                    jobs.spawn(async move {
+                                        let Ok(permit)=budget.acquire_many_owned(content.length.min(tau_protocol::blocks::MAX_BLOCK_BYTES).max(1) as u32).await else {return;};
+                                        let result=data.descriptor(content).await;let _=tx.send((epoch,key,serial,result,permit)).await;
+                                    });
                                     continue;
                                 }
                                 if !events.send(Event::Message(epoch, Box::new(message))).await { return Ok(()); }

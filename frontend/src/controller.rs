@@ -39,12 +39,15 @@ pub struct Controller {
     pub notice: Option<String>,
     remote: crate::blocks::Cache,
     block_plan: Option<crate::blocks::Plan>,
+    viewport:Option<(String,std::collections::BTreeSet<String>)>,
     copy:Option<(String,Vec<String>)>,
     pub copied:Option<String>,
     network: Option<Network>,
     requests: HashMap<String, ClientCommand>,
     project_deletions: HashMap<String, Vec<String>>,
     create_failed_epoch: Option<u64>,
+    control_check:Option<std::time::Instant>,
+    control_cursor:usize,
     wake: Wake,
 }
 impl Controller {
@@ -72,11 +75,13 @@ impl Controller {
             notice: None,
             remote,
             block_plan: None,
+            viewport:None,
             copy:None, copied:None,
             network: None,
             requests: HashMap::new(),
             project_deletions: HashMap::new(),
             create_failed_epoch: None,
+            control_check:None,control_cursor:0,
             wake,
         };
         if let Some(id) = c.account.selected.clone() {
@@ -92,6 +97,8 @@ impl Controller {
         self.connection = "Connecting…".into();
         self.health = crate::connection::Health::connecting();
         self.block_plan = None;
+        self.requests.clear();
+        self.project_deletions.clear();
         self.network = Some(Network::start_cached(self.settings.clone(), self.wake.clone(),self.remote.clone()));
     }
     pub fn configure(&mut self, settings: Settings) -> Result<()> {
@@ -103,6 +110,7 @@ impl Controller {
         self.identity = self.settings.identity();
         self.remote = self.store.block_cache(&self.identity)?;
         self.block_plan = None;
+        self.viewport=None;
         self.copy=None;self.copied=None;
         self.account = self.store.get(&self.identity, "account")?;
         self.model_preferences = self.store.get(&self.identity, "quick-models")?;
@@ -355,22 +363,40 @@ impl Controller {
         Ok(())
     }
     pub fn request(&mut self, command: ClientCommand) -> Result<String> {
-        let epoch = self.epoch.ok_or_else(|| anyhow::anyhow!("Not connected"))?;
-        let request = ClientRequest {
-            id: uuid::Uuid::new_v4().to_string(),
-            command,
-        };
-        self.network.as_ref().unwrap().send(Command::Request {
-            epoch,
-            request: request.clone(),
-        })?;
-        if let ClientCommand::DeleteProject { project_id, mode: DeleteProjectMode::DeleteChats, .. } = &request.command {
-            self.project_deletions.insert(request.id.clone(), self.account.sessions.iter().filter(|s| &s.project_id == project_id).map(|s| s.id.clone()).collect());
+        let epoch=self.epoch.ok_or_else(||anyhow::anyhow!("Not connected"))?;
+        let durable=command.journalled_control();
+        let encoded=serde_json::to_vec(&command)?;
+        let retry=durable.then(||self.account.pending_controls.values().find(|saved|
+            serde_json::to_vec(&saved.request.command).is_ok_and(|bytes|bytes==encoded)).map(|saved|saved.request.id.clone())).flatten();
+        let request=ClientRequest {id:retry.unwrap_or_else(||uuid::Uuid::new_v4().to_string()),command};
+        let deleted=if let ClientCommand::DeleteProject {project_id,mode:DeleteProjectMode::DeleteChats,..}=&request.command {
+            self.account.sessions.iter().filter(|s|&s.project_id==project_id).map(|s|s.id.clone()).collect()
+        } else {vec![]};
+        if durable {
+            ensure!(self.account.pending_controls.len()<32 || self.account.pending_controls.contains_key(&request.id),"Reconcile outstanding actions before submitting more");
+            let mut account=self.account.clone();
+            account.pending_controls.insert(request.id.clone(),PendingControl {request:request.clone(),deleted_chats:deleted.clone(),blocked:false,accepted:false});
+            ensure!(serde_json::to_vec(&account.pending_controls)?.len()<=16*1024*1024,"Saved action inputs exceed the 16 MiB outbox limit; reconcile them before submitting more");
+            self.store.put(&self.identity,"account",&account)?;self.account=account;
         }
-        self.requests.insert(request.id.clone(), request.command);
+        if !deleted.is_empty() {self.project_deletions.insert(request.id.clone(),deleted);}
+        self.requests.insert(request.id.clone(),request.command.clone());
+        self.network.as_ref().unwrap().send(Command::Request {epoch,request:request.clone()})?;
         Ok(request.id)
     }
-    pub fn control(&mut self, command: ClientCommand) -> Result<()> {
+    fn reconcile_controls(&mut self)->Result<()> {
+        if self.epoch.is_none() || self.control_check.is_some_and(|at|at.elapsed()<std::time::Duration::from_secs(2)) {return Ok(());}
+        self.control_check=Some(std::time::Instant::now());
+        let ids=self.account.pending_controls.iter().filter(|(id,p)|!p.blocked && !self.requests.contains_key(*id)).map(|(id,_)|id.clone()).collect::<Vec<_>>();
+        if ids.is_empty() {return Ok(());}
+        let start=self.control_cursor%ids.len();
+        for id in ids.iter().cycle().skip(start).take(4.min(ids.len())) {
+            self.request(ClientCommand::GetOperation {operation_id:id.clone()})?;
+        }
+        self.control_cursor=(start+4)%ids.len();Ok(())
+    }
+    pub fn control(&mut self,command:ClientCommand)->Result<()> {self.control_id(command).map(|_|())}
+    fn control_id(&mut self, command: ClientCommand) -> Result<String> {
         let epoch = self.epoch.ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let session = match &command {
             ClientCommand::Prompt { session_id, text } if text.starts_with('/') => {
@@ -406,13 +432,14 @@ impl Controller {
         });
         self.store.save_chat(&self.identity, &session, &local)?;
         chat.local = local;
+        self.requests.insert(request.id.clone(),request.command.clone());
         if let Err(error) = self.network.as_ref().unwrap().send(Command::Request {
             epoch,
             request: request.clone(),
         }) {
             self.not_sent(&request.id, &error.to_string())?;
         }
-        Ok(())
+        Ok(request.id)
     }
     pub fn restore_pending(&mut self, id: &str) -> Result<()> {
         let session = self
@@ -489,7 +516,7 @@ impl Controller {
         // Send even when it matches this chat: another chat may have changed
         // the remembered default. Only an explicit tile click reaches here.
         // Preserve drafts/attachments and never replay after reconnect.
-        let id = self.request(ClientCommand::Prompt {
+        let id = self.control_id(ClientCommand::Prompt {
             session_id: session.into(),
             text: format!("/model {slug}"),
         })?;
@@ -709,13 +736,14 @@ impl Controller {
             changed = true;
             if let Some((key,path,status))=notice.transfer {
                 if let Err(error)=self.network_event(transport::Event::Download {key,path,status}) {self.notice=Some(error.to_string());}
-            } else if let Some(error) = notice.error { self.notice = Some(error); }
+            } else if let Some(error) = notice.error { if let Some(chat)=self.chats.get_mut(&notice.scope) {chat.feed.loading=false;} self.notice = Some(error); }
             else { scopes.insert(notice.scope); }
         }
         for scope in scopes {
             if self.chats.contains_key(&scope) && let Err(error) = self.refresh_blocks(&scope) { self.notice = Some(error.to_string()); }
         }
         if let Err(error) = self.watch_blocks() { self.notice = Some(error.to_string()); }
+        if let Err(error) = self.reconcile_controls() {self.notice=Some(error.to_string());}
         changed
     }
     fn refresh_blocks(&mut self, scope: &str) -> Result<()> {
@@ -730,7 +758,7 @@ impl Controller {
             chat.feed.synchronized = chat.feed.queue.available;
             chat.feed.opening = false;
             let before = chat.local.pending.len();
-            chat.local.reconcile(&chat.feed.queue, &delivered);
+            chat.local.reconcile_complete(&chat.feed.queue, &delivered,&chat.feed.incomplete);
             if chat.local.pending.len() != before { self.store.save_chat(&self.identity,scope,&chat.local)?; }
         }
         Ok(())
@@ -750,6 +778,9 @@ impl Controller {
         }
         Ok(())
     }
+    pub fn viewport(&mut self,scope:&str,ids:std::collections::BTreeSet<String>) {
+        self.viewport=Some((scope.into(),ids));
+    }
     fn watch_blocks(&mut self) -> Result<()> {
         if self.copy.as_ref().is_some_and(|(scope,_)|self.account.selected.as_ref()!=Some(scope)) {self.cancel_copy();}
         if let Some((scope,ids))=&self.copy {
@@ -760,7 +791,7 @@ impl Controller {
             }
         }
         let next = self.account.selected.as_ref().filter(|id|!self.is_creating(id)).and_then(|id|self.chats.get(id).map(|chat|(id,chat)))
-            .map(|(id,chat)|self.remote.plan(id,&chat.local,self.copy.as_ref().map_or(&[],|(_,ids)|ids.as_slice()))).transpose()?;
+            .map(|(id,chat)|self.remote.plan_visible(id,&chat.local,self.copy.as_ref().map_or(&[],|(_,ids)|ids.as_slice()),self.viewport.as_ref().filter(|(scope,_)|scope==id).map(|(_,ids)|ids))).transpose()?;
         if next != self.block_plan && let Some(network) = &self.network {
             network.send(transport::Command::Blocks(crate::blocks::Command::Plan(next.clone())))?;
             self.block_plan = next;
@@ -773,6 +804,8 @@ impl Controller {
             transport::Event::Ready(epoch) => {
                 self.epoch = Some(epoch);
                 self.create_failed_epoch = None;
+                self.control_check=None;
+                for saved in self.account.pending_controls.values_mut() {saved.blocked=false;}
                 self.connection = "Connected".into();
                 self.health.connected();
                 self.request(ClientCommand::ListSessions)?;
@@ -877,17 +910,50 @@ impl Controller {
     }
     pub fn message(&mut self, message: ServerMessage) -> Result<()> {
         match message {
-            ServerMessage::BlockConnection { .. } => {}, // Owned by the network block service.
+            ServerMessage::BlockConnection { .. } | ServerMessage::Data {..} => {},
+            ServerMessage::Operation {operation_id,registered,response} => {
+                if let Some(saved)=self.account.pending_controls.get(&operation_id).cloned() {
+                    if registered && !saved.accepted {
+                        self.account.pending_controls.get_mut(&operation_id).unwrap().accepted=true;
+                        self.store.put(&self.identity,"account",&self.account)?;
+                    }
+                    if let Some(response)=response {
+                        ensure!(matches!(response.as_ref(),ServerMessage::Response {request_id,..} if request_id==&operation_id),"Operation receipt has a different identity");
+                        self.requests.insert(operation_id.clone(),saved.request.command);
+                        if !saved.deleted_chats.is_empty() {self.project_deletions.insert(operation_id.clone(),saved.deleted_chats);}
+                        self.message(*response)?;
+                    } else if !registered {
+                        self.account.pending_controls.get_mut(&operation_id).unwrap().blocked=true;
+                        self.store.put(&self.identity,"account",&self.account)?;
+                        self.notice=Some("An action has no daemon receipt. Its intent is saved locally; repeat the same action explicitly to retry its original ID.".into());
+                    }
+                }
+            }
+            ServerMessage::Accepted {request_id} => {
+                if let Some(saved)=self.account.pending_controls.get_mut(&request_id) {saved.accepted=true;self.store.put(&self.identity,"account",&self.account)?;}
+                for (session,chat) in &mut self.chats {
+                    if let Some(p)=chat.local.pending.iter_mut().find(|p|p.request.id==request_id) {
+                        p.status=Delivery::Accepted;p.detail=Some("Accepted; awaiting outcome".into());
+                        self.store.save_chat(&self.identity,session,&chat.local)?;
+                    }
+                }
+            }, // Owned by the network block service.
             ServerMessage::Receipts {session_id,reports} => {
                 self.ensure_chat(&session_id)?;
                 let chat = self.chats.get_mut(&session_id).unwrap();
                 for report in reports {
+                    if let Some(notice)=&report.notice {self.notice=Some(notice.clone());}
                     if let Some(pending) = chat.local.pending.iter_mut().find(|p|p.request.id == report.id) {
                         if let Some(error) = report.error { pending.status = Delivery::Rejected; pending.detail = Some(error); }
                         else if report.accepted && !report.complete { pending.status = Delivery::Accepted; pending.detail = Some("Accepted; awaiting outcome".into()); }
-                        else if report.accepted { chat.local.pending.retain(|p|p.request.id != report.id); }
+                        else if report.accepted {
+                            if matches!(pending.request.command,ClientCommand::QueueControl {operation:QueueOperation::Edit {..}|QueueOperation::Delete {..},..}) {
+                                pending.status=Delivery::Accepted;pending.detail=Some("Accepted; synchronizing queue".into());
+                            } else {chat.local.pending.retain(|p|p.request.id!=report.id);}
+                        }
                     }
                 }
+                chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);
                 self.store.save_chat(&self.identity,&session_id,&chat.local)?;
             }
             ServerMessage::Projects { projects } => {
@@ -950,7 +1016,7 @@ impl Controller {
                 let chat = self.chats.get_mut(&session_id).unwrap();
                 chat.feed.opening = false;
                 if chat.feed.snapshot(snapshot)? {
-                    chat.local.reconcile(&chat.feed.queue, &delivered);
+                    chat.local.reconcile_complete(&chat.feed.queue, &delivered,&chat.feed.incomplete);
                     self.save_chat(&session_id)?;
                 }
             }
@@ -972,7 +1038,7 @@ impl Controller {
                 let chat = self.chats.get_mut(&session_id).unwrap();
                 match chat.feed.update(&generation, sequence, change) {
                     Ok(true) => {
-                        chat.local.reconcile(&chat.feed.queue, &delivered);
+                        chat.local.reconcile_complete(&chat.feed.queue, &delivered,&chat.feed.incomplete);
                         self.save_chat(&session_id)?;
                     }
                     Ok(false) => {}
@@ -1025,7 +1091,7 @@ impl Controller {
                 settings,
                 ..
             } => {
-                self.daemon_settings = Some(*settings);
+                if self.daemon_settings.as_ref().is_none_or(|old|old.revision<=settings.revision) {self.daemon_settings = Some(*settings);}
             }
             ServerMessage::Notice { message, .. } => self.notice = Some(message),
             ServerMessage::ResyncRequired { session_id } => {
@@ -1089,15 +1155,16 @@ impl Controller {
                         if ok
                             && !uncertain
                             && (matches!(disposition, Some(PromptDisposition::Handled))
-                                || !matches!(p.request.command, ClientCommand::Prompt { .. }))
+                                || !matches!(p.request.command, ClientCommand::Prompt { .. } | ClientCommand::QueueControl {operation:QueueOperation::Edit {..}|QueueOperation::Delete {..},..}))
                         {
                             chat.local.pending.retain(|p| p.request.id != request_id);
                         }
+                        chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);
                         self.store.save_chat(&self.identity, id, &chat.local)?;
                     }
                 }
                 let create_reply = self.is_creating(&request_id);
-                let command = self.requests.remove(&request_id);
+                let command = self.requests.remove(&request_id).or_else(||self.account.pending_controls.get(&request_id).map(|saved|saved.request.command.clone()));
                 if let Some(ClientCommand::GetSession {session_id}) = &command && let Some(chat) = self.chats.get_mut(session_id) { chat.feed.opening = false; }
                 if let Some(deleted) = self.project_deletions.remove(&request_id) && ok && !uncertain {
                     for id in deleted {
@@ -1176,7 +1243,16 @@ impl Controller {
                         Some(ClientCommand::ForkSession { .. } | ClientCommand::CloneSession { .. }) => {
                             if let Some(id) = session_id {
                                 self.select(&id)?;
-                                if let Some(draft) = draft { self.draft(draft)?; }
+                                if let Some(draft) = draft {
+                                    if self.chats[&id].local.draft.is_empty() || self.chats[&id].local.draft==draft {self.draft(draft)?;}
+                                    else {
+                                        let chat=self.chats.get_mut(&id).unwrap();
+                                        if !chat.local.pending.iter().any(|p|p.text==draft) {
+                                            chat.local.pending.push(Pending {request:ClientRequest {id:uuid::Uuid::new_v4().to_string(),command:ClientCommand::Prompt {session_id:id.clone(),text:draft.clone()}},started_at_ms:None,text:draft,files:vec![],status:Delivery::Rejected,detail:Some("Recovered fork draft; existing draft was preserved".into())});
+                                            self.save_chat(&id)?;
+                                        }
+                                    }
+                                }
                             }
                         }
                         Some(ClientCommand::RefreshModelCatalog { .. }) => {
@@ -1195,6 +1271,11 @@ impl Controller {
                         }
                         _ => {}
                     }
+                }
+                if uncertain {
+                    if let Some(saved)=self.account.pending_controls.get_mut(&request_id) {saved.blocked=true;self.store.put(&self.identity,"account",&self.account)?;}
+                } else if self.account.pending_controls.remove(&request_id).is_some() {
+                    self.store.put(&self.identity,"account",&self.account)?;
                 }
             }
             ServerMessage::Hello { .. } => {}

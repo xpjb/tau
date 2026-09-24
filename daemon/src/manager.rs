@@ -16,7 +16,7 @@ use crate::settings::{SettingsStore, Settings};
 use crate::state::{StateStore, Receipt, SessionModel};
 use crate::transcript::{QueuedRequest, QueueControl, Transcript};
 
-const EVENT_BUFFER: usize = 2048;
+const EVENT_BUFFER: usize = 64;
 
 pub struct PromptOutcome { pub disposition: PromptDisposition, pub notice: Option<String> }
 #[derive(Clone)]
@@ -43,12 +43,10 @@ pub(crate) struct SessionRuntime {
 pub(crate) struct SessionContent {
     pub agent: Option<AgentSession>,
     pub transcript: Option<Transcript>,
-    pub events: broadcast::Sender<Arc<ServerMessage>>,
 }
 impl Default for SessionContent {
-    fn default() -> Self { Self { agent: None, transcript: None, events: broadcast::channel(EVENT_BUFFER).0 } }
+    fn default() -> Self { Self { agent: None, transcript: None } }
 }
-pub struct SessionFeed { pub initial: Vec<ServerMessage>, pub events: broadcast::Receiver<Arc<ServerMessage>> }
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeState { pub status: SessionStatus, pub detail: Option<String>, pub idle_since: Option<Instant>, pub context_usage: Option<ContextUsage> }
 impl SessionRuntime {
@@ -58,6 +56,7 @@ impl SessionRuntime {
 impl AgentManager {
     pub async fn new(config: Config, state: StateStore) -> Result<Self> {
         state.recover_blocks().await?;
+        state.recover_operations().await?;
         let settings = SettingsStore::load(&config, crate::state::DEFAULT_TITLE_PROMPT.into()).await?;
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
@@ -170,41 +169,23 @@ impl AgentManager {
     pub async fn session_state_message(&self, id: &str) -> Result<ServerMessage> {
         let stored = self.inner.state.get(id).await?.context("Unknown session")?;
         let state = self.inner.runtimes.lock().await.get(id).map(|runtime|runtime.snapshot());
-        let usage = self.context_usage(&self.inner.settings.get(),&stored.model,stored.tokens);
+        let tokens=state.as_ref().filter(|s|s.status!=SessionStatus::Sleeping).and_then(|s|s.context_usage).and_then(|u|u.tokens).or(stored.tokens);
+        let usage = self.context_usage(&self.inner.settings.get(),&stored.model,tokens);
         Ok(ServerMessage::SessionState { session_id:id.into(),status:state.as_ref().map_or(SessionStatus::Sleeping,|s|s.status),
-            detail:state.as_ref().and_then(|s|s.detail.clone()),context_usage:state.map_or(usage,|s|s.context_usage) })
+            detail:state.as_ref().and_then(|s|s.detail.clone()),context_usage:usage })
     }
     pub async fn receipt_message(&self, id: &str, requests: &[String]) -> Result<ServerMessage> {
         anyhow::ensure!(requests.len() <= 4,"Receipt requests are limited to four IDs");
-        anyhow::ensure!(self.inner.state.get(id).await?.is_some(),"Unknown session");
+        anyhow::ensure!(id.len()<=128 && id.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_')),"Invalid receipt scope");
         let mut reports = vec![];
         for request in requests {
             anyhow::ensure!(!request.is_empty() && request.len() <= 128,"Invalid request ID");
             let receipt = self.inner.state.receipt(id,request).await?;
-            let short = |s:String| { let mut n=s.len().min(384); while !s.is_char_boundary(n) {n-=1;} s[..n].to_owned() };
+            if receipt.is_none() && let Some(report)=self.inner.state.operation_receipt(request).await? {reports.push(report);continue;}
             reports.push(crate::protocol::OperationReceipt { id:request.clone(),accepted:receipt.is_some(),complete:receipt.as_ref().is_some_and(|r|r.finished),
-                error:receipt.as_ref().and_then(|r|r.error.clone()).map(short),notice:receipt.and_then(|r|r.notice).map(short) });
+                error:receipt.as_ref().and_then(|r|r.error.clone()),notice:receipt.and_then(|r|r.notice) });
         }
         Ok(ServerMessage::Receipts { session_id:id.into(),reports })
-    }
-    pub async fn open_session(&self, id: &str, requests: &[String]) -> Result<SessionFeed> {
-        let runtime = self.runtime(id).await?;
-        let mut content = runtime.content.lock().await;
-        self.ensure_loaded(id, &runtime, &mut content).await?;
-        let mut snapshot = content.transcript.as_ref().unwrap().snapshot();
-        snapshot.delivered = self.inner.state.delivered(id,requests).await?;
-        let state = runtime.snapshot();
-        let agent = content.agent.as_ref().unwrap();
-        self.schedule_catalog(&agent.model.provider);
-        let usage = self.context_usage(&self.inner.settings.get(), &agent.model, agent.tokens);
-        Ok(SessionFeed { initial: vec![ServerMessage::TranscriptSnapshot { session_id:id.into(), snapshot },
-            ServerMessage::SessionState { session_id:id.into(), status:state.status, detail:state.detail, context_usage:usage }], events:content.events.subscribe() })
-    }
-    pub async fn history_page(&self, id: &str, generation: &str, before: u64) -> Result<crate::transcript::HistoryPage> {
-        let runtime = self.runtime(id).await?; let content = runtime.content.lock().await;
-        let transcript = content.transcript.as_ref().context("Open this chat before reading history")?;
-        if transcript.generation != generation { bail!("History changed; reopen this chat"); }
-        self.inner.state.page(id,Some(before)).await
     }
     pub async fn prompt(&self, id: &str, text: &str, request_id: &str) -> Result<PromptOutcome> {
         if text.trim().is_empty() || text.chars().count() > MAX_PROMPT_CHARS { bail!("Message must contain 1–{MAX_PROMPT_CHARS} characters"); }
@@ -216,15 +197,31 @@ impl AgentManager {
         if let Some(receipt) = self.inner.state.receipt(id,request_id).await? {
             if receipt.command.as_deref().is_some_and(|kind|kind != "builtin") { bail!("Request ID was already used for another operation"); }
             if receipt.text != text { bail!("Request ID was already used for different text"); }
-            if !receipt.finished { bail!("This command was interrupted; inspect its effects before issuing a new request ID"); }
+            if !receipt.finished { return Ok(PromptOutcome {disposition:PromptDisposition::Accepted,notice:Some("Command is already accepted; awaiting outcome".into())}); }
             if let Some(error) = receipt.error { bail!("{error}"); }
             return Ok(PromptOutcome { disposition:receipt.disposition,notice:receipt.notice });
         }
         if let Some(rest) = text.strip_prefix('/') {
             let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             if ["compact", "model", "thinking", "name", "fast"].contains(&name) {
+                if name=="compact" && content.agent.as_ref().unwrap().running {bail!("Stop the current run before compacting");}
                 let receipt = Receipt { id:request_id.into(),command:Some("builtin".into()),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
                 content.commit(id,Vec::new(),None,Some(receipt.clone())).await?;
+                if name=="compact" {
+                    let agent=content.agent.as_mut().unwrap();agent.running=true;agent.cancel=tokio_util::sync::CancellationToken::new();
+                    let manager=self.clone();let session=id.to_owned();let rt=runtime.clone();let arguments=args.trim().to_owned();
+                    self.set_runtime_state(id,&runtime,SessionStatus::Running,Some("Compacting context".into()),None);
+                    agent.task=Some(tokio::spawn(async move {
+                        let result=manager.compact(&session,&rt,&arguments).await.map(|()|PromptOutcome {disposition:PromptDisposition::Handled,notice:Some("Context compacted.".into())});
+                        let mut content=rt.content.lock().await;
+                        if let Some(agent)=&mut content.agent {agent.running=false;}
+                        if let Err(error)=manager.inner.state.finish_command(&session,receipt.clone(),&result).await {warn!(%error,"Could not persist compaction outcome");}
+                        if let Ok(report)=manager.receipt_message(&session,&[receipt.id]).await {let _=manager.inner.events.send(report);}
+                        manager.set_runtime_state(&session,&rt,SessionStatus::Idle,result.as_ref().err().map(|e|e.to_string()),Some(None));
+                        if result.is_ok() {manager.start_run(&session,&rt,&mut content);}
+                    }));
+                    return Ok(PromptOutcome {disposition:PromptDisposition::Accepted,notice:Some("Compaction accepted".into())});
+                }
                 drop(content);
                 let result = self.run_builtin_command(id, &runtime, name, args.trim()).await;
                 self.inner.state.finish_command(id,receipt,&result).await?;
@@ -317,10 +314,11 @@ impl AgentManager {
         }
         let mut queue=content.transcript.as_ref().unwrap().queue.clone();
         if let Some(agent)=&content.agent {
-            agent.cancel.cancel();
             if agent.running || !queue.requests.is_empty() { queue.paused=true; }
         }
-        content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:Some("abort".into()),text:String::new(),disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await
+        content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:Some("abort".into()),text:String::new(),disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
+        if let Some(agent)=&content.agent {agent.cancel.cancel();}
+        Ok(())
     }
     pub async fn close_session(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
@@ -338,7 +336,6 @@ impl AgentManager {
         let mut content = runtime.content.lock().await;
         let usage = content.agent.as_ref().and_then(|agent| self.context_usage(&self.inner.settings.get(), &agent.model, agent.tokens));
         content.agent = None; content.transcript = None;
-        let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id:Some(id.into()) }));
         self.set_runtime_state(id, runtime, SessionStatus::Sleeping, None, Some(usage));
     }
     pub async fn delete_session(&self, id: &str) -> Result<()> {
@@ -395,7 +392,6 @@ impl AgentManager {
         content.transcript = Some(transcript);
         content.agent = Some(AgentSession { store:self.inner.state.clone(), revision:stored.revision, model:stored.model, thinking:stored.thinking,
             running:false, cancel:tokio_util::sync::CancellationToken::new(), task:None, tokens:stored.tokens, needs_turn:stored.needs_turn });
-        let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id:Some(id.into()) }));
         self.set_runtime_state(id,runtime,SessionStatus::Idle,detail,Some(usage)); Ok(())
     }
     pub(crate) fn set_runtime_state(&self, id: &str, runtime: &Arc<SessionRuntime>, status: SessionStatus, detail: Option<String>, usage: Option<Option<ContextUsage>>) {
@@ -422,7 +418,7 @@ impl AgentManager {
         }
     }
     pub(crate) async fn broadcast_sessions(&self) {
-        match self.sessions_message().await { Ok(message) => { let _ = self.inner.events.send(message); }, Err(error) => warn!(%error,"Could not read session list") }
+        let _=self.inner.events.send(ServerMessage::ResyncRequired {session_id:None});
     }
     pub async fn set_settings(&self, revision: u64, settings: Settings) -> Result<Settings> {
         let updated = self.inner.settings.set(revision, settings).await?;

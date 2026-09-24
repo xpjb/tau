@@ -98,7 +98,7 @@ impl AgentManager {
         Ok(tau_protocol::ServerMessage::Projects { projects:self.inner.state.projects().await? })
     }
     async fn broadcast_projects(&self) -> Result<()> {
-        let _ = self.inner.events.send(self.projects_message().await?);
+        let _ = self.inner.events.send(tau_protocol::ServerMessage::ResyncRequired {session_id:None});
         Ok(())
     }
     pub async fn create_project(&self, id: String, name: String, prompt: String) -> Result<()> {
@@ -184,7 +184,7 @@ mod tests {
         let again = StateStore::load(path).await.unwrap();
         assert_eq!(again.project_prompt(&chat).await.unwrap(),"Pinned");
         again.access(|db| {
-            assert_eq!(db.query_row("PRAGMA user_version",[],|r|r.get::<_,u32>(0))?,3);
+            assert_eq!(db.query_row("PRAGMA user_version",[],|r|r.get::<_,u32>(0))?,4);
             assert_eq!(db.query_row("SELECT count(*) FROM entries WHERE session_id='old'",[],|r|r.get::<_,u32>(0))?,1);
             Ok(())
         }).await.unwrap();

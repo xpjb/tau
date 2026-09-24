@@ -6,6 +6,8 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 pub use tau_protocol::blocks::*;
+pub mod uploads;
+pub mod cache_budget;
 
 
 pub fn initialize(db: &Connection) -> Result<()> {

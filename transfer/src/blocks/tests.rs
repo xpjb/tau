@@ -194,3 +194,13 @@ async fn stalled_bulk_admission_reserves_capacity_for_foreground_and_metadata() 
     assert_eq!(bytes,b"responsive");drop(stalled);
     client.shutdown().await;server.shutdown().await;
 }
+
+#[tokio::test]
+async fn metadata_fanout_cannot_consume_foreground_or_descriptor_slots() {
+    let (backend,server,client)=fixture().await;backend.put("answer",None,BlockKind::Text,b"reserved",true);
+    let _first=client.watch(feed_request(None)).await.unwrap();let _second=client.watch(feed_request(None)).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(30),client.watch(feed_request(None))).await.is_err());
+    assert_eq!(collect(client.watch(block_request("answer",0,0,false)).await.unwrap()).await.0,b"reserved");
+    assert_eq!(collect(client.watch_descriptor(block_request("answer",0,0,false)).await.unwrap()).await.0,b"reserved");
+    client.shutdown().await;server.shutdown().await;
+}

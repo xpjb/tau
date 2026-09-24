@@ -262,3 +262,18 @@ fn staged_import_has_no_feed_changes_until_atomic_publish_and_cleans_up() {
     let tx=source.transaction().unwrap();stage_append(&tx,"abandoned",0,b"discard me").unwrap();discard_staging(&tx).unwrap();tx.commit().unwrap();
     assert_eq!(source.query_row("SELECT count(*) FROM block_chunks",[],|r|r.get::<_,u64>(0)).unwrap(),count);
 }
+
+#[test]
+fn cache_byte_quota_evicts_old_bodies_without_advancing_or_deleting_metadata() {
+    let mut db=Connection::open_in_memory().unwrap();db.execute_batch("PRAGMA foreign_keys=ON").unwrap();initialize(&db).unwrap();
+    for (id,bytes) in [("old",b"older".as_slice()),("new",b"newest".as_slice())] {
+        let tx=db.transaction().unwrap();
+        let h=BlockHeader {id:id.into(),parent:None,order:0,kind:BlockKind::Text,meta:serde_json::json!({}),version:1,length:bytes.len() as u64,sealed:true,revision:1};
+        cache_range(&tx,"chat",&ContentRange {header:h,offset:0,hash:blake3::hash(bytes).to_hex().to_string(),bytes:bytes.to_vec()}).unwrap();
+        cache_budget::enforce(&tx,"chat",id,6).unwrap();tx.commit().unwrap();
+    }
+    assert!(header(&db,"chat","old").unwrap().is_some());assert!(cached_content(&db,"chat","old").unwrap().is_empty());
+    assert_eq!(cached_content(&db,"chat","new").unwrap(),b"newest");
+    assert_eq!(db.query_row("SELECT bytes FROM block_usage",[],|r|r.get::<_,u64>(0)).unwrap(),6);
+    assert!(cached_feed(&db,"chat",None).unwrap().is_none());
+}

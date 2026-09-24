@@ -5,8 +5,9 @@ pub mod blocks;
 mod transcript;
 pub use transcript::*;
 
-// Protocol 16 separates durable block synchronization from control and receipts.
-pub const PROTOCOL_VERSION: u32 = 16;
+// Protocol 17 uses bounded control and one native data connection in both directions.
+pub const PROTOCOL_VERSION: u32 = 17;
+pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -50,8 +51,11 @@ pub struct ClientRequest {
 )]
 pub enum ClientCommand {
     ConnectBlocks { node_id: String },
+    /// A complete ClientRequest uploaded through the native data connection.
+    Input { content: blocks::ContentRef },
     GetSession { session_id: String },
     GetReceipts { session_id: String, requests: Vec<String> },
+    GetOperation { operation_id: String },
     ListSessions,
     CreateProject { project_id: String, name: String, prompt: String },
     UpdateProject { project_id: String, revision: u64, name: String, prompt: String },
@@ -66,11 +70,13 @@ pub enum ClientCommand {
         #[serde(default)]
         keep_session_id: Option<String>,
     },
+    #[serde(skip)] // Internal legacy adapter only; no wire route.
     OpenSession {
         session_id: String,
         #[serde(default)]
         requests: Vec<String>,
     },
+    #[serde(skip)]
     GetHistory {
         session_id: String,
         generation: String,
@@ -108,6 +114,14 @@ pub enum ClientCommand {
     CloneSession {
         session_id: String,
     },
+}
+
+impl ClientCommand {
+    pub fn journalled_control(&self)->bool {
+        matches!(self,Self::CreateSession {..}|Self::CreateProject {..}|Self::UpdateProject {..}|Self::DeleteProject {..}
+            |Self::MoveSession {..}|Self::SetSettings {..}|Self::CloseSession {..}|Self::DeleteSession {..}
+            |Self::RenameSession {..}|Self::ForkSession {..}|Self::CloneSession {..})
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -151,7 +165,11 @@ pub enum QueueOperation {
 )]
 pub enum ServerMessage {
     BlockConnection { offer: blocks::BulkOffer },
+    /// Large descriptors travel over native data, never as a WebSocket body.
+    Data { content: blocks::ContentRef, key: String, session_id: Option<String>, reports: Vec<OperationReceipt>, operation_id: Option<String> },
     Receipts { session_id: String, reports: Vec<OperationReceipt> },
+    Accepted { request_id: String },
+    Operation { operation_id: String, registered: bool, response: Option<Box<ServerMessage>> },
     Hello {
         protocol_version: u32,
         daemon_version: String,
@@ -183,10 +201,12 @@ pub enum ServerMessage {
     Sessions {
         sessions: Vec<SessionSummary>,
     },
+    #[serde(skip)] // Rendering/provider adapter, not a control message.
     TranscriptSnapshot {
         session_id: String,
         snapshot: TranscriptSnapshot,
     },
+    #[serde(skip)] // Rendering/provider adapter, not a control message.
     TranscriptPage {
         request_id: String,
         session_id: String,
@@ -194,6 +214,7 @@ pub enum ServerMessage {
         cursor: u64,
         page: HistoryPage,
     },
+    #[serde(skip)] // Rendering/provider adapter, not a control message.
     TranscriptUpdate {
         session_id: String,
         generation: String,
@@ -214,6 +235,19 @@ pub enum ServerMessage {
 }
 
 impl ServerMessage {
+    /// Only superseded replicated state may be coalesced. Response IDs retain
+    /// distinct delivery; their durable acceptance is not a display cursor.
+    pub fn replication_key(&self) -> Option<String> {
+        match self {
+            Self::Sessions {..}=>Some("sessions".into()),Self::Projects {..}=>Some("projects".into()),
+            Self::SessionState {session_id,..}=>Some(format!("state:{session_id}")),
+            Self::Commands {session_id,..}=>Some(format!("commands:{session_id}")),
+            Self::Settings {..}=>Some("settings".into()),
+            Self::Data {key,..}=>Some(key.clone()),
+            _=>None,
+        }
+    }
+
     pub fn success(request_id: String, session_id: Option<String>, draft: Option<String>) -> Self {
         Self::Response {
             request_id,
@@ -329,6 +363,7 @@ pub struct SessionSummary {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptDisposition {
+    Accepted,
     Submitted,
     Queued,
     Handled,

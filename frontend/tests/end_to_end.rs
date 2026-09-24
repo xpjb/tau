@@ -169,7 +169,7 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
         .await
         .unwrap()
         .unwrap();
-    c.draft("queued café 😀".into()).unwrap();
+    c.draft("queued café 😀".repeat(4096)).unwrap();
     c.send_prompt().unwrap();
     until(&mut c, |c| {
         c.selected().unwrap().feed.queue.requests.len() == 1
@@ -374,7 +374,8 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     c.chats.get_mut(&starter).unwrap().commands_loaded = false;
     c.choose_model(&starter, "openai-codex/unlisted-exact-id").unwrap();
     c.send_prompt().unwrap();
-    let waiting = &c.chats[&starter].local.pending[0];
+    let waiting = c.chats[&starter].local.pending.iter().find(|p|p.text=="Keep my draft").unwrap();
+    assert!(c.chats[&starter].local.pending.iter().any(|p|p.text=="/model openai-codex/unlisted-exact-id"),"Model selection intent must also be durable");
     assert_eq!(waiting.status,tau_frontend::store::Delivery::WaitingForModel);
     assert_eq!(waiting.text,"Keep my draft");
     assert_eq!(calls.load(Ordering::SeqCst),3,"A send queued behind model selection must not run under the previous model");

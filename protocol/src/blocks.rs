@@ -8,6 +8,9 @@ pub const MAX_BLOCK_HEADER_BYTES: usize = 4096;
 pub const MAX_BLOCK_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_FEED_PAGE: usize = 32;
 pub const BLOCK_WINDOW_BYTES: u32 = 64 * 1024;
+pub const UPLOAD_SCOPE: &str = "@uploads";
+pub const CONTROL_SCOPE: &str = "@control";
+pub const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -90,3 +93,36 @@ pub enum BlockWatch { Feed(FeedRequest), Feeds { requests:Vec<FeedRequest> }, Bl
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BulkOffer { pub node_id: String, pub port: u16, pub lineage: String }
+
+/// Immutable, verified input. Retrying an ID with a different specification is
+/// an error, including after a disconnect or a process restart.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadSpec {
+    pub id: String,
+    pub length: u64,
+    pub hash: String,
+    pub purpose: UploadPurpose,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum UploadPurpose { Command, File { session_id: String, file_name: String } }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadStatus {
+    pub offset: u64,
+    pub sealed: bool,
+    pub file: Option<crate::UploadedFile>,
+}
+
+/// References are scoped to an authenticated database lineage, never just a
+/// hash. Both length and raw BLAKE3 are checked before decoding a descriptor.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentRef {
+    pub lineage: String,
+    pub scope: String,
+    pub id: String,
+    pub length: u64,
+    pub hash: String,
+}

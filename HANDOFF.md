@@ -2,69 +2,55 @@
 
 ## Location and safety
 
-- **Active branch:** `feat/tau2-block-sync`
-- **Active worktree:** `/root/tau2-block-sync`
-- Base: `c5088dc` (`origin/tau2` at the start of this work).
-- This is the **native block/network rewrite**, not the separate pause-removal work.
-- Checkpoint is local; **not pushed, merged, or deployed**. Run `git log -1 --oneline` for its commit.
-- `/root/tau2` is the original, unchanged integration worktree. Common Git repository: `/root/tau/.git`.
-- Preserve the unrelated `/root/tau2-remove-pause` worktree and its changes.
-- **Do not deploy or start beta. Do not restart/change stable.** Last verified: `tau2-beta.service` inactive, PID 0; `tau.service` active, PID 474496.
-- Read `/root/AGENTS.md`: **Clippy is explicitly banned**, including wrappers/aliases/alternate binaries. Use `/usr/local/bin/cargo`. No Cargo built-in test runner; use nextest.
+- **Branch:** `feat/tau2-block-sync`; **worktree:** `/root/tau2-block-sync`.
+- Original integration base: `c5088dc`; previous read-path checkpoint: `4784635`. Use `git log -1 --oneline` for the current local checkpoint.
+- **Not pushed, merged or deployed.** Preserve `/root/tau2`, `/root/tau2-remove-pause` and unrelated worktrees.
+- **Do not deploy/start beta or restart/change stable.** Read-only verification: `tau2-beta.service` inactive / PID 0; `tau.service` active / PID 474496.
+- `/root/AGENTS.md` applies: **Clippy is banned in every form**. Use managed `/usr/local/bin/cargo`, nextest and relevant rustdoc checks; never Cargo's built-in test runner. Shared build-lock contention is handled by retrying normally, not bypassing the wrapper.
 
-## Why this handoff exists
+## User context
 
-The conversation hit a disk-quota error. The user freed space, then asked to finish the current checkpoint and leave a handoff discoverable with **“read the handoff on tau2 latest net rewrite branch.”** The conversation was no longer usable for them. Do not depend on its earlier messages: this file and the linked design/status document are the continuation context.
+The original disk-quota interruption was resolved by the user; the read checkpoint passed 129 tests. The user subsequently asked to read the handoff and **“okay please finish implementing this.”** This continuation implemented the native write/control cutover and substantial correctness/resource work. It did not change any production service.
 
-The disk error interrupted a compiler check, not a production service. After the cleanup, checks and the complete test suite passed. No cache purge, wrapper bypass, or service change was performed.
+**Status: native read/write/control cutover implemented and locally exercised, but the full rewrite's release gates are not all finished.** Do not describe a passing suite as full release certification. The exact remaining implementation/audit/measurement gates are at the end of [docs/tau2-block-sync.md](docs/tau2-block-sync.md).
 
-## Status: working read-path checkpoint, NOT finished/release-ready
+The [original protocol audit](docs/tau2-protocol-audit.md) is historical evidence/design. The implementation/status document supersedes its descriptions of current wire routes and limits.
 
-**Implemented and exercised end to end:** native chat reads, durable block caching, batched header watches, streamed content, and native file downloads on one shared Iroh connection. Prompt/queue/create receipt recovery remains independent of display replication.
+## What this continuation implemented
 
-**Still unfinished:** native uploads/large client payloads, strict small control messages, removal of legacy transcript/file server routes, bounded viewport/cache policies, and the remaining intent/outbox audit issues. Do not describe the full network rewrite as complete.
+- Protocol **17**, strict **4 KiB** control frames/messages in both directions. Large command inputs upload immutable bodies; large responses/settings/lists/catalogs use native body references. Small acceptance/operation markers remain independent of display/body completion.
+- Production uses one native Iroh endpoint/connection for chat, uploads, descriptors and files. Removed legacy HTTP file/upload/offer routes, transcript wire APIs, Iroh-blobs dependencies and legacy transfer fixture. Daemon/raw crash-test clients now consume native blocks.
+- Durable resumable upload specs/prefixes/sealing, bounded hashing/reads, deterministic fsynced file publication and stable lost-ACK retry. Persistent transport upload/restart/conflict/integrity/auth tests.
+- Source schema **4** generic mutation reservation/outcome journal; immutable IDs, replayed stored outcomes, explicit interrupted/uncertain recovery without reexecuting effects. `GetOperation` reconciliation. General client mutation outbox saved before submission; model-selection intents now use the durable per-chat outbox.
+- Exact client-named chat creation rather than new starter aliases. Compatible legacy creation receipts remain recoverable. Async compaction returns Accepted after receipt ownership; completion is separate. Abort persists pause/receipt before cancellation.
+- Queue accepted edit/delete overlays survive until full replicated convergence, including restart. Large/escaped event attributes are preserved in referenced metadata bodies rather than overflowing headers.
+- Actual viewport/overscan interests, bounded root/body working sets, coalesced plan/configuration channels, hard 2/4/6/2 stream classes and renewable live-watch leases. Copy waits for sealed content and advances through bounded cohorts instead of starving after 30 cards.
+- Logical body-cache eviction at 512 MiB; bounded/expiring descriptor and upload leases. Live source appends avoid rereading full old DB prefixes. These are not complete metadata/retained-file quotas or a proof of incremental render CPU.
+- Prioritized control health writes; UI-independent bounded/coalescing event mailbox; state descriptor epoch/key fencing; small source resync broadcasts rather than retained large list broadcasts.
 
-Read [docs/tau2-block-sync.md](docs/tau2-block-sync.md) for the protocol, implementation map, invariants, tests, and ordered release gates. The earlier audit is [docs/tau2-protocol-audit.md](docs/tau2-protocol-audit.md); some characterization tests intentionally still describe legacy paths.
+## Validation
 
-## Approved design — preserve these decisions
-
-1. Uniform blocks: text, thinking, code, tool cards, input/results, files/images, state, queue. Storage/sync are flat; parent links describe presentation.
-2. Collapsed tool card is its own small block. Fetching its header does **not** fetch child headers or contents. The client chooses interests and disclosure state; the server has no UI-collapse state.
-3. Generic reads: ordered direct-child header/change feed from durable cursor; block bytes from version + byte offset, optionally following appends. Long-lived, batchable watches; no per-token RTT.
-4. Stable IDs through streaming and sealing. Append suffixes, explicit replacement versions, seal without resending contents. Hidden 16 KiB chunks, raw integrity hashes, optional independent zstd.
-5. One control WebSocket and **one shared Iroh/QUIC data connection per client/daemon**. Files must not create another endpoint/connection or use a parallel HTTP download stack.
-6. Durable verified cache/cursors. Intent receipts are independent of display convergence. No automatic replay of uncertain paid/external effects after restart.
-7. Native Tau protocol; no requirement to keep the old transcript wire compatibility. Existing internal/render adapters can be refactored separately.
-
-## Last validation (after disk cleanup)
-
-From `/root/tau2-block-sync`:
+From this worktree, using the managed wrapper:
 
 ```sh
 /usr/local/bin/cargo check --locked --workspace --all-targets
 /usr/local/bin/cargo nextest run --locked --workspace --no-fail-fast
+/usr/local/bin/cargo doc --locked --workspace --no-deps
+git diff --check
 ```
 
-Both passed, with no compiler warnings. **129 tests passed, 0 skipped, across 13 binaries.** Nextest run ID: `feae8cb2-2894-4781-a8f8-b39b971f752f`.
+All commands passed after the final code changes. **138 tests passed, 0 skipped, across 13 binaries**, nextest run `95f7eeb7-24aa-4ea2-8185-67de1555fe3e`. Compiler and rustdoc passed without warnings; `git diff --check` passed.
 
-`git diff --check` also passed. No Clippy and no built-in Cargo test runner were run. No manual mobile UI validation or actual constrained-network latency certification has been completed.
+No Clippy, built-in Cargo test runner, deployment, mobile manual validation or actual constrained-network latency certification was performed.
 
-## What was finished immediately before this checkpoint
+## Continue here — explicit remaining work
 
-- Batched up to 16 child-directory watches per data stream, with indexed records/pages and a serialized request budget. This replaces one stream per expanded tool.
-- Six background/bulk admission slots within 14 total client streams; metadata and foreground can proceed while bulk streams stall. The queue, live non-code content, and the latest two ordinary text blocks get foreground admission. Priority changes cancel/reopen with verified offsets.
-- Header notifications coalesce at 100 ms; followed body notifications at 50 ms, plus polling fallback. This avoids a full header on every provider token monopolizing a weak link.
-- Client renews the one-hour data grant every 30 minutes without replacing the data connection. Closed node-identity watches no longer spin.
-- Compound history positions `(order, id)` prevent skipping equal-position siblings; deltas are not incorrectly filtered by the initial floor. A queue-only initial root no longer hides later lower-order messages.
-- Finite older pages cannot move a live cursor past unread changes or delete equal-order siblings. Non-root directories (especially the up-to-256-item queue) automatically fetch all metadata pages; root history stays user-driven.
-- Queue copy/edit controls require fully received text, not placeholders/partial text. Prefix execution waits for a complete queue directory. Unloaded root tool results have a visible loading placeholder.
-- Copy Details adds temporary content interests without changing collapse preferences; it waits for known child-directory/content completeness, rather than copying “Loading…”. Tool cards show writing/running/completed/failed/interrupted metadata.
-- Native file materialization uses unpublished 128 KiB staging transactions, async file reads, SHA-256, and atomic chunk-reference publication. Cancellation/restart clean staging. Native downloads share the chat connection and verified cache; exports are atomically written and verified, including offline repair of a corrupt local export.
-- Added tests for coalescing, history races/ties, corrupt deduplicated chunk repair, staging, batching, stalled-bulk admission, exact disclosure interests, full queue pagination, split UTF-8, stale-lineage rejection, actual daemon file materialization, and raw tool input sealing without replacement/retransmission.
+Read the full status document before modifying code. The important unclosed gates are not the old HTTP-upload cutover anymore:
 
-## Suggested next session
+1. Cold first-prompt acceptance still follows runtime/history loading; audit/refactor durable queue ownership independently of the heavy runtime. Audit every delayed receipt/data UI transition, multi-record local crash windows, legacy alias migration and interrupted private/tool context. General uncertain actions need better inspection/reconciliation UX.
+2. Finish aggregate metadata/tombstone/export retention, lease maintenance and list pagination; test ENOSPC, file-upload deletion/cancellation races, many peers/fanout and incremental cache/render/copy CPU. Preserve authored data rather than silently evicting intents or uncertain receipts.
+3. Provide/test the old-backup restore lineage-rotation and migration/rollback procedure. Same-lineage rollback is not covered by normal restart tests.
+4. Add native byte/latency/connection/queue counters and delayed/lossy/low-bandwidth regression scenarios. Removed legacy transfer tests are not native performance evidence. Perform mobile/manual UI certification only through an authorized workflow.
+5. Re-run managed checks/nextest and update these files. **Deployment still requires explicit user authorization.**
 
-1. Read this file and the implementation/status document. Check branch/worktree and service state without changing services.
-2. Finish the **write/control cutover**: native upload/large command bodies, small control descriptors, durable acceptance independent of content/render progress, then remove legacy wire routes/tests. Do not add another per-file transfer stack.
-3. Before release, close the explicit remaining read-path correctness/resource gates in the status document: viewport interest limits, cache quotas, extreme watch fanout, receipt/display UI races, long metadata fields, copy freshness, and real weak-link metrics.
-4. Re-run managed compiler checks/nextest. Update the handoff when pausing. Deployment still requires the user's instruction.
+Approved design remains unchanged: uniform flat blocks; explicit direct-child/body interests; no body data in collapsed headers; stable streaming identities; durable verified offsets/cursors; one small control socket plus one shared data connection; no automatic replay of uncertain paid/external work.

@@ -41,18 +41,9 @@ fn retained_history_delta_gap_and_stale_page_are_transactional() {
         },
     )
     .unwrap();
-    // Optional fields really are absent in a protocol-10 delta (not null/[]).
-    let patch:ServerMessage=serde_json::from_value(json!({"type":"transcript_update","sessionId":"chat","generation":"g","sequence":5,"change":{"delta":{"eventId":"live","text":"world** 🦀"}}})).unwrap();
-    let ServerMessage::TranscriptUpdate {
-        generation,
-        sequence,
-        change,
-        ..
-    } = patch
-    else {
-        unreachable!()
-    };
-    feed.update(&generation, sequence, change).unwrap();
+    // The renderer's internal delta adapter is not a network message.
+    let change:TranscriptChange=serde_json::from_value(json!({"delta":{"eventId":"live","text":"world** 🦀"}})).unwrap();
+    feed.update("g",5,change).unwrap();
     assert_eq!(feed.event("live").unwrap().text, "Hello **world** 🦀");
     let change: TranscriptChange =
         serde_json::from_value(json!({"events":[event("collision",1,"saved")],"removed":["live"]}))
@@ -405,4 +396,63 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[test]
+fn accepted_queue_edit_retains_optimistic_text_until_complete_replication_after_restart() {
+    let root=tempfile::tempdir().unwrap();
+    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
+    c.ensure_chat("chat").unwrap();c.account.selected=Some("chat".into());
+    c.store.put(&c.identity,"account",&c.account).unwrap();
+    let pending=tau_frontend::store::Pending {request:ClientRequest {id:"edit".into(),command:ClientCommand::QueueControl {session_id:"chat".into(),generation:"g".into(),operation:QueueOperation::Edit {request_id:"queued".into(),revision:0,text:"new complete text".into()}}},started_at_ms:None,text:"new complete text".into(),files:vec![],status:Delivery::Sending,detail:None};
+    let chat=c.chats.get_mut("chat").unwrap();chat.local.pending.push(pending);chat.feed.queue=QueueState::native();
+    chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:0,kind:"steer".into(),text:"old text".into(),images:0,timestamp_ms:None});
+    c.message(ServerMessage::success("edit".into(),Some("chat".into()),None)).unwrap();
+    assert_eq!(c.chats["chat"].local.pending[0].status,Delivery::Accepted);
+    drop(c);
+    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
+    let chat=c.chats.get_mut("chat").unwrap();assert_eq!(chat.local.pending[0].status,Delivery::Accepted);
+    chat.feed.queue=QueueState::native();chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:1,kind:"steer".into(),text:"new".into(),images:0,timestamp_ms:None});
+    chat.feed.incomplete.insert("queued:queued".into());
+    chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);assert_eq!(chat.local.pending.len(),1);
+    chat.feed.queue.requests[0].text="new complete text".into();chat.feed.incomplete.clear();
+    chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);assert!(chat.local.pending.is_empty());
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn generic_control_outbox_recovers_original_outcome_without_reexecuting_after_restart() {
+    #[derive(Clone)]
+    struct Peer {request:Arc<Mutex<Option<ClientRequest>>>,mutations:Arc<AtomicUsize>}
+    let peer=Peer {request:Arc::new(Mutex::new(None)),mutations:Arc::new(AtomicUsize::new(0))};
+    let counted=peer.clone();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+    let app=Router::new().route("/v1/ws",get(move |ws:WebSocketUpgrade| {let peer=peer.clone();async move {ws.on_upgrade(move |mut socket|async move {
+        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into()}).unwrap().into())).await.unwrap();
+        while let Some(Ok(frame))=socket.recv().await {
+            let axum::extract::ws::Message::Text(text)=frame else {continue;};
+            let request:ClientRequest=serde_json::from_str(&text).unwrap();
+            match &request.command {
+                ClientCommand::RenameSession {..}=>{peer.mutations.fetch_add(1,Ordering::SeqCst);*peer.request.lock().unwrap()=Some(request);let _=socket.close().await;return;}
+                ClientCommand::GetOperation {operation_id}=>{
+                    let saved=peer.request.lock().unwrap().clone().unwrap();assert_eq!(&saved.id,operation_id);
+                    let response=ServerMessage::Operation {operation_id:operation_id.clone(),registered:true,response:Some(Box::new(ServerMessage::success(saved.id,Some("chat".into()),None)))};
+                    socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&response).unwrap().into())).await.unwrap();
+                }
+                _=>{},
+            }
+        }
+    })}}));
+    let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
+    let root=tempfile::tempdir().unwrap();let store=Store::open(root.path().into()).unwrap();
+    store.put("","settings",&Settings {server_url:format!("http://{address}"),token:"fixture".into()}).unwrap();
+    let mut c=Controller::new(store,Arc::new(||{})).unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {loop {c.poll();if c.epoch.is_some() {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+    let id=c.request(ClientCommand::RenameSession {session_id:"chat".into(),title:"durable title".into()}).unwrap();
+    assert_eq!(c.account.pending_controls[&id].request.id,id);
+    tokio::time::timeout(Duration::from_secs(5),async {while counted.mutations.load(Ordering::SeqCst)==0 {tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+    drop(c);
+    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();assert!(c.account.pending_controls.contains_key(&id));
+    tokio::time::timeout(Duration::from_secs(5),async {loop {c.poll();if c.account.pending_controls.is_empty() {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+    assert_eq!(counted.mutations.load(Ordering::SeqCst),1,"Receipt reconciliation must not execute another mutation");
+    drop(c);server.abort();
 }

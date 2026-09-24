@@ -2,10 +2,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use axum::{Router, Json, body::Body, extract::State, http::{StatusCode, HeaderMap, Uri}, response::{IntoResponse, Response}, routing::post};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, mpsc};
-use tokio_tungstenite::{connect_async, tungstenite::{Message, client::IntoClientRequest}};
 use crate::{Config, manager::AgentManager, settings::{Api, Settings}, state::StateStore};
 
 struct Reply { status: u16, bytes: Vec<u8>, gate: Option<Arc<Notify>>, body_gate: Option<(usize, Arc<Notify>)> }
@@ -75,37 +74,9 @@ async fn serve(manager: &AgentManager) -> (String, tokio::task::JoinHandle<()>) 
     let manager = manager.clone(); let config = manager.inner.config.clone();
     (url, tokio::spawn(async move { crate::server::serve(config, manager, listener).await.unwrap(); }))
 }
-struct Client { socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, seen: Vec<Value> }
-impl Client {
-    async fn connect(url: &str) -> Self {
-        let mut request = url.into_client_request().unwrap(); request.headers_mut().insert("authorization", "Bearer isolated-test-token".parse().unwrap());
-        let (socket, _) = connect_async(request).await.unwrap();
-        let mut client = Self { socket, seen:vec![] };
-        let hello = client.until(|m| m["type"] == "hello").await;
-        assert_eq!(hello["protocolVersion"], crate::protocol::PROTOCOL_VERSION);
-        client
-    }
-    async fn until(&mut self, predicate: impl Fn(&Value) -> bool) -> Value {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match self.socket.next().await.unwrap().unwrap() {
-                    Message::Text(text) => { let message: Value = serde_json::from_str(&text).unwrap(); self.seen.push(message.clone()); if predicate(&message) { return message; } }
-                    Message::Ping(_) => self.socket.flush().await.unwrap(),
-                    other => panic!("Unexpected client message: {other:?}"),
-                }
-            }
-        }).await.expect("Expected WebSocket event")
-    }
-    async fn request(&mut self, value: Value) -> Value {
-        let id = value["id"].clone(); self.socket.send(Message::Text(value.to_string().into())).await.unwrap();
-        self.until(|message| message["type"] == "response" && message["requestId"] == id).await
-    }
-    async fn open(&mut self, id: &str) -> Value {
-        let request = format!("open-{}",uuid::Uuid::new_v4());
-        assert_eq!(self.request(json!({"id":request,"type":"open_session","sessionId":id})).await["ok"], true);
-        self.seen.iter().rev().find(|m| m["type"] == "transcript_snapshot" && m["sessionId"] == id).unwrap()["snapshot"].clone()
-    }
-}
+#[path = "../tests/support/mod.rs"]
+mod native_client;
+use native_client::Client;
 
 #[tokio::test]
 async fn client_named_create_is_immediate_and_idempotent_after_a_lost_ack() {
@@ -113,12 +84,11 @@ async fn client_named_create_is_immediate_and_idempotent_after_a_lost_ack() {
     let (_root, manager, _, server) = fixture(&model, Api::Codex).await;
     let first = uuid::Uuid::new_v4().to_string();
     assert_eq!(manager.create_session_requested(None,"general",Some(&first)).await.unwrap(),first);
-    // Reusing the existing untouched starter is still the server's established
-    // behavior; an optimistic client reconciles its local ID on acknowledgement.
+    // New client-named chats never alias an existing empty tile.
     let candidate = uuid::Uuid::new_v4().to_string();
-    assert_eq!(manager.create_session_requested(None,"general",Some(&candidate)).await.unwrap(),first);
+    assert_eq!(manager.create_session_requested(None,"general",Some(&candidate)).await.unwrap(),candidate);
     manager.rename_session(&first,"Old chat is no longer a starter").await.unwrap();
-    assert_eq!(manager.create_session_requested(None,"general",Some(&candidate)).await.unwrap(),first,
+    assert_eq!(manager.create_session_requested(None,"general",Some(&candidate)).await.unwrap(),candidate,
         "A lost create acknowledgement must still resolve to its original chat after that starter becomes active");
     let second = uuid::Uuid::new_v4().to_string();
     assert_eq!(manager.create_session_requested(Some(&first),"general",Some(&second)).await.unwrap(),second);
@@ -135,9 +105,9 @@ async fn client_named_create_is_immediate_and_idempotent_after_a_lost_ack() {
     let work = uuid::Uuid::new_v4().to_string();
     assert_eq!(manager.create_session_requested(None,&topic,Some(&work)).await.unwrap(),work);
     let alias = uuid::Uuid::new_v4().to_string();
-    assert_eq!(manager.create_session_requested(None,&topic,Some(&alias)).await.unwrap(),work);
+    assert_eq!(manager.create_session_requested(None,&topic,Some(&alias)).await.unwrap(),alias);
     manager.update_project(topic.clone(),0,"Work".into(),"Changed topic prompt".into()).await.unwrap();
-    assert_eq!(manager.create_session_requested(None,&topic,Some(&alias)).await.unwrap(),work);
+    assert_eq!(manager.create_session_requested(None,&topic,Some(&alias)).await.unwrap(),alias);
     assert!(manager.create_session_requested(None,"general",Some(&alias)).await.is_err(), "A create ID cannot be reused in another topic");
     assert!(manager.create_session_requested(Some(&first),&topic,Some(&work)).await.is_err(), "A create ID cannot change its keep-chat intent");
     let stored = manager.inner.state.get(&work).await.unwrap().unwrap();
@@ -208,10 +178,9 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
         ("delete", json!({"type":"delete","requestId":"deleted","revision":0})),
         ("pause", json!({"type":"pause","runId":run,"boundary":"turn"})),
     ] { assert_eq!(client.request(json!({"id":id_cmd,"type":"queue_control","sessionId":id,"generation":generation,"operation":operation})).await["ok"], true); }
-    let delivered_edit = |m: &Value| m["type"] == "transcript_update" && m["sessionId"] == id
-        && m["change"]["delivered"].as_array().is_some_and(|ids| ids.contains(&json!("edit")));
-    if !client.seen.iter().any(delivered_edit) { client.until(delivered_edit).await; }
-    assert!(client.seen.iter().any(delivered_edit), "The edit receipt must publish while the model response is gated");
+    client.request(json!({"id":"edit-receipt","type":"get_receipts","sessionId":id,"requests":["edit"]})).await;
+    let report=client.seen.iter().rev().find(|m|m["type"]=="receipts").unwrap();
+    assert_eq!(report["reports"][0]["accepted"],true,"The durable edit receipt is independent of gated display/provider work");
     assert_eq!(client.request(json!({"id":"stale","type":"queue_control","sessionId":id,"generation":generation,"operation":{"type":"edit","requestId":"queued","revision":0,"text":"Stale"}})).await["ok"], false);
     // Full settings, stale revisions, and secrets stay on the same real wire.
     client.request(json!({"id":"get","type":"get_settings"})).await;
@@ -238,7 +207,7 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     assert_eq!(resolved.size, 5);
     let events = snapshot["events"].as_array().unwrap();
     assert_eq!(events.iter().filter(|event| event["attachment"].is_object()).count(), 5);
-    assert_eq!(events.iter().filter(|event| event["toolName"] == "send_file" && event["isError"] == true).count(), 3);
+    assert_eq!(events.iter().filter(|event| event["role"] == "tool" && event["toolName"] == "send_file" && event["isError"] == true).count(), 3);
     for (name, kind) in [("pixel.png","image"),("large.png","file"),("misleading.png","file")] {
         let attachment = events.iter().find(|event| event["attachment"]["fileName"] == name).unwrap();
         assert_eq!(attachment["attachment"]["kind"], kind);
@@ -330,8 +299,13 @@ async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposin
         assert_eq!(payload["store"], false);
         if request == "two" { assert!(payload["input"].to_string().contains("private-reasoning-cipher")); }
         else {
-            let update = client.until(|m| m["change"]["events"].as_array().is_some_and(|events| events.iter().any(|e| e["kind"] == "thinking"))).await;
-            thinking_started = update["change"]["events"].as_array().unwrap().iter().find(|e| e["kind"] == "thinking").unwrap()["timestampMs"].clone();
+            thinking_started = tokio::time::timeout(Duration::from_secs(5),async {
+                loop {
+                    let snapshot=client.page(&id,None).await;
+                    if let Some(thinking)=snapshot["events"].as_array().unwrap().iter().find(|e|e["kind"]=="thinking") {break thinking["timestampMs"].clone();}
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
             tokio::time::sleep(Duration::from_millis(20)).await; gate.notify_one();
         }
         client.until(|m| m["type"] == "session_state" && m["status"] == "idle").await;
@@ -343,6 +317,8 @@ async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposin
     assert!(answer["timestampMs"].as_u64().unwrap() > thinking_started.as_u64().unwrap(), "Sections record their own first stream observation, not a cloned save time");
     let compact = client.request(json!({"id":"compact","type":"prompt","sessionId":id,"text":"/compact Keep the task goals"})).await;
     assert_eq!(compact["ok"], true, "{compact}");
+    let completed=|m:&Value|m["type"]=="receipts" && m["reports"].as_array().is_some_and(|rs|rs.iter().any(|r|r["id"]=="compact" && r["complete"]==true));
+    if !client.seen.iter().any(completed) {client.until(completed).await;}
     assert_eq!(client.request(json!({"id":"compact","type":"prompt","sessionId":id,"text":"/compact Keep the task goals"})).await["disposition"], "handled");
     let payload = model.request().await;
     assert_eq!(payload["input"].as_array().unwrap().last().unwrap()["type"], "compaction_trigger");
@@ -510,11 +486,11 @@ async fn native_images_are_delivered_reopened_and_replayed_as_references_without
     assert_eq!(before["queue"]["paused"], false, "An image-only answer finishes normally");
     let download = format!("{}/v1/sessions/{id}/attachments/{}",url.trim_end_matches("/v1/ws").replace("ws://","http://"),image["entryId"].as_str().unwrap());
     let http = reqwest::Client::new();
-    assert_eq!(http.get(&download).send().await.unwrap().status(), reqwest::StatusCode::UNAUTHORIZED);
-    let response = http.get(&download).bearer_auth("isolated-test-token").send().await.unwrap();
-    assert_eq!(response.status(),reqwest::StatusCode::OK); assert_eq!(response.headers()["content-type"],"image/png");
+    assert_eq!(http.get(&download).send().await.unwrap().status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(http.get(&download).bearer_auth("isolated-test-token").send().await.unwrap().status(), reqwest::StatusCode::NOT_FOUND);
     use base64::Engine as _;
-    assert_eq!(response.bytes().await.unwrap().as_ref(),base64::engine::general_purpose::STANDARD.decode(GENERATED_PNG).unwrap());
+    let bytes=client.body(&id,&format!("file:{}",image["entryId"].as_str().unwrap())).await;
+    assert_eq!(bytes,base64::engine::general_purpose::STANDARD.decode(GENERATED_PNG).unwrap());
     let journal = manager.inner.state.context(&id,&manager.inner.settings.get().agent.model).await.unwrap();
     assert!(!serde_json::to_string(&journal).unwrap().contains(GENERATED_PNG));
     assert!(!client.seen.iter().any(|message| message.to_string().contains(GENERATED_PNG)));
@@ -638,17 +614,17 @@ async fn sqlite_transactions_roll_back_consumption_and_forks_while_history_pages
     runtime.content.lock().await.commit(&id,entries,None,None).await.unwrap();
     manager.close_session(&id).await.unwrap();
     let snapshot = client.open(&id).await;
-    assert_eq!(snapshot["events"].as_array().unwrap().len(),crate::transcript::PAGE_EVENTS);
-    assert!(runtime.content.lock().await.transcript.as_mut().unwrap().events_mut().count() <= crate::transcript::PAGE_EVENTS);
+    assert!(snapshot["events"].as_array().unwrap().len() <= tau_blocks::MAX_FEED_PAGE);
+    assert!(runtime.content.lock().await.transcript.is_none(),"Native reads must not reload the runtime");
     let mut all = snapshot["events"].as_array().unwrap().clone();
     let mut before = snapshot["before"].clone();
-    while let Some(order) = before.as_u64() {
-        assert_eq!(client.request(json!({"id":format!("page-{order}"),"type":"get_history","sessionId":id,"generation":snapshot["generation"],"before":order})).await["ok"],true);
-        let page = &client.seen.iter().rev().find(|m| m["type"] == "transcript_page").unwrap()["page"];
-        let older = page["events"].as_array().unwrap();
-        assert!(older.len() <= crate::transcript::PAGE_EVENTS);
-        assert!(older.iter().all(|e| e["order"].as_u64().unwrap() < order));
-        all.extend(older.iter().cloned()); before = page["before"].clone();
+    while !before.is_null() {
+        let position:tau_blocks::FeedPosition=serde_json::from_value(before).unwrap();
+        let page=client.page(&id,Some(position.clone())).await;
+        let older=page["events"].as_array().unwrap();
+        assert!(older.len()<=tau_blocks::MAX_FEED_PAGE);
+        assert!(older.iter().all(|e|e["order"].as_u64().unwrap()*2<=position.order));
+        all.extend(older.iter().cloned());before=page["before"].clone();
     }
     all.sort_by_key(|e| e["order"].as_u64().unwrap());
     assert_eq!(all.len(),163); assert!(all.windows(2).all(|pair| pair[0]["order"].as_u64() < pair[1]["order"].as_u64()));

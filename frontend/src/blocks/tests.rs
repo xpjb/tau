@@ -86,3 +86,36 @@ fn text_prefix_handles_split_utf8_and_old_connections_cannot_pollute_new_cache()
     f.cache.configure("other-source").unwrap();assert!(f.cache.range(&f.lineage,"chat",&range).is_err());
     assert!(f.cache.header(&f.lineage,"chat",&range.header).is_err());assert!(f.cache.snapshot("chat").unwrap().is_none());
 }
+
+#[test]
+fn viewport_limits_body_interests_and_copy_waits_for_sealed_content() {
+    let mut f=Fixture::new();
+    for n in 0..100 {let id=format!("text-{n}");f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),b"body");}
+    f.page(None,None);
+    while let Some(before)=f.cache.history_cursor("chat").unwrap() {f.page(None,Some(before));}
+    let plan=f.cache.plan("chat",&LocalChat::default(),&[]).unwrap();
+    assert!(plan.blocks.len()<=31);assert!(plan.blocks.iter().any(|(id,_)|id=="text-99"));
+    let visible=BTreeSet::from(["text-3".into(),"text-4".into()]);
+    let plan=f.cache.plan_visible("chat",&LocalChat::default(),&[],Some(&visible)).unwrap();
+    assert_eq!(plan.blocks.iter().map(|(id,_)|id.clone()).collect::<BTreeSet<_>>(),BTreeSet::from([QUEUE.into(),"text-3".into(),"text-4".into()]));
+    let tx=f.source.transaction().unwrap();
+    tau_blocks::put(&tx,"chat",BlockHeader {id:"live".into(),parent:None,order:200,kind:BlockKind::Thinking,meta:event("live",200,"thinking"),version:0,length:0,sealed:false,revision:0},b"observed prefix").unwrap();tx.commit().unwrap();
+    f.page(None,None);f.body("live");assert!(f.cache.copy_ready("chat",&["live".into()]).unwrap().is_none());
+    let tx=f.source.transaction().unwrap();let mut h=tau_blocks::header(&tx,"chat","live").unwrap().unwrap();h.sealed=true;tau_blocks::set_header(&tx,"chat",h).unwrap();tx.commit().unwrap();
+    f.page(None,None);assert!(f.cache.copy_ready("chat",&["live".into()]).unwrap().unwrap().contains("observed prefix"));
+}
+
+#[test]
+fn copy_interest_advances_in_bounded_cohorts_instead_of_starving_after_thirty_cards() {
+    let mut f=Fixture::new();let ids=(0..100).map(|n|format!("thinking-{n}")).collect::<Vec<_>>();
+    for (n,id) in ids.iter().enumerate() {f.put(id,None,n as u64,BlockKind::Thinking,event(id,n as u64,"thinking"),b"thought");}
+    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat").unwrap() {f.page(None,Some(before));}
+    let mut fetched=BTreeSet::new();
+    for expected in [30,30,30,10] {
+        assert!(f.cache.copy_ready("chat",&ids).unwrap().is_none());
+        let plan=f.cache.plan("chat",&LocalChat::default(),&ids).unwrap();
+        let bodies=plan.blocks.iter().filter(|(id,_)|id!=QUEUE).map(|(id,_)|id.clone()).collect::<Vec<_>>();assert_eq!(bodies.len(),expected);
+        for id in bodies {assert!(fetched.insert(id.clone()));f.body(&id);}
+    }
+    assert_eq!(fetched.len(),100);assert_eq!(f.cache.copy_ready("chat",&ids).unwrap().unwrap().matches("thought").count(),100);
+}

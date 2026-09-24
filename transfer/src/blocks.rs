@@ -21,6 +21,15 @@ pub trait Backend: Send + Sync + 'static {
     fn read(&self, request: BlockRequest) -> BoxFuture<'static, Result<ContentRange>>;
     /// Hints only: lag/coalescing cannot lose data, which is read by durable cursor.
     fn changes(&self) -> watch::Receiver<u64>;
+    fn upload_begin(&self, _spec: UploadSpec) -> BoxFuture<'static, Result<UploadStatus>> {
+        Box::pin(async { bail!("Uploads are not supported") })
+    }
+    fn upload_write(&self, _spec: UploadSpec, _offset: u64, _bytes: Vec<u8>) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { bail!("Uploads are not supported") })
+    }
+    fn upload_finish(&self, _spec: UploadSpec) -> BoxFuture<'static, Result<UploadStatus>> {
+        Box::pin(async { bail!("Uploads are not supported") })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -31,6 +40,8 @@ pub enum Codec { Raw, Zstd }
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Header {
     Watch { request: BlockWatch, credit: u32 },
+    Upload { spec: UploadSpec },
+    Uploaded { status: UploadStatus },
     Credit { bytes: u32 },
     Record { watch:usize, record: BlockRecord },
     Page { watch:usize, reset: bool, cursor: FeedCursor, floor: u64, before: Option<FeedPosition>, more: bool },
@@ -220,7 +231,10 @@ async fn send_credited(send: &mut SendStream, recv: &mut RecvStream, credit: &mu
 
 async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc<dyn Backend>, grants: &Grants, node: NodeId) -> Result<()> {
     let (frame,_) = tokio::time::timeout(Duration::from_secs(10),receive(recv)).await??;
-    let Header::Watch { mut request, mut credit } = frame.header else { bail!("Expected block watch"); };
+    if let Header::Upload { spec } = frame.header {
+        return serve_upload(send, recv, backend, grants, node, spec).await;
+    }
+    let Header::Watch { mut request, mut credit } = frame.header else { bail!("Expected block watch or upload"); };
     ensure!(credit == BLOCK_WINDOW_BYTES,"Invalid initial block window");
     let priority = match &request { BlockWatch::Feed(_) | BlockWatch::Feeds {..} => 10, BlockWatch::Block(_) => 0 };
     send.set_priority(priority)?;
@@ -285,6 +299,81 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
     send_credited(send,recv,&mut credit,Frame::metadata(Header::End)).await
 }
 
+async fn serve_upload(send: &mut SendStream, recv: &mut RecvStream, backend: Arc<dyn Backend>, grants: &Grants, node: NodeId, spec: UploadSpec) -> Result<()> {
+    ensure!(authorized(grants,&node), "Block authorization expired");
+    tau_blocks::uploads::validate(&spec)?;
+    send.set_priority(-10)?;
+    let status = backend.upload_begin(spec.clone()).await?;
+    send.write_all(&encode(&Frame::metadata(Header::Uploaded { status:status.clone() }))?).await?;
+    if status.sealed { return Ok(()); }
+    loop {
+        let (frame,n) = tokio::time::timeout(IO_TIMEOUT,receive(recv)).await.context("Upload stalled")??;
+        ensure!(authorized(grants,&node), "Block authorization expired");
+        match &frame.header {
+            Header::Data {version:1,offset,..} => {
+                let bytes = frame.decoded()?;
+                tokio::select! {
+                    _ = send.stopped() => return Ok(()),
+                    result = backend.upload_write(spec.clone(),*offset,bytes) => result?,
+                }
+                // A returned byte credit certifies that the verified range is
+                // durable, not merely queued for a database worker.
+                tokio::time::timeout(IO_TIMEOUT,send.write_all(&encode(&Frame::metadata(Header::Credit {bytes:n}))?)).await??;
+            }
+            Header::End => {
+                let status = tokio::select! {
+                    _ = send.stopped() => return Ok(()),
+                    result = backend.upload_finish(spec) => result?,
+                };
+                send.write_all(&encode(&Frame::metadata(Header::Uploaded {status}))?).await?;
+                return Ok(());
+            }
+            _ => bail!("Unexpected upload frame"),
+        }
+    }
+}
+
+fn upload_status(frame: Frame) -> Result<UploadStatus> {
+    match frame.header {
+        Header::Uploaded {status} => Ok(status),
+        Header::Error {message} => bail!("{message}"),
+        _ => bail!("Expected durable upload checkpoint"),
+    }
+}
+
+/// One stream on the shared connection, with a pipelined encoded-byte window.
+/// Dropping it cancels only this stream; a retry discovers the durable prefix.
+pub struct Uploader {
+    send: SendStream, recv: RecvStream, pub status: UploadStatus, spec: UploadSpec, credit:u32,
+    _permit:tokio::sync::OwnedSemaphorePermit, _bulk:tokio::sync::OwnedSemaphorePermit,
+}
+impl Uploader {
+    pub async fn write(&mut self, bytes:&[u8]) -> Result<()> {
+        ensure!(!self.status.sealed && !bytes.is_empty() && bytes.len() <= BLOCK_CHUNK_BYTES && self.status.offset.saturating_add(bytes.len() as u64) <= self.spec.length, "Invalid upload write");
+        let compressed = if bytes.len() >= 1024 {zstd::bulk::compress(bytes,1)?} else {vec![]};
+        let (codec,data) = if !compressed.is_empty() && compressed.len()+16 < bytes.len() {(Codec::Zstd,compressed)} else {(Codec::Raw,bytes.to_vec())};
+        let frame = Frame {header:Header::Data {version:1,offset:self.status.offset,hash:blake3::hash(bytes).to_hex().to_string(),length:bytes.len() as u32,codec},data};
+        send_credited(&mut self.send,&mut self.recv,&mut self.credit,frame).await?;
+        self.status.offset += bytes.len() as u64;
+        Ok(())
+    }
+    pub async fn finish(&mut self) -> Result<UploadStatus> {
+        if self.status.sealed {return Ok(self.status.clone());}
+        ensure!(self.status.offset == self.spec.length,"Upload is incomplete");
+        self.send.write_all(&encode(&Frame::metadata(Header::End))?).await?;
+        loop {
+            let (frame,_) = tokio::time::timeout(IO_TIMEOUT,receive(&mut self.recv)).await??;
+            if matches!(frame.header,Header::Credit {..}) {continue;}
+            self.status = upload_status(frame)?;
+            ensure!(self.status.sealed && self.status.offset == self.spec.length,"Upload was not committed");
+            return Ok(self.status.clone());
+        }
+    }
+}
+impl Drop for Uploader {
+    fn drop(&mut self) {let _ = self.send.reset(0u32.into()); let _ = self.recv.stop(0u32.into());}
+}
+
 /// Reused for every stream/file in this client/daemon context.
 pub struct Client {
     endpoint: Endpoint,
@@ -292,12 +381,15 @@ pub struct Client {
     connection: tokio::sync::Mutex<Option<Connection>>,
     streams: Arc<Semaphore>,
     bulk: Arc<Semaphore>,
+    metadata: Arc<Semaphore>,
+    foreground: Arc<Semaphore>,
+    descriptors: Arc<Semaphore>,
 }
 impl Client {
     pub async fn bind() -> Result<Self> {
         let endpoint = Endpoint::builder().bind_addr_v6(SocketAddrV6::new(Ipv6Addr::LOCALHOST,0,0,0))
             .relay_mode(RelayMode::Disabled).transport_config(config()).bind().await?;
-        Ok(Self { endpoint,peer:tokio::sync::Mutex::new(None),connection:tokio::sync::Mutex::new(None),streams:Arc::new(Semaphore::new(MAX_STREAMS-2)),bulk:Arc::new(Semaphore::new(6)) })
+        Ok(Self { endpoint,peer:tokio::sync::Mutex::new(None),connection:tokio::sync::Mutex::new(None),streams:Arc::new(Semaphore::new(MAX_STREAMS-2)),bulk:Arc::new(Semaphore::new(6)),metadata:Arc::new(Semaphore::new(2)),foreground:Arc::new(Semaphore::new(4)),descriptors:Arc::new(Semaphore::new(2)) })
     }
     pub fn node_id(&self) -> String { self.endpoint.node_id().to_string() }
     pub async fn configure(&self, offer: &BulkOffer, host: &str) -> Result<()> {
@@ -320,7 +412,26 @@ impl Client {
         let connection = tokio::time::timeout(IO_TIMEOUT,self.endpoint.connect(peer,ALPN)).await??;
         *slot = Some(connection.clone()); Ok(connection)
     }
-    pub async fn watch(&self, request: BlockWatch) -> Result<Watcher> { self.open_watch(request,None).await }
+    pub async fn watch(&self, request: BlockWatch) -> Result<Watcher> {
+        let class = if matches!(request,BlockWatch::Feed(_) | BlockWatch::Feeds {..}) { &self.metadata } else { &self.foreground };
+        self.open_watch(request,Some(class.clone().acquire_owned().await?)).await
+    }
+    pub async fn watch_descriptor(&self, request: BlockWatch) -> Result<Watcher> {
+        self.open_watch(request,Some(self.descriptors.clone().acquire_owned().await?)).await
+    }
+    pub async fn uploader(&self, spec: UploadSpec) -> Result<Uploader> {
+        tau_blocks::uploads::validate(&spec)?;
+        let bulk = self.bulk.clone().acquire_owned().await?;
+        let permit = self.streams.clone().acquire_owned().await?;
+        let connection = self.connection().await?;
+        let (mut send,mut recv) = connection.open_bi().await?;
+        send.set_priority(-10)?;
+        send.write_all(&encode(&Frame::metadata(Header::Upload { spec:spec.clone() }))?).await?;
+        let (frame,_) = tokio::time::timeout(IO_TIMEOUT,receive(&mut recv)).await??;
+        let status = upload_status(frame)?;
+        ensure!(status.offset <= spec.length && (!status.sealed || status.offset == spec.length), "Invalid upload checkpoint");
+        Ok(Uploader { send,recv,status,spec,credit:BLOCK_WINDOW_BYTES,_permit:permit,_bulk:bulk })
+    }
     pub async fn watch_bulk(&self, request: BlockWatch) -> Result<Watcher> {
         let bulk=self.bulk.clone().acquire_owned().await?;
         self.open_watch(request,Some(bulk)).await

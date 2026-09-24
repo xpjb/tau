@@ -63,13 +63,23 @@ pub struct Account {
     pub selected: Option<String>,
     pub read_at: BTreeMap<String, u64>,
     pub pending_create: Option<ClientRequest>,
+    pub pending_controls:BTreeMap<String,PendingControl>,
 }
 impl Default for Account {
     fn default() -> Self {
         Self { projects: vec![Project::general()], selected_project: general_project_id(),
-            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, read_at: BTreeMap::new(), pending_create: None }
+            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, read_at: BTreeMap::new(), pending_create: None, pending_controls:BTreeMap::new() }
     }
 }
+/// Complete immutable intent, saved before control or input-upload submission.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PendingControl {
+    pub request:ClientRequest,
+    pub deleted_chats:Vec<String>,
+    pub blocked:bool,
+    #[serde(default)] pub accepted:bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalFile {
     pub id: String,
@@ -152,14 +162,25 @@ impl LocalChat {
         !self.draft.is_empty() || !self.files.is_empty() || !self.pending.is_empty()
     }
     pub fn reconcile(&mut self, queue: &QueueState, delivered: &[String]) {
-        self.pending.retain(|p| {
-            !delivered.contains(&p.request.id)
-                && !queue.requests.iter().any(|q| q.request_id == p.request.id)
-        });
-        if let Some(control) = &queue.control {
-            self.pending.retain(|p| p.request.id != control.command_id);
-        }
+        self.reconcile_complete(queue,delivered,&HashSet::new());
     }
+    pub fn reconcile_complete(&mut self, queue:&QueueState, delivered:&[String], incomplete:&HashSet<String>) {
+        self.pending.retain(|p| {
+            if matches!(p.status,Delivery::Rejected) {return true;}
+            match &p.request.command {
+                ClientCommand::QueueControl {operation:QueueOperation::Edit {request_id,revision,text},..} if p.status==Delivery::Accepted => {
+                    if !queue.available {return true;}
+                    queue.requests.iter().find(|q|&q.request_id==request_id).is_some_and(|q|
+                        q.revision<=*revision || incomplete.contains(&format!("queued:{request_id}")) || q.revision==revision+1 && &q.text!=text)
+                }
+                ClientCommand::QueueControl {operation:QueueOperation::Delete {request_id,..},..} if p.status==Delivery::Accepted =>
+                    !queue.available || queue.requests.iter().any(|q|&q.request_id==request_id),
+                _ => !delivered.contains(&p.request.id) && !queue.requests.iter().any(|q|q.request_id==p.request.id)
+                    && !queue.control.as_ref().is_some_and(|c|c.command_id==p.request.id),
+            }
+        });
+    }
+
 }
 
 pub struct Store {
@@ -271,6 +292,10 @@ impl Store {
             anyhow::bail!("File changed size during import");
         }
         output.sync_all()?;
+        #[cfg(unix)] {
+            let mut at=directory.as_path();
+            loop {std::fs::File::open(at)?.sync_all()?;if at==self.root {break;}at=at.parent().context("Attachment directory escaped local storage")?;}
+        }
         let name = name
             .map(str::to_owned)
             .or_else(|| source.file_name().map(|n| n.to_string_lossy().into_owned()))

@@ -2451,13 +2451,13 @@ impl App {
             let control = matches!(&p.request.command, ClientCommand::QueueControl { .. } | ClientCommand::Abort { .. });
             let in_queue = chat.feed.queue.requests.iter().any(|q| match &p.request.command {
                 ClientCommand::QueueControl { operation: QueueOperation::Edit { request_id, revision, .. }
-                    | QueueOperation::Delete { request_id, revision }, .. } => q.request_id == *request_id && q.revision == *revision,
+                    | QueueOperation::Delete { request_id, revision }, .. } => q.request_id == *request_id && q.revision <= revision.saturating_add(1),
                 _ => false,
             });
             // The queue row owns an in-flight edit/delete. Never represent it as
             // a new user message; an unresolved control remains visible by itself
             // only if its target disappeared or it was explicitly rejected.
-            if (edit || delete) && in_queue && !matches!(p.status, crate::store::Delivery::Rejected | crate::store::Delivery::Accepted) { continue; }
+            if (edit || delete) && in_queue && !matches!(p.status, crate::store::Delivery::Rejected) { continue; }
             let mut actions = vec![("Copy text".into(), Action::Copy(p.text.clone()))];
             if !control { actions.push(("Restore draft".into(), Action::Restore(p.request.id.clone()))); }
             actions.push(("Dismiss".into(), Action::Dismiss(p.request.id.clone())));
@@ -2520,10 +2520,10 @@ impl App {
                 let target = match &p.request.command {
                     ClientCommand::QueueControl { operation: QueueOperation::Edit { request_id, revision, .. }
                         | QueueOperation::Delete { request_id, revision }, .. } =>
-                        request_id == &q.request_id && *revision == q.revision,
+                        request_id == &q.request_id && q.revision <= revision.saturating_add(1),
                     _ => false,
                 };
-                target && matches!(p.status, crate::store::Delivery::Sending | crate::store::Delivery::Unconfirmed)
+                target && matches!(p.status, crate::store::Delivery::Sending | crate::store::Delivery::Unconfirmed | crate::store::Delivery::Accepted)
             });
             let editing = pending.and_then(|p| match &p.request.command {
                 ClientCommand::QueueControl { operation: QueueOperation::Edit { text, .. }, .. } => Some(text.as_str()),
@@ -2540,7 +2540,7 @@ impl App {
                 key: format!("queue:{}", q.request_id),
                 title: if let Some(p) = pending {
                     format!("{} · {}", if editing.is_some() { "Queue edit" } else { "Queue delete" },
-                        if p.status == crate::store::Delivery::Unconfirmed { "unconfirmed · not resent" } else { "saving…" })
+                        if p.status == crate::store::Delivery::Unconfirmed { "unconfirmed · not resent" } else if p.status==crate::store::Delivery::Accepted {"accepted · synchronizing…"} else { "saving…" })
                 } else { format!("Queued{}", if state.paused { " · held" } else { "" }) },
                 timestamp: clock::label(q.timestamp_ms),
                 sender: EventRole::User,
@@ -2824,6 +2824,22 @@ impl App {
         {
             wheel.target = (wheel.target + self.scroll - old_scroll).clamp(0., self.max_scroll);
         }
+        let mut interests=std::collections::BTreeSet::new();
+        let top=self.scroll-viewport.height;let bottom=self.scroll+2.*viewport.height;
+        for (row,p) in rows.iter().zip(&placements).filter(|(_,p)|p.top+p.height>=top && p.top<=bottom) {
+            if row.details.is_empty() {
+                if let Some(id)=row.key.strip_prefix(&format!("{session}/")) {interests.insert(id.to_owned());}
+            } else if let Some(layout)=detail_layouts.get(&row.key) {
+                for (line,(offset,height)) in row.details.iter().zip(layout) {
+                    if p.top+offset+height<top || p.top+offset>bottom {continue;}
+                    for event in self.controller.chats[&session].feed.events.values() {
+                        let tool=format!("tool:{}",event.tool_call_id.as_deref().unwrap_or(&event.id));
+                        if line.key==format!("thinking:{}",event.id) || line.key==tool || line.key.starts_with(&format!("{tool}:")) {interests.insert(event.id.clone());}
+                    }
+                }
+            }
+        }
+        self.controller.viewport(&session,interests);
         self.placed = placements;
         self.placed_session = Some(session.clone());
         if can_remember {
