@@ -38,6 +38,7 @@ pub struct Editor {
     // Mutate through the editor operations, not by assigning text behind its cache.
     pub value: String,
     pub single_line: bool,
+    center_one_line: bool,
     caret: Caret,
     anchor: usize,
     goal: Option<f32>,
@@ -57,13 +58,18 @@ impl Editor {
         let end = value.len();
         Self {
             value, caret: Caret { byte_index: end, line_index: 0 }, anchor: end,
-            single_line: false, goal: None, after_edit: true, follow_caret: true,
+            single_line: false, center_one_line: false, goal: None, after_edit: true, follow_caret: true,
             composition: None, undo: Vec::new(), redo: Vec::new(), layout: None,
             view: None, visible: false, scroll: Vec2::new(0., 0.),
         }
     }
     pub fn line(value: String) -> Self {
         Self { single_line: true, ..Self::new(normalize(&value, true)) }
+    }
+    /// A multiline composer centers its text only while it occupies one visual
+    /// line. Other multiline fields (such as large settings editors) stay top-aligned.
+    pub fn composer(value: String) -> Self {
+        Self { center_one_line: true, ..Self::new(value) }
     }
     pub fn range(&self) -> Range<usize> {
         self.caret.byte_index.min(self.anchor)..self.caret.byte_index.max(self.anchor)
@@ -202,7 +208,9 @@ impl Editor {
     }
     fn origin(&self, layout: &Layout, view: View) -> Vec2 {
         let inner = view.inner();
-        let center = if self.single_line { ((inner.height - layout.height_em() * view.size) * 0.5).max(0.) } else { 0. };
+        let center = if self.single_line || (self.center_one_line && layout.line_count() == 1) {
+            ((inner.height - layout.height_em() * view.size) * 0.5).max(0.)
+        } else { 0. };
         Vec2::new(inner.x - self.scroll.x * view.size, inner.y + center - self.scroll.y * view.size)
     }
     pub fn hide(&mut self) { self.visible = false; }
@@ -374,7 +382,7 @@ impl Editor {
         let inner = view.inner();
         if self.value.is_empty() && self.composition.is_none() {
             let h = size * 1.3;
-            let placeholder_rect = if self.single_line {
+            let placeholder_rect = if self.single_line || self.center_one_line {
                 Rect::new(inner.x, inner.y + (inner.height - h) / 2., inner.width, h)
             } else {
                 inner

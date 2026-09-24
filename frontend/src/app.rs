@@ -224,7 +224,7 @@ impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
         let controller = Controller::new(store, wake)?;
         let composer_session = controller.account.selected.clone();
-        let composer = Editor::new(
+        let composer = Editor::composer(
             controller
                 .selected()
                 .map(|c| c.local.draft.clone())
@@ -425,7 +425,7 @@ impl App {
             self.scroll = 0.;
             self.horizontal = 0.;
             self.velocity = 0.;
-            self.composer = Editor::new(
+            self.composer = Editor::composer(
                 self.controller
                     .selected()
                     .map(|c| c.local.draft.clone())
@@ -436,7 +436,7 @@ impl App {
         } else if let Some(chat) = self.controller.selected()
             && self.composer.value != chat.local.draft
         {
-            self.composer = Editor::new(chat.local.draft.clone());
+            self.composer = Editor::composer(chat.local.draft.clone());
             self.dirty = true;
         }
         if self.waiting_settings
@@ -1603,7 +1603,7 @@ impl App {
             Action::Restore(id) => {
                 self.controller.restore_pending(&id)?;
                 self.composer =
-                    Editor::new(self.controller.selected().unwrap().local.draft.clone());
+                    Editor::composer(self.controller.selected().unwrap().local.draft.clone());
             }
             Action::Dismiss(id) => self.controller.dismiss_pending(&id)?,
             Action::Queue(operation) => {
@@ -1660,7 +1660,7 @@ impl App {
                 }
             }
             Action::Suggest(text) => {
-                self.composer = Editor::new(text.clone());
+                self.composer = Editor::composer(text.clone());
                 self.controller.draft(text)?;
             }
         }
