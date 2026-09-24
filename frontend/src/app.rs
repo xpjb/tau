@@ -4258,3 +4258,5 @@ fn count(n: u64) -> String {
 
 #[cfg(all(test, not(target_os = "android")))]
 mod editor_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod thinking_tests;
