@@ -171,6 +171,12 @@ struct Viewer {
     zoom: f32,
     pan: Vec2,
 }
+#[cfg(not(target_os = "android"))]
+#[derive(Clone, Copy)]
+pub enum ConnectionPreview {
+    Waiting,
+    Disconnected,
+}
 pub struct App {
     pub controller: Controller,
     renderer: Renderer,
@@ -294,15 +300,24 @@ impl App {
         }
         Ok(app)
     }
-    /// Explicitly mocked, offline status for the headless connection-card fixture.
+    /// Headless-only state injection; never starts a socket or uses saved credentials.
     #[cfg(not(target_os = "android"))]
-    pub fn preview_connection(&mut self) {
+    pub fn preview_connection(&mut self, preview: ConnectionPreview) {
         self.controller.settings.server_url = "https://tau.example.invalid/private?token=hidden".into();
-        self.controller.connection = "Connected".into();
-        self.controller.epoch = Some(1); // Fixture only; never starts a transport.
-        self.controller.health.connected();
-        self.controller.health.reply(std::time::Duration::from_millis(32));
-        self.controller.health.sent(Instant::now() - std::time::Duration::from_millis(347));
+        match preview {
+            ConnectionPreview::Waiting => {
+                self.controller.connection = "Connected".into();
+                self.controller.epoch = Some(1);
+                self.controller.health.connected();
+                self.controller.health.reply(std::time::Duration::from_millis(32));
+                self.controller.health.sent(Instant::now() - std::time::Duration::from_millis(347));
+            }
+            ConnectionPreview::Disconnected => {
+                self.controller.connection = "Ping timed out. Reconnecting…".into();
+                self.controller.epoch = None;
+                self.controller.health.disconnected(false);
+            }
+        }
         self.info_target = Info::Connection;
         self.info_tip.pinned = true;
         self.info_tip.suppressed = false;
@@ -2039,11 +2054,15 @@ impl App {
             let status = format!(
                 "{}{}",
                 if unread { "●  " } else { "" },
-                match session.status {
-                    SessionStatus::Running => "Working",
-                    SessionStatus::Error => "Error",
-                    SessionStatus::Idle => "Ready",
-                    SessionStatus::Sleeping => "Sleeping",
+                if self.controller.epoch.is_none() {
+                    "Offline"
+                } else {
+                    match session.status {
+                        SessionStatus::Running => "Working",
+                        SessionStatus::Error => "Error",
+                        SessionStatus::Idle => "Ready",
+                        SessionStatus::Sleeping => "Sleeping",
+                    }
                 }
             );
             self.renderer.clipped_label(
@@ -2051,7 +2070,7 @@ impl App {
                 &status,
                 Rect::new(rect.x + 12. * s, y + 58. * s, rect.width - 24. * s, 18. * s),
                 12. * s,
-                color(if session.status == SessionStatus::Running {
+                color(if self.controller.epoch.is_some() && session.status == SessionStatus::Running {
                     0x67d4ff
                 } else {
                     0x82909f

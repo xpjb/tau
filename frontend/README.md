@@ -19,8 +19,9 @@ ANDROID_ABI=arm64-v8a frontend/android/build.sh
 Desktop development can seed connection settings with `TAU2_SERVER` and `TAU2_TOKEN`;
 `TAU2_DATA_DIR` isolates local data. `target/debug/tau --screenshot PATH [--phone]`
 renders the explicitly offline demo through the real GPU shader path.
-`target/debug/tau --screenshot PATH --connection-preview` pins a mocked
-in-flight connection card (no network connection, no credentials).
+`target/debug/tau --screenshot PATH --connection-preview [waiting|disconnected]`
+pins a mocked connection card (defaults to waiting; no network connection or
+credentials).
 
 ## UI and ownership
 

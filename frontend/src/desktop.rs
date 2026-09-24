@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, PlatformAction},
+    app::{App, ConnectionPreview, PlatformAction},
     store::{Settings, Store},
 };
 use chad::winit::{
@@ -296,10 +296,16 @@ impl Desktop {
 pub fn run() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().map(String::as_str) == Some("--screenshot") {
+        let preview = args.iter().position(|a| a == "--connection-preview")
+            .map(|i| match args.get(i + 1).map(String::as_str) {
+                Some("disconnected") => Ok(ConnectionPreview::Disconnected),
+                Some("waiting" | "--phone") | None => Ok(ConnectionPreview::Waiting),
+                Some(mode) => Err(format!("Unknown connection preview: {mode}")),
+            }).transpose()?;
         return screenshot(
             Path::new(args.get(1).ok_or("Missing output path")?),
             args.iter().any(|a| a == "--phone"),
-            args.iter().any(|a| a == "--connection-preview"),
+            preview,
         );
     }
     #[cfg(windows)]
@@ -339,7 +345,7 @@ pub fn limits() -> wgpu::Limits {
         ..wgpu::Limits::downlevel_defaults()
     }
 }
-pub fn screenshot(path: &Path, phone: bool, connection_preview: bool) -> Result<(), String> {
+pub fn screenshot(path: &Path, phone: bool, connection_preview: Option<ConnectionPreview>) -> Result<(), String> {
     let size = if phone { (1080, 2160) } else { (1280, 900) };
     let ctx = chad::HeadlessCtx::new(&Config {
         size,
@@ -353,7 +359,7 @@ pub fn screenshot(path: &Path, phone: bool, connection_preview: bool) -> Result<
     crate::demo::populate(&mut app.controller).map_err(|e| e.to_string())?;
     app.resize(size, if phone { 2.5 } else { 1. }, Vec2::new(0., 0.));
     app.tick(0.);
-    if connection_preview { app.preview_connection(); }
+    if let Some(preview) = connection_preview { app.preview_connection(preview); }
     app.frame(&ctx, ctx.view());
     let rgba = ctx.read_rgba8()?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {

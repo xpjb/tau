@@ -94,7 +94,13 @@ impl Health {
                 ));
             }
         } else if matches!(self.phase, Phase::Blocked | Phase::Reconnecting) && !reason.is_empty() {
-            lines.push(reason.into());
+            // The title already says Reconnecting; don't repeat it in the cause.
+            lines.push(
+                reason
+                    .trim_end_matches(" Reconnecting…")
+                    .trim_end_matches('.')
+                    .into(),
+            );
         }
         lines.join("\n")
     }
@@ -167,6 +173,10 @@ mod tests {
         health.sent(now);
         health.disconnected(false);
         assert_eq!(health.waiting_ms(now), None);
+        assert_eq!(
+            health.details(&settings, "Ping timed out. Reconnecting…", now),
+            "Reconnecting…\nhttps://example.com:8443\nPing timed out"
+        );
         assert_eq!(
             health.details(&settings, "Socket closed", now),
             "Reconnecting…\nhttps://example.com:8443\nSocket closed"

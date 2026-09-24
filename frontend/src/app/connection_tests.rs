@@ -23,7 +23,7 @@ fn connection_counter_repaints_while_visible_and_stops_after_reply() {
     crate::demo::populate(&mut app.controller).unwrap();
     app.resize(ctx.size(), 1., Vec2::new(0., 0.));
     app.tick(0.);
-    app.preview_connection();
+    app.preview_connection(ConnectionPreview::Waiting);
     app.frame(&ctx, ctx.view());
     let first = ctx.read_rgba8().unwrap();
     assert!(
@@ -95,4 +95,17 @@ fn connection_counter_repaints_while_visible_and_stops_after_reply() {
         "a hidden counter must not keep the GPU awake"
     );
     assert_eq!(app.counter_bucket, None);
+
+    app.preview_connection(ConnectionPreview::Disconnected);
+    app.frame(&ctx, ctx.view());
+    assert_eq!(
+        app.info_tip.text,
+        "Reconnecting…\nhttps://tau.example.invalid\nPing timed out"
+    );
+    assert_eq!(app.controller.health.color(), 0xfbbf24);
+    assert_ne!(
+        first,
+        ctx.read_rgba8().unwrap(),
+        "disconnected card must render on the GPU"
+    );
 }
