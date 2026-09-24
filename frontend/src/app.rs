@@ -1944,13 +1944,18 @@ impl App {
                 radius - 2. * s,
                 color(0x18212b),
             );
-            self.renderer.label(
+            let icon_size = 24. * s;
+            self.renderer.icon(
+                ctx,
                 &mut overlay,
-                "↕",
-                Rect::new(a.x - 7. * s, a.y - 12. * s, 18. * s, 26. * s),
-                22. * s,
-                color(0x67d4ff),
-                false,
+                Icon::Autoscroll,
+                Rect::new(
+                    a.x - icon_size / 2.,
+                    a.y - icon_size / 2.,
+                    icon_size,
+                    icon_size,
+                ),
+                0x67d4ff,
             );
         }
         if let Some(viewer) = &self.viewer {

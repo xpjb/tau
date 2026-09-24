@@ -144,3 +144,70 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         );
     }
 }
+
+#[test]
+fn middle_click_marker_is_drawn_at_the_autoscroll_anchor_not_text_baseline() {
+    let root = tempfile::tempdir().unwrap();
+    let ctx = HeadlessCtx::new(&Config {
+        size: (1000, 800),
+        device_limits: crate::desktop::limits(),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut app = App::new(
+        &ctx,
+        Store::open(root.path().into()).unwrap(),
+        Arc::new(|| {}),
+        false,
+    )
+    .unwrap();
+    app.back();
+    crate::demo::populate(&mut app.controller).unwrap();
+    app.controller
+        .chats
+        .get_mut("demo")
+        .unwrap()
+        .feed
+        .events
+        .values_mut()
+        .last()
+        .unwrap()
+        .text = "Enough text to scroll.\n\n".repeat(120);
+    app.resize(ctx.size(), 1., Vec2::new(0., 0.));
+    app.tick(0.);
+    app.frame(&ctx, ctx.view());
+    assert!(app.max_scroll > 0.);
+    let point = Vec2::new(
+        app.transcript.x + app.transcript.width / 2.,
+        app.transcript.y + app.transcript.height / 2.,
+    );
+    let before = ctx.read_rgba8().unwrap();
+    app.middle(true, point);
+    let anchor = app.autoscroll.as_ref().unwrap().anchor;
+    assert_eq!((anchor.x, anchor.y), (point.x, point.y));
+    app.frame(&ctx, ctx.view());
+    let during = ctx.read_rgba8().unwrap();
+    let pixel = |image: &[u8], x: f32, y: f32| {
+        let at = (y as usize * 1000 + x as usize) * 4;
+        <[u8; 4]>::try_from(&image[at..at + 4]).unwrap()
+    };
+    assert_ne!(
+        pixel(&before, point.x, point.y),
+        pixel(&during, point.x, point.y)
+    );
+    assert_ne!(
+        pixel(&before, point.x, point.y - 7.),
+        pixel(&during, point.x, point.y - 7.)
+    );
+    assert_ne!(
+        pixel(&before, point.x, point.y + 7.),
+        pixel(&during, point.x, point.y + 7.)
+    );
+    app.cancel_autoscroll();
+    app.frame(&ctx, ctx.view());
+    assert_eq!(
+        before,
+        ctx.read_rgba8().unwrap(),
+        "dismissing the badge restores the transcript"
+    );
+}
