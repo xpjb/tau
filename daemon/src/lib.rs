@@ -56,6 +56,8 @@ pub async fn run(mut config: Config) -> Result<()> {
 
 #[cfg(test)]
 mod agent_test;
+#[cfg(test)]
+mod protocol_audit_test;
 
 pub async fn login_codex() -> Result<()> {
     let settings_path = std::env::var_os("TAU_SETTINGS_PATH").map(std::path::PathBuf::from).unwrap_or_else(|| "/var/lib/tau/settings.json".into());
