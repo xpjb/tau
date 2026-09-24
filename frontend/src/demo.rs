@@ -11,7 +11,7 @@ pub fn populate(c: &mut Controller) -> Result<()> {
         detail: None,
         context_usage: Some(ContextUsage {
             tokens: Some(18340),
-            context_window: 200000,
+            context_window: Some(200000),
         }),
         model: Some(SessionModel {
             provider: "anthropic".into(),

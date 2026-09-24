@@ -2858,11 +2858,7 @@ impl App {
         );
         let usage_rect = Rect::new(field.x + field.width - 84. * s, iy, 40. * s, 40. * s);
         let usage = summary.as_ref().and_then(|s| s.context_usage);
-        let capacity = usage.map(|u| u.context_window).filter(|n| *n > 0);
-        let used = usage.and_then(|u| u.tokens);
-        let ratio = capacity
-            .zip(used)
-            .map(|(capacity, used)| used as f32 / capacity as f32);
+        let (ratio, usage_text) = context_usage_display(usage);
         self.icon_button(
             ctx,
             chrome,
@@ -2874,24 +2870,8 @@ impl App {
             true,
         );
         self.usage.region = usage_rect;
-        self.usage.text = if let Some(capacity) = capacity {
-            if let Some(used) = used {
-                format!(
-                    "Estimated context usage: {:.0}%\n{} of {} tokens",
-                    ratio.unwrap() * 100.,
-                    count(used),
-                    count(capacity)
-                )
-            } else {
-                format!(
-                    "Context usage unknown\nCapacity: {} tokens",
-                    count(capacity)
-                )
-            }
-        } else {
-            "Context usage unavailable".into()
-        };
-        if capacity.is_some()
+        self.usage.text = usage_text;
+        if usage.is_some()
             && (!connected
                 || !self.controller.chats[&session].feed.synchronized
                 || summary.as_ref().is_none_or(|s| {
@@ -4244,6 +4224,21 @@ pub(crate) fn code(text: &str) -> String {
     format!("{fence}\n{text}\n{fence}")
 }
 
+fn context_usage_display(usage: Option<ContextUsage>) -> (Option<f32>, String) {
+    match usage {
+        Some(ContextUsage { tokens: Some(used), context_window: Some(capacity) }) if capacity > 0 => {
+            let ratio = used as f32 / capacity as f32;
+            (Some(ratio), format!("Estimated context usage: {:.0}%\n{} of {} tokens", ratio * 100., count(used), count(capacity)))
+        }
+        Some(ContextUsage { tokens: Some(used), .. }) =>
+            (None, format!("Estimated context used: {} tokens\nCapacity unknown", count(used))),
+        Some(ContextUsage { context_window: Some(capacity), .. }) if capacity > 0 =>
+            (None, format!("Context usage unknown\nCapacity: {} tokens", count(capacity))),
+        Some(_) => (None, "Context usage unknown\nCapacity unknown".into()),
+        None => (None, "Context usage unavailable".into()),
+    }
+}
+
 fn count(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
@@ -4258,3 +4253,25 @@ fn count(n: u64) -> String {
 
 #[cfg(all(test, not(target_os = "android")))]
 mod editor_tests;
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn token_usage_does_not_require_a_guessed_context_window() {
+        let unknown_capacity = Some(ContextUsage { tokens: Some(1_024), context_window: None });
+        let (ring, text) = context_usage_display(unknown_capacity);
+        assert_eq!(ring, None);
+        assert_eq!(text, "Estimated context used: 1,024 tokens\nCapacity unknown");
+        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: None })).1,
+            "Context usage unknown\nCapacity unknown");
+        assert_eq!(context_usage_display(None).1, "Context usage unavailable");
+
+        let (ring, text) = context_usage_display(Some(ContextUsage { tokens: Some(1_024), context_window: Some(4_096) }));
+        assert_eq!(ring, Some(0.25));
+        assert_eq!(text, "Estimated context usage: 25%\n1,024 of 4,096 tokens");
+        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: Some(4_096) })).1,
+            "Context usage unknown\nCapacity: 4,096 tokens");
+    }
+}

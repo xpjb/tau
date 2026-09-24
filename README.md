@@ -33,8 +33,13 @@ part of the wire settings document.
 
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
-context capacity stays unknown. The title model is separately configurable; unset
-uses the chat model. Cache rings are estimates from existing reply timestamps, not native
+context capacity stays unknown: the context tooltip shows the last provider-reported
+turn total in tokens even when the selected model has no `contextWindow` metadata.
+The percentage/ring fill and threshold-based auto-compaction still need an explicitly
+configured capacity; a missing window is never guessed. Sleeping chats retain the
+last saved token count, marked as last known. This protocol-15 change needs matching
+client and daemon builds and has not been deployed. The title model is separately
+configurable; unset uses the chat model. Cache rings are estimates from existing reply timestamps, not native
 runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.
 

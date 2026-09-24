@@ -1,4 +1,3 @@
-use crate::settings::SettingsExt;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
@@ -13,10 +12,19 @@ use crate::agent::{AgentSession, auth::AuthStore};
 use crate::config::Config;
 use crate::protocol::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, SessionSummary, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
 use crate::settings::{SettingsStore, Settings};
-use crate::state::{StateStore, Receipt};
+use crate::state::{StateStore, Receipt, SessionModel};
 use crate::transcript::{QueuedRequest, QueueControl, Transcript};
 
 const EVENT_BUFFER: usize = 2048;
+
+// Provider usage can be known even when optional model metadata has no capacity.
+// Never invent a context window or turn a missing token count into zero.
+pub(crate) fn context_usage(settings: &Settings, model: &SessionModel, tokens: Option<u64>) -> Option<ContextUsage> {
+    let context_window = settings.models.iter()
+        .find(|item| item.provider == model.provider && item.id == model.model_id)
+        .and_then(|item| item.context_window);
+    (tokens.is_some() || context_window.is_some()).then_some(ContextUsage { tokens, context_window })
+}
 pub struct PromptOutcome { pub disposition: PromptDisposition, pub notice: Option<String> }
 #[derive(Clone)]
 pub struct AgentManager { pub(crate) inner: Arc<ManagerInner> }
@@ -61,9 +69,14 @@ impl AgentManager {
     pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> { self.inner.events.subscribe() }
     pub async fn sessions_message(&self) -> Result<ServerMessage> {
         let runtimes = self.inner.runtimes.lock().await;
+        let settings = self.inner.settings.get();
         Ok(ServerMessage::Sessions { sessions: self.inner.state.list().await?.into_iter().map(|(id, s)| {
             let runtime = runtimes.get(&id).map(|r| r.snapshot()).unwrap_or_default();
-            SessionSummary { id, title:s.title, starter:s.starter, status:runtime.status, detail:runtime.detail, context_usage:runtime.context_usage,
+            // Sleeping chats (including those never opened since restart) retain the
+            // last saved value; active chats may have newer in-memory turn usage.
+            let tokens = if runtime.status == SessionStatus::Sleeping { s.tokens } else { runtime.context_usage.and_then(|usage| usage.tokens) };
+            let context_usage = context_usage(&settings, &s.model, tokens);
+            SessionSummary { id, title:s.title, starter:s.starter, status:runtime.status, detail:runtime.detail, context_usage,
                 model:Some(s.model), parent_id:s.parent_id, created_at_ms:s.created_at_ms, updated_at_ms:s.updated_at_ms }
         }).collect() })
     }
@@ -91,8 +104,10 @@ impl AgentManager {
         let mut snapshot = content.transcript.as_ref().unwrap().snapshot();
         snapshot.delivered = self.inner.state.delivered(id,requests).await?;
         let state = runtime.snapshot();
+        let agent = content.agent.as_ref().unwrap();
+        let usage = context_usage(&self.inner.settings.get(), &agent.model, agent.tokens);
         Ok(SessionFeed { initial: vec![ServerMessage::TranscriptSnapshot { session_id:id.into(), snapshot },
-            ServerMessage::SessionState { session_id:id.into(), status:state.status, detail:state.detail, context_usage:state.context_usage }], events:content.events.subscribe() })
+            ServerMessage::SessionState { session_id:id.into(), status:state.status, detail:state.detail, context_usage:usage }], events:content.events.subscribe() })
     }
     pub async fn history_page(&self, id: &str, generation: &str, before: u64) -> Result<crate::transcript::HistoryPage> {
         let runtime = self.runtime(id).await?; let content = runtime.content.lock().await;
@@ -222,9 +237,10 @@ impl AgentManager {
         };
         if let Some(task) = task && let Err(error) = task.await { warn!(%error, "Agent task stopped unexpectedly"); }
         let mut content = runtime.content.lock().await;
+        let usage = content.agent.as_ref().and_then(|agent| context_usage(&self.inner.settings.get(), &agent.model, agent.tokens));
         content.agent = None; content.transcript = None;
         let _ = content.events.send(Arc::new(ServerMessage::ResyncRequired { session_id:Some(id.into()) }));
-        self.set_runtime_state(id, runtime, SessionStatus::Sleeping, None, Some(None));
+        self.set_runtime_state(id, runtime, SessionStatus::Sleeping, None, Some(usage));
     }
     pub async fn delete_session(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
@@ -271,7 +287,7 @@ impl AgentManager {
         queue.run_id = None; queue.control = None;
         if !queue.requests.is_empty() || stored.needs_turn { queue.paused = true; }
         let detail = (queue.paused && (stored.needs_turn || !queue.requests.is_empty())).then(|| "Pending work is paused; resume when ready".to_owned());
-        let usage = settings.model(&stored.model).ok().and_then(|model| model.context_window).map(|context_window| ContextUsage { tokens:stored.tokens,context_window });
+        let usage = context_usage(&settings, &stored.model, stored.tokens);
         let page = self.inner.state.page(id,None).await?;
         content.transcript = Some(Transcript::new(page,stored.head,stored.next_order,queue));
         content.agent = Some(AgentSession { store:self.inner.state.clone(), revision:stored.revision, model:stored.model, thinking:stored.thinking,
@@ -305,7 +321,12 @@ impl AgentManager {
     pub(crate) async fn broadcast_sessions(&self) {
         match self.sessions_message().await { Ok(message) => { let _ = self.inner.events.send(message); }, Err(error) => warn!(%error,"Could not read session list") }
     }
-    pub async fn set_settings(&self, revision: u64, settings: Settings) -> Result<Settings> { self.inner.settings.set(revision, settings).await }
+    pub async fn set_settings(&self, revision: u64, settings: Settings) -> Result<Settings> {
+        let updated = self.inner.settings.set(revision, settings).await?;
+        // Capacity edits should update open and sleeping chat summaries immediately.
+        self.broadcast_sessions().await;
+        Ok(updated)
+    }
 }
 pub(crate) fn safe_file_name(file_name: &str) -> String {
     let safe = file_name.rsplit(['/', '\\']).next().unwrap_or_default().chars()

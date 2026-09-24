@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use crate::manager::{AgentManager, SessionContent, SessionRuntime, bounded};
-use crate::protocol::{ContextUsage, ServerMessage, SessionStatus};
+use crate::manager::{AgentManager, SessionContent, SessionRuntime, bounded, context_usage};
+use crate::protocol::{ServerMessage, SessionStatus};
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, TranscriptChange};
 use crate::settings::SteeringMode;
@@ -113,7 +113,7 @@ impl AgentManager {
             let agent = content.agent.as_mut().unwrap();
             agent.running = false;
             let settings = manager.inner.settings.get();
-            let usage = settings.model(&agent.model).ok().and_then(|model| model.context_window).map(|context_window| ContextUsage { tokens:agent.tokens, context_window });
+            let usage = context_usage(&settings, &agent.model, agent.tokens);
             let mut queue = content.transcript.as_ref().unwrap().queue.clone();
             queue.run_id = None;
             if cancelled || result.is_err() { queue.paused = true; }
@@ -267,7 +267,7 @@ impl AgentManager {
                 runtime.content.lock().await.append(id, json!({"type":"message","message":result})).await?;
             }
             for attachment in attachments { runtime.content.lock().await.append(id, attachment).await?; }
-            self.set_runtime_state(id, runtime, SessionStatus::Running, None, Some(context_window.map(|context_window| ContextUsage { tokens:completion.tokens, context_window })));
+            self.set_runtime_state(id, runtime, SessionStatus::Running, None, Some(context_usage(&self.inner.settings.get(), &selected, completion.tokens)));
         }
     }
 

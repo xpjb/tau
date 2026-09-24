@@ -721,7 +721,8 @@ async fn model_prompt_overrides_and_unlisted_ids_reach_both_providers_and_surviv
             assert!(request["tools"].as_array().unwrap().len()>1,"Empty prompt must keep tools");
             gate.notify_one();
             let idle = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
-            assert!(idle["contextUsage"].is_null(),"An unlisted model has no invented capacity");
+            assert_eq!(idle["contextUsage"]["tokens"], if api == Api::Codex {120} else {1024});
+            assert!(idle["contextUsage"]["contextWindow"].is_null(), "An unlisted model has no invented capacity");
         }
         let mut settings = manager.inner.settings.get(); settings.agent.system_prompt.clear();
         assert_eq!(client.request(json!({"id":"empty-default","type":"set_settings","revision":settings.revision,"settings":settings})).await["ok"],true);
@@ -767,6 +768,74 @@ async fn model_prompt_overrides_and_unlisted_ids_reach_both_providers_and_surviv
         assert!(detail.contains("HTTP 400") && detail.contains("No such model: fixture-missing"),"{detail}");
         assert!(!detail.contains(credential));
         assert!(model.requests.try_recv().is_err(),"Provider 400 errors are not retried");
+        manager.shutdown().await; server.abort();
+    }
+}
+
+#[tokio::test]
+async fn provider_usage_without_model_capacity_survives_sleep_restart_and_metadata_edits() {
+    for api in [Api::Codex, Api::ChatCompletions] {
+        let mut model = ModelServer::start(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }]).await;
+        let (_root, manager, url, server) = fixture(&model, api).await;
+        let mut client = Client::connect(&url).await;
+        client.until(|m| m["type"] == "sessions").await;
+        let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        client.open(&id).await;
+        assert_eq!(client.request(json!({"id":"select","type":"prompt","sessionId":id,"text":"/model openai-codex/gpt-6-sol"})).await["ok"],true);
+        client.open(&id).await;
+        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+        assert!(state["contextUsage"].is_null(), "An unused model without metadata has no usage or capacity");
+
+        assert_eq!(client.request(json!({"id":"turn","type":"prompt","sessionId":id,"text":"Report usage"})).await["ok"],true);
+        assert_eq!(model.request().await["model"], "gpt-6-sol");
+        let idle = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
+        let tokens = if api == Api::Codex { 120 } else { 1024 };
+        assert_eq!(idle["contextUsage"]["tokens"], tokens);
+        assert!(idle["contextUsage"]["contextWindow"].is_null());
+        client.request(json!({"id":"list","type":"list_sessions"})).await;
+        let summary = client.seen.iter().rev().find(|m| m["type"] == "sessions").unwrap()["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
+        assert_eq!(summary["contextUsage"], idle["contextUsage"]);
+
+        manager.close_session(&id).await.unwrap();
+        let sleeping = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "sleeping").await;
+        assert_eq!(sleeping["contextUsage"]["tokens"], tokens);
+        client.socket.close(None).await.unwrap();
+        let config = manager.inner.config.clone();
+        manager.shutdown().await; server.abort();
+
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
+        let (url, server) = serve(&manager).await;
+        let mut client = Client::connect(&url).await;
+        let sessions = client.until(|m| m["type"] == "sessions").await;
+        let summary = sessions["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
+        assert_eq!(summary["status"], "sleeping");
+        assert_eq!(summary["contextUsage"]["tokens"], tokens);
+        assert!(summary["contextUsage"]["contextWindow"].is_null());
+        client.open(&id).await;
+        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+        assert_eq!(state["contextUsage"], summary["contextUsage"]);
+
+        let mut settings = manager.inner.settings.get();
+        settings.models.push(crate::settings::ModelSettings { provider:"openai-codex".into(), id:"gpt-6-sol".into(), context_window:Some(200_000), ..Default::default() });
+        assert_eq!(client.request(json!({"id":"capacity","type":"set_settings","revision":settings.revision,"settings":settings})).await["ok"],true);
+        client.request(json!({"id":"list-known","type":"list_sessions"})).await;
+        let summary = client.seen.iter().rev().find(|m| m["type"] == "sessions").unwrap()["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
+        let expected = json!({"tokens":tokens,"contextWindow":200_000});
+        assert_eq!(summary["contextUsage"],expected);
+        client.open(&id).await;
+        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+        assert_eq!(state["contextUsage"], expected);
+
+        let mut settings = manager.inner.settings.get();
+        settings.models.retain(|m| m.id != "gpt-6-sol");
+        assert_eq!(client.request(json!({"id":"remove-capacity","type":"set_settings","revision":settings.revision,"settings":settings})).await["ok"],true);
+        client.open(&id).await;
+        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+        assert_eq!(state["contextUsage"],json!({"tokens":tokens,"contextWindow":null}));
+        assert_eq!(client.request(json!({"id":"switch","type":"prompt","sessionId":id,"text":"/model openai-codex/other-id"})).await["ok"],true);
+        client.open(&id).await;
+        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+        assert!(state["contextUsage"].is_null(), "Changing models clears the previous model's tokens");
         manager.shutdown().await; server.abort();
     }
 }

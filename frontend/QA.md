@@ -1,3 +1,22 @@
+# Context-usage follow-up (unreleased, protocol 15 branch)
+
+Tau 2 previously discarded provider-reported tokens whenever the selected model
+was absent from optional metadata. The tooltip now shows the last reported turn
+total without a context window; the ring percentage remains unknown until a real
+`contextWindow` is configured. Sleeping/unopened chats recover their saved last
+value after restart. Model changes clear the old count, and adding/removing model
+metadata changes capacity without inventing one. Protocol 15 needs matched client
+and daemon builds; protocol 14 is reserved for the in-progress Projects integration.
+This branch has not been merged, deployed, or packaged for devices.
+
+Managed all-target workspace check passed; nextest **66/66 passed**. Isolated
+Codex and Chat Completions provider fixtures exercised the actual WebSocket state,
+list, sleep, restart, settings edits, and model switch; the tooltip's unknown and
+known-capacity states were checked without a GUI. No paid completion or physical
+device acceptance is claimed.
+
+---
+
 # 0.7.0 integrated beta acceptance
 
 The user explicitly authorized native integration, cleanup, remote `tau2`, a separate

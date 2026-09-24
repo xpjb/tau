@@ -4,7 +4,8 @@ pub mod settings;
 mod transcript;
 pub use transcript::*;
 
-pub const PROTOCOL_VERSION: u32 = 13;
+// 14 is already assigned to the in-progress Projects integration.
+pub const PROTOCOL_VERSION: u32 = 15;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
@@ -266,8 +267,10 @@ pub enum SessionStatus {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
+    /// Last provider-reported turn total. This is not a live tokenizer count.
     pub tokens: Option<u64>,
-    pub context_window: u64,
+    /// Only known when the selected model has explicit context-window metadata.
+    pub context_window: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
