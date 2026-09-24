@@ -98,6 +98,66 @@ fn retained_history_delta_gap_and_stale_page_are_transactional() {
     assert_eq!(feed.events.len(), 1);
 }
 
+#[test]
+fn offline_new_chat_and_send_are_durable_before_any_server_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
+    c.new_chat().unwrap();
+    let id = c.account.selected.clone().unwrap();
+    let request = c.account.pending_create.as_ref().unwrap().id.clone();
+    assert_eq!(id, request);
+    assert_eq!(c.account.sessions[0].title, "Creating chat…");
+    c.draft("A message typed while offline".into()).unwrap();
+    c.send_prompt().unwrap();
+    let prompt = c.selected().unwrap().local.pending[0].request.id.clone();
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForChat);
+    drop(c);
+    let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
+    assert_eq!(c.account.pending_create.as_ref().unwrap().id, request);
+    assert_eq!(c.account.selected.as_deref(), Some(id.as_str()));
+    assert_eq!(c.selected().unwrap().local.pending[0].request.id, prompt);
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForChat);
+    let summary = tau_protocol::SessionSummary { id:id.clone(), title:"New chat".into(), starter:true,
+        status:SessionStatus::Idle, detail:None, context_usage:None, model:None,
+        parent_id:None, created_at_ms:1, updated_at_ms:1 };
+    c.message(ServerMessage::Sessions { sessions:vec![summary] }).unwrap();
+    assert!(c.account.pending_create.is_none());
+    assert_eq!(c.selected().unwrap().local.pending[0].request.id, prompt);
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForChat,
+        "A saved prompt cannot be sent before the transport is ready");
+}
+
+#[test]
+fn existing_starter_coalesces_pending_create_without_losing_draft_or_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("reference.png");
+    std::fs::write(&source, b"fixture attachment").unwrap();
+    let mut c = Controller::new(Store::open(dir.path().join("local")).unwrap(), Arc::new(|| {})).unwrap();
+    c.new_chat().unwrap();
+    let provisional = c.account.selected.clone().unwrap();
+    c.attach(&source,None).unwrap();
+    c.draft("First message".into()).unwrap();
+    c.send_prompt().unwrap();
+    let original = c.selected().unwrap().local.pending[0].request.id.clone();
+    c.draft("Unsent second draft".into()).unwrap();
+    c.attach(&source,None).unwrap();
+    c.message(ServerMessage::Sessions { sessions:vec![SessionSummary { id:"existing".into(), title:"New chat".into(),starter:true,
+        status:SessionStatus::Idle,detail:None,context_usage:None,model:None,parent_id:None,created_at_ms:1,updated_at_ms:1 }] }).unwrap();
+    assert_eq!(c.account.selected.as_deref(),Some(provisional.as_str()), "A remote starter is not proof that our create was accepted");
+    c.message(serde_json::from_value(json!({"type":"response","requestId":provisional,"ok":true,
+        "sessionId":"existing","uncertain":false})).unwrap()).unwrap();
+    assert_eq!(c.account.selected.as_deref(),Some("existing"));
+    assert!(c.account.pending_create.is_none());
+    assert!(c.account.sessions.iter().all(|s| s.id != provisional));
+    let chat = c.selected().unwrap();
+    assert_eq!(chat.local.draft,"Unsent second draft");
+    assert_eq!(chat.local.pending[0].request.id,original);
+    assert_eq!(chat.local.pending[0].status,Delivery::WaitingForChat);
+    assert!(matches!(&chat.local.pending[0].request.command,ClientCommand::Prompt {session_id,..} if session_id == "existing"));
+    assert!(chat.local.pending[0].files[0].path.exists() && chat.local.files[0].path.exists());
+    assert_eq!(std::fs::read(&chat.local.pending[0].files[0].path).unwrap(),b"fixture attachment");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     #[derive(Clone)]

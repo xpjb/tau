@@ -1,3 +1,28 @@
+# Immediate new-chat and send intent (unreleased, atop protocol 15)
+
+The client now saves and selects a provisional **Creating chat…** immediately,
+including offline. Drafts, staged files and sends persist before an acknowledgement;
+sends wait locally until creation confirms. Existing chats accept offline sends
+without a network round-trip; sends during model selection wait for its confirmation
+and never run under the previous model. On failed/uncertain selection, the authored
+send remains recoverable rather than being replayed under a different model. Client-named UUIDs and transactional
+creation receipts let the daemon return the same session on retry, including if an
+untouched starter was reused and subsequently became active. A reused starter
+receives the provisional draft/files/sends without losing existing local work.
+New work accepted into a paused queue replaces the stale Error badge with a
+paused/ready detail immediately, without awaiting a model turn. A sent prompt
+whose acknowledgement was lost remains unconfirmed and is reconciled by request
+ID from the daemon on reconnect; it is not blindly replayed.
+
+Managed all-target workspace check and nextest **70/70 passed**. Offline local
+restart, a real controller/daemon with a gated local provider, coalesced starters
+with files, duplicate create receipts, queued model selection and paused-error
+acknowledgement were exercised without a billed model call. No physical Windows/Android UI acceptance,
+merge, package or deployment is claimed. This branch builds on the separate
+context-catalog branch and needs matched client/daemon integration.
+
+---
+
 # Context-usage follow-up (unreleased, protocol 15 branch)
 
 Tau 2 previously discarded provider-reported tokens whenever the selected model

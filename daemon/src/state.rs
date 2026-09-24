@@ -88,16 +88,38 @@ impl StateStore {
                 .map(|row| { let (id,data) = row?; Ok((id,serde_json::from_str(&data)?)) }).collect()
         }).await
     }
-    pub async fn create(&self, model: SessionModel, thinking: String, keep: Option<String>) -> Result<String> {
+    pub async fn create(&self, model: SessionModel, thinking: String, keep: Option<String>, requested_id: Option<String>) -> Result<String> {
         self.access(move |db| {
             let tx = db.transaction()?;
+            if let Some(id) = &requested_id {
+                uuid::Uuid::parse_str(id).context("Invalid create ID")?;
+                let previous: Option<(String,String)> = tx.query_row(
+                    "SELECT session_id,data FROM receipts WHERE request_id=?1 AND json_extract(data,'$.command')='create_session' LIMIT 1",
+                    [id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+                if let Some((session,raw)) = previous {
+                    let receipt: Receipt = serde_json::from_str(&raw)?;
+                    if receipt.text != keep.as_deref().unwrap_or_default() { bail!("Create request ID was used for another chat"); }
+                    tx.commit()?; return Ok(session);
+                }
+                if tx.query_row("SELECT id FROM sessions WHERE id=?1",[id],|row|row.get::<_,String>(0)).optional()?.is_some() {
+                    bail!("Create request ID is already in use");
+                }
+            }
+            let keep_receipt = keep.clone().unwrap_or_default();
             if let Some(id) = keep {
                 let data: String = tx.query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| row.get(0)).context("Unknown session")?;
                 let mut session: StoredSession = serde_json::from_str(&data)?; session.starter = false;
                 tx.execute("UPDATE sessions SET starter=0,data=?2 WHERE id=?1", params![id,serde_json::to_string(&session)?])?;
             }
-            if let Some(id) = tx.query_row("SELECT id FROM sessions WHERE starter=1", [], |row| row.get(0)).optional()? { tx.commit()?; return Ok(id); }
-            let id = uuid::Uuid::new_v4().to_string();
+            if let Some(id) = tx.query_row("SELECT id FROM sessions WHERE starter=1", [], |row| row.get(0)).optional()? {
+                if let Some(request) = requested_id {
+                    let receipt = Receipt { id:request.clone(), command:Some("create_session".into()), text:keep_receipt,
+                        disposition:PromptDisposition::Handled, finished:true, notice:None, error:None };
+                    tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
+                }
+                tx.commit()?; return Ok(id);
+            }
+            let id = requested_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let now = activity(&tx)?;
             let mut session = StoredSession { title:"New chat".into(), starter:true, parent_id:None, model:model.clone(), thinking:thinking.clone(),
                 created_at_ms:now, updated_at_ms:now, tokens:None, needs_turn:false, head:None, next_order:0, revision:0 };
@@ -107,6 +129,11 @@ impl StateStore {
             tx.execute("INSERT INTO sessions(id,starter,activity,data,queue) VALUES(?1,1,?2,?3,?4)",
                 params![id,now,serde_json::to_string(&session)?,serde_json::to_string(&QueueState::native())?])?;
             tx.execute("INSERT INTO entries(session_id,id,kind,data) VALUES(?1,?2,'model_change',?3)",params![id,entry["id"].as_str(),entry.to_string()])?;
+            if let Some(request) = requested_id {
+                let receipt = Receipt { id:request.clone(), command:Some("create_session".into()), text:keep_receipt,
+                    disposition:PromptDisposition::Handled, finished:true, notice:None, error:None };
+                tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
+            }
             tx.commit()?; Ok(id)
         }).await
     }

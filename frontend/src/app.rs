@@ -24,6 +24,7 @@ use tau_protocol::*;
 enum Action {
     Select(String),
     New,
+    RetryCreate,
     Settings,
     ModelSettings,
     ResetModels,
@@ -1203,7 +1204,9 @@ impl App {
             Action::New => {
                 self.controller.new_chat()?;
                 self.show_chats = false;
+                self.focus = Some(None);
             }
+            Action::RetryCreate => self.controller.retry_create_manually()?,
             Action::Back => self.back(),
             Action::ModelSettings => {
                 self.controller.notice = None;
@@ -2018,12 +2021,14 @@ impl App {
             let status = format!(
                 "{}{}",
                 if unread { "●  " } else { "" },
-                match session.status {
+                if self.controller.is_creating(&session.id) { "Creating…" }
+                else if self.controller.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) { "Paused" }
+                else { match session.status {
                     SessionStatus::Running => "Working",
                     SessionStatus::Error => "Error",
                     SessionStatus::Idle => "Ready",
                     SessionStatus::Sleeping => "Sleeping",
-                }
+                }}
             );
             self.renderer.clipped_label(
                 layer,
@@ -2321,8 +2326,12 @@ impl App {
         );
         self.renderer.label(
             chrome,
-            if self.controller.epoch.is_none() {
+            if self.controller.is_creating(&session) {
+                if self.controller.epoch.is_none() { "Saved locally · offline" } else { "Creating…" }
+            } else if self.controller.epoch.is_none() {
                 "Offline"
+            } else if self.controller.chats[&session].feed.queue.paused {
+                "Paused · resume needed"
             } else if summary
                 .as_ref()
                 .is_some_and(|s| s.status == SessionStatus::Running)
@@ -2813,14 +2822,23 @@ impl App {
             .and_then(|s| s.model.as_ref())
             .map(|m| format!("{}/{}", m.provider, m.model_id))
             .unwrap_or_else(|| "Model loads when the worker starts".into());
+        let creating = self.controller.is_creating(&session);
+        let choosing = self.controller.chats[&session].model_request.is_some();
         self.renderer.label(
             chrome,
-            &model,
-            Rect::new(x, composer_top + 10. * s, width, 20. * s),
+            if creating { "Creating chat… Sends are saved locally." }
+                else if choosing { "Selecting model… Sends are saved locally." }
+                else { &model },
+            Rect::new(x, composer_top + 10. * s, (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s),
             12. * s,
             color(0x82909f),
             false,
         );
+        if creating && self.controller.epoch.is_some() {
+            button(&mut self.renderer, chrome, &mut self.hits,
+                Rect::new(x + width - 88. * s, composer_top + 6. * s, 88. * s, 24. * s),
+                "Retry", Action::RetryCreate, s, false);
+        }
         chrome.rect(Rect::new(b.x, composer_top, b.width, s), color(0x2a3541));
         let field = Rect::new(x, composer_top + 32. * s, width, editor_h);
         let edge = if self.focus == Some(None) { 2. * s } else { s };
@@ -2873,7 +2891,7 @@ impl App {
             22.,
             Action::Attach,
             false,
-            connected,
+            true,
         );
         let usage_rect = Rect::new(field.x + field.width - 84. * s, iy, 40. * s, 40. * s);
         let usage = summary.as_ref().and_then(|s| s.context_usage);
@@ -2899,9 +2917,7 @@ impl App {
         {
             self.usage.text.push_str("\nLast known value");
         }
-        let choosing = self.controller.chats[&session].model_request.is_some();
-        let can_send =
-            connected && !choosing && (!self.composer.value.trim().is_empty() || !files.is_empty());
+        let can_send = !self.composer.value.trim().is_empty() || !files.is_empty();
         self.icon_button(
             ctx,
             chrome,

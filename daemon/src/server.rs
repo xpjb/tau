@@ -259,7 +259,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
-                        ClientCommand::CreateSession { keep_session_id } => match manager.create_session(keep_session_id.as_deref()).await {
+                        ClientCommand::CreateSession { keep_session_id } => match manager.create_session_requested(
+                            keep_session_id.as_deref(),
+                            uuid::Uuid::parse_str(&request_id).ok().as_ref().map(|_| request_id.as_str()),
+                        ).await {
                             Ok(session_id) => ServerMessage::success(
                                 request_id,
                                 Some(session_id),

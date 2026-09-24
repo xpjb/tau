@@ -37,6 +37,7 @@ pub struct Controller {
     pub notice: Option<String>,
     network: Option<Network>,
     requests: HashMap<String, ClientCommand>,
+    create_failed_epoch: Option<u64>,
     wake: Wake,
 }
 impl Controller {
@@ -61,6 +62,7 @@ impl Controller {
             notice: None,
             network: None,
             requests: HashMap::new(),
+            create_failed_epoch: None,
             wake,
         };
         if let Some(id) = c.account.selected.clone() {
@@ -89,6 +91,7 @@ impl Controller {
         self.chats.clear();
         self.downloads.clear();
         self.requests.clear();
+        self.create_failed_epoch = None;
         self.daemon_settings = None;
         self.settings_result = None;
         self.notice = None;
@@ -135,7 +138,7 @@ impl Controller {
                 .insert(id.into(), session.updated_at_ms);
         }
         self.store.put(&self.identity, "account", &self.account)?;
-        if self.epoch.is_some() {
+        if self.epoch.is_some() && !self.is_creating(id) {
             self.open(id)?;
             self.request(ClientCommand::GetCommands {
                 session_id: id.into(),
@@ -214,19 +217,11 @@ impl Controller {
         self.save_chat(&id)
     }
     pub fn send_prompt(&mut self) -> Result<()> {
-        let epoch = self
-            .epoch
-            .ok_or_else(|| anyhow::anyhow!("Connect before sending; your draft is saved"))?;
-        let session = self
-            .account
-            .selected
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Select a chat"))?;
+        let session = self.account.selected.clone().ok_or_else(|| anyhow::anyhow!("Select a chat"))?;
+        let provisional = self.is_creating(&session);
+        let epoch = self.epoch;
         let chat = self.chats.get_mut(&session).unwrap();
-        ensure!(
-            chat.model_request.is_none(),
-            "Wait for model selection to finish; your draft is saved"
-        );
+        let choosing = chat.model_request.is_some();
         ensure!(
             !chat.local.draft.trim().is_empty() || !chat.local.files.is_empty(),
             "Write a message or attach a file"
@@ -249,7 +244,10 @@ impl Controller {
             started_at_ms: crate::clock::now_ms(),
             text: text.clone(),
             files: files.clone(),
-            status: if files.is_empty() {
+            status: if provisional { Delivery::WaitingForChat }
+                else if choosing { Delivery::WaitingForModel }
+                else if epoch.is_none() { Delivery::WaitingForConnection }
+                else if files.is_empty() {
                 Delivery::Sending
             } else {
                 Delivery::Preparing
@@ -266,6 +264,8 @@ impl Controller {
         self.store
             .save_chat(&self.identity, &session, &replacement)?;
         chat.local = replacement;
+        if provisional || choosing || epoch.is_none() { return Ok(()); }
+        let epoch = epoch.unwrap();
         let command = if files.is_empty() {
             Command::Request {
                 epoch,
@@ -426,13 +426,87 @@ impl Controller {
             self.chats.get(&session.id).map(|c| &c.feed),
         )
     }
+    pub fn is_creating(&self, id: &str) -> bool {
+        self.account.pending_create.as_ref().is_some_and(|request| request.id == id)
+    }
     pub fn new_chat(&mut self) -> Result<()> {
-        let keep_session_id = self
-            .account
-            .selected
-            .clone()
+        ensure!(self.account.pending_create.is_none(), "The previous new chat is still awaiting confirmation");
+        let keep_session_id = self.account.selected.clone()
             .filter(|id| self.chats.get(id).is_some_and(|c| c.local.has_work()));
-        self.request(ClientCommand::CreateSession { keep_session_id })?;
+        let request = ClientRequest { id:uuid::Uuid::new_v4().to_string(), command:ClientCommand::CreateSession { keep_session_id } };
+        let now = crate::clock::now_ms().unwrap_or(0);
+        let mut account = self.account.clone();
+        account.pending_create = Some(request.clone());
+        account.selected = Some(request.id.clone());
+        account.sessions.insert(0, Self::creating_summary(&request.id, now));
+        self.store.put(&self.identity, "account", &account)?;
+        self.account = account;
+        self.ensure_chat(&request.id)?;
+        self.retry_create()?;
+        Ok(())
+    }
+    fn creating_summary(id: &str, at: u64) -> SessionSummary {
+        SessionSummary { id:id.into(), title:"Creating chat…".into(), starter:false, status:SessionStatus::Sleeping,
+            detail:Some("Waiting for daemon confirmation".into()), context_usage:None, model:None,
+            parent_id:None, created_at_ms:at, updated_at_ms:at }
+    }
+    pub fn retry_create_manually(&mut self) -> Result<()> {
+        self.create_failed_epoch = None;
+        self.retry_create()
+    }
+    pub fn retry_create(&mut self) -> Result<()> {
+        let Some(request) = self.account.pending_create.clone() else { return Ok(()); };
+        if self.create_failed_epoch == self.epoch && self.epoch.is_some() { return Ok(()); }
+        let Some(epoch) = self.epoch else { return Ok(()); };
+        if self.requests.contains_key(&request.id) { return Ok(()); }
+        if let Err(error) = self.network.as_ref().unwrap().send(Command::Request {epoch, request:request.clone()}) {
+            self.notice = Some(format!("New chat saved locally; will retry after reconnect: {error}"));
+        } else { self.requests.insert(request.id, request.command); }
+        Ok(())
+    }
+    fn finish_create(&mut self, provisional: &str, confirmed: &str) -> Result<()> {
+        if !self.is_creating(provisional) { return Ok(()); }
+        if provisional != confirmed {
+            let source = &self.chats.get(provisional).ok_or_else(|| anyhow::anyhow!("Local new chat is missing"))?.local;
+            let target = self.chats.get(confirmed).map(|chat| &chat.local);
+            let merged = self.store.merge_chat(&self.identity, provisional, confirmed, source, target)?;
+            if let Some(chat) = self.chats.get_mut(confirmed) { chat.local = merged; }
+            else {
+                let mut chat = self.chats.remove(provisional).unwrap();
+                chat.local = merged;
+                chat.feed = Feed::default();
+                self.chats.insert(confirmed.into(), chat);
+            }
+            self.chats.remove(provisional);
+            self.account.sessions.retain(|s| s.id != provisional);
+            if !self.account.sessions.iter().any(|s| s.id == confirmed) {
+                self.account.sessions.insert(0, Self::creating_summary(confirmed, crate::clock::now_ms().unwrap_or(0)));
+            }
+            if self.account.selected.as_deref() == Some(provisional) { self.account.selected = Some(confirmed.into()); }
+        }
+        self.account.pending_create = None;
+        self.create_failed_epoch = None;
+        self.requests.remove(provisional);
+        self.store.put(&self.identity, "account", &self.account)?;
+        if self.epoch.is_some() { self.open(confirmed)?; self.send_waiting(confirmed, false)?; }
+        Ok(())
+    }
+    fn send_waiting(&mut self, session: &str, model_confirmed: bool) -> Result<()> {
+        let Some(epoch) = self.epoch else { return Ok(()); };
+        let pending = self.chats.get(session).map(|chat| chat.local.pending.iter()
+            .filter(|p| matches!(p.status, Delivery::WaitingForChat | Delivery::WaitingForConnection)
+                || model_confirmed && p.status == Delivery::WaitingForModel)
+            .cloned().collect::<Vec<_>>()).unwrap_or_default();
+        for p in pending {
+            let chat = self.chats.get_mut(session).unwrap();
+            if let Some(saved) = chat.local.pending.iter_mut().find(|saved| saved.request.id == p.request.id) {
+                saved.status = if p.files.is_empty() {Delivery::Sending} else {Delivery::Preparing};
+            }
+            self.save_chat(session)?;
+            let command = if p.files.is_empty() { Command::Request {epoch, request:p.request.clone()} }
+                else { Command::Upload {epoch, id:p.request.id.clone(), session:session.into(), text:p.text.clone(), files:p.files.clone()} };
+            if let Err(error) = self.network.as_ref().unwrap().send(command) { self.not_sent(&p.request.id, &error.to_string())?; }
+        }
         Ok(())
     }
     pub fn open(&mut self, id: &str) -> Result<()> {
@@ -553,13 +627,14 @@ impl Controller {
         match event {
             transport::Event::Ready(epoch) => {
                 self.epoch = Some(epoch);
+                self.create_failed_epoch = None;
                 self.connection = "Connected".into();
                 self.health.connected();
                 self.request(ClientCommand::ListSessions)?;
                 for id in self.chats.keys().cloned().collect::<Vec<_>>() {
-                    self.open(&id)?;
+                    if !self.is_creating(&id) { self.open(&id)?; self.send_waiting(&id, false)?; }
                 }
-                if let Some(id) = self.account.selected.clone() {
+                if let Some(id) = self.account.selected.clone().filter(|id| !self.is_creating(id)) {
                     self.request(ClientCommand::GetCommands { session_id: id })?;
                 }
             }
@@ -579,6 +654,9 @@ impl Controller {
                     for p in &mut chat.local.pending {
                         if matches!(p.status, Delivery::Sending | Delivery::Preparing) {
                             p.status = Delivery::Unconfirmed;
+                        } else if p.status == Delivery::WaitingForModel {
+                            p.status = Delivery::Rejected;
+                            p.detail = Some("Model selection unconfirmed; check the current model, then restore this draft".into());
                         }
                     }
                     self.store.save_chat(&self.identity, session, &chat.local)?;
@@ -592,7 +670,12 @@ impl Controller {
             {
                 self.health.reply(at, rtt, ok)
             }
-            transport::Event::NotSent(id, detail) => self.not_sent(&id, &detail)?,
+            transport::Event::NotSent(id, detail) => {
+                if self.is_creating(&id) {
+                    self.requests.remove(&id);
+                    self.notice = Some(format!("New chat saved locally, not yet confirmed: {detail}"));
+                } else { self.not_sent(&id, &detail)?; }
+            },
             transport::Event::Prepared { epoch, id, result } => {
                 let session = self
                     .chats
@@ -651,7 +734,18 @@ impl Controller {
     pub fn message(&mut self, message: ServerMessage) -> Result<()> {
         match message {
             ServerMessage::Sessions { sessions } => {
+                let pending = self.account.pending_create.clone();
+                let confirmed = pending.as_ref().and_then(|request| {
+                    sessions.iter().any(|s| s.id == request.id).then(|| request.id.clone())
+                });
                 self.account.sessions = sessions;
+                if let Some(request) = pending {
+                    if let Some(confirmed) = confirmed { self.finish_create(&request.id, &confirmed)?; }
+                    else {
+                        self.account.sessions.insert(0, Self::creating_summary(&request.id, crate::clock::now_ms().unwrap_or(0)));
+                        self.retry_create()?;
+                    }
+                }
                 if let Some(id) = &self.account.selected
                     && let Some(s) = self.account.sessions.iter().find(|s| &s.id == id)
                 {
@@ -669,7 +763,7 @@ impl Controller {
                     .collect::<Vec<_>>();
                 if self.epoch.is_some() {
                     for id in warm {
-                        self.open(&id)?;
+                        if !self.is_creating(&id) { self.open(&id)?; }
                     }
                 }
             }
@@ -835,7 +929,9 @@ impl Controller {
                         self.store.save_chat(&self.identity, id, &chat.local)?;
                     }
                 }
+                let create_reply = self.is_creating(&request_id);
                 let command = self.requests.remove(&request_id);
+                if ok && create_reply && let Some(id) = &session_id { self.finish_create(&request_id, id)?; }
                 if matches!(
                     command,
                     Some(ClientCommand::SetSettings { .. } | ClientCommand::GetSettings)
@@ -843,9 +939,25 @@ impl Controller {
                     self.settings_result = Some((request_id.clone(), ok && !uncertain));
                 }
                 if model_changed {
+                    if let Some(id) = session_id.as_deref() { self.send_waiting(id, true)?; }
                     self.request(ClientCommand::ListSessions)?;
                 }
                 if !ok {
+                    if create_reply || matches!(command, Some(ClientCommand::CreateSession { .. })) {
+                        self.create_failed_epoch = self.epoch;
+                        self.notice = Some(error.clone().unwrap_or_else(|| "New chat is saved locally but was not confirmed; retry when connected".into()));
+                    }
+                    if matches!(&command, Some(ClientCommand::Prompt {text,..}) if text.starts_with("/model "))
+                        && let Some(id) = session_id.as_deref() && let Some(chat) = self.chats.get_mut(id)
+                        && chat.local.pending.iter().any(|p| p.status == Delivery::WaitingForModel) {
+                        for p in &mut chat.local.pending {
+                            if p.status == Delivery::WaitingForModel {
+                                p.status = Delivery::Rejected;
+                                p.detail = Some("Model selection failed; restore the draft and choose a model".into());
+                            }
+                        }
+                        self.store.save_chat(&self.identity, id, &chat.local)?;
+                    }
                     if let Some(ClientCommand::GetHistory { session_id, .. }) = &command
                         && let Some(chat) = self.chats.get_mut(session_id)
                     {
@@ -856,16 +968,13 @@ impl Controller {
                     }
                 } else {
                     match command {
-                        Some(
-                            ClientCommand::CreateSession { .. }
-                            | ClientCommand::ForkSession { .. }
-                            | ClientCommand::CloneSession { .. },
-                        ) => {
+                        Some(ClientCommand::CreateSession { .. }) => {
+                            if let Some(id) = session_id { self.finish_create(&request_id, &id)?; }
+                        }
+                        Some(ClientCommand::ForkSession { .. } | ClientCommand::CloneSession { .. }) => {
                             if let Some(id) = session_id {
                                 self.select(&id)?;
-                                if let Some(draft) = draft {
-                                    self.draft(draft)?;
-                                }
+                                if let Some(draft) = draft { self.draft(draft)?; }
                             }
                         }
                         Some(ClientCommand::RefreshModelCatalog { .. }) => {

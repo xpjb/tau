@@ -129,17 +129,31 @@ impl AgentManager {
                 model:Some(s.model), parent_id:s.parent_id, created_at_ms:s.created_at_ms, updated_at_ms:s.updated_at_ms }
         }).collect() })
     }
+    #[cfg(test)]
     pub async fn create_session(&self, keep_session_id: Option<&str>) -> Result<String> {
+        self.create_session_requested(keep_session_id, None).await
+    }
+    pub async fn create_session_requested(&self, keep_session_id: Option<&str>, requested_id: Option<&str>) -> Result<String> {
         if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        if let Some(id) = requested_id && self.inner.state.receipt(id,id).await?.is_some_and(|r| r.command.as_deref() == Some("create_session")) {
+            // A repeated create must not reset its model after a lost ack.
+            return Ok(id.into());
+        }
         let settings = self.inner.settings.get(); let model = settings.agent.model.clone();
         let thinking = settings.agent.model_thinking_levels.get(&format!("{}/{}",model.provider,model.model_id)).unwrap_or(&settings.agent.thinking_level).clone();
         let mut keep=keep_session_id.map(str::to_owned);
         loop {
-            let id = self.inner.state.create(model.clone(),thinking.clone(),keep.take()).await?;
+            let id = self.inner.state.create(model.clone(),thinking.clone(),keep.take(),requested_id.map(str::to_owned)).await?;
             let runtime = self.runtime(&id).await?; let _guard = runtime.operation.lock().await;
             let mut content=runtime.content.lock().await;
             self.ensure_loaded(&id,&runtime,&mut content).await?;
-            if !self.inner.state.get(&id).await?.is_some_and(|s|s.starter) { continue; }
+            if !self.inner.state.get(&id).await?.is_some_and(|s|s.starter) {
+                if let Some(request) = requested_id
+                    && self.inner.state.receipt(&id,request).await?.is_some_and(|r| r.command.as_deref() == Some("create_session")) {
+                    return Ok(id);
+                }
+                continue;
+            }
             if content.agent.as_ref().is_some_and(|agent|agent.model != model || agent.thinking != thinking) {
                 content.append(&id,json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":thinking})).await?;
             }
@@ -199,7 +213,14 @@ impl AgentManager {
         queue.requests.push(QueuedRequest { request_id:request_id.into(), revision:0, kind:"steer".into(), text:text.into(), images:0, timestamp_ms:Some(crate::agent::now_ms()) });
         content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:None,text:text.into(),disposition,finished:true,notice:None,error:None })).await?;
         // Queue, receipt and retained session metadata commit together before acknowledgement.
+        let paused = content.transcript.as_ref().unwrap().queue.paused && !content.agent.as_ref().unwrap().running;
         self.start_run(id, &runtime, &mut content);
+        if paused {
+            // A newly accepted send must not leave the UI displaying an old
+            // provider error while the durable queue waits for explicit Resume.
+            self.set_runtime_state(id, &runtime, SessionStatus::Idle,
+                Some("Pending work is paused; resume when ready".into()), None);
+        }
         drop(content);
         let manager = self.clone(); let session = id.to_owned(); let text = text.to_owned();
         tokio::spawn(async move { manager.title_after_prompt(&session, &text).await; });

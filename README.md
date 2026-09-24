@@ -31,6 +31,23 @@ there is no project/provider/built-in fallback. Prompt fields use the shared edi
 advanced provider/metadata structures use JSON editors; credentials are never
 part of the wire settings document.
 
+New chats appear immediately as **Creating chat…**, including offline. Their
+creation intent and any draft, attachment or send are committed to local SQLite
+before network effects; queued sends wait locally for the chat's durable server ID.
+Existing chats also accept offline sends into a visible **Waiting for connection**
+state. Sends made during quick model selection wait locally for its confirmation;
+a failed or uncertain model change retains the authored send for explicit recovery
+rather than using the wrong model.
+The daemon records client-named creation receipts transactionally, so a lost create
+ack can be retried without creating a duplicate. If it reuses an existing starter,
+local drafts, files and queued sends move to that chat without losing the old
+session's work. A send is acknowledged after its server-side queue/receipt commit,
+not after a model response. A socket lost after a sent prompt leaves the receipt
+**unconfirmed** until history verifies it; potentially billed prompts are not
+blindly retransmitted. New sends accepted into a paused queue clear a stale error
+indicator while still showing that work must be resumed. This follow-up is not
+merged or deployed.
+
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
 context capacity comes from the **selected provider's own catalog** when available:

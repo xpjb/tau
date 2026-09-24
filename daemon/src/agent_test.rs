@@ -108,6 +108,30 @@ impl Client {
 }
 
 #[tokio::test]
+async fn client_named_create_is_immediate_and_idempotent_after_a_lost_ack() {
+    let model = ModelServer::start(vec![]).await;
+    let (_root, manager, _, server) = fixture(&model, Api::Codex).await;
+    let first = uuid::Uuid::new_v4().to_string();
+    assert_eq!(manager.create_session_requested(None,Some(&first)).await.unwrap(),first);
+    // Reusing the existing untouched starter is still the server's established
+    // behavior; an optimistic client reconciles its local ID on acknowledgement.
+    let candidate = uuid::Uuid::new_v4().to_string();
+    assert_eq!(manager.create_session_requested(None,Some(&candidate)).await.unwrap(),first);
+    manager.rename_session(&first,"Old chat is no longer a starter").await.unwrap();
+    assert_eq!(manager.create_session_requested(None,Some(&candidate)).await.unwrap(),first,
+        "A lost create acknowledgement must still resolve to its original chat after that starter becomes active");
+    let second = uuid::Uuid::new_v4().to_string();
+    assert_eq!(manager.create_session_requested(Some(&first),Some(&second)).await.unwrap(),second);
+    manager.rename_session(&second,"Authored chat").await.unwrap();
+    let count = manager.inner.state.list().await.unwrap().len();
+    assert_eq!(manager.create_session_requested(Some(&first),Some(&second)).await.unwrap(),second);
+    let sessions = manager.inner.state.list().await.unwrap();
+    assert_eq!(sessions.len(),count,"Retry cannot create or retire a second chat");
+    assert_eq!(sessions.iter().find(|(id,_)| id == &second).unwrap().1.title,"Authored chat");
+    manager.shutdown().await; server.abort();
+}
+
+#[tokio::test]
 async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_path() {
     let gate = Arc::new(Notify::new());
     let mut reply = completion("Working π🧠", vec![
@@ -329,7 +353,12 @@ async fn incomplete_stream_never_executes_tools_abort_kills_shell_group_and_retr
     assert!(!root.path().join("must-not-exist").exists());
     let snapshot = client.open(&id).await;
     assert!(snapshot["events"].as_array().unwrap().iter().any(|event| event["stopReason"] == "error"));
-    client.request(json!({"id":"sleep","type":"prompt","sessionId":id,"text":"Run a shell"})).await;
+    let queued = client.request(json!({"id":"sleep","type":"prompt","sessionId":id,"text":"Run a shell"})).await;
+    assert_eq!(queued["disposition"],"queued");
+    let status = client.seen.iter().rev().find(|m|m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+    let status = if status["status"] == "idle" { status.clone() }
+        else { client.until(|m|m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await };
+    assert!(status["detail"].as_str().unwrap().contains("paused"));
     client.request(json!({"id":"resume","type":"queue_control","sessionId":id,"generation":snapshot["generation"],"operation":{"type":"resume","runId":null}})).await;
     let payload = model.request().await;
     assert!(!payload["messages"].to_string().contains("must-not-exist"));
