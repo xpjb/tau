@@ -2,6 +2,7 @@ mod attachments;
 mod commands;
 mod config;
 mod manager;
+mod projects;
 mod agent;
 mod settings;
 mod protocol;

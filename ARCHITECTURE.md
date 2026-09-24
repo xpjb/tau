@@ -7,7 +7,7 @@ SQLite storage agent's implementation. The old Kotlin client, UniFFI/CDylib tran
 bridge, Pi/Node agent subprocess, desktop JVM bootstrap and Python title helper are
 not alternate runtime paths on this branch.
 
-`protocol` owns both sides of protocol 12, including settings, receipts, canonical
+`protocol` owns both sides of protocol 14, including settings, receipts, canonical
 transcript changes, history cuts, queues and transfer offers. `daemon` adds internal
 projection/head/activity bookkeeping around those wire types. Frontend snapshots,
 live suffixes and durable replacements use one sequence/cursor model, not separate
@@ -46,6 +46,15 @@ Run one daemon per database. The beta systemd unit, directories and port are sep
 from stable. Per-session revisions reject stale snapshots; they are not permission
 to run competing tool-executing daemons on one database. The abandoned reconciliation
 store is not part of the release ancestry.
+
+Projects live in SQLite (schema 2), alongside sessions. Migration places existing
+sessions in General with an empty captured project prompt and preserves history.
+Membership changes are ordered by a manager gate; delete-with-chats cancels and
+retires affected runtimes before one cascading transaction. Delete-with-move is
+also one transaction. A project edit never rewrites session prompts. Creation and
+moves capture the exact current project prompt in session metadata; forks copy that
+snapshot. Provider requests append it to the ordinary resolved system instructions.
+In-flight tool continuations pin their current snapshot until a new user turn.
 
 Settings and auth are separate private, atomic files. Settings CAS preserves exact
 prompt text and distinguishes missing/inherited (`null`) from intentionally empty

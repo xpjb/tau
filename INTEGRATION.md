@@ -156,3 +156,48 @@ Daemon SHA-256:
 
 Windows installer SHA-256:
 `80dce02691ee91431916d42529983b41b3efac30790d5710454064f51994200c`
+
+
+## Projects / beta 0.7.2 deployment and Windows + Android delivery — 2026-09-24
+
+User authorized deployment and both platform builds. The projects working tree was
+versioned as **0.7.2 / protocol 14**; Android advanced to versionCode **7**. The feature
+workspace compiler check and **69/69 nextest tests** passed before the version-only
+release bump. Daemon, Windows app/installer and Android ARM64 release builds then
+completed sequentially with the managed Cargo wrapper, one Cargo job and one Rayon
+thread. Java tools used one active processor. No paid provider requests.
+
+- Before migration: beta had **2 chats, 0 running**, no queued messages, schema 1.
+  A consistent SQLite backup (including WAL state), settings/auth/environment, old
+  binary and unit are private under
+  `/var/lib/tau2-beta/backups/pre-0.7.2-20260924T111416Z`.
+- Restarted only `tau2-beta.service`; acceptance PID **552203**. Installed executable
+  byte-matches the new release. Local health and the actual Tailnet serve endpoint
+  (`tailscale nc vibe 8789`, for this userspace-networked host) report **0.7.2 / 14**.
+- Authenticated live acceptance created only owned UUID fixtures and verified project
+  CRUD, unchanged captured prompts after edits, fresh-chat snapshots, moving with
+  prompt replacement, transcript opening, both delete choices and complete cleanup.
+  Anonymous WebSockets were rejected. No existing chat was opened, moved or deleted.
+- Schema-2 integrity and foreign-key checks passed. Original session metadata differs
+  only by General membership; both original chats' history, receipts and queues
+  compare exactly with the pre-upgrade backup. General is the only project left
+  after fixture cleanup.
+- Stable `tau.service` PID **474496**, start timestamp, binary and unit hashes are
+  unchanged. All existing Tailnet routes, including beta **http://vibe:8789**, match
+  their pre-deployment state. Stable data/service was not migrated or restarted.
+- Sent `Tau-Beta-0.7.2-windows-x64.exe` and
+  `Tau-Beta-0.7.2-android-arm64-v8a.apk`. Package identities, payloads, certificate,
+  alignment and sizes are documented in `frontend/PACKAGING.md`. No physical-device
+  UI/IME/DPI acceptance is inferred from cross-builds. Older beta clients require a
+  matched update for protocol 14.
+
+Source remains the local projects working tree (no push/tag was requested); its
+release snapshot and local validation records are retained under
+`target/projects-release-0.7.2/`. Package checksums are in
+`dist/Tau-Beta-0.7.2-SHA256SUMS.txt`.
+
+SHA-256:
+
+- Daemon: `1019b82f7f6e4d4f9d995ce1166bf753aabb398b346f249e8579b2af426b8008`
+- Windows installer: `00ef15e7ca5cd4590f2df92593a719148b2ca7727c153ec877c9e9a0505dfe56`
+- Android APK: `4e67786b8548a521a49652e3c260b1add4fdba96704945a965244255e5d8e723`

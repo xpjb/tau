@@ -658,7 +658,7 @@ async fn native_title_request_uses_configured_prompt_and_never_overwrites_a_manu
     let mut settings=manager.inner.settings.get(); settings.daemon.generate_titles=true; settings.daemon.title_prompt="Exact template: {text}\n".into();
     settings.daemon.title_model=Some("openai-codex/title-without-metadata".parse().unwrap());
     manager.set_settings(settings.revision,settings).await.unwrap();
-    let id=manager.create_session(None).await.unwrap(); let task_manager=manager.clone(); let task_id=id.clone();
+    let id=manager.create_session(None, "general").await.unwrap(); let task_manager=manager.clone(); let task_id=id.clone();
     let title=tokio::spawn(async move { task_manager.title_after_prompt(&task_id,"Example task").await; });
     let request=model.request().await;
     assert_eq!(request["model"],"title-without-metadata");
@@ -670,11 +670,11 @@ async fn native_title_request_uses_configured_prompt_and_never_overwrites_a_manu
     assert_eq!(manager.inner.state.get(&id).await.unwrap().unwrap().title,"Manually named");
     let mut settings=manager.inner.settings.get(); settings.daemon.title_model=None;
     manager.set_settings(settings.revision,settings).await.unwrap();
-    let next=manager.create_session(None).await.unwrap();
+    let next=manager.create_session(None, "general").await.unwrap();
     manager.title_after_prompt(&next,"Next task").await;
     assert_eq!(model.request().await["model"],"gpt-6-astra");
     assert_eq!(manager.inner.state.get(&next).await.unwrap().unwrap().title,"Chat model title");
-    let failed=manager.create_session(None).await.unwrap();
+    let failed=manager.create_session(None, "general").await.unwrap();
     manager.title_after_prompt(&failed,"Fallback first line\nMore text").await;
     model.request().await;
     assert_eq!(manager.inner.state.get(&failed).await.unwrap().unwrap().title,"Fallback first line");
@@ -807,4 +807,115 @@ async fn saved_settings_keep_exact_text_without_a_third_prompt_layer() {
     assert!(settings.validate().is_err());
     settings.agent.model_system_prompts.clear();
     settings.daemon.title_model=Some("missing-provider/model".parse().unwrap()); assert!(settings.validate().is_err());
+}
+
+#[tokio::test]
+async fn project_prompt_snapshots_reach_both_providers_and_moves_replace_them() {
+    for api in [Api::Codex, Api::ChatCompletions] {
+        let gate = Arc::new(Notify::new());
+        let replies = (0..4).map(|_| {
+            let mut reply = if api == Api::Codex { codex("Done",vec![]) } else { completion("Done",vec![]) };
+            reply.gate = Some(gate.clone()); reply
+        }).collect();
+        let mut model = ModelServer::start(replies).await;
+        let (_root, manager, url, server) = fixture(&model, api).await;
+        let mut client = Client::connect(&url).await;
+        let project = uuid::Uuid::new_v4().to_string();
+        assert_eq!(client.request(json!({"id":"project","type":"create_project","projectId":project,"name":"Research","prompt":"  Project v1\n"})).await["ok"],true);
+        let id = client.request(json!({"id":"chat","type":"create_session","projectId":project})).await["sessionId"].as_str().unwrap().to_owned();
+        let general = client.request(json!({"id":"general","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        assert_ne!(general,id,"Each project has its own starter");
+        assert_eq!(client.request(json!({"id":"same","type":"create_session","projectId":project})).await["sessionId"],id);
+        assert_eq!(client.request(json!({"id":"edit","type":"update_project","projectId":project,"revision":0,"name":"Research renamed","prompt":"Project v2"})).await["ok"],true);
+        assert_eq!(client.request(json!({"id":"stale","type":"update_project","projectId":project,"revision":0,"name":"Lost edit","prompt":"WRONG"})).await["ok"],false);
+        let fresh = client.request(json!({"id":"fresh","type":"create_session","projectId":project})).await["sessionId"].as_str().unwrap().to_owned();
+        assert_ne!(id,fresh,"Never rewrite an existing starter's captured instructions");
+        assert_eq!(manager.inner.state.get(&fresh).await.unwrap().unwrap().project_prompt,"Project v2");
+        for (index, (session, suffix)) in [(&id, "  Project v1\n"), (&fresh, "Project v2"), (&general, "Project v2"), (&id, "General context")].into_iter().enumerate() {
+            if index == 2 {
+                assert_eq!(client.request(json!({"id":"move","type":"move_session","sessionId":general,"projectId":project})).await["ok"],true);
+            }
+            if index == 3 {
+                assert_eq!(client.request(json!({"id":"general-prompt","type":"update_project","projectId":"general","revision":0,"name":"General","prompt":"General context"})).await["ok"],true);
+                assert_eq!(client.request(json!({"id":"move-back","type":"move_session","sessionId":id,"projectId":"general"})).await["ok"],true);
+            }
+            client.open(session).await;
+            assert_eq!(client.request(json!({"id":format!("turn-{index}"),"type":"prompt","sessionId":session,"text":"Check captured instructions"})).await["ok"],true);
+            let request = model.request().await;
+            let prompt = if api == Api::Codex { &request["instructions"] } else { &request["messages"][0]["content"] };
+            assert!(prompt.as_str().unwrap().ends_with(&format!("\n\n{suffix}")),"{prompt}");
+            assert!(prompt.as_str().unwrap().starts_with(&manager.inner.settings.get().agent.system_prompt));
+            assert_eq!(request["messages"].as_array().map(|m| m.iter().filter(|v| v["role"] == "system").count()).unwrap_or(1),1);
+            gate.notify_one();
+            client.until(|m| m["type"] == "session_state" && m["sessionId"] == *session && m["status"] == "idle").await;
+        }
+        let clone = client.request(json!({"id":"clone","type":"clone_session","sessionId":general})).await["sessionId"].as_str().unwrap().to_owned();
+        let copied = manager.inner.state.get(&clone).await.unwrap().unwrap();
+        assert_eq!((copied.project_id.as_str(),copied.project_prompt.as_str()),(project.as_str(),"Project v2"));
+        assert_eq!(client.request(json!({"id":"delete-general","type":"delete_project","projectId":"general","revision":1,"mode":"delete_chats"})).await["ok"],false);
+        assert_eq!(client.request(json!({"id":"rename-general","type":"update_project","projectId":"general","revision":1,"name":"Other","prompt":""})).await["ok"],false);
+        // Deleting a project with Keep is a real move, including its captured prompt.
+        assert_eq!(client.request(json!({"id":"keep","type":"delete_project","projectId":project,"revision":1,"mode":"move_to_general"})).await["ok"],true);
+        for session in [&fresh,&general,&clone] {
+            let stored = manager.inner.state.get(session).await.unwrap().unwrap();
+            assert_eq!((stored.project_id.as_str(),stored.project_prompt.as_str()),("general","General context"));
+            assert!(!manager.inner.state.page(session,None).await.unwrap().events.is_empty());
+        }
+        let config = manager.inner.config.clone();
+        manager.shutdown().await; server.abort(); drop(client);
+        let reopened = StateStore::load(config.database_path).await.unwrap();
+        assert_eq!(reopened.projects().await.unwrap(),vec![tau_protocol::Project { id:"general".into(),name:"General".into(),prompt:"General context".into(),revision:1 }]);
+        assert_eq!(reopened.get(&id).await.unwrap().unwrap().project_prompt,"General context");
+        assert!(model.requests.try_recv().is_err(),"Metadata edits must never invoke a provider");
+    }
+}
+
+#[tokio::test]
+async fn moving_during_tool_run_keeps_that_turn_stable_and_project_delete_cancels_work_atomically() {
+    let gate = Arc::new(Notify::new());
+    let mut first = completion("Checking",vec![call("read","read",json!({"path":"input.txt"}))]);
+    first.gate = Some(gate.clone());
+    let mut last = completion("Must be cancelled",vec![]); last.gate = Some(Arc::new(Notify::new()));
+    let mut model = ModelServer::start(vec![first,completion("Done",vec![]),last]).await;
+    let (root, manager, url, server) = fixture(&model,Api::ChatCompletions).await;
+    tokio::fs::write(root.path().join("input.txt"),"test").await.unwrap();
+    let mut client = Client::connect(&url).await;
+    let project = uuid::Uuid::new_v4().to_string();
+    client.request(json!({"id":"project","type":"create_project","projectId":project,"name":"Work","prompt":"DESTINATION"})).await;
+    let session = client.request(json!({"id":"chat","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+    client.open(&session).await;
+    client.request(json!({"id":"turn","type":"prompt","sessionId":session,"text":"Read input"})).await;
+    let before = model.request().await["messages"][0].clone();
+    assert_eq!(client.request(json!({"id":"move","type":"move_session","sessionId":session,"projectId":project})).await["ok"],true);
+    assert_eq!(client.request(json!({"id":"edit","type":"update_project","projectId":project,"revision":0,"name":"Work","prompt":"LATER"})).await["ok"],true);
+    gate.notify_one();
+    assert_eq!(model.request().await["messages"][0],before,"A tool continuation must keep its in-flight instructions");
+    client.until(|m| m["type"] == "session_state" && m["sessionId"] == session && m["status"] == "idle").await;
+    let clone = manager.clone_session(&session).await.unwrap();
+    manager.move_session(&clone,"general".into()).await.unwrap();
+    client.request(json!({"id":"next","type":"prompt","sessionId":session,"text":"Next turn"})).await;
+    let next = model.request().await;
+    assert!(next["messages"][0]["content"].as_str().unwrap().ends_with("\n\nDESTINATION"));
+    assert_eq!(manager.inner.state.get(&session).await.unwrap().unwrap().project_prompt,"DESTINATION");
+    let upload = root.path().join("uploads").join(&session);
+    tokio::fs::create_dir_all(&upload).await.unwrap(); tokio::fs::write(upload.join("file"),"private upload").await.unwrap();
+    // A forced transaction failure leaves the project and every chat intact.
+    manager.inner.state.access(|db| { db.execute_batch("CREATE TRIGGER fail_project_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END;")?; Ok(()) }).await.unwrap();
+    assert_eq!(client.request(json!({"id":"fail-delete","type":"delete_project","projectId":project,"revision":1,"mode":"delete_chats"})).await["ok"],false);
+    assert!(manager.inner.state.get(&session).await.unwrap().is_some());
+    assert!(manager.inner.state.projects().await.unwrap().iter().any(|p| p.id == project));
+    assert!(upload.is_dir());
+    manager.inner.state.access(|db| { db.execute_batch("DROP TRIGGER fail_project_delete")?; Ok(()) }).await.unwrap();
+    assert_eq!(client.request(json!({"id":"delete","type":"delete_project","projectId":project,"revision":1,"mode":"delete_chats"})).await["ok"],true);
+    assert!(manager.inner.state.get(&session).await.unwrap().is_none());
+    assert!(!upload.exists());
+    let survivor = manager.inner.state.get(&clone).await.unwrap().unwrap();
+    assert!(survivor.parent_id.is_none());
+    assert!(!manager.inner.state.page(&clone,None).await.unwrap().events.is_empty());
+    manager.inner.state.access(|db| {
+        assert_eq!(db.query_row("SELECT count(*) FROM receipts WHERE session_id NOT IN (SELECT id FROM sessions)",[],|r|r.get::<_,u32>(0))?,0);
+        assert_eq!(db.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0))?,"ok");
+        Ok(())
+    }).await.unwrap();
+    manager.shutdown().await; server.abort();
 }

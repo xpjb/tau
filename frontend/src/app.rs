@@ -20,10 +20,22 @@ use std::{
 };
 use tau_protocol::*;
 
+mod projects;
+
 #[derive(Clone)]
 enum Action {
     Select(String),
     New,
+    SelectProject(String),
+    NewProject,
+    RenameProject(String),
+    ProjectPrompt(String),
+    DeleteProject(String),
+    RemoveProject(DeleteProjectMode),
+    MoveMenu(String),
+    ContextBack,
+    MoveChat(String, String),
+    Noop,
     Settings,
     ModelSettings,
     ResetModels,
@@ -77,6 +89,11 @@ enum Info {
 #[derive(Clone)]
 enum ModalKind {
     Settings,
+    NewProject(String),
+    RenameProject(Project),
+    ProjectPrompt(Project),
+    DeleteProject(Project),
+    DeleteProjectChoice(Project),
     Models,
     Rename(String),
     Delete(String),
@@ -119,12 +136,15 @@ struct Placed {
     top: f32,
     height: f32,
 }
+#[derive(Clone)]
 struct ContextMenu {
     at: Vec2,
     section: Option<String>,
     chat: Option<String>,
     options: Vec<(String, Action)>,
     selected: usize,
+    scroll: f32,
+    parent: Option<Box<ContextMenu>>,
 }
 struct MessageArea {
     key: String,
@@ -182,8 +202,17 @@ pub struct App {
     modal: Option<Modal>,
     context_menu: Option<ContextMenu>,
     context_rect: Rect,
+    menu_viewport: Rect,
     message_areas: Vec<MessageArea>,
     chat_areas: Vec<(Rect, String)>,
+    project_areas: Vec<(Rect, String)>,
+    projects_rect: Rect,
+    list_rect: Rect,
+    project_scroll: f32,
+    max_project_scroll: f32,
+    project_velocity: f32,
+    revealed_project: String,
+    saving_project: Option<String>,
     usage: Tooltip,
     info_tip: Tooltip,
     info_target: Info,
@@ -244,8 +273,17 @@ impl App {
             modal: None,
             context_menu: None,
             context_rect: Rect::new(0., 0., 0., 0.),
+            menu_viewport: Rect::new(0., 0., 0., 0.),
             message_areas: vec![],
             chat_areas: vec![],
+            project_areas: vec![],
+            projects_rect: Rect::new(0., 0., 0., 0.),
+            list_rect: Rect::new(0., 0., 0., 0.),
+            project_scroll: 0.,
+            max_project_scroll: 0.,
+            project_velocity: 0.,
+            revealed_project: String::new(),
+            saving_project: None,
             usage: Tooltip::default(),
             info_tip: Tooltip::default(),
             info_target: Info::Connection,
@@ -290,6 +328,7 @@ impl App {
     pub fn resize(&mut self, size: (u32, u32), scale: f32, origin: Vec2) {
         if self.size != size || self.scale != scale || self.origin != origin {
             self.cancel_pointer();
+            self.revealed_project.clear();
             self.size = size;
             self.scale = scale;
             self.origin = origin;
@@ -346,6 +385,10 @@ impl App {
             self.dirty |= section_at(self.hover) != section_at(point);
         }
         self.hover = point;
+        if self.context_menu.as_ref().is_some_and(|m| m.parent.is_none())
+            && let Some(Action::MoveMenu(id)) = point.and_then(|p| self.hits.iter().rev().find(|h| contains(h.rect, p))).map(|h| h.action.clone()) {
+            self.move_menu(&id);
+        }
         self.dirty |= old != new;
     }
     #[cfg(not(target_os = "android"))]
@@ -406,6 +449,8 @@ impl App {
         self.dirty = true;
     }
     pub fn tick(&mut self, dt: f32) -> bool {
+        let visible = (self.size.0 as f32 / self.scale >= 760. || !self.show_chats) && self.modal.is_none() && self.viewer.is_none();
+        if let Err(error) = self.controller.viewing(visible) { self.controller.notice = Some(error.to_string()); }
         self.dirty |= self.controller.poll();
         self.dirty |= self.usage.tick();
         self.dirty |= self.info_tip.tick();
@@ -415,6 +460,7 @@ impl App {
             self.focus = None;
             self.dirty = true;
         }
+        self.project_result();
         let selected = self.controller.account.selected.clone();
         if selected != self.composer_session {
             self.cancel_pointer();
@@ -542,9 +588,23 @@ impl App {
             self.remember_scroll();
             self.dirty = true;
         }
+        if self.pointer.is_none() && self.project_velocity.abs() > 4. {
+            let old = self.project_scroll;
+            self.project_scroll = (old + self.project_velocity * dt.min(0.05)).clamp(0., self.max_project_scroll);
+            self.project_velocity *= (-9. * dt).exp();
+            if (old - self.project_scroll).abs() < 0.1 { self.project_velocity = 0.; }
+            self.dirty = true;
+        }
+        if let Some(point) = self.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
+            && self.modal.is_none() && self.context_menu.is_none() && self.viewer.is_none()
+            && (self.project_areas.iter().any(|(r,_)| contains(*r, point)) || self.chat_areas.iter().any(|(r,_)| contains(*r, point))) {
+            self.context_at(point);
+        }
+        let waiting_hold = self.pointer.as_ref().is_some_and(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() < 450)
+            && self.modal.is_none() && self.context_menu.is_none() && self.viewer.is_none();
         let dirty = self.dirty;
         self.dirty = false;
-        dirty || self.velocity.abs() > 4.
+        dirty || self.velocity.abs() > 4. || self.project_velocity.abs() > 4. || waiting_hold
     }
     pub fn save(&mut self) -> Result<()> {
         self.remember_scroll();
@@ -584,6 +644,11 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.context_menu.is_some() {
+            self.context_menu = self.context_menu.take().and_then(|m| m.parent.map(|p| *p));
+            self.dirty = true;
+            return;
+        }
         self.focus = None;
         if self.viewer.take().is_some() {
         } else if self.modal.is_some() {
@@ -599,6 +664,7 @@ impl App {
         match lane {
             Lane::Transcript => (self.scroll, self.max_scroll),
             Lane::Sidebar => (self.list_scroll, self.max_list_scroll),
+            Lane::Projects => (self.project_scroll, self.max_project_scroll),
             Lane::Horizontal => (self.horizontal, self.max_horizontal),
         }
     }
@@ -609,6 +675,7 @@ impl App {
                 self.remember_scroll();
             }
             Lane::Sidebar => self.list_scroll = value.clamp(0., self.max_list_scroll),
+            Lane::Projects => self.project_scroll = value.clamp(0., self.max_project_scroll),
             Lane::Horizontal => self.horizontal = value.clamp(0., self.max_horizontal),
         }
     }
@@ -651,7 +718,12 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn wheel(&mut self, amount: f32, horizontal: bool, point: Vec2) {
+        if self.context_menu.is_some() && contains(self.context_rect, point) {
+            self.scroll_menu(amount);
+            return;
+        }
         self.context_menu = None;
+        self.project_velocity = 0.;
         self.usage.dismiss();
         self.info_tip.dismiss();
         self.cancel_autoscroll();
@@ -670,7 +742,9 @@ impl App {
         if let Some(v) = &mut self.viewer {
             v.zoom = (v.zoom * (-amount * 0.002).exp()).clamp(1., 16.);
         } else if self.modal.is_none() {
-            let lane = if horizontal {
+            let lane = if contains(self.projects_rect, point) {
+                Lane::Projects
+            } else if horizontal {
                 Lane::Horizontal
             } else if self.show_chats
                 || self.size.0 as f32 / self.scale >= 760.
@@ -757,6 +831,7 @@ impl App {
         self.expansion_pin = None;
         self.history_attempt = None;
         self.velocity = 0.;
+        self.project_velocity = 0.;
         if self.pointer.is_some() {
             if self.viewer.is_some() && touch {
                 self.pinch = Some((id, point));
@@ -896,12 +971,21 @@ impl App {
         let dx = point.x - p.last.x;
         p.dragged |= (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 7. * self.scale;
         if p.dragged {
+            if self.context_menu.is_some() {
+                p.last = point;
+                p.at = Instant::now();
+                self.scroll_menu(-dy);
+                return;
+            }
             if let Some(v) = &mut self.viewer {
                 v.pan.x += dx;
                 v.pan.y += dy;
             } else if self.modal.is_none() {
-                if self.show_chats {
-                    self.list_scroll = (self.list_scroll - dy).max(0.);
+                if contains(self.projects_rect, p.start) {
+                    self.project_scroll = (self.project_scroll - dx).clamp(0., self.max_project_scroll);
+                    if p.touch { self.project_velocity = (-dx / p.at.elapsed().as_secs_f32().max(0.008)).clamp(-3000. * self.scale, 3000. * self.scale); }
+                } else if contains(self.list_rect, p.start) {
+                    self.list_scroll = (self.list_scroll - dy).clamp(0., self.max_list_scroll);
                 } else if contains(self.transcript, p.start)
                     && self.max_horizontal > 0.
                     && (point.x - p.start.x).abs() > 1.5 * (point.y - p.start.y).abs()
@@ -936,7 +1020,9 @@ impl App {
         if !p.dragged {
             if p.touch
                 && p.started.elapsed().as_millis() > 450
-                && (contains(self.transcript, point)
+                && self.context_menu.is_none()
+                && (self.project_areas.iter().any(|(r,_)| contains(*r, point) && contains(*r, p.start))
+                    || contains(self.transcript, point)
                     || self
                         .chat_areas
                         .iter()
@@ -950,6 +1036,8 @@ impl App {
                 .find(|h| contains(h.rect, point) && contains(h.rect, p.start))
             {
                 self.activate(hit.action.clone());
+            } else if self.context_menu.is_some() {
+                // Empty menu space never activates the transcript behind it.
             } else if let Some(link) = self.renderer.hit_link(point) {
                 self.activate(Action::Link(link));
             } else if p.touch
@@ -969,6 +1057,7 @@ impl App {
         self.field_selection = None;
         if p.at.elapsed().as_millis() > 150 {
             self.velocity = 0.;
+            self.project_velocity = 0.;
         }
         let result = self.save();
         self.report(result);
@@ -986,6 +1075,7 @@ impl App {
         self.pointer = None;
         self.pinch = None;
         self.velocity = 0.;
+        self.project_velocity = 0.;
         self.selecting = false;
         self.field_selection = None;
     }
@@ -1075,7 +1165,9 @@ impl App {
         }
         if let Some(menu) = &mut self.context_menu {
             match key {
-                "Escape" => self.context_menu = None,
+                "Escape" | "ArrowLeft" => {
+                    self.context_menu = self.context_menu.take().and_then(|m| m.parent.map(|p| *p));
+                }
                 "ArrowUp" => {
                     self.hover = None;
                     menu.selected = (menu.selected + menu.options.len() - 1) % menu.options.len()
@@ -1084,12 +1176,13 @@ impl App {
                     self.hover = None;
                     menu.selected = (menu.selected + 1) % menu.options.len();
                 }
-                "Enter" => {
+                "Enter" | "ArrowRight" => {
                     let action = menu.options[menu.selected].1.clone();
-                    self.activate(action);
+                    if key == "Enter" || matches!(action, Action::MoveMenu(_)) { self.activate(action); }
                 }
                 _ => {}
             }
+            self.reveal_menu_selection();
             self.dirty = true;
             return;
         }
@@ -1168,9 +1261,28 @@ impl App {
     }
     fn apply(&mut self, action: Action) -> Result<()> {
         self.cancel_preedit();
+        if let Action::MoveMenu(ref id) = action { self.move_menu(id); return Ok(()); }
+        if matches!(action, Action::ContextBack) {
+            self.context_menu = self.context_menu.take().and_then(|m| m.parent.map(|p| *p));
+            return Ok(());
+        }
+        if matches!(action, Action::Noop) { return Ok(()); }
         self.context_menu = None;
         let selected = self.controller.account.selected.clone();
         match action {
+            Action::SelectProject(id) => {
+                if self.controller.account.selected_project == id { return Ok(()); }
+                self.save()?;
+                self.controller.select_project(&id)?;
+                self.list_scroll = 0.;
+                self.show_chats = true;
+                self.focus = None;
+            }
+            Action::NewProject | Action::RenameProject(_) | Action::ProjectPrompt(_) | Action::DeleteProject(_) | Action::RemoveProject(_) => self.project_action(action)?,
+            Action::MoveChat(session_id, project_id) => {
+                self.controller.request(ClientCommand::MoveSession { session_id, project_id })?;
+            }
+            Action::MoveMenu(_) | Action::ContextBack | Action::Noop => {}
             Action::Select(id) => {
                 self.controller.select(&id)?;
                 self.show_chats = false;
@@ -1316,6 +1428,10 @@ impl App {
                     .map(|(_, e, _)| e.value.clone())
                     .collect::<Vec<_>>();
                 match modal.kind.clone() {
+                    ModalKind::NewProject(_) | ModalKind::RenameProject(_) | ModalKind::ProjectPrompt(_) | ModalKind::DeleteProject(_) | ModalKind::DeleteProjectChoice(_) => {
+                        self.confirm_project()?;
+                        return Ok(());
+                    }
                     ModalKind::Settings => {
                         if self.connecting && self.controller.connection == "Connecting…" {
                             return Ok(());
@@ -1386,6 +1502,7 @@ impl App {
             }
             Action::CancelModal => {
                 self.connecting = false;
+                self.saving_project = None;
                 self.waiting_settings = false;
                 self.daemon_draft = None;
                 self.saving_settings = None;
@@ -1697,6 +1814,10 @@ impl App {
         self.scrollbars.clear();
         self.message_areas.clear();
         self.chat_areas.clear();
+        self.project_areas.clear();
+        self.projects_rect = Rect::new(0.,0.,0.,0.);
+        self.list_rect = Rect::new(0.,0.,0.,0.);
+        self.transcript = Rect::new(0.,0.,0.,0.);
         self.info_areas.clear();
         self.usage.region = Rect::new(0., 0., 0., 0.);
         self.info_tip.region = Rect::new(0., 0., 0., 0.);
@@ -1858,13 +1979,15 @@ impl App {
             Some(ModalKind::Daemon)
         ) {
             self.daemon_settings_frame(&mut overlay, bounds);
+        } else if self.modal.as_ref().is_some_and(|m| projects::is_project_modal(&m.kind)) {
+            self.project_modal_frame(&mut overlay, bounds);
         } else if self.modal.is_some() {
             self.modal_frame(&mut overlay, bounds);
         }
         if !matches!(
             self.modal.as_ref().map(|m| &m.kind),
             Some(ModalKind::Settings | ModalKind::Models | ModalKind::Daemon)
-        ) {
+        ) && !self.modal.as_ref().is_some_and(|m| projects::is_project_modal(&m.kind)) {
             self.notice_frame(&mut overlay, bounds);
         }
         if self.selecting
@@ -1884,7 +2007,6 @@ impl App {
             Rect::new(b.x + b.width - s, b.y, s, b.height),
             color(0x2a3541),
         );
-        layer.rect(Rect::new(b.x, b.y + 140. * s, b.width, s), color(0x2a3541));
         let indicator = Rect::new(b.x + 72. * s, b.y + 22. * s, 28. * s, 34. * s);
         self.info_areas.push((indicator, Info::Connection));
         layer.rounded_rect(
@@ -1929,11 +2051,14 @@ impl App {
             s,
             true,
         );
-        let clip = Rect::new(b.x, b.y + 148. * s, b.width, (b.height - 156. * s).max(0.));
+        self.project_tabs(layer, Rect::new(b.x, b.y + 140. * s, b.width, 42. * s));
+        let clip = Rect::new(b.x, b.y + 190. * s, b.width, (b.height - 198. * s).max(0.));
+        self.list_rect = clip;
+        let sessions = self.controller.account.sessions.iter().filter(|c| c.project_id == self.controller.account.selected_project);
         self.max_list_scroll =
-            (self.controller.account.sessions.len() as f32 * 90. * s - clip.height).max(0.);
+            (sessions.clone().count() as f32 * 90. * s - clip.height).max(0.);
         self.list_scroll = self.list_scroll.min(self.max_list_scroll);
-        for (i, session) in self.controller.account.sessions.iter().enumerate() {
+        for (i, session) in sessions.enumerate() {
             let y = clip.y + i as f32 * 90. * s - self.list_scroll;
             let rect = Rect::new(b.x + 8. * s, y, b.width - 16. * s, 84. * s);
             if y + rect.height < clip.y || y > clip.y + clip.height {
@@ -1961,14 +2086,7 @@ impl App {
             );
             let rect = crate::render::intersect(rect, clip);
             self.chat_areas.push((rect, session.id.clone()));
-            let unread = self
-                .controller
-                .account
-                .read_at
-                .get(&session.id)
-                .copied()
-                .unwrap_or(0)
-                < session.updated_at_ms;
+            let unread = self.controller.unread(session);
             let title = if session.starter {
                 "New chat"
             } else if session.title.is_empty() {
@@ -2039,6 +2157,9 @@ impl App {
                     action: Action::Info(info),
                 });
             }
+        }
+        if self.max_list_scroll == 0. && !self.controller.account.sessions.iter().any(|c| c.project_id == self.controller.account.selected_project) {
+            self.renderer.clipped_label(layer, "No chats in this project yet", Rect::new(b.x + 20. * s, clip.y + 20. * s, b.width - 40. * s, 40. * s), 13. * s, color(0x82909f), false, clip);
         }
         self.scrollbar(layer, Lane::Sidebar, clip);
     }
@@ -3204,6 +3325,10 @@ impl App {
         {
             return;
         }
+        if let Some(id) = self.project_areas.iter().find(|(r,_)| contains(*r, point)).map(|(_,id)| id.clone()) {
+            self.project_context(&id, point);
+            return;
+        }
         let mut chat = self
             .chat_areas
             .iter()
@@ -3257,6 +3382,7 @@ impl App {
                     "Codex priority…".into(),
                     Action::AgentSetting(id.clone(), "fast".into()),
                 ),
+                ("Move to project  ›".into(), Action::MoveMenu(id.clone())),
                 ("Rename…".into(), Action::Rename(id.clone())),
                 ("Clone chat".into(), Action::Clone(id.clone())),
                 ("Release idle runtime".into(), Action::Sleep(id.clone())),
@@ -3269,56 +3395,12 @@ impl App {
             chat,
             options,
             selected: 0,
+            scroll: 0.,
+            parent: None,
         });
         self.pointer = None;
         self.selecting = false;
         self.dirty = true;
-    }
-    fn context_frame(&mut self, layer: &mut Layer, bounds: Rect) {
-        let Some(menu) = &self.context_menu else {
-            return;
-        };
-        let s = self.scale;
-        let w = (240. * s).min(bounds.width);
-        let h = (menu.options.len() as f32 * 36. + 8.) * s;
-        let rect = Rect::new(
-            menu.at
-                .x
-                .clamp(bounds.x, (bounds.x + bounds.width - w).max(bounds.x)),
-            menu.at
-                .y
-                .clamp(bounds.y, (bounds.y + bounds.height - h).max(bounds.y)),
-            w,
-            h,
-        );
-        self.context_rect = rect;
-        self.hits.clear();
-        layer.rounded_rect(rect, 8. * s, color(0x36343b));
-        for (i, (label, action)) in menu.options.iter().enumerate() {
-            let r = Rect::new(
-                rect.x + 4. * s,
-                rect.y + (4. + i as f32 * 36.) * s,
-                w - 8. * s,
-                36. * s,
-            );
-            if self.hover.is_some_and(|p| contains(r, p))
-                || self.hover.is_none() && menu.selected == i
-            {
-                layer.rounded_rect(r, 4. * s, color(0x494750));
-            }
-            self.renderer.label(
-                layer,
-                label,
-                Rect::new(r.x + 12. * s, r.y + 9. * s, r.width - 24. * s, 22. * s),
-                14. * s,
-                color(0xe5eaf0),
-                false,
-            );
-            self.hits.push(Hit {
-                rect: r,
-                action: action.clone(),
-            });
-        }
     }
     #[allow(clippy::too_many_arguments)]
     fn icon_button(
@@ -4192,10 +4274,11 @@ fn button(
     if rect.width <= 0. || rect.height <= 0. {
         return;
     }
+    let destructive = matches!(action, Action::RemoveProject(DeleteProjectMode::DeleteChats));
     layer.rounded_rect(
         rect,
         rect.height * 0.5,
-        layer.control_color(rect, color(if primary { 0x67d4ff } else { 0x18212b })),
+        layer.control_color(rect, color(if destructive { 0x402b30 } else if primary { 0x67d4ff } else { 0x18212b })),
     );
     let style = sanscale::Style {
         chain: renderer.faces.prose[0],
@@ -4214,7 +4297,7 @@ fn button(
                 rect.y + (rect.height - layout.height_em() * size) / 2.,
             ),
             size,
-            color: color(if primary { 0x003546 } else { 0x67d4ff }),
+            color: color(if destructive { 0xffb4ab } else if primary { 0x003546 } else { 0x67d4ff }),
             clip: Some(rect),
             ..Default::default()
         });
@@ -4258,3 +4341,6 @@ fn count(n: u64) -> String {
 
 #[cfg(all(test, not(target_os = "android")))]
 mod editor_tests;
+
+#[cfg(all(test, not(target_os = "android")))]
+mod project_tests;
