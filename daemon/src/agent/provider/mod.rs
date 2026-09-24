@@ -25,6 +25,9 @@ pub struct Stream<'a> {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub message: serde_json::Map<String, Value>,
+    // A Codex summary part may start without a newline. Chunk boundaries are
+    // not part boundaries; these indices identify actual thinking segments.
+    pub reasoning_segment: Option<(bool, Option<u64>, Option<u64>)>,
     pub tool_calls: BTreeMap<usize, serde_json::Map<String, Value>>,
     pub output_items: BTreeMap<usize, Option<Value>>,
     pub finish_reason: Option<String>,
@@ -47,6 +50,7 @@ impl<'a> Stream<'a> {
             provider: None,
             model: None,
             message: serde_json::Map::new(),
+            reasoning_segment: None,
             tool_calls: BTreeMap::new(),
             output_items: BTreeMap::new(),
             finish_reason: None,

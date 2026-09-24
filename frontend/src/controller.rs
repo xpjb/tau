@@ -139,6 +139,7 @@ impl Controller {
         self.account.selected = Some(id.into());
         if let Some(session) = self.account.sessions.iter().find(|s| s.id == id) {
             self.account.selected_project = session.project_id.clone();
+            self.account.last_chat_by_project.insert(session.project_id.clone(), id.into());
             self.account
                 .read_at
                 .insert(id.into(), session.updated_at_ms);
@@ -162,10 +163,34 @@ impl Controller {
         }
         Ok(())
     }
+    fn last_chat_in_project(&self, project: &str) -> Option<String> {
+        self.account.last_chat_by_project.get(project)
+            .filter(|id| self.account.sessions.iter().any(|s| s.project_id == project && s.id == id.as_str()))
+            .cloned()
+            .or_else(|| self.account.sessions.iter().filter(|s| s.project_id == project)
+                .max_by_key(|s| (s.updated_at_ms, &s.id)).map(|s| s.id.clone()))
+    }
     pub fn select_project(&mut self, id: &str) -> Result<()> {
+        // Older local accounts remember only a single selected chat; capture it
+        // before replacing the global selection with this topic's resume target.
+        if let Some(current) = &self.account.selected
+            && let Some(session) = self.account.sessions.iter().find(|s| &s.id == current) {
+            self.account.last_chat_by_project.insert(session.project_id.clone(), current.clone());
+        }
         self.account.selected_project = id.into();
-        self.account.selected = None;
-        self.store.put(&self.identity, "account", &self.account)
+        self.account.selected = self.last_chat_in_project(id);
+        // Tab selection itself is not a read receipt. The app marks the chat
+        // read only when its pane is actually visible (including after restart).
+        self.viewing_chat = false;
+        self.store.put(&self.identity, "account", &self.account)?;
+        if let Some(chat) = self.account.selected.clone() {
+            self.ensure_chat(&chat)?;
+            if self.epoch.is_some() {
+                self.open(&chat)?;
+                self.request(ClientCommand::GetCommands { session_id: chat })?;
+            }
+        }
+        Ok(())
     }
     pub fn unread(&self, session: &SessionSummary) -> bool {
         !session.starter && self.account.read_at.get(&session.id).copied().unwrap_or(0) < session.updated_at_ms
@@ -707,10 +732,13 @@ impl Controller {
                     if s.starter { self.account.read_at.insert(s.id.clone(), s.updated_at_ms); }
                 }
                 self.account.sessions = sessions;
+                self.account.last_chat_by_project.retain(|project, chat| self.account.sessions.iter()
+                    .any(|s| s.project_id == *project && s.id == *chat));
                 if let Some(id) = &self.account.selected
                     && let Some(s) = self.account.sessions.iter().find(|s| &s.id == id)
                 {
                     self.account.selected_project = s.project_id.clone();
+                    self.account.last_chat_by_project.insert(s.project_id.clone(), id.clone());
                     if self.viewing_chat { self.account.read_at.insert(id.clone(), s.updated_at_ms); }
                 }
                 self.store.put(&self.identity, "account", &self.account)?;
@@ -963,6 +991,7 @@ impl Controller {
                             if self.account.selected.as_ref() == Some(&session_id) {
                                 self.account.selected = None;
                             }
+                            self.account.last_chat_by_project.retain(|_, chat| chat != &session_id);
                             self.store.put(&self.identity, "account", &self.account)?;
                         }
                         _ => {}

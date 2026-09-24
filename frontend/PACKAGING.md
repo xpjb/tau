@@ -1,6 +1,6 @@
 # Beta packaging sizes
 
-## 0.7.2 projects beta
+## 0.7.2 topics beta
 
 | Measured component | MiB |
 |---|---:|

@@ -9,7 +9,7 @@ not alternate runtime paths on this branch.
 
 `protocol` owns both sides of protocol 14, including settings, receipts, canonical
 transcript changes, history cuts, queues and transfer offers. `daemon` adds internal
-projection/head/activity bookkeeping around those wire types. Frontend snapshots,
+topicion/head/activity bookkeeping around those wire types. Frontend snapshots,
 live suffixes and durable replacements use one sequence/cursor model, not separate
 hand-written DTO dialects or a preview bridge.
 
@@ -36,7 +36,7 @@ overwrite a later manual rename. It adds a provider request when enabled.
 
 SQLite is the sole authoritative native transcript/queue/receipt store. WAL/FULL
 transactions atomically accept prompts, advance metadata and queue generations,
-consume queued users, commit saved projections, and record request outcomes. Events
+consume queued users, commit saved topicions, and record request outcomes. Events
 are published only after commit. SQL indexes serve history and applicable checkpoint
 plus suffix replay. Runtime memory retains a bounded hot tail, not every old turn.
 Forks copy the selected prefix and relevant consumed-user receipts; deletion cascades
@@ -47,14 +47,17 @@ from stable. Per-session revisions reject stale snapshots; they are not permissi
 to run competing tool-executing daemons on one database. The abandoned reconciliation
 store is not part of the release ancestry.
 
-Projects live in SQLite (schema 2), alongside sessions. Migration places existing
-sessions in General with an empty captured project prompt and preserves history.
+Topics live in SQLite (schema 2), alongside sessions. Migration places existing
+sessions in General with an empty captured topic prompt and preserves history.
 Membership changes are ordered by a manager gate; delete-with-chats cancels and
 retires affected runtimes before one cascading transaction. Delete-with-move is
-also one transaction. A project edit never rewrites session prompts. Creation and
-moves capture the exact current project prompt in session metadata; forks copy that
+also one transaction. A topic edit never rewrites session prompts. Creation and
+moves capture the exact current topic prompt in session metadata; forks copy that
 snapshot. Provider requests append it to the ordinary resolved system instructions.
 In-flight tool continuations pin their current snapshot until a new user turn.
+The UI calls these *topics*; existing `projectId` wire fields and SQLite table names
+remain stable. Each client persists its last-open chat per topic, validates it against
+current server membership, and falls back to the most recently active chat.
 
 Settings and auth are separate private, atomic files. Settings CAS preserves exact
 prompt text and distinguishes missing/inherited (`null`) from intentionally empty
