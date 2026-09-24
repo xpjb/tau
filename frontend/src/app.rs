@@ -253,6 +253,7 @@ pub struct App {
     max_horizontal: f32,
     transcript: Rect,
     placed: Vec<Placed>,
+    placed_session: Option<String>,
     pointer: Option<Pointer>,
     hover: Option<Vec2>,
     pinch: Option<(u64, Vec2)>,
@@ -327,6 +328,7 @@ impl App {
             max_horizontal: 0.,
             transcript: Rect::new(0., 0., 0., 0.),
             placed: vec![],
+            placed_session: None,
             pointer: None,
             hover: None,
             pinch: None,
@@ -480,6 +482,15 @@ impl App {
         self.project_result();
         let selected = self.controller.account.selected.clone();
         if selected != self.composer_session {
+            // A selection changed outside the click path (e.g. a server reply).
+            // Persist the old chat's last measured anchor before discarding it.
+            if let Some(previous) = &self.composer_session
+                && self.placed_session.as_deref() == Some(previous.as_str())
+                && let Err(error) = self.controller.save_chat(previous) {
+                self.controller.notice = Some(error.to_string());
+            }
+            self.placed.clear();
+            self.placed_session = None;
             self.cancel_pointer();
             self.history_attempt = None;
             self.context_menu = None;
@@ -647,11 +658,12 @@ impl App {
     }
     fn remember_scroll(&mut self) {
         if let Some(id) = self.controller.account.selected.clone()
+            && self.placed_session.as_deref() == Some(id.as_str())
+            && let Some(anchor) = self.placed.iter().find(|r| r.top + r.height >= self.scroll)
             && let Some(chat) = self.controller.chats.get_mut(&id)
         {
-            let anchor = self.placed.iter().find(|r| r.top + r.height >= self.scroll);
-            chat.local.position.key = anchor.map(|r| r.key.clone());
-            chat.local.position.offset = anchor.map_or(0., |r| (self.scroll - r.top) / self.scale);
+            chat.local.position.key = Some(anchor.key.clone());
+            chat.local.position.offset = (self.scroll - anchor.top) / self.scale;
             chat.local.position.follow = self.expansion_pin.is_none()
                 && !self
                     .wheel
@@ -1339,9 +1351,12 @@ impl App {
             }
             Action::MoveMenu(_) | Action::ContextBack | Action::Noop => {}
             Action::Select(id) => {
-                self.controller.select(&id)?;
+                if selected.as_deref() != Some(id.as_str()) {
+                    self.save()?;
+                    self.controller.select(&id)?;
+                    self.scroll = 0.;
+                }
                 self.show_chats = false;
-                self.scroll = 0.;
                 self.focus = Some(None);
             }
             Action::Info(target) => {
@@ -2658,7 +2673,8 @@ impl App {
         let position = &self.controller.chats[&session].local.position;
         // An empty/not-yet-loaded frame must not erase the saved anchor. If the
         // anchor is on an older page, near-top paging can find it before rebasing.
-        let can_remember = self.controller.chats[&session].feed.synchronized
+        let can_remember = !placements.is_empty()
+            && self.controller.chats[&session].feed.synchronized
             && (position.follow
                 || position
                     .key
@@ -2687,6 +2703,7 @@ impl App {
             wheel.target = (wheel.target + self.scroll - old_scroll).clamp(0., self.max_scroll);
         }
         self.placed = placements;
+        self.placed_session = Some(session.clone());
         if can_remember {
             self.remember_scroll();
         }
@@ -4413,3 +4430,5 @@ mod icon_controls_tests;
 mod hover_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod viewer_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod scroll_tests;

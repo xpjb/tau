@@ -17,6 +17,7 @@ complete just because code compiles.
 | 009 Nested tool hover feedback | Visual | Open |
 | 010 Account usage remaining | Context hover | Open |
 | 011 Title generation model and prompt | With 001 | Beta daemon/Windows delivered |
+| 012 Chat scroll-position architecture and test removal | Later | Open; quick fix provisional, audit deferred |
 
 Settings and the composer must reuse the existing shared editor. Do not create
 another text controller. See 004 for the pinned source and migration difficulties.
