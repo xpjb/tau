@@ -98,7 +98,7 @@ impl SettingsStore {
                     let agent = value["agent"].as_object_mut().context("Invalid agent settings")?;
                     if let Some(projects) = agent.remove("projectPrompts")
                         && !projects.as_object().is_some_and(|p| p.is_empty()) {
-                        bail!("Project prompt settings were removed; put their text in the default or model prompt before upgrading");
+                        bail!("Legacy directory prompt settings were removed; put their text in the default or model prompt before upgrading");
                     }
                     let mut prompt = match agent.remove("systemPrompt") {
                         Some(Value::String(text)) => text,

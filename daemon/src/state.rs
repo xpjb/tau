@@ -100,7 +100,7 @@ impl StateStore {
     pub async fn create(&self, model: SessionModel, thinking: String, keep: Option<String>, project_id: String) -> Result<String> {
         self.access(move |db| {
             let tx = db.transaction()?;
-            let project_prompt: String = tx.query_row("SELECT prompt FROM projects WHERE id=?1", [&project_id], |r| r.get(0)).context("Unknown project")?;
+            let project_prompt: String = tx.query_row("SELECT prompt FROM projects WHERE id=?1", [&project_id], |r| r.get(0)).context("Unknown topic")?;
             if let Some(id) = keep {
                 let data: String = tx.query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| row.get(0)).context("Unknown session")?;
                 let mut session: StoredSession = serde_json::from_str(&data)?; session.starter = false;

@@ -158,7 +158,7 @@ Windows installer SHA-256:
 `80dce02691ee91431916d42529983b41b3efac30790d5710454064f51994200c`
 
 
-## Projects / beta 0.7.2 deployment and Windows + Android delivery — 2026-09-24
+## Topics (wire/storage: projects) / beta 0.7.2 deployment and Windows + Android delivery — 2026-09-24
 
 User authorized deployment and both platform builds. The projects working tree was
 versioned as **0.7.2 / protocol 14**; Android advanced to versionCode **7**. The feature

@@ -6,7 +6,7 @@ pub(super) fn is_project_modal(kind: &ModalKind) -> bool {
 impl App {
     fn project(&self, id: &str) -> Result<Project> {
         self.controller.account.projects.iter().find(|p| p.id == id).cloned()
-            .ok_or_else(|| anyhow::anyhow!("Project no longer exists"))
+            .ok_or_else(|| anyhow::anyhow!("Topic no longer exists"))
     }
     pub(super) fn project_action(&mut self, action: Action) -> Result<()> {
         if self.saving_project.is_some() { return Ok(()); }
@@ -14,22 +14,22 @@ impl App {
         let options = vec![("Save".into(), Action::Confirm), ("Cancel".into(), Action::CancelModal)];
         self.modal = Some(match action {
             Action::NewProject => Modal {
-                kind: ModalKind::NewProject(uuid::Uuid::new_v4().to_string()), title: "New project".into(),
-                fields: vec![("Name".into(), Editor::line(String::new()), false), ("Project prompt (optional)".into(), Editor::new(String::new()), false)], options,
+                kind: ModalKind::NewProject(uuid::Uuid::new_v4().to_string()), title: "New topic".into(),
+                fields: vec![("Name".into(), Editor::line(String::new()), false), ("Topic prompt (optional)".into(), Editor::new(String::new()), false)], options,
             },
             Action::RenameProject(id) => {
                 let p = self.project(&id)?;
                 anyhow::ensure!(id != GENERAL_PROJECT_ID, "General cannot be renamed");
-                Modal { title: "Rename project".into(), fields: vec![("Name".into(), Editor::line(p.name.clone()), false)], kind: ModalKind::RenameProject(p), options }
+                Modal { title: "Rename topic".into(), fields: vec![("Name".into(), Editor::line(p.name.clone()), false)], kind: ModalKind::RenameProject(p), options }
             }
             Action::ProjectPrompt(id) => {
                 let p = self.project(&id)?;
-                Modal { title: format!("{} — project prompt", p.name), fields: vec![("Project prompt".into(), Editor::new(p.prompt.clone()), false)], kind: ModalKind::ProjectPrompt(p), options }
+                Modal { title: format!("{} — topic prompt", p.name), fields: vec![("Topic prompt".into(), Editor::new(p.prompt.clone()), false)], kind: ModalKind::ProjectPrompt(p), options }
             }
             Action::DeleteProject(id) => {
                 let p = self.project(&id)?;
                 anyhow::ensure!(id != GENERAL_PROJECT_ID, "General cannot be deleted");
-                Modal { title: format!("Delete project “{}”?", p.name), fields: vec![], kind: ModalKind::DeleteProject(p),
+                Modal { title: format!("Delete topic “{}”?", p.name), fields: vec![], kind: ModalKind::DeleteProject(p),
                     options: vec![("Continue…".into(), Action::Confirm), ("Cancel".into(), Action::CancelModal)] }
             }
             Action::RemoveProject(mode) => {
@@ -61,15 +61,15 @@ impl App {
                 let p = p.clone();
                 self.modal = Some(Modal { title: format!("Delete “{}” — what happens to its chats?", p.name), fields: vec![], kind: ModalKind::DeleteProjectChoice(p),
                     options: vec![("Move chats to General".into(), Action::RemoveProject(DeleteProjectMode::MoveToGeneral)),
-                        ("Delete project and its chats".into(), Action::RemoveProject(DeleteProjectMode::DeleteChats)), ("Cancel".into(), Action::CancelModal)] });
+                        ("Delete topic and its chats".into(), Action::RemoveProject(DeleteProjectMode::DeleteChats)), ("Cancel".into(), Action::CancelModal)] });
                 self.focus = None;
                 return Ok(());
             }
             _ => return Ok(()),
         };
         if let ClientCommand::CreateProject { name, prompt, .. } | ClientCommand::UpdateProject { name, prompt, .. } = &command {
-            anyhow::ensure!(!name.trim().is_empty() && name.chars().count() <= MAX_PROJECT_NAME_CHARS && !name.chars().any(char::is_control), "Use a project name of 1–{MAX_PROJECT_NAME_CHARS} characters on one line");
-            anyhow::ensure!(prompt.chars().count() <= MAX_PROJECT_PROMPT_CHARS, "Project prompt is too long");
+            anyhow::ensure!(!name.trim().is_empty() && name.chars().count() <= MAX_PROJECT_NAME_CHARS && !name.chars().any(char::is_control), "Use a topic name of 1–{MAX_PROJECT_NAME_CHARS} characters on one line");
+            anyhow::ensure!(prompt.chars().count() <= MAX_PROJECT_PROMPT_CHARS, "Topic prompt is too long");
         }
         self.send_project(command)
     }
@@ -86,7 +86,7 @@ impl App {
             self.dirty = true;
         } else if self.controller.epoch.is_none() {
             self.saving_project = None;
-            self.controller.notice = Some("Project change unconfirmed. Reconnect and check before trying again; it was not resent.".into());
+            self.controller.notice = Some("Topic change unconfirmed. Reconnect and check before trying again; it was not resent.".into());
             self.dirty = true;
         }
     }
@@ -97,9 +97,9 @@ impl App {
         let style = sanscale::Style { chain: self.renderer.faces.prose[1], wrap_em: None, align: sanscale::Align::Left, line_spacing: 1. };
         let widths = projects.iter().map(|p| {
             let text = self.renderer.text.shape_transient(&p.name, &style).map_or(70. * s, |block| self.renderer.text.measure(block).width_em() * 13. * s);
-            (text + 34. * s).clamp(68. * s, 240. * s)
+            (text + 24. * s).clamp(56. * s, 220. * s)
         }).collect::<Vec<_>>();
-        self.max_project_scroll = (widths.iter().sum::<f32>() + 48. * s - b.width).max(0.);
+        self.max_project_scroll = (widths.iter().sum::<f32>() + 40. * s - b.width).max(0.);
         if self.revealed_project != self.controller.account.selected_project {
             self.revealed_project = self.controller.account.selected_project.clone();
             if let Some(i) = projects.iter().position(|p| p.id == self.revealed_project) {
@@ -117,22 +117,22 @@ impl App {
             if hit.width > 0. {
                 let selected = p.id == self.controller.account.selected_project;
                 layer.clipped_rounded_rect(r, 4. * s, layer.control_color(r, color(0x0e141b)), b);
-                let label = Rect::new(x + 12. * s, b.y + 12. * s, w - 32. * s, 18. * s);
+                let label = Rect::new(x + 8. * s, b.y + 8. * s, w - 24. * s, 18. * s);
                 self.renderer.clipped_label(layer, &p.name, label, 13. * s, color(if selected { 0x67d4ff } else { 0xb7c2ce }), selected, crate::render::intersect(label, b));
                 if self.controller.project_unread(&p.id) {
-                    layer.clipped_rounded_rect(Rect::new(x + w - 14. * s, b.y + 17. * s, 6. * s, 6. * s), 3. * s, color(0x67d4ff), b);
+                    layer.clipped_rounded_rect(Rect::new(x + w - 12. * s, b.y + 14. * s, 5. * s, 5. * s), 3. * s, color(0x67d4ff), b);
                 }
-                if selected { layer.clipped_rounded_rect(Rect::new(x + 10. * s, b.y + b.height - 3. * s, w - 20. * s, 3. * s), 1.5 * s, color(0x67d4ff), b); }
+                if selected { layer.clipped_rounded_rect(Rect::new(x + 8. * s, b.y + b.height - 3. * s, w - 16. * s, 3. * s), 1.5 * s, color(0x67d4ff), b); }
                 self.project_areas.push((hit, p.id.clone()));
                 self.hits.push(Hit { rect: hit, action: Action::SelectProject(p.id.clone()) });
             }
             x += w;
         }
-        let add = Rect::new(x, b.y, 40. * s, b.height);
+        let add = Rect::new(x, b.y, 36. * s, b.height);
         let hit = crate::render::intersect(add, b);
         if hit.width > 0. {
             layer.clipped_rounded_rect(add, 8. * s, layer.control_color(add, color(0x0e141b)), b);
-            self.renderer.clipped_label(layer, "+", Rect::new(x + 12. * s, b.y + 8. * s, 24. * s, 28. * s), 22. * s, color(0x67d4ff), false, b);
+            self.renderer.clipped_label(layer, "+", Rect::new(x + 10. * s, b.y + 3. * s, 24. * s, 28. * s), 22. * s, color(0x67d4ff), false, b);
             self.hits.push(Hit { rect: hit, action: Action::NewProject });
         }
         layer.rect(Rect::new(b.x, b.y + b.height, b.width, s), color(0x2a3541));
@@ -144,8 +144,8 @@ impl App {
         self.selecting = false;
         let mut options = vec![];
         if id != GENERAL_PROJECT_ID { options.push(("Rename…".into(), Action::RenameProject(id.into()))); }
-        options.push(("Edit project prompt…".into(), Action::ProjectPrompt(id.into())));
-        if id != GENERAL_PROJECT_ID { options.push(("Delete project…".into(), Action::DeleteProject(id.into()))); }
+        options.push(("Edit topic prompt…".into(), Action::ProjectPrompt(id.into())));
+        if id != GENERAL_PROJECT_ID { options.push(("Delete topic…".into(), Action::DeleteProject(id.into()))); }
         self.context_menu = Some(ContextMenu { at: point, section: None, chat: None, options, selected: 0, scroll: 0., parent: None });
         self.pointer = None;
         self.wheel = None;
@@ -157,7 +157,7 @@ impl App {
         let Some(menu) = self.context_menu.take() else { return; };
         let parent = menu.parent.unwrap_or_else(|| Box::new(ContextMenu { parent: None, ..menu }));
         let current = self.controller.account.sessions.iter().find(|s| s.id == session).map(|s| &s.project_id);
-        let mut options = vec![("‹  Move to project".into(), Action::ContextBack)];
+        let mut options = vec![("‹  Move to topic".into(), Action::ContextBack)];
         options.extend(self.controller.account.projects.iter().map(|p| {
             if current == Some(&p.id) { (format!("✓  {}", p.name), Action::Noop) }
             else { (p.name.clone(), Action::MoveChat(session.into(), p.id.clone())) }
@@ -217,7 +217,7 @@ impl App {
         let x = r.x + 18. * s;
         let w = (r.width - 36. * s).max(1.);
         self.renderer.label(layer, &modal.title, Rect::new(x, r.y + 16. * s, w, 48. * s), 17. * s, color(0xe5eaf0), true);
-        let help = if prompt { "New chats capture this prompt. Edits do not change existing chats. Moving a chat here replaces its project prompt." }
+        let help = if prompt { "New chats capture this prompt. Edits do not change existing chats. Moving a chat here replaces its topic prompt." }
             else if matches!(modal.kind, ModalKind::DeleteProjectChoice(_)) { "Moving keeps the chats and their history. Deleting chats permanently removes them and cannot be undone." }
             else if matches!(modal.kind, ModalKind::DeleteProject(_)) { "Next, choose whether to keep its chats in General or permanently delete them." } else { "Changes appear on all connected devices." };
         let help_h = if height / s < 400. && prompt { 0. } else { 52. * s };

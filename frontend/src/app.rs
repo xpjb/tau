@@ -1322,11 +1322,15 @@ impl App {
         let selected = self.controller.account.selected.clone();
         match action {
             Action::SelectProject(id) => {
-                if self.controller.account.selected_project == id { return Ok(()); }
+                if self.controller.account.selected_project == id
+                    && self.controller.account.selected.as_ref().is_some_and(|chat|
+                        self.controller.account.sessions.iter().any(|s| s.id == chat.as_str() && s.project_id == id)) {
+                    return Ok(());
+                }
                 self.save()?;
                 self.controller.select_project(&id)?;
                 self.list_scroll = 0.;
-                self.show_chats = true;
+                self.show_chats = self.controller.account.selected.is_none();
                 self.focus = None;
             }
             Action::NewProject | Action::RenameProject(_) | Action::ProjectPrompt(_) | Action::DeleteProject(_) | Action::RemoveProject(_) => self.project_action(action)?,
@@ -2104,8 +2108,8 @@ impl App {
             s,
             true,
         );
-        self.project_tabs(layer, Rect::new(b.x, b.y + 140. * s, b.width, 42. * s));
-        let clip = Rect::new(b.x, b.y + 190. * s, b.width, (b.height - 198. * s).max(0.));
+        self.project_tabs(layer, Rect::new(b.x, b.y + 140. * s, b.width, 34. * s));
+        let clip = Rect::new(b.x, b.y + 182. * s, b.width, (b.height - 190. * s).max(0.));
         self.list_rect = clip;
         let sessions = self.controller.account.sessions.iter().filter(|c| c.project_id == self.controller.account.selected_project);
         self.max_list_scroll =
@@ -2212,7 +2216,7 @@ impl App {
             }
         }
         if self.max_list_scroll == 0. && !self.controller.account.sessions.iter().any(|c| c.project_id == self.controller.account.selected_project) {
-            self.renderer.clipped_label(layer, "No chats in this project yet", Rect::new(b.x + 20. * s, clip.y + 20. * s, b.width - 40. * s, 40. * s), 13. * s, color(0x82909f), false, clip);
+            self.renderer.clipped_label(layer, "No chats in this topic yet", Rect::new(b.x + 20. * s, clip.y + 20. * s, b.width - 40. * s, 40. * s), 13. * s, color(0x82909f), false, clip);
         }
         self.scrollbar(layer, Lane::Sidebar, clip);
     }
@@ -3433,7 +3437,7 @@ impl App {
                     "Codex priority…".into(),
                     Action::AgentSetting(id.clone(), "fast".into()),
                 ),
-                ("Move to project  ›".into(), Action::MoveMenu(id.clone())),
+                ("Move to topic  ›".into(), Action::MoveMenu(id.clone())),
                 ("Rename…".into(), Action::Rename(id.clone())),
                 ("Clone chat".into(), Action::Clone(id.clone())),
                 ("Release idle runtime".into(), Action::Sleep(id.clone())),

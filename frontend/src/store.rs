@@ -57,6 +57,8 @@ pub fn hash(value: &str) -> String {
 pub struct Account {
     pub projects: Vec<Project>,
     pub selected_project: String,
+    /// Per-topic resume target. Kept client-local; server membership is authoritative.
+    pub last_chat_by_project: BTreeMap<String, String>,
     pub sessions: Vec<SessionSummary>,
     pub selected: Option<String>,
     pub read_at: BTreeMap<String, u64>,
@@ -64,7 +66,7 @@ pub struct Account {
 impl Default for Account {
     fn default() -> Self {
         Self { projects: vec![Project::general()], selected_project: general_project_id(),
-            sessions: vec![], selected: None, read_at: BTreeMap::new() }
+            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, read_at: BTreeMap::new() }
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]

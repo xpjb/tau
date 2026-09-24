@@ -7,8 +7,8 @@ use crate::{manager::AgentManager, state::StateStore};
 
 fn validate(name: &str, prompt: &str) -> Result<()> {
     ensure!(!name.trim().is_empty() && name.chars().count() <= MAX_PROJECT_NAME_CHARS
-        && !name.chars().any(char::is_control), "Project name must contain 1–{MAX_PROJECT_NAME_CHARS} characters on one line");
-    ensure!(prompt.chars().count() <= MAX_PROJECT_PROMPT_CHARS, "Project prompt is too long");
+        && !name.chars().any(char::is_control), "Topic name must contain 1–{MAX_PROJECT_NAME_CHARS} characters on one line");
+    ensure!(prompt.chars().count() <= MAX_PROJECT_PROMPT_CHARS, "Topic prompt is too long");
     Ok(())
 }
 impl StateStore {
@@ -21,10 +21,10 @@ impl StateStore {
     }
     pub async fn create_project(&self, id: String, name: String, prompt: String) -> Result<()> {
         validate(&name, &prompt)?;
-        uuid::Uuid::parse_str(&id).context("Invalid project ID")?;
+        uuid::Uuid::parse_str(&id).context("Invalid topic ID")?;
         self.access(move |db| {
             let tx = db.transaction()?;
-            ensure!(tx.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_,u64>(0))? < 128, "At most 128 projects");
+            ensure!(tx.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_,u64>(0))? < 128, "At most 128 topics");
             tx.execute("INSERT INTO projects(id,name,prompt) VALUES(?1,?2,?3)", params![id,name.trim(),prompt])?;
             tx.commit()?; Ok(())
         }).await
@@ -32,10 +32,10 @@ impl StateStore {
     pub async fn update_project(&self, id: String, revision: u64, name: String, prompt: String) -> Result<()> {
         validate(&name, &prompt)?;
         ensure!(id != GENERAL_PROJECT_ID || name == "General", "General cannot be renamed");
-        ensure!(revision < i64::MAX as u64, "Project revision exhausted");
+        ensure!(revision < i64::MAX as u64, "Topic revision exhausted");
         self.access(move |db| {
             ensure!(db.execute("UPDATE projects SET name=?3,prompt=?4,revision=revision+1 WHERE id=?1 AND revision=?2",
-                params![id,revision,name.trim(),prompt])? == 1, "Project changed or was deleted; reopen its settings");
+                params![id,revision,name.trim(),prompt])? == 1, "Topic changed or was deleted; reopen its settings");
             Ok(())
         }).await
     }
@@ -47,7 +47,7 @@ impl StateStore {
     pub async fn move_session(&self, session: String, project: String) -> Result<()> {
         self.access(move |db| {
             let tx = db.transaction()?;
-            let prompt: String = tx.query_row("SELECT prompt FROM projects WHERE id=?1", [&project], |r| r.get(0)).context("Unknown project")?;
+            let prompt: String = tx.query_row("SELECT prompt FROM projects WHERE id=?1", [&project], |r| r.get(0)).context("Unknown topic")?;
             let current: String = tx.query_row("SELECT json_extract(data,'$.project_id') FROM sessions WHERE id=?1", [&session], |r| r.get(0)).context("Unknown chat")?;
             if current == project { return Ok(()); }
             // A destination may already have a reusable new-chat tile. Never
@@ -65,7 +65,7 @@ impl StateStore {
         let id = id.to_owned();
         self.access(move |db| {
             let current: Option<u64> = db.query_row("SELECT revision FROM projects WHERE id=?1", [&id], |r| r.get(0)).optional()?;
-            ensure!(current == Some(revision), "Project changed or was deleted; reopen its settings");
+            ensure!(current == Some(revision), "Topic changed or was deleted; reopen its settings");
             let mut query = db.prepare("SELECT id FROM sessions WHERE json_extract(data,'$.project_id')=?1 ORDER BY id")?;
             Ok(query.query_map([&id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
         }).await
@@ -75,7 +75,7 @@ impl StateStore {
         self.access(move |db| {
             let tx = db.transaction()?;
             ensure!(tx.execute("DELETE FROM projects WHERE id=?1 AND revision=?2", params![id,revision])? == 1,
-                "Project changed or was deleted; reopen its settings");
+                "Topic changed or was deleted; reopen its settings");
             match mode {
                 DeleteProjectMode::MoveToGeneral => {
                     tx.execute("UPDATE sessions SET starter=0,data=json_set(data,'$.project_id','general','$.project_prompt',(SELECT prompt FROM projects WHERE id='general'),'$.starter',json('false')) WHERE json_extract(data,'$.project_id')=?1", [&id])?;
