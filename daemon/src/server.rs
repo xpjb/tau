@@ -238,6 +238,14 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             }
                             Err(error) => ServerMessage::command_failure(request_id,error),
                         }
+                        ClientCommand::RefreshModelCatalog { provider } => match manager.refresh_model_catalog(&provider).await {
+                            Ok(notice) => {
+                                let mut response = ServerMessage::success(request_id, None, None);
+                                if let ServerMessage::Response { notice: field, .. } = &mut response { *field = Some(notice); }
+                                response
+                            }
+                            Err(error) => ServerMessage::command_failure(request_id, error),
+                        },
                         command @ (ClientCommand::GetSettings | ClientCommand::SetSettings { .. }) => {
                             let result = match command {
                                 ClientCommand::SetSettings { revision, settings } => manager.set_settings(revision, *settings).await,

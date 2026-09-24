@@ -40,6 +40,7 @@ enum Action {
     Confirm,
     CancelModal,
     DaemonSettings,
+    RefreshCatalog,
     SettingsSection(usize),
     SettingsField(bool),
     SettingToggle,
@@ -81,6 +82,7 @@ enum ModalKind {
     Rename(String),
     Delete(String),
     Daemon,
+    RefreshCatalog,
     AgentCommand(String, String),
     QueueEdit(String, u64),
     ConfirmLink(String),
@@ -1366,6 +1368,13 @@ impl App {
                         self.focus = None;
                         return Ok(());
                     }
+                    ModalKind::RefreshCatalog => {
+                        let provider = values[0].trim();
+                        anyhow::ensure!(!provider.is_empty() && provider.len() <= 120 && !provider.chars().any(char::is_whitespace),
+                            "Enter a configured provider name");
+                        self.controller.notice = Some(format!("Refreshing {provider} model catalog…"));
+                        self.controller.request(ClientCommand::RefreshModelCatalog { provider: provider.into() })?;
+                    }
                     ModalKind::AgentCommand(session, command) => {
                         self.apply(Action::AgentCommand(
                             session,
@@ -1391,6 +1400,16 @@ impl App {
                 self.saving_settings = None;
                 self.modal = None;
                 self.focus = None;
+            }
+            Action::RefreshCatalog => {
+                let provider = self.controller.daemon_settings.as_ref().map(|settings| settings.agent.model.provider.clone())
+                    .or_else(|| selected.as_ref().and_then(|id| self.controller.account.sessions.iter().find(|s| &s.id == id))
+                        .and_then(|s| s.model.as_ref().map(|m| m.provider.clone())))
+                    .unwrap_or_else(|| "openai-codex".into());
+                self.modal = Some(Modal { kind: ModalKind::RefreshCatalog, title: "Refresh model catalog".into(),
+                    fields: vec![("Provider name".into(), Editor::line(provider), false)],
+                    options: vec![("Refresh".into(), Action::Confirm), ("Cancel".into(), Action::CancelModal)] });
+                self.focus = Some(Some(0));
             }
             Action::DaemonSettings => {
                 self.controller.notice = None;
@@ -3636,9 +3655,19 @@ impl App {
                     &mut self.renderer,
                     layer,
                     &mut self.hits,
-                    Rect::new(x, y, 168. * s, 32. * s),
+                    Rect::new(x, y, (inner_w - 8. * s) / 2., 32. * s),
                     "Open settings",
                     Action::DaemonSettings,
+                    s,
+                    false,
+                );
+                button(
+                    &mut self.renderer,
+                    layer,
+                    &mut self.hits,
+                    Rect::new(x + (inner_w + 8. * s) / 2., y, (inner_w - 8. * s) / 2., 32. * s),
+                    "Refresh models",
+                    Action::RefreshCatalog,
                     s,
                     false,
                 );
@@ -4225,7 +4254,7 @@ pub(crate) fn code(text: &str) -> String {
 }
 
 fn context_usage_display(usage: Option<ContextUsage>) -> (Option<f32>, String) {
-    let (ratio, mut text) = match usage {
+    match usage {
         Some(ContextUsage { tokens: Some(used), context_window: Some(capacity), .. }) if capacity > 0 => {
             let ratio = used as f32 / capacity as f32;
             (Some(ratio), format!("Estimated context usage: {:.0}%\n{} of {} tokens", ratio * 100., count(used), count(capacity)))
@@ -4236,15 +4265,7 @@ fn context_usage_display(usage: Option<ContextUsage>) -> (Option<f32>, String) {
             (None, format!("Context usage unknown\nCapacity: {} tokens", count(capacity))),
         Some(_) => (None, "Context usage unknown\nCapacity unknown".into()),
         None => (None, "Context usage unavailable".into()),
-    };
-    if let Some(usage) = usage && usage.context_window.is_some() {
-        match usage.source {
-            Some(ContextCapacitySource::Provider) => text.push_str("\nLimit from provider catalog"),
-            Some(ContextCapacitySource::Configured) => text.push_str("\nConfigured limit (unverified)"),
-            None => {},
-        }
     }
-    (ratio, text)
 }
 
 fn count(n: u64) -> String {
@@ -4268,22 +4289,18 @@ mod usage_tests {
 
     #[test]
     fn token_usage_does_not_require_a_guessed_context_window() {
-        let unknown_capacity = Some(ContextUsage { tokens: Some(1_024), context_window: None, source: None });
+        let unknown_capacity = Some(ContextUsage { tokens: Some(1_024), context_window: None });
         let (ring, text) = context_usage_display(unknown_capacity);
         assert_eq!(ring, None);
         assert_eq!(text, "Estimated context used: 1,024 tokens\nCapacity unknown");
-        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: None, source: None })).1,
+        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: None })).1,
             "Context usage unknown\nCapacity unknown");
         assert_eq!(context_usage_display(None).1, "Context usage unavailable");
 
-        let (ring, text) = context_usage_display(Some(ContextUsage { tokens: Some(1_024), context_window: Some(4_096), source: None }));
+        let (ring, text) = context_usage_display(Some(ContextUsage { tokens: Some(1_024), context_window: Some(4_096) }));
         assert_eq!(ring, Some(0.25));
         assert_eq!(text, "Estimated context usage: 25%\n1,024 of 4,096 tokens");
-        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: Some(4_096), source: None })).1,
+        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: Some(4_096) })).1,
             "Context usage unknown\nCapacity: 4,096 tokens");
-        let provider = Some(ContextUsage { tokens: Some(1_024), context_window: Some(4_096), source: Some(ContextCapacitySource::Provider) });
-        assert!(context_usage_display(provider).1.ends_with("Limit from provider catalog"));
-        let configured = Some(ContextUsage { source: Some(ContextCapacitySource::Configured), ..provider.unwrap() });
-        assert!(context_usage_display(configured).1.ends_with("Configured limit (unverified)"));
     }
 }

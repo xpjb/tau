@@ -1,5 +1,5 @@
 use crate::settings::SettingsExt;
-use std::sync::Arc;
+use std::{sync::Arc, collections::BTreeMap};
 use anyhow::{Result, bail};
 use serde_json::json;
 use crate::manager::{AgentManager, PromptOutcome, SessionRuntime};
@@ -10,9 +10,16 @@ impl AgentManager {
     pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
         self.runtime(id).await?;
         let settings = self.inner.settings.get();
+        let mut models = settings.models.iter().map(|m| (format!("{}/{}",m.provider,m.id), Some(m.name.clone())))
+            .collect::<BTreeMap<_,_>>();
+        for provider in settings.providers.keys() {
+            for (id, window) in self.inner.catalog.models(&settings, provider) {
+                models.insert(format!("{provider}/{id}"), Some(format!("{} token context", window)));
+            }
+        }
         Ok([
             ("compact", "Compact session context", "[instructions]", vec![]),
-            ("model", "Select the model (also the default for new chats)", "<provider/model>", settings.models.iter().map(|m| SlashCommandArgument { value:format!("{}/{}",m.provider,m.id), description:Some(m.name.clone()) }).collect()),
+            ("model", "Select the model (also the default for new chats)", "<provider/model>", models.into_iter().map(|(value, description)| SlashCommandArgument { value, description }).collect()),
             ("thinking", "Set this chat's thinking level", "<level>", crate::settings::LEVELS.iter().map(|level| SlashCommandArgument { value:(*level).into(), description:None }).collect()),
             ("name", "Rename this chat", "<title>", vec![]),
             ("fast", "Set Codex priority service for subsequent turns", "<on|off|status>", ["on","off","status"].into_iter().map(|v| SlashCommandArgument { value:v.into(), description:None }).collect()),

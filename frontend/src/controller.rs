@@ -868,6 +868,11 @@ impl Controller {
                                 }
                             }
                         }
+                        Some(ClientCommand::RefreshModelCatalog { .. }) => {
+                            if let Some(id) = self.account.selected.clone() {
+                                self.request(ClientCommand::GetCommands { session_id:id })?;
+                            }
+                        }
                         Some(ClientCommand::DeleteSession { session_id }) => {
                             self.store.delete_chat(&self.identity, &session_id)?;
                             self.chats.remove(&session_id);

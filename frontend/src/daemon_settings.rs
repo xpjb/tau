@@ -109,12 +109,6 @@ pub fn fields(section: usize) -> &'static [Field] {
                 "enabled, reserveTokens, keepRecentTokens, nativeCodex and timeoutSeconds. Saved history is retained."
             ),
             field!(
-                "Use configured context limits when catalog unavailable",
-                "/agent/allowConfiguredContextFallback",
-                Bool,
-                "Off by default. The provider catalog is authoritative. If it cannot be fetched, use contextWindow from Model metadata as an unverified fallback; Tau marks the estimate accordingly."
-            ),
-            field!(
                 "HTTP idle timeout (seconds)",
                 "/agent/httpIdleTimeoutSeconds",
                 Number,
@@ -181,7 +175,7 @@ pub fn fields(section: usize) -> &'static [Field] {
             "Optional model metadata",
             "/models",
             Json,
-            "Optional name, contextWindow and thinkingLevelMap for each provider/id. Not an allowlist. Context limits come from the authenticated provider catalog. A configured contextWindow is used only with the opt-in fallback above, visibly marked unverified."
+            "Optional name and thinkingLevelMap suggestions for each provider/id. Not an allowlist. Context limits come only from Tau's saved authenticated provider catalog. Refresh it from Connection settings."
         )],
     }
 }

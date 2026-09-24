@@ -43,8 +43,6 @@ pub struct AgentSettings {
     pub fast_mode: bool,
     pub retry: RetrySettings,
     pub compaction: CompactionSettings,
-    /// Opt-in only: an unverified settings value may replace an unavailable catalog.
-    pub allow_configured_context_fallback: bool,
     pub shell_path: PathBuf,
     pub shell_command_prefix: String,
     pub http_idle_timeout_seconds: u64,
@@ -77,7 +75,6 @@ impl Default for AgentSettings {
         thinking_level: "max".into(), model_thinking_levels: BTreeMap::new(), steering_mode: SteeringMode::All,
         system_prompt: DEFAULT_SYSTEM_PROMPT.into(), model_system_prompts: BTreeMap::new(),
         load_agents_files: true, fast_mode: false, retry: RetrySettings::default(), compaction: CompactionSettings::default(),
-        allow_configured_context_fallback: false,
         shell_path: "/bin/bash".into(), shell_command_prefix: String::new(), http_idle_timeout_seconds: 300, max_tool_output_bytes: 50 * 1024,
     } }
 }

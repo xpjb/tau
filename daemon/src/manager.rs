@@ -10,8 +10,8 @@ use tracing::warn;
 
 use crate::agent::{AgentSession, auth::AuthStore};
 use crate::config::Config;
-use crate::catalog::{ModelCatalog, CapacitySource};
-use crate::protocol::{ContextCapacitySource, ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, SessionSummary, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
+use crate::catalog::ModelCatalog;
+use crate::protocol::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, SessionSummary, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
 use crate::settings::{SettingsStore, Settings};
 use crate::state::{StateStore, Receipt, SessionModel};
 use crate::transcript::{QueuedRequest, QueueControl, Transcript};
@@ -58,34 +58,56 @@ impl AgentManager {
         let settings = SettingsStore::load(&config, crate::state::DEFAULT_TITLE_PROMPT.into()).await?;
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
+        let catalog = ModelCatalog::load(config.settings_path.with_file_name("model-catalog.json")).await;
         Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
-            catalog: ModelCatalog::default(), catalog_requests: Semaphore::new(2),
+            catalog, catalog_requests: Semaphore::new(2),
             runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false) }) })
     }
     pub(crate) fn context_window(&self, settings: &Settings, model: &SessionModel) -> Option<u64> {
-        self.inner.catalog.capacity(settings, model).map(|(window, _)| window)
+        self.inner.catalog.capacity(settings, model)
     }
     pub(crate) fn context_usage(&self, settings: &Settings, model: &SessionModel, tokens: Option<u64>) -> Option<ContextUsage> {
-        let capacity = self.inner.catalog.capacity(settings, model);
-        (tokens.is_some() || capacity.is_some()).then_some(ContextUsage { tokens,
-            context_window:capacity.map(|(window, _)| window),
-            source:capacity.map(|(_, source)| match source { CapacitySource::Provider => ContextCapacitySource::Provider,
-                CapacitySource::Configured => ContextCapacitySource::Configured }) })
+        let context_window = self.inner.catalog.capacity(settings, model);
+        (tokens.is_some() || context_window.is_some()).then_some(ContextUsage { tokens, context_window })
     }
     pub(crate) fn schedule_catalog(&self, provider: &str) {
         if self.inner.shutting_down.load(Ordering::Acquire) { return; }
         let settings = self.inner.settings.get();
         let Some(config) = settings.providers.get(provider) else { return; };
-        if !self.inner.catalog.begin(provider, config) { return; }
+        if !self.inner.catalog.begin(provider, config, false) { return; }
         let config = config.clone(); let provider = provider.to_owned(); let manager = self.clone();
         tokio::spawn(async move {
-            let Ok(_permit) = manager.inner.catalog_requests.acquire().await else { return; };
-            if manager.inner.shutting_down.load(Ordering::Acquire) { return; }
-            let result = crate::catalog::fetch(&manager.inner.http, &manager.inner.auth, &provider, &config).await;
-            if let Err(error) = &result { warn!(%provider, reason = %error.root_cause(), "model catalog unavailable; configured limits are unverified"); }
-            manager.inner.catalog.finish(&provider, &config, result.ok());
+            if let Err(error) = manager.resolve_catalog(&provider, &config, false).await {
+                warn!(%provider, reason = %error.root_cause(), "model catalog unavailable");
+                let message = format!("Could not load {provider} model catalog: {error}. Refresh from daemon settings after checking provider access.");
+                let _ = manager.inner.events.send(ServerMessage::Notice { session_id:String::new(), message:bounded(&message, 320) });
+            }
             manager.broadcast_sessions().await;
         });
+    }
+    async fn resolve_catalog(&self, provider: &str, config: &crate::settings::ProviderSettings, force: bool) -> Result<usize> {
+        let _permit = self.inner.catalog_requests.acquire().await?;
+        if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        let result: Result<usize> = async {
+            let (key, account, identity) = crate::catalog::authorize(&self.inner.auth, provider, config).await?;
+            let cached = self.inner.catalog.restore(provider, config, &identity);
+            if cached && !force {
+                self.inner.catalog.restored(provider);
+                return Ok(self.inner.catalog.models(&self.inner.settings.get(), provider).len());
+            }
+            let windows = crate::catalog::fetch(&self.inner.http, config, &key, account.as_deref()).await?;
+            self.inner.catalog.save(provider, config, identity, windows).await
+        }.await;
+        if result.is_err() { self.inner.catalog.failed(provider); }
+        result
+    }
+    pub async fn refresh_model_catalog(&self, provider: &str) -> Result<String> {
+        let settings = self.inner.settings.get();
+        let config = settings.providers.get(provider).context("Configure this provider in daemon settings first")?.clone();
+        if !self.inner.catalog.begin(provider, &config, true) { bail!("Model catalog refresh is already in progress"); }
+        let count = self.resolve_catalog(provider, &config, true).await?;
+        self.broadcast_sessions().await;
+        Ok(format!("Refreshed {provider} model catalog: {count} models"))
     }
     pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> { self.inner.events.subscribe() }
     pub async fn sessions_message(&self) -> Result<ServerMessage> {

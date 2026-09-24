@@ -3,20 +3,24 @@
 Tau 2 previously discarded provider-reported tokens whenever the selected model
 was absent from optional metadata. The tooltip now shows the last reported turn
 total, including when capacity is unknown. For percentages and compaction the
-selected provider's authenticated model catalog takes priority: Codex
+selected provider's authenticated model catalog is the only source: Codex
 `context_window` (or `max_context_window`) and OpenRouter `context_length` for
-an **exact** ID. Catalog limits are cached for one hour, matched to the configured
-endpoint, and refreshed asynchronously. A successful catalog missing the model
-leaves capacity unknown. Previously Pi-imported `contextWindow` values are no
-longer trusted by default; an explicit opt-in permits a visibly unverified fallback
-only if discovery fails. Sleeping/unopened chats recover their saved token count.
+an **exact** ID. The bounded, private `model-catalog.json` is loaded at startup
+after credential/endpoint identity validation. Missing/invalid cache triggers
+an asynchronous provider GET; a failure alerts connected clients. Explicit
+**Refresh models** in Connection settings replaces only on success and exposes
+new model IDs as suggestions. No Pi metadata fallback, 1-hour expiration,
+automatic guess, or rewriting the daemon settings document. A catalog missing
+the selected model leaves capacity unknown. Sleeping/unopened chats recover saved
+token counts.
 Model changes clear the old count. Protocol 15 needs matched clients and daemon;
 protocol 14 is reserved for Projects. Not yet merged, deployed, or packaged.
 
-Managed all-target workspace check passed; nextest **68/68 passed**. Scripted
+Managed all-target workspace check passed; nextest **67/67 passed**. Scripted
 Codex and Chat Completions catalog/turn requests checked exact authenticated GET
-paths, identity/originator, catalog precedence and unknown-model behavior through
-WebSocket state/list, sleep, restart, settings edits, and model switches. Read-only
+paths, identity/originator, missing-file alerts, explicit refresh, failure preserving
+the last good file, restart without a new GET, and unknown-model behavior through
+WebSocket state/list, sleep, restart, and model switches. Read-only
 live Codex catalog GET (September 24, 2026) using the beta's shared account access
 and Tau's inference originator reported 272,000 for GPT-6 Sol, Luna and Astra with
 catalog client version 0.156.1. No paid completion, credential copy/refresh, GUI

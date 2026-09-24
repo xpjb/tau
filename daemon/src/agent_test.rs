@@ -9,11 +9,11 @@ use tokio_tungstenite::{connect_async, tungstenite::{Message, client::IntoClient
 use crate::{Config, manager::AgentManager, settings::{Api, Settings}, state::StateStore};
 
 struct Reply { status: u16, bytes: Vec<u8>, gate: Option<Arc<Notify>>, body_gate: Option<(usize, Arc<Notify>)> }
-struct ModelServer { url: String, requests: mpsc::UnboundedReceiver<Value>, catalogs: mpsc::UnboundedReceiver<Value>, task: tokio::task::JoinHandle<()> }
+struct ModelServer { url: String, requests: mpsc::UnboundedReceiver<Value>, catalogs: mpsc::UnboundedReceiver<Value>, catalog: Arc<Mutex<Option<Value>>>, task: tokio::task::JoinHandle<()> }
 impl ModelServer {
     async fn start(replies: Vec<Reply>) -> Self { Self::with_catalog(replies, None).await }
     async fn with_catalog(replies: Vec<Reply>, catalog: Option<Value>) -> Self {
-        #[derive(Clone)] struct Script { replies: Arc<Mutex<VecDeque<Reply>>>, requests: mpsc::UnboundedSender<Value>, catalog:Option<Value>, catalogs:mpsc::UnboundedSender<Value> }
+        #[derive(Clone)] struct Script { replies: Arc<Mutex<VecDeque<Reply>>>, requests: mpsc::UnboundedSender<Value>, catalog:Arc<Mutex<Option<Value>>>, catalogs:mpsc::UnboundedSender<Value> }
         async fn respond(State(script): State<Script>, Json(body): Json<Value>) -> Response {
             script.requests.send(body).unwrap();
             let reply = script.replies.lock().await.pop_front().expect("Unexpected extra provider request");
@@ -32,17 +32,19 @@ impl ModelServer {
                 "authorization":headers.get("authorization").and_then(|v|v.to_str().ok()),
                 "account":headers.get("chatgpt-account-id").and_then(|v|v.to_str().ok()),
                 "originator":headers.get("originator").and_then(|v|v.to_str().ok())})).unwrap();
-            match &script.catalog { Some(data) => Json(data.clone()).into_response(), None => StatusCode::NOT_FOUND.into_response() }
+            match script.catalog.lock().await.clone() { Some(data) => Json(data).into_response(), None => StatusCode::NOT_FOUND.into_response() }
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, requests) = mpsc::unbounded_channel();
         let (catalog_tx, catalogs) = mpsc::unbounded_channel();
-        let app = Router::new().route("/{*path}", post(respond).get(reply_catalog)).with_state(Script { replies:Arc::new(Mutex::new(replies.into())), requests:tx, catalog, catalogs:catalog_tx });
-        Self { url, requests, catalogs, task:tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); }) }
+        let catalog = Arc::new(Mutex::new(catalog));
+        let app = Router::new().route("/{*path}", post(respond).get(reply_catalog)).with_state(Script { replies:Arc::new(Mutex::new(replies.into())), requests:tx, catalog:catalog.clone(), catalogs:catalog_tx });
+        Self { url, requests, catalogs, catalog, task:tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); }) }
     }
     async fn request(&mut self) -> Value { tokio::time::timeout(Duration::from_secs(10), self.requests.recv()).await.unwrap().unwrap() }
     async fn catalog_request(&mut self) -> Value { tokio::time::timeout(Duration::from_secs(10), self.catalogs.recv()).await.unwrap().unwrap() }
+    async fn set_catalog(&self, value: Option<Value>) { *self.catalog.lock().await = value; }
 }
 impl Drop for ModelServer { fn drop(&mut self) { self.task.abort(); } }
 fn completion(text: &str, calls: Vec<Value>) -> Reply {
@@ -793,7 +795,6 @@ async fn provider_catalog_outweighs_configured_limits_and_uses_exact_authenticat
         let mut model = ModelServer::with_catalog(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }], Some(catalog)).await;
         let (_root, manager, url, server) = fixture(&model, api).await;
         let mut settings = manager.inner.settings.get();
-        settings.agent.allow_configured_context_fallback = true;
         settings.models.push(crate::settings::ModelSettings { provider:"openai-codex".into(), id:"gpt-6-sol".into(),
             context_window:Some(272_000), ..Default::default() });
         let path = if api == Api::Codex { "backend-api/codex" } else { "api/v1" };
@@ -818,11 +819,11 @@ async fn provider_catalog_outweighs_configured_limits_and_uses_exact_authenticat
         assert_eq!(client.request(json!({"id":"model","type":"prompt","sessionId":id,"text":"/model openai-codex/gpt-6-sol"})).await["ok"],true);
         client.open(&id).await;
         let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
-        assert_eq!(state["contextUsage"],json!({"tokens":null,"contextWindow":window,"source":"provider"}));
+        assert_eq!(state["contextUsage"],json!({"tokens":null,"contextWindow":window}));
         client.request(json!({"id":"turn","type":"prompt","sessionId":id,"text":"Use this catalog"})).await;
         assert_eq!(model.request().await["model"],"gpt-6-sol");
         let idle = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
-        assert_eq!(idle["contextUsage"],json!({"tokens":if api == Api::Codex {120} else {1024},"contextWindow":window,"source":"provider"}));
+        assert_eq!(idle["contextUsage"],json!({"tokens":if api == Api::Codex {120} else {1024},"contextWindow":window}));
         client.request(json!({"id":"list","type":"list_sessions"})).await;
         let summary = client.seen.iter().rev().find(|m| m["type"] == "sessions").unwrap()["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
         assert_eq!(summary["contextUsage"],idle["contextUsage"]);
@@ -831,70 +832,63 @@ async fn provider_catalog_outweighs_configured_limits_and_uses_exact_authenticat
 }
 
 #[tokio::test]
-async fn provider_usage_without_model_capacity_survives_sleep_restart_and_metadata_edits() {
+async fn missing_catalog_alerts_manual_refresh_persists_and_old_file_survives_failure() {
     for api in [Api::Codex, Api::ChatCompletions] {
         let mut model = ModelServer::start(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }]).await;
-        let (_root, manager, url, server) = fixture(&model, api).await;
+        let (root, manager, url, server) = fixture(&model, api).await;
+        let mut alerts = manager.subscribe();
         let mut client = Client::connect(&url).await;
-        client.until(|m| m["type"] == "sessions").await;
         let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        assert_eq!(model.catalog_request().await["path"],"/models");
+        let alert = tokio::time::timeout(Duration::from_secs(10), async {
+            loop { if let crate::protocol::ServerMessage::Notice { message, .. } = alerts.recv().await.unwrap() { break message; } }
+        }).await.unwrap();
+        assert!(alert.contains("Could not load openai-codex model catalog"),"{alert}");
+        assert!(!root.path().join("model-catalog.json").exists());
         client.open(&id).await;
         assert_eq!(client.request(json!({"id":"select","type":"prompt","sessionId":id,"text":"/model openai-codex/gpt-6-sol"})).await["ok"],true);
-        client.open(&id).await;
-        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
-        assert!(state["contextUsage"].is_null(), "An unused model without metadata has no usage or capacity");
-
-        assert_eq!(client.request(json!({"id":"turn","type":"prompt","sessionId":id,"text":"Report usage"})).await["ok"],true);
-        assert_eq!(model.request().await["model"], "gpt-6-sol");
+        client.request(json!({"id":"turn","type":"prompt","sessionId":id,"text":"Report usage"})).await;
+        assert_eq!(model.request().await["model"],"gpt-6-sol");
         let idle = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
         let tokens = if api == Api::Codex { 120 } else { 1024 };
-        assert_eq!(idle["contextUsage"]["tokens"], tokens);
-        assert!(idle["contextUsage"]["contextWindow"].is_null());
-        client.request(json!({"id":"list","type":"list_sessions"})).await;
-        let summary = client.seen.iter().rev().find(|m| m["type"] == "sessions").unwrap()["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
-        assert_eq!(summary["contextUsage"], idle["contextUsage"]);
+        assert_eq!(idle["contextUsage"], json!({"tokens":tokens,"contextWindow":null}));
 
-        manager.close_session(&id).await.unwrap();
-        let sleeping = client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "sleeping").await;
-        assert_eq!(sleeping["contextUsage"]["tokens"], tokens);
+        let response = if api == Api::Codex { json!({"models":[{"slug":"gpt-6-sol","context_window":200000}]}) }
+            else { json!({"data":[{"id":"gpt-6-sol","context_length":200000}]}) };
+        model.set_catalog(Some(response)).await;
+        let refreshed = client.request(json!({"id":"refresh","type":"refresh_model_catalog","provider":"openai-codex"})).await;
+        assert_eq!(refreshed["ok"],true,"{refreshed}");
+        assert!(refreshed["notice"].as_str().unwrap().contains("1 models"));
+        let saved = tokio::fs::read(root.path().join("model-catalog.json")).await.unwrap();
+        assert!(!String::from_utf8_lossy(&saved).contains("fixture-access"));
+        assert!(!String::from_utf8_lossy(&saved).contains("fixture-key"));
+        client.open(&id).await;
+        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
+        assert_eq!(state["contextUsage"],json!({"tokens":tokens,"contextWindow":200000}));
+        client.request(json!({"id":"commands","type":"get_commands","sessionId":id})).await;
+        assert!(client.seen.iter().rev().find(|m| m["type"] == "commands" && m["sessionId"] == id).unwrap()["commands"]
+            .as_array().unwrap().iter().any(|c| c["name"] == "model" && c["arguments"].as_array().unwrap().iter().any(|a| a["value"] == "openai-codex/gpt-6-sol")));
+
+        model.set_catalog(None).await;
+        let failed = client.request(json!({"id":"refresh-failed","type":"refresh_model_catalog","provider":"openai-codex"})).await;
+        assert_eq!(failed["ok"],false);
+        assert_eq!(tokio::fs::read(root.path().join("model-catalog.json")).await.unwrap(),saved,"A failed refresh must retain the last valid cache");
+        assert_eq!(model.catalog_request().await["path"],"/models");
+        assert_eq!(model.catalog_request().await["path"],"/models");
         client.socket.close(None).await.unwrap();
-        let config = manager.inner.config.clone();
-        manager.shutdown().await; server.abort();
+        let config = manager.inner.config.clone(); manager.shutdown().await; server.abort();
 
-        let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
-        let (url, server) = serve(&manager).await;
-        let mut client = Client::connect(&url).await;
-        let sessions = client.until(|m| m["type"] == "sessions").await;
-        let summary = sessions["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
-        assert_eq!(summary["status"], "sleeping");
-        assert_eq!(summary["contextUsage"]["tokens"], tokens);
-        assert!(summary["contextUsage"]["contextWindow"].is_null());
+        let manager = AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
+        let (url, server) = serve(&manager).await; let mut client = Client::connect(&url).await;
+        client.until(|m| m["type"] == "sessions" && m["sessions"].as_array().is_some_and(|list| list.iter().any(|s| s["id"] == id && s["contextUsage"]["contextWindow"] == 200000))).await;
+        assert!(model.catalogs.try_recv().is_err(),"A valid cached file needs no GET after restart");
         client.open(&id).await;
         let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
-        assert_eq!(state["contextUsage"], summary["contextUsage"]);
-
-        let mut settings = manager.inner.settings.get();
-        settings.agent.allow_configured_context_fallback = true;
-        settings.models.push(crate::settings::ModelSettings { provider:"openai-codex".into(), id:"gpt-6-sol".into(), context_window:Some(200_000), ..Default::default() });
-        assert_eq!(client.request(json!({"id":"capacity","type":"set_settings","revision":settings.revision,"settings":settings})).await["ok"],true);
-        client.request(json!({"id":"list-known","type":"list_sessions"})).await;
-        let summary = client.seen.iter().rev().find(|m| m["type"] == "sessions").unwrap()["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
-        let expected = json!({"tokens":tokens,"contextWindow":200_000,"source":"configured"});
-        assert_eq!(summary["contextUsage"],expected);
-        client.open(&id).await;
-        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
-        assert_eq!(state["contextUsage"], expected);
-
-        let mut settings = manager.inner.settings.get();
-        settings.models.retain(|m| m.id != "gpt-6-sol");
-        assert_eq!(client.request(json!({"id":"remove-capacity","type":"set_settings","revision":settings.revision,"settings":settings})).await["ok"],true);
-        client.open(&id).await;
-        let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
-        assert_eq!(state["contextUsage"],json!({"tokens":tokens,"contextWindow":null}));
+        assert_eq!(state["contextUsage"],json!({"tokens":tokens,"contextWindow":200000}));
         assert_eq!(client.request(json!({"id":"switch","type":"prompt","sessionId":id,"text":"/model openai-codex/other-id"})).await["ok"],true);
         client.open(&id).await;
         let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
-        assert!(state["contextUsage"].is_null(), "Changing models clears the previous model's tokens");
+        assert!(state["contextUsage"].is_null(),"Changing models clears old usage and never borrows another model's window");
         manager.shutdown().await; server.abort();
     }
 }

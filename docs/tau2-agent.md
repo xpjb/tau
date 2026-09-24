@@ -273,12 +273,14 @@ against its configured inference provider, with the same authentication and
 Codex originator. Codex `/models` supplies `context_window` (falling back to
 `max_context_window`); OpenRouter-compatible `/models` supplies `context_length`.
 Only an exact model ID from a nonempty catalog with valid limits is accepted.
-Successful catalogs missing the selected model do not inherit settings metadata;
-errors or unsupported catalogs leave capacity unknown by default. Catalogs are
-kept in memory for one hour, with a one-minute retry delay on failure. A separate
-settings opt-in permits a clearly labeled, unverified configured limit only when
-catalog discovery is unavailable. The same resolved capacity gates automatic
-compaction. The public OpenAI `/v1/models` listing is not used as a source of
+The validated minimal catalog is persisted in private `model-catalog.json` next to
+daemon settings. On startup its credential identity and endpoint are checked
+before use; a missing/invalid file triggers a provider GET and alerts clients on
+failure. Connection settings has an explicit **Refresh models** control for
+fetching newly released models without expiring otherwise valid saved metadata.
+A failed refresh leaves the last good file intact. No configured/Pi metadata
+fallback is used for the meter or automatic compaction; an exact ID missing from
+the provider catalog remains unknown. The same saved capacity gates compaction. The public OpenAI `/v1/models` listing is not used as a source of
 context windows. No Pi worker, Pi settings mirror, or guessed ID aliases are used.
 
 ## Unshipped settings update
