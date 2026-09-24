@@ -130,11 +130,11 @@ impl Health {
     /// Pure snapshot: `now` is injectable in tests and previews.
     pub fn details(&self, reason: &str, now: Instant) -> String {
         let title = match self.phase {
-            Phase::Offline => "Offline",
-            Phase::Connecting => "Connecting…",
-            Phase::Connected => "Connected",
-            Phase::Reconnecting => "Reconnecting…",
-            Phase::Blocked => "Connection blocked",
+            Phase::Offline => Some("Offline"),
+            Phase::Connecting => Some("Connecting…"),
+            Phase::Connected => None, // The live reply/wait timer says more than "Connected".
+            Phase::Reconnecting => Some("Reconnecting…"),
+            Phase::Blocked => Some("Connection blocked"),
         };
         let (min, max) = match self.min_max() {
             Some((min, max)) => (
@@ -143,7 +143,11 @@ impl Health {
             ),
             None => ("—".into(), "—".into()),
         };
-        let mut lines = vec![title.into(), format!("min: {min}"), format!("max: {max}")];
+        let mut lines = Vec::new();
+        if let Some(title) = title {
+            lines.push(title.into());
+        }
+        lines.extend([format!("min: {min}"), format!("max: {max}")]);
         lines.push(match self.counter(now) {
             Some((label, ms)) => format!("{label}: {ms}ms"),
             None => "received: —".into(),
@@ -231,10 +235,7 @@ mod tests {
         let now = Instant::now();
         let mut health = Health::connecting();
         health.connected();
-        assert_eq!(
-            health.details("", now),
-            "Connected\nmin: —\nmax: —\nreceived: —"
-        );
+        assert_eq!(health.details("", now), "min: —\nmax: —\nreceived: —");
         for ms in 100..110 {
             ack(&mut health, now, ms);
         }
@@ -249,7 +250,7 @@ mod tests {
         );
         assert_eq!(
             health.details("", now + Duration::from_millis(347)),
-            "Connected\nmin: 101ms\nmax: 109ms\nwaiting: 347ms"
+            "min: 101ms\nmax: 109ms\nwaiting: 347ms"
         );
         health.disconnected(false); // The unanswered attempt is not a fabricated 5s RTT.
         assert_eq!(
@@ -296,7 +297,7 @@ mod tests {
         );
         assert_eq!(
             health.details("", now + Duration::from_millis(5555)),
-            "Connected\nmin: 4321ms\nmax: 4321ms\nreceived: 1234ms"
+            "min: 4321ms\nmax: 4321ms\nreceived: 1234ms"
         );
         health.sent(now + Duration::from_millis(5555));
         assert_eq!(

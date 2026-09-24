@@ -40,7 +40,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert!(
         app.info_tip
             .text
-            .starts_with("Connected\nmin: 123ms\nmax: 420ms\nreceived: "),
+            .starts_with("min: 123ms\nmax: 420ms\nreceived: "),
         "{}",
         app.info_tip.text
     );
@@ -57,7 +57,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert_ne!(received, waiting, "waiting must change the GPU frame");
     assert!(elapsed(&app.info_tip.text, "waiting: ") >= 1350);
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
-    assert_eq!(app.info_tip.text.lines().count(), 4);
+    assert_eq!(app.info_tip.text.lines().count(), 3);
 
     // Pong: the live timer switches to age since receipt, not the previous send.
     app.controller
@@ -68,7 +68,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert!(
         app.info_tip
             .text
-            .starts_with("Connected\nmin: 123ms\nmax: 1350ms\nreceived: ")
+            .starts_with("min: 123ms\nmax: 1350ms\nreceived: ")
     );
     let before = elapsed(&app.info_tip.text, "received: ");
     std::thread::sleep(Duration::from_millis(60));
@@ -87,7 +87,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert!(
         app.info_tip
             .text
-            .starts_with("Connected\nmin: 21ms\nmax: 1350ms\nreceived: ")
+            .starts_with("min: 21ms\nmax: 1350ms\nreceived: ")
     );
     assert_eq!(app.controller.health.color(Instant::now()), 0x4ade80);
 

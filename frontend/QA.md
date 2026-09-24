@@ -1,7 +1,8 @@
 # Connection status follow-up
 
-The connection card shows state, min/max acknowledged Ping/Pong RTT across the
-last ten *attempts*, and a live `received:` or `waiting:` millisecond counter.
+The connection card omits the redundant Connected title. It shows min/max
+acknowledged Ping/Pong RTT across the last ten *attempts* and a live `received:`
+or `waiting:` millisecond counter; explicit state remains for connection failure.
 Failed attempts take a slot but never fabricate an RTT. No server URL appears;
 that belongs in Settings. The last reply age and samples survive automatic
 reconnects to the same server, but changing settings resets them. Pong receipt
