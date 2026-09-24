@@ -36,8 +36,13 @@ that default. IDs are sent exactly; optional metadata is not an allowlist. Unkno
 context capacity stays unknown: the context tooltip shows the last provider-reported
 turn total in tokens even when the selected model has no `contextWindow` metadata.
 The percentage/ring fill and threshold-based auto-compaction still need an explicitly
-configured capacity; a missing window is never guessed. Sleeping chats retain the
-last saved token count, marked as last known. This protocol-15 change needs matching
+configured capacity; a missing window is never guessed. Tau 1's custom Sol/Luna
+models declare a 272,000-token window in Pi's separate `models.json`. The initial
+Pi import now reads that metadata as well as `models-store.json` without copying
+provider credentials. Existing Tau 2 settings are not overwritten: those models
+need their verified `contextWindow` added through Daemon settings → Model metadata
+to show a percentage. Sleeping chats retain the last saved token count, marked
+as last known. This protocol-15 change needs matching
 client and daemon builds and has not been deployed. The title model is separately
 configurable; unset uses the chat model. Cache rings are estimates from existing reply timestamps, not native
 runtime idle timeouts. Chat context menus target the clicked chat and expose model,

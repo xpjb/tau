@@ -162,6 +162,34 @@ impl SettingsStore {
                         }
                         if !models.is_empty() { settings.models = models; }
                     }
+                    // Pi's user-defined models.json is separate from its downloaded
+                    // models-store.json. The latter does not contain custom IDs such
+                    // as Sol/Luna, so importing it alone loses their context windows.
+                    // Read metadata only, once during explicit Pi setup; never copy
+                    // provider endpoints, keys, or credentials from this file.
+                    if let Some(text) = optional_text(&dir.join("models.json")).await? {
+                        if text.len() > 4 * 1024 * 1024 { bail!("Legacy custom models exceed 4 MB"); }
+                        let raw: Value = serde_json::from_str(&text).context("Invalid legacy custom models")?;
+                        let providers = raw.get("providers").and_then(Value::as_object).context("Legacy custom models have no providers")?;
+                        for (provider, config) in providers {
+                            if !settings.providers.contains_key(provider) { continue; }
+                            for model in config.get("models").and_then(Value::as_array).into_iter().flatten() {
+                                let id = model["id"].as_str().context("Legacy custom model has no ID")?;
+                                let window = model.get("contextWindow").map(|v| v.as_u64().context("Invalid custom context window")).transpose()?;
+                                let name = model.get("name").map(|v| v.as_str().context("Invalid custom model name")).transpose()?;
+                                let levels = model.get("thinkingLevelMap").map(|v| serde_json::from_value(v.clone())).transpose()?;
+                                if let Some(existing) = settings.models.iter_mut().find(|m| m.provider == *provider && m.id == id) {
+                                    if let Some(window) = window { existing.context_window = Some(window); }
+                                    if let Some(name) = name { existing.name = name.into(); }
+                                    if let Some(levels) = levels { existing.thinking_level_map = levels; }
+                                } else {
+                                    settings.models.push(ModelSettings { provider:provider.clone(), id:id.into(),
+                                        name:name.unwrap_or_default().into(), context_window:window,
+                                        thinking_level_map:levels.unwrap_or_default() });
+                                }
+                            }
+                        }
+                    }
                     settings.validate()?;
                     let auth = config.settings_path.with_file_name("auth.json");
                     if !auth.try_exists()? && let Some(text) = optional_text(&dir.join("auth.json")).await? {
