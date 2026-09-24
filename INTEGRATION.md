@@ -191,9 +191,11 @@ thread. Java tools used one active processor. No paid provider requests.
   UI/IME/DPI acceptance is inferred from cross-builds. Older beta clients require a
   matched update for protocol 14.
 
-Source remains the local projects working tree (no push/tag was requested); its
-release snapshot and local validation records are retained under
-`target/projects-release-0.7.2/`. Package checksums are in
+At deployment, source was in the local projects worktree (no push/tag was
+requested then). The validated source was subsequently committed and pushed to
+`tau2` as `c2a2f5d`, without another build or deployment. Its release snapshot
+and local validation records are retained under `target/projects-release-0.7.2/`.
+Package checksums are in
 `dist/Tau-Beta-0.7.2-SHA256SUMS.txt`.
 
 SHA-256:
