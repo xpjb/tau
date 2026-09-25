@@ -1,5 +1,20 @@
 # Beta packaging sizes
 
+## 0.7.3 protocol-15 beta
+
+| Measured component | MiB |
+|---|---:|
+| Windows x64 installer | **9.42** |
+| Windows native app | **31.00** |
+| Android ARM64 APK | **11.34** |
+| Android extracted native library | **26.57** |
+
+Windows installer embeds exactly the freshly built native app. Android package
+`app.tau.rust` has versionCode **8**, versionName **0.7.3-beta**, and the same beta
+signing certificate as 0.7.2. APK signature, ZIP CRC, compressed native payload,
+ZIP alignment and 16 KiB ELF LOAD alignment passed. Both packages were sent after
+the matched beta daemon deployed. Device UI testing remains with the user.
+
 ## 0.7.2 topics beta
 
 | Measured component | MiB |

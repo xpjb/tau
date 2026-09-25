@@ -4,7 +4,7 @@ Rust client, daemon, coding agent, shared protocol, Markdown and verified file t
 No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Python title
 helper. Android retains a small Java bridge for Android OS APIs.
 
-**0.7.2 beta · protocol 14 (topics).**
+**0.7.3 beta · protocol 15.**
 Beta daemon deployed; Windows x64 installer and Android ARM64 APK delivered.
 This is a separate installation, not a stable-Tau cutover.
 The maintained frontend branch is `tau2-rust-frontend`; the integrated release
@@ -48,8 +48,8 @@ session's work. A send is acknowledged after its server-side queue/receipt commi
 not after a model response. A socket lost after a sent prompt leaves the receipt
 **unconfirmed** until history verifies it; potentially billed prompts are not
 blindly retransmitted. New sends accepted into a paused queue clear a stale error
-indicator while still showing that work must be resumed. This follow-up is not
-merged or deployed.
+indicator while still showing that work must be resumed. This behavior ships in
+beta 0.7.3.
 
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
@@ -70,8 +70,8 @@ changes its models or limits.
 
 The tooltip shows last provider-reported turn tokens even when capacity is unknown.
 The ring percentage and threshold-based auto-compaction need a known saved limit.
-Sleeping chats retain the last saved token count, marked as last known. This
-protocol-15 change needs matched client/daemon builds and has not been deployed. The title model is separately
+Sleeping chats retain the last saved token count, marked as last known. The
+protocol-15 beta has matched clients and daemon. The title model is separately
 configurable; unset uses the chat model. Cache rings are estimates from existing
 reply timestamps, not native runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.
@@ -107,7 +107,7 @@ drafts, and read markers remain account-scoped client state. Existing `projectId
 wire fields and SQLite names remain unchanged so beta history stays compatible.
 Concurrent topic edits
 use revision checks and preserve the losing editor’s text. Both clients and daemon
-must be updated for protocol 14. The beta service is updated; stable Tau is unchanged.
+must use protocol 15 in beta 0.7.3. Stable Tau is unchanged.
 
 ## Build and validate
 

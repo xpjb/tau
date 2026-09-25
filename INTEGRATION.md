@@ -203,3 +203,42 @@ SHA-256:
 - Daemon: `1019b82f7f6e4d4f9d995ce1166bf753aabb398b346f249e8579b2af426b8008`
 - Windows installer: `00ef15e7ca5cd4590f2df92593a719148b2ca7727c153ec877c9e9a0505dfe56`
 - Android APK: `4e67786b8548a521a49652e3c260b1add4fdba96704945a965244255e5d8e723`
+
+## Beta 0.7.3 / protocol 15 — 2026-09-25
+
+The user requested merging `feat/tau2-finished-attention` to `tau2`, deploying the
+beta daemon, then sending Windows followed by Android. The feature and the 0.7.3
+version bump fast-forwarded to `origin/tau2` at `ebbbc54`. Local `tau2-integration`
+tracks that remote because local `tau2/*` branches prevent a local branch named
+`tau2`. No unrelated branch was merged; `feat/tau2-block-sync` remains separate.
+
+The managed workspace check and nextest passed: **103/103 tests**, no skips. The
+release daemon, Windows x64 installer and Android ARM64 APK built sequentially with
+one Cargo job and one Rayon thread. Java packaging used one processor. Beta was
+stopped before installation; schema 2, seven chats and an empty queue were checked.
+The private backup at
+`/var/backups/tau2-beta/pre-0.7.3-20260925T091912Z` contains the prior binary,
+unit, environment, complete stopped SQLite state, settings/auth and beta files.
+Checksums verified. The new daemon was installed atomically and only
+`tau2-beta.service` was started. It reports **0.7.3 / 15** locally and through
+`tailscale nc vibe 8789`. Its PID was **1064959** with zero restarts; database
+integrity, foreign keys, schema and all six existing tables' rows matched the
+backup after startup. An anonymous WebSocket received 401. Stable `tau.service`
+kept PID **474496**, its binary hash and start time; its data and routes were not
+changed. No paid provider request or production prompt was sent.
+
+The Windows installer contains exactly the new `app/Tau Beta.exe`, byte-matched to
+the fresh Windows build. It was sent first. The Android APK was sent second:
+`app.tau.rust`, versionCode **8**, versionName **0.7.3-beta**, not debuggable;
+v3 signature matches the preceding beta signing certificate, with verified ZIP,
+native library and 16 KiB ELF/ZIP alignment. Artifact checksums are in
+`dist/Tau-Beta-0.7.3-SHA256SUMS.txt`. Physical Windows/Android UI acceptance and
+sustained slow-link behavior were not tested by this release. The known beta
+network issue from `docs/tau2-protocol-audit.md` remains until a separate network
+rewrite is reviewed and released.
+
+SHA-256:
+
+- Daemon: `1c1cb7baf8320ac1fed78f89d5d08265781cc15dada33e3ff8271edcf577754b`
+- Windows installer: `82502237e5d21cafa76c57306f9693487ca73d790d2bbde9b9f5d74bf2910608`
+- Android APK: `01ff14c3f7ff2f3d15bbc81d6bc0bc604194a4c877390771af98ab0a32741aaa`
