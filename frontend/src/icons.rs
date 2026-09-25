@@ -3,6 +3,7 @@ use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform
 #[derive(Clone, Copy, Debug)]
 pub enum Icon {
     Attach,
+    Attachments,
     Send,
     Stop,
     Play,
@@ -16,6 +17,7 @@ impl Icon {
     pub fn name(self) -> &'static str {
         match self {
             Self::Attach => "attach",
+            Self::Attachments => "attachments",
             Self::Send => "send",
             Self::Stop => "stop",
             Self::Play => "play",
@@ -67,6 +69,22 @@ impl Icon {
                 p.cubic_to(15.54, 23., 18., 20.54, 18., 17.5);
                 p.line_to(18., 6.);
                 p.close();
+            }
+            Self::Attachments => {
+                p.move_to(5., 2.);
+                p.line_to(14., 2.);
+                p.line_to(20., 8.);
+                p.line_to(20., 22.);
+                p.line_to(5., 22.);
+                p.close();
+                p.move_to(14., 2.);
+                p.line_to(14., 8.);
+                p.line_to(20., 8.);
+                pixmap.stroke_path(
+                    &p.finish().unwrap(), &paint,
+                    &Stroke { width: 1.8, ..Default::default() }, transform, None,
+                );
+                return straight_alpha(pixmap);
             }
             Self::Send => {
                 p.move_to(2.01, 21.);

@@ -203,3 +203,50 @@ fn visible_file_captions_load_full_metadata_without_requesting_binary_payloads()
     let visible=BTreeSet::from(["card".into()]);let plan=f.cache.plan_visible("chat",&LocalChat::default(),&[],Some(&visible)).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="card/meta"));assert!(!plan.blocks.iter().any(|(id,_)|id.starts_with("file:")));
     f.body("card/meta");let view=f.cache.preview("chat",Some(&visible)).unwrap().unwrap();assert_eq!(view.snapshot.events[0].attachment.as_ref().unwrap().caption.as_deref(),Some(caption.as_str()));
 }
+
+#[test]
+fn attachment_history_paging_clears_loading_without_fetching_closed_tools_or_files() {
+    let mut f = Fixture::new();
+    for n in 0..100 {
+        let id = format!("event-{n}");
+        let mut meta = event(&id, n, "tool");
+        let kind = if n % 20 == 0 {
+            meta["event"]["role"] = json!("tool");
+            meta["event"]["kind"] = json!("text");
+            meta["event"]["attachment"] = json!({"fileName":format!("file-{n}.txt"),"kind":"file","size":12});
+            BlockKind::Code
+        } else { BlockKind::Tool };
+        f.put(&id, None, n, kind, meta, b"unread output");
+        f.put(&format!("file:{id}"), Some(&id), 1, BlockKind::File,
+            json!({"attachment":{"kind":"file"}}), b"file payload");
+    }
+    f.page(None, None);
+    let visible = BTreeSet::new();
+    let mut feed = crate::feed::Feed::default();
+    feed.native_view(f.cache.changes("chat", Some(&visible), true).unwrap().unwrap()).unwrap();
+    let mut pages = 1;
+    while let Some(before) = f.cache.history_cursor("chat").unwrap() {
+        feed.loading = true;
+        f.cache.changed("chat", "event-99", false);
+        feed.native_view(f.cache.changes("chat", Some(&visible), false).unwrap().unwrap()).unwrap();
+        assert!(feed.loading, "unrelated content progress does not complete history loading");
+        f.page(None, Some(before));
+        let view = f.cache.changes("chat", Some(&visible), false).unwrap().unwrap();
+        feed.native_view(view).unwrap();
+        assert!(!feed.loading, "the next older page remains reachable");
+        pages += 1;
+        assert!(pages < 10);
+    }
+    assert!(pages > 2);
+    let files = feed.events.values().rev().filter(|e| e.attachment.is_some()).collect::<Vec<_>>();
+    assert_eq!(files.iter().map(|e| e.order).collect::<Vec<_>>(), vec![80, 60, 40, 20, 0]);
+    let visible = files.iter().map(|e| e.id.clone()).collect::<BTreeSet<_>>();
+    let plan = f.cache.plan_visible("chat", &LocalChat::default(), &[], Some(&visible)).unwrap();
+    assert_eq!(plan.parents, BTreeSet::from([None, Some(QUEUE.into())]));
+    assert_eq!(plan.blocks.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec![QUEUE]);
+    let db = f.cache.db.lock().unwrap();
+    for id in &visible {
+        assert!(tau_blocks::cached_content(&db, "chat", id).unwrap().is_empty());
+        assert!(tau_blocks::header(&db, "chat", &format!("file:{id}")).unwrap().is_none());
+    }
+}

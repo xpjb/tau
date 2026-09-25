@@ -6,6 +6,7 @@ use std::time::Instant;
 pub enum Lane {
     Transcript,
     Sidebar,
+    Attachments,
     Projects,
     Horizontal,
 }

@@ -24,6 +24,7 @@ use ripple::Ripple;
 use tau_protocol::*;
 
 mod projects;
+mod attachments;
 
 #[derive(Clone)]
 enum Action {
@@ -83,6 +84,8 @@ enum Action {
     CopySelection,
     Link(String),
     Attach,
+    Attachments,
+    History,
     RemoveFile(String),
     Toggle(String, bool),
     Restore(String),
@@ -264,6 +267,11 @@ pub struct App {
     connection_visible: bool,
     composer_session: Option<String>,
     show_chats: bool,
+    show_attachments: bool,
+    attachments_rect: Rect,
+    attachment_scroll: f32,
+    max_attachment_scroll: f32,
+    attachment_velocity: f32,
     waiting_settings: bool,
     daemon_draft: Option<crate::daemon_settings::Draft>,
     saving_settings: Option<String>,
@@ -345,6 +353,11 @@ impl App {
             connection_visible: true,
             composer_session,
             show_chats,
+            show_attachments: false,
+            attachments_rect: Rect::new(0., 0., 0., 0.),
+            attachment_scroll: 0.,
+            max_attachment_scroll: 0.,
+            attachment_velocity: 0.,
             waiting_settings: false,
             daemon_draft: None,
             saving_settings: None,
@@ -552,7 +565,9 @@ impl App {
         self.dirty = true;
     }
     pub fn tick(&mut self, dt: f32) -> bool {
-        let visible = self.window_focused && (self.size.0 as f32 / self.scale >= 760. || !self.show_chats) && self.modal.is_none() && self.viewer.is_none();
+        let visible = self.window_focused && (self.size.0 as f32 / self.scale >= 760. || !self.show_chats)
+            && (!self.show_attachments || !self.mobile && self.size.0 as f32 / self.scale >= 1000.)
+            && self.modal.is_none() && self.viewer.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.notice = Some(error.to_string()); }
         self.dirty |= self.controller.poll();
         if let Some(text)=self.controller.copied.take() && !text.is_empty() {self.platform.push(PlatformAction::Copy(text));self.dirty=true;}
@@ -591,6 +606,9 @@ impl App {
                     .unwrap_or_default(),
             );
             self.show_chats = self.composer_session.is_none();
+            self.attachment_scroll = 0.;
+            self.max_attachment_scroll = 0.;
+            if self.show_chats { self.show_attachments = false; }
             self.dirty = true;
         } else if let Some(chat) = self.controller.selected()
             && self.composer.value != chat.local.draft
@@ -723,6 +741,13 @@ impl App {
             self.remember_scroll();
             self.dirty = true;
         }
+        if self.pointer.is_none() && self.attachment_velocity.abs() > 4. {
+            let old = self.attachment_scroll;
+            self.attachment_scroll = (old + self.attachment_velocity * dt.min(0.05)).clamp(0., self.max_attachment_scroll);
+            self.attachment_velocity *= (-9. * dt).exp();
+            if (old - self.attachment_scroll).abs() < 0.1 { self.attachment_velocity = 0.; }
+            self.dirty = true;
+        }
         if self.pointer.is_none() && self.project_velocity.abs() > 4. {
             let old = self.project_scroll;
             self.project_scroll = (old + self.project_velocity * dt.min(0.05)).clamp(0., self.max_project_scroll);
@@ -748,7 +773,7 @@ impl App {
         }
         let dirty = self.dirty;
         self.dirty = false;
-        dirty || self.velocity.abs() > 4. || self.project_velocity.abs() > 4. || waiting_hold
+        dirty || self.velocity.abs() > 4. || self.project_velocity.abs() > 4. || self.attachment_velocity.abs() > 4. || waiting_hold
     }
     fn section_at(&self, point: Vec2) -> Option<(&str, Rect)> {
         self.detail_areas.iter().rev().find(|a| a.contains(point))
@@ -805,6 +830,9 @@ impl App {
             self.viewer_image = None;
         } else if self.modal.is_some() {
             self.activate(Action::CancelModal);
+        } else if self.show_attachments {
+            self.show_attachments = false;
+            self.cancel_pointer();
         } else if !self.show_chats && self.size.0 as f32 / self.scale < 760. {
             self.show_chats = true;
         } else {
@@ -816,6 +844,7 @@ impl App {
         match lane {
             Lane::Transcript => (self.scroll, self.max_scroll),
             Lane::Sidebar => (self.list_scroll, self.max_list_scroll),
+            Lane::Attachments => (self.attachment_scroll, self.max_attachment_scroll),
             Lane::Projects => (self.project_scroll, self.max_project_scroll),
             Lane::Horizontal => (self.horizontal, self.max_horizontal),
         }
@@ -827,6 +856,7 @@ impl App {
                 self.remember_scroll();
             }
             Lane::Sidebar => self.list_scroll = value.clamp(0., self.max_list_scroll),
+            Lane::Attachments => self.attachment_scroll = value.clamp(0., self.max_attachment_scroll),
             Lane::Projects => self.project_scroll = value.clamp(0., self.max_project_scroll),
             Lane::Horizontal => self.horizontal = value.clamp(0., self.max_horizontal),
         }
@@ -876,6 +906,7 @@ impl App {
         }
         self.context_menu = None;
         self.project_velocity = 0.;
+        self.attachment_velocity = 0.;
         self.usage.dismiss();
         self.info_tip.dismiss();
         self.cancel_autoscroll();
@@ -894,7 +925,9 @@ impl App {
         if let Some(v) = &mut self.viewer {
             v.zoom = (v.zoom * (-amount * 0.002).exp()).clamp(1., 16.);
         } else if self.modal.is_none() {
-            let lane = if contains(self.projects_rect, point) {
+            let lane = if contains(self.attachments_rect, point) {
+                Lane::Attachments
+            } else if contains(self.projects_rect, point) {
                 Lane::Projects
             } else if horizontal {
                 Lane::Horizontal
@@ -940,8 +973,8 @@ impl App {
             self.scrollbars.push(bar);
         }
     }
-    fn history_near_top(&mut self, session: &str) {
-        if self.modal.is_some() || self.viewer.is_some() || self.scroll > 180. * self.scale {
+    fn history_near_edge(&mut self, session: &str, near: bool) {
+        if self.modal.is_some() || self.viewer.is_some() || !near {
             return;
         }
         let feed = &self.controller.chats[session].feed;
@@ -984,6 +1017,7 @@ impl App {
         self.history_attempt = None;
         self.velocity = 0.;
         self.project_velocity = 0.;
+        self.attachment_velocity = 0.;
         self.ripple = None;
         if self.pointer.is_some() {
             if self.viewer.is_some() && touch {
@@ -1141,6 +1175,12 @@ impl App {
                 if contains(self.projects_rect, p.start) {
                     self.project_scroll = (self.project_scroll - dx).clamp(0., self.max_project_scroll);
                     if p.touch { self.project_velocity = (-dx / p.at.elapsed().as_secs_f32().max(0.008)).clamp(-3000. * self.scale, 3000. * self.scale); }
+                } else if contains(self.attachments_rect, p.start) {
+                    self.attachment_scroll = (self.attachment_scroll - dy).clamp(0., self.max_attachment_scroll);
+                    if p.touch {
+                        self.attachment_velocity = (-dy / p.at.elapsed().as_secs_f32().max(0.008))
+                            .clamp(-3000. * self.scale, 3000. * self.scale);
+                    }
                 } else if contains(self.list_rect, p.start) {
                     self.list_scroll = (self.list_scroll - dy).clamp(0., self.max_list_scroll);
                 } else if contains(self.transcript, p.start)
@@ -1227,6 +1267,7 @@ impl App {
         if p.at.elapsed().as_millis() > 150 {
             self.velocity = 0.;
             self.project_velocity = 0.;
+            self.attachment_velocity = 0.;
         }
         let result = self.save();
         self.report(result);
@@ -1246,6 +1287,7 @@ impl App {
         self.pinch = None;
         self.velocity = 0.;
         self.project_velocity = 0.;
+        self.attachment_velocity = 0.;
         self.selecting = false;
         self.field_selection = None;
     }
@@ -1389,7 +1431,7 @@ impl App {
             }
         }
         if key == "Escape" {
-            if self.modal.is_some() || self.viewer.is_some() {
+            if self.modal.is_some() || self.viewer.is_some() || self.show_attachments {
                 self.back();
             } else {
                 self.activate(Action::Abort);
@@ -1494,6 +1536,17 @@ impl App {
             }
             Action::RetryCreate => self.controller.retry_create_manually()?,
             Action::Back => self.back(),
+            Action::Attachments => {
+                self.save()?;
+                self.cancel_pointer();
+                self.focus = None;
+                self.show_attachments = !self.show_attachments;
+                self.history_attempt = None;
+            }
+            Action::History => {
+                self.history_attempt = None;
+                if let Some(session) = selected { self.history_near_edge(&session, true); }
+            }
             Action::ModelSettings => {
                 self.controller.notice = None;
                 self.modal = Some(Modal {
@@ -2041,6 +2094,7 @@ impl App {
         self.projects_rect = Rect::new(0.,0.,0.,0.);
         self.list_rect = Rect::new(0.,0.,0.,0.);
         self.transcript = Rect::new(0.,0.,0.,0.);
+        self.attachments_rect = Rect::new(0., 0., 0., 0.);
         self.info_areas.clear();
         self.usage.region = Rect::new(0., 0., 0., 0.);
         self.info_tip.region = Rect::new(0., 0., 0., 0.);
@@ -2053,7 +2107,11 @@ impl App {
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
         let side = if wide { 300. * s } else { 0. };
-        if wide || self.show_chats {
+        let file_side = self.show_attachments && !self.mobile && bounds.width / s >= 1000.;
+        let file_screen = self.show_attachments && !file_side;
+        let file_width = if file_side { 320. * s } else { 0. };
+        let mut interests = std::collections::BTreeSet::new();
+        if !file_screen && (wide || self.show_chats) {
             self.sidebar(
                 ctx,
                 &mut main,
@@ -2065,7 +2123,7 @@ impl App {
                 ),
             );
         }
-        if wide || !self.show_chats {
+        if !file_screen && (wide || !self.show_chats) {
             self.chat(
                 ctx,
                 &mut body,
@@ -2073,10 +2131,86 @@ impl App {
                 Rect::new(
                     bounds.x + side,
                     bounds.y,
-                    bounds.width - side,
+                    bounds.width - side - file_width,
                     bounds.height,
                 ),
+                &mut interests,
             );
+        }
+        if self.show_attachments && let Some(session) = self.controller.account.selected.clone()
+            && let Some(chat) = self.controller.chats.get(&session)
+        {
+            let files = chat.feed.events.values().rev().filter_map(|event|
+                event.attachment.clone().map(|file| (event.id.clone(), event.entry_id.clone(), file)))
+                .collect::<Vec<_>>();
+            let older = chat.feed.before.is_some();
+            let loading = chat.feed.loading;
+            let synchronized = chat.feed.synchronized;
+            let b = if file_side {
+                Rect::new(bounds.x + bounds.width - file_width, bounds.y, file_width, bounds.height)
+            } else { bounds };
+            main.rect(b, color(0x0e141b));
+            if file_side { main.rect(Rect::new(b.x, b.y, s, b.height), color(0x2a3541)); }
+            chrome.rect(Rect::new(b.x, b.y + 56. * s, b.width, s), color(0x2a3541));
+            let title_x = b.x + if file_screen { 80. * s } else { 14. * s };
+            let title_width = b.width - if file_screen { 94. * s } else { 70. * s };
+            self.renderer.label(&mut chrome, "Attachments",
+                Rect::new(title_x, b.y + 8. * s, title_width, 22. * s), 16. * s, color(0xe5eaf0), true);
+            self.renderer.label(&mut chrome, &format!("{} loaded · newest first", files.len()),
+                Rect::new(title_x, b.y + 30. * s, title_width, 18. * s), 12. * s, color(0x82909f), false);
+            button(&mut self.renderer, &mut chrome, &mut self.hits,
+                Rect::new(if file_screen { b.x + 8. * s } else { b.x + b.width - 48. * s }, b.y + 8. * s,
+                    if file_screen { 64. * s } else { 40. * s }, 40. * s),
+                if file_screen { "Back" } else { "×" },
+                if file_screen { Action::Back } else { Action::Attachments }, s, false);
+            let viewport = Rect::new(b.x + s, b.y + 57. * s, b.width - s, (b.height - 57. * s).max(0.));
+            self.attachments_rect = viewport;
+            let heights = files.iter().map(|(_, _, file)|
+                (166. + if file.kind == AttachmentKind::Image { 240. } else { 0. }) * s).collect::<Vec<_>>();
+            let content_height = 12. * s + heights.iter().map(|h| h + 12. * s).sum::<f32>();
+            self.max_attachment_scroll = (content_height + if older { 52. * s } else { 0. } - viewport.height).max(0.);
+            self.attachment_scroll = self.attachment_scroll.clamp(0., self.max_attachment_scroll);
+            let mut y = viewport.y + 12. * s - self.attachment_scroll;
+            for ((id, entry, file), height) in files.iter().zip(heights) {
+                let rect = Rect::new(b.x + 12. * s, y, b.width - 28. * s, height);
+                if y + height >= viewport.y - viewport.height && y <= viewport.y + 2. * viewport.height {
+                    interests.insert(id.clone());
+                }
+                if y + height >= viewport.y && y <= viewport.y + viewport.height {
+                    body.clipped_corners(rect, [12. * s; 4], color(0x18212b), viewport);
+                    self.attachment_card(ctx, &mut body, &session, entry, file, rect, viewport);
+                }
+                y += height + 12. * s;
+            }
+            if files.is_empty() {
+                let text = if self.controller.epoch.is_none() {
+                    "No cached attachments.\nConnect to load sent files."
+                } else if older || !synchronized {
+                    "Loading attachments…"
+                } else { "No attachments yet.\nFiles sent in this chat appear here." };
+                self.renderer.label(&mut body, text,
+                    Rect::new(b.x + 24. * s, viewport.y + 80. * s, b.width - 48. * s, 100. * s),
+                    14. * s, color(0xb7c2ce), false);
+            }
+            if older {
+                let r = crate::render::intersect(Rect::new(b.x + 16. * s, y, b.width - 44. * s, 36. * s), viewport);
+                if r.height > 0. {
+                    if loading || !synchronized || self.controller.epoch.is_none() {
+                        self.renderer.clipped_label(&mut body,
+                            if self.controller.epoch.is_none() { "Connect to load older files" } else { "Loading older files…" },
+                            Rect::new(b.x + 16. * s, y + 8. * s, b.width - 44. * s, 24. * s),
+                            12. * s, color(0x82909f), false, viewport);
+                    } else {
+                        button(&mut self.renderer, &mut body, &mut self.hits, r,
+                            "Load older files", Action::History, s, false);
+                    }
+                }
+                self.history_near_edge(&session, self.max_attachment_scroll - self.attachment_scroll <= 180. * s);
+            }
+            self.scrollbar(&mut chrome, Lane::Attachments, viewport);
+        }
+        if !interests.is_empty() || !self.show_chats || file_side {
+            if let Some(session) = self.controller.account.selected.clone() { self.controller.viewport(&session, interests); }
         }
         if let Some((rect, _)) = self
             .info_areas
@@ -2605,7 +2739,7 @@ impl App {
         }
         rows
     }
-    fn chat(&mut self, ctx: &impl RenderContext, layer: &mut Layer, chrome: &mut Layer, b: Rect) {
+    fn chat(&mut self, ctx: &impl RenderContext, layer: &mut Layer, chrome: &mut Layer, b: Rect, interests: &mut std::collections::BTreeSet<String>) {
         let s = self.scale;
         let paint_at = Instant::now();
         let wide = self.size.0 as f32 / s >= 760.;
@@ -2648,7 +2782,7 @@ impl App {
             .is_some_and(|s| s.status == SessionStatus::Running);
         let paused = self.controller.chats[&session].feed.queue.paused;
         let title_width =
-            (b.x + b.width - if running || paused { 64. * s } else { 12. * s } - title_x).max(1.);
+            (b.x + b.width - if running || paused { 108. * s } else { 64. * s } - title_x).max(1.);
         self.chat_areas.push((
             Rect::new(title_x, b.y, title_width, header.height),
             session.clone(),
@@ -2883,7 +3017,6 @@ impl App {
                 else {tool_roots.entry(call).or_insert(&event.id);}
             }
         }
-        let mut interests=std::collections::BTreeSet::new();
         let top=self.scroll-viewport.height;let bottom=self.scroll+2.*viewport.height;
         for (row,p) in rows.iter().zip(&placements).filter(|(_,p)|p.top+p.height>=top && p.top<=bottom) {
             if row.details.is_empty() {
@@ -2903,13 +3036,12 @@ impl App {
                 }
             }
         }
-        self.controller.viewport(&session,interests);
         self.placed = placements;
         self.placed_session = Some(session.clone());
         if can_remember {
             self.remember_scroll();
         }
-        self.history_near_top(&session);
+        self.history_near_edge(&session, self.scroll <= 180. * s);
         if quick_models {
             self.quick_models_frame(
                 layer,
@@ -2918,13 +3050,14 @@ impl App {
                 viewport,
             );
         }
-        for (index, (row, p)) in rows.iter().zip(&self.placed).enumerate() {
-            let top = viewport.y + p.top - self.scroll;
-            if top + p.height < viewport.y || top > viewport.y + viewport.height {
+        for (index, row) in rows.iter().enumerate() {
+            let height = self.placed[index].height;
+            let top = viewport.y + self.placed[index].top - self.scroll;
+            if top + height < viewport.y || top > viewport.y + viewport.height {
                 continue;
             }
             let x = x + if row.user { width - bubble_width } else { 0. };
-            let rect = Rect::new(x, top, bubble_width, p.height);
+            let rect = Rect::new(x, top, bubble_width, height);
             let joined_above = index > 0 && row.joins(rows.get(index - 1));
             let joined_below = row.joins(rows.get(index + 1));
             let upper = if joined_above { 0. } else { 12. * s };
@@ -3064,130 +3197,8 @@ impl App {
                     self.horizontal,
                 );
             }
-            let mut actions: Vec<(String, Action)> = vec![];
             if let Some((entry, attachment)) = &row.attachment {
-                let image = attachment.kind == AttachmentKind::Image;
-                let path = self.controller.attachment_path(&session,entry);
-                let key = Controller::download_key(&session, entry);
-                if image && path.is_file() {
-                    let preview = crate::render::intersect(
-                        Rect::new(x + 14. * s, top + p.height - 372. * s, text_width, 230. * s),
-                        viewport,
-                    );
-                    if let Ok((w, h)) = self.renderer.image_size(ctx, &path) {
-                        let fit = (text_width / w as f32).min(230. * s / h as f32);
-                        layer.images.push((
-                            path.clone(),
-                            Rect::new(
-                                x + 14. * s,
-                                top + p.height - 372. * s,
-                                w as f32 * fit,
-                                h as f32 * fit,
-                            ),
-                            preview,
-                        ));
-                        self.hits.push(Hit {
-                            rect: preview,
-                            action: Action::Attachment(
-                                session.clone(),
-                                entry.clone(),
-                                attachment.file_name.clone(),
-                                true,
-                            ),
-                        });
-                    }
-                } else if image
-                    && self.controller.epoch.is_some()
-                    && !self.controller.downloads.contains_key(&key)
-                    && let Err(error) = self.controller.download(&session, entry, 10_000_000)
-                {
-                    self.controller.notice = Some(error.to_string());
-                }
-                let status = if path.is_file() {
-                    "Saved on this device".into()
-                } else if let Some(d) = self.controller.downloads.get(&key) {
-                    if let Some(error) = &d.status.failure {
-                        error.clone()
-                    } else {
-                        format!("{} / {} bytes", d.status.transferred, d.status.total)
-                    }
-                } else {
-                    format!(
-                        "{} · {}",
-                        if image { "Image" } else { "File" },
-                        attachment
-                            .size
-                            .map_or_else(|| "size unknown".into(), |n| format!("{n} bytes"))
-                    )
-                };
-                let label = format!(
-                    "{}\n{}",
-                    attachment
-                        .caption
-                        .as_deref()
-                        .unwrap_or(&attachment.file_name),
-                    status
-                );
-                self.renderer.label(
-                    layer,
-                    &label,
-                    crate::render::intersect(
-                        Rect::new(x + 14. * s, top + p.height - 132. * s, text_width, 78. * s),
-                        viewport,
-                    ),
-                    13. * s,
-                    color(0xb7c2ce),
-                    false,
-                );
-                actions.insert(
-                    0,
-                    (
-                        if path.is_file() {
-                            if image { "View image" } else { "Save file" }
-                        } else {
-                            "Download"
-                        }
-                        .into(),
-                        Action::Attachment(
-                            session.clone(),
-                            entry.clone(),
-                            attachment.file_name.clone(),
-                            image,
-                        ),
-                    ),
-                );
-                if self
-                    .controller
-                    .downloads
-                    .get(&key)
-                    .is_some_and(|d| !d.status.done)
-                {
-                    actions.push(("Cancel".into(), Action::CancelDownload(key)));
-                }
-            }
-            let mut ax = x + 10. * s;
-            for (label, action) in actions {
-                let width = (label.chars().count() as f32 * 7. + 18.) * s;
-                if ax + width > x + rect.width {
-                    break;
-                }
-                let r = crate::render::intersect(
-                    Rect::new(ax, top + p.height - 28. * s, width, 24. * s),
-                    viewport,
-                );
-                if r.height > 10. * s {
-                    button(
-                        &mut self.renderer,
-                        layer,
-                        &mut self.hits,
-                        r,
-                        &label,
-                        action,
-                        s,
-                        false,
-                    );
-                }
-                ax += width + 5. * s;
+                self.attachment_card(ctx, layer, &session, entry, attachment, rect, viewport);
             }
             layer.surface_highlight(rect, corners, viewport, pinned, true,
                 self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
@@ -3307,6 +3318,12 @@ impl App {
             Action::Send,
             true,
             can_send,
+        );
+        self.icon_button(
+            ctx, chrome,
+            Rect::new(b.x + b.width - if running || paused { 96. * s } else { 52. * s },
+                header.y + (header.height - 40. * s) / 2., 40. * s, 40. * s),
+            Icon::Attachments, 22., Action::Attachments, self.show_attachments, true,
         );
         if running || paused {
             let (icon, action) = if running {
@@ -3681,7 +3698,7 @@ impl App {
         enabled: bool,
     ) {
         let hovered = layer.interaction.hover.is_some_and(|p| contains(r, p));
-        let tonal = matches!(icon, Icon::Stop | Icon::Play);
+        let tonal = matches!(icon, Icon::Stop | Icon::Play | Icon::Attachments);
         if primary || tonal || enabled && hovered {
             layer.rounded_rect(
                 r,
