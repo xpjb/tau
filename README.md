@@ -72,7 +72,7 @@ changes its models or limits.
 The tooltip shows last provider-reported turn tokens even when capacity is unknown.
 The ring percentage and threshold-based auto-compaction need a known saved limit.
 Sleeping chats retain the last saved token count, marked as last known. The
-protocol-15 beta has matched clients and daemon. The title model is separately
+current beta requires matching protocol-18 clients and daemon. The title model is separately
 configurable; unset uses the chat model. Cache rings are estimates from existing
 reply timestamps, not native runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.

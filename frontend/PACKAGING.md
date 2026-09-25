@@ -1,5 +1,28 @@
 # Beta packaging sizes
 
+## 0.7.4 protocol-18 native block-sync beta
+
+| Measured component | MiB |
+|---|---:|
+| Windows x64 installer | **9.46** |
+| Windows native app | **31.08** |
+| Android ARM64 APK | **11.25** |
+| Android extracted native library | **26.50** |
+
+The rewrite is merged/pushed to `origin/tau2` at `ca87e4d`, and the matching
+0.7.4/protocol-18 beta daemon is deployed. Windows was sent first, Android second.
+Installer payload bytes match the fresh native executable. Android package
+`app.tau.rust`, versionCode **9**, versionName **0.7.4-beta**, retains the preceding
+beta certificate and is not debuggable. APK CRC/payload, v3 signature, ZIP alignment
+and 16 KiB ELF LOAD alignment passed. Both builds used the managed wrapper,
+registry-offline, one Cargo/Rayon job; Android Java packaging used one processor.
+Microsoft SDK missing-debug-PDB linker warnings were nonblocking. No extra full
+test suite or physical-device test was run for package delivery.
+
+Checksums: `dist/Tau-Beta-0.7.4-SHA256SUMS.txt`. Upgrade both clients; old protocol-15
+clients do not match the new daemon. Stable Tau installation/data remain separate.
+
+
 ## 0.7.3 protocol-15 beta
 
 | Measured component | MiB |

@@ -242,3 +242,57 @@ SHA-256:
 - Daemon: `1c1cb7baf8320ac1fed78f89d5d08265781cc15dada33e3ff8271edcf577754b`
 - Windows installer: `82502237e5d21cafa76c57306f9693487ca73d790d2bbde9b9f5d74bf2910608`
 - Android APK: `01ff14c3f7ff2f3d15bbc81d6bc0bc604194a4c877390771af98ab0a32741aaa`
+
+
+## Beta 0.7.4 / protocol 18 — 2026-09-25
+
+The user explicitly authorized stopping the flooding old beta, merging/pushing
+`feat/tau2-block-sync`, redeploying, and delivering Windows then Android, with
+**no new backup**. The rewrite is actually merged: `ca87e4d` has parents `25afcdc`
+and `43e40a0`, and is pushed to `origin/tau2`; the feature branch is pushed too.
+The existing finished/unread attention behavior is retained.
+
+The merged compiler check passed and **169/169 tests** passed (run
+`422f6a71-95bd-4ce0-88dd-f3f6d581ee83`). These results and the completed release
+daemon were reused after the user requested no redundant tests. The suite itself
+took 58.6 seconds; the earlier combined command also contained 71 seconds of test
+compilation and a 5m31s release build. No suite was repeated during final delivery.
+Client package builds run sequentially, one Cargo job and one Rayon thread,
+registry-offline through the managed Cargo wrapper. No Clippy was run.
+
+Beta was installed atomically and started at 20:14:35 AEST, PID **1078725**, with
+zero restarts during rollout checks. Local HTTP and the Tailnet serve route report
+**0.7.4 / protocol 18**. Anonymous WebSocket upgrade returns 401; an authenticated
+read-only handshake returns the matching Hello, a nonempty lineage and the native
+IPv4/IPv6 port offer. Source migration reached schema **5**, with zero queued rows.
+No paid provider request or production prompt was sent by this rollout.
+
+This host uses **userspace Tailscale**, not a kernel TUN interface. Native UDP is
+bound privately to `127.0.0.1:8792` and `[::1]:8792`; tailscaled forwards incoming
+Tailnet datagrams to loopback. The installer selects actual Tailnet addresses on
+kernel-mode hosts instead, and never configures a public wildcard socket. The
+optional `TAU_TRANSFER_BIND_V6` fixes the advertised IPv6 port independently.
+No Tailscale or stable service restart was performed.
+
+Stable `tau.service` retained PID **474496** and binary SHA-256
+`23b45c6153281bcbc76c8c86108b89ff45fe63d96d461b3c9eb1c41b33ada230`.
+Its data and routes were not changed. The separate slow Tau 1 download was not
+claimed fixed: passive samples found chat traffic alongside file traffic, not a
+proven root cause. Beta and build/test jobs were confirmed stopped during that
+investigation; no traffic shaping or network configuration was installed by tests.
+
+The Windows installer was delivered first. Its compressed payload contains exactly
+`app/Tau Beta.exe`, verified against the fresh native build and embedded installer
+bytes. Microsoft SDK missing-debug-PDB linker warnings do not affect the packaged
+release executable. Physical client UI acceptance is not claimed.
+
+Android ARM64 was delivered second: `app.tau.rust`, versionCode **9**,
+versionName **0.7.4-beta**, not debuggable. Its v3 signing certificate matches
+0.7.3; APK CRC, embedded native-library identity, ZIP alignment and 16 KiB ELF
+LOAD alignment passed. Checksums are in `dist/Tau-Beta-0.7.4-SHA256SUMS.txt`.
+No physical-device or sustained WAN benchmark was added during this rollout.
+
+Daemon SHA-256: `8420508b9de56829f486f836242930fb3396f6cf7ea31e3c5a9666e045a99774`.
+Windows SHA-256: `c9f77c687b11152103614b54096651e9f7c95eea5e98b054555d8c06c94f5374`.
+
+Android SHA-256: `5ea4e7f5a4b199bcf783048be303f186331b1daac98f1ec6285428d2e3ebcb9d`.

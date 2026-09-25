@@ -2,7 +2,7 @@
 
 The user explicitly authorized pushing/merging the native rewrite and redeploying
 beta, with **no new backup**, then sending Windows and Android packages. The
-feature below is being released through `/root/tau2`, local `tau2-integration`
+feature below is merged/pushed and deployed through `/root/tau2`, local `tau2-integration`
 tracking `origin/tau2`; stable remains untouched. The historical no-deployment
 restriction below is superseded for this authorized beta rollout only.
 
@@ -11,7 +11,9 @@ Reuse the completed merged check and **169/169 nextest result**
 unnecessary tests.** The user explicitly requested minimal rollout checks after
 an opaque combined build/test command caused unacceptable delay. Build client
 targets sequentially with one Cargo job/Rayon thread through the managed wrapper.
-Current release/delivery facts belong in `INTEGRATION.md`.
+Release merge: `ca87e4d` (pushed to `origin/tau2`); daemon **0.7.4 / 18** is running.
+Windows and Android 0.7.4 packages were built, verified and sent in that order.
+Actual deployment/checksum facts are recorded in `INTEGRATION.md`.
 
 ---
 
