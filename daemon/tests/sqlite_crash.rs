@@ -3,33 +3,13 @@ use std::path::Path;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use std::time::Duration;
 use axum::{Router, Json, body::Body, response::Response, routing::post};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::{Message, client::IntoClientRequest}};
 
 const TOKEN: &str = "isolated-tau-sqlite-crash-test-token";
-struct Client { socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, seen: Vec<Value> }
-impl Client {
-    async fn until(&mut self, predicate: impl Fn(&Value) -> bool) -> Value {
-        tokio::time::timeout(Duration::from_secs(10),async {
-            loop {
-                match self.socket.next().await.unwrap().unwrap() {
-                    Message::Text(text) => { let value: Value = serde_json::from_str(&text).unwrap(); self.seen.push(value.clone()); if predicate(&value) { return value; } }
-                    Message::Ping(_) => self.socket.flush().await.unwrap(),
-                    other => panic!("Unexpected socket event {other:?}"),
-                }
-            }
-        }).await.expect("Expected daemon event")
-    }
-    async fn request(&mut self, value: Value) -> Value {
-        self.socket.send(Message::Text(value.to_string().into())).await.unwrap();
-        self.until(|event| event["type"] == "response" && event["requestId"] == value["id"]).await
-    }
-    async fn open(&mut self, id: &str) -> Value {
-        assert_eq!(self.request(json!({"id":"open","type":"open_session","sessionId":id,"requests":["first","second","deleted","edit","delete"]})).await["ok"],true);
-        self.seen.iter().rev().find(|event| event["type"] == "transcript_snapshot").unwrap()["snapshot"].clone()
-    }
-}
+mod support;
+use support::Client;
 async fn boot(root: &Path) -> (tokio::process::Child, Client) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap(); drop(listener);
@@ -50,7 +30,8 @@ async fn boot(root: &Path) -> (tokio::process::Child, Client) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }).await.unwrap();
-    let mut client = Client {socket,seen:Vec::new()}; client.until(|event| event["type"] == "hello").await;
+    drop(socket);
+    let client = Client::connect_token(&format!("ws://{address}/v1/ws"),TOKEN).await;
     (child,client)
 }
 
@@ -100,7 +81,11 @@ async fn sigkill_after_ack_recovers_wal_queue_receipts_and_unfinished_turn_witho
     assert_eq!(snapshot["queue"]["requests"].as_array().unwrap().len(),1);
     assert_eq!(snapshot["queue"]["requests"][0]["text"],"Edited second task");
     assert_eq!(snapshot["queue"]["requests"][0]["revision"],1);
-    assert_eq!(snapshot["delivered"].as_array().unwrap().len(),5,"Deleted prompts and queue controls remain durably acknowledged");
+    for batch in [vec!["first","second","deleted","edit"],vec!["delete"]] {
+        client.request(json!({"id":"receipts","type":"get_receipts","sessionId":id,"requests":batch})).await;
+        let reports=client.seen.iter().rev().find(|m|m["type"]=="receipts").unwrap()["reports"].as_array().unwrap();
+        assert!(reports.iter().all(|r|r["accepted"]==true),"Deleted prompts and queue controls remain durably acknowledged");
+    }
     assert_eq!(snapshot["events"].as_array().unwrap().iter().filter(|event| event["origin"]["requestId"] == "first").count(),1);
     for (request,text) in [("first","First task"),("second","Second task"),("deleted","Do not run this")] {
         assert_eq!(client.request(json!({"id":request,"type":"prompt","sessionId":id,"text":text})).await["ok"],true);

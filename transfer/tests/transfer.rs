@@ -1,154 +1,73 @@
-use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
-use std::sync::Arc;
-use std::time::Duration;
+//! Native upload restart, immutable input identity and shared-connection tests.
+use std::sync::{Arc,Mutex};
+use futures_util::{FutureExt,future::BoxFuture};
+use rusqlite::Connection;
+use tau_blocks::*;
+use tau_transfer::blocks::{Backend,Server,Client,Header};
+use tokio::sync::watch;
 
-use tau_transfer::{MAX_FILE_BYTES, TransferDownload, TransferProvider, TransferStatus};
-use tokio::net::UdpSocket;
-use tokio::time::{sleep, timeout};
-
-async fn finished(download: &TransferDownload) -> TransferStatus {
-    timeout(Duration::from_secs(45), async {
-        loop {
-            let status = download.status();
-            if status.done { return status; }
-            sleep(Duration::from_millis(10)).await;
-        }
-    }).await.expect("native transfer did not stop")
+struct Store {db:Arc<Mutex<Connection>>,changes:watch::Sender<u64>}
+impl Store {
+    fn open(path:&std::path::Path)->Arc<Self> {
+        let db=Connection::open(path).unwrap();db.execute_batch("PRAGMA foreign_keys=ON;PRAGMA journal_mode=WAL;PRAGMA synchronous=FULL").unwrap();tau_blocks::initialize(&db).unwrap();
+        Arc::new(Self {db:Arc::new(Mutex::new(db)),changes:watch::channel(0).0})
+    }
+    fn lineage(&self)->String {cursor(&self.db.lock().unwrap()).unwrap().lineage}
+}
+impl Backend for Store {
+    fn feed(&self,r:FeedRequest)->BoxFuture<'static,anyhow::Result<FeedPage>> {let db=self.db.clone();async move {feed(&db.lock().unwrap(),&r)}.boxed()}
+    fn read(&self,r:BlockRequest)->BoxFuture<'static,anyhow::Result<ContentRange>> {let db=self.db.clone();async move {read(&db.lock().unwrap(),&r)}.boxed()}
+    fn changes(&self)->watch::Receiver<u64> {self.changes.subscribe()}
+    fn upload_begin(&self,s:UploadSpec)->BoxFuture<'static,anyhow::Result<UploadStatus>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;let status=uploads::begin(&tx,&s)?;tx.commit()?;Ok(status)}.boxed()}
+    fn upload_write(&self,s:UploadSpec,offset:u64,bytes:Vec<u8>)->BoxFuture<'static,anyhow::Result<()>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;uploads::write(&tx,&s,offset,&bytes)?;tx.commit()?;Ok(())}.boxed()}
+    fn upload_finish(&self,s:UploadSpec)->BoxFuture<'static,anyhow::Result<UploadStatus>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;let bytes=cached_content(&tx,UPLOAD_SCOPE,&s.id)?;let status=uploads::seal(&tx,&s,&blake3::hash(&bytes).to_hex(),None)?;tx.commit()?;Ok(status)}.boxed()}
+}
+async fn connect(store:Arc<Store>)->(Server,Client) {
+    let server=Server::bind("127.0.0.1:0".parse().unwrap(),store.clone()).await.unwrap();
+    let client=Client::bind().await.unwrap();
+    let offer=server.authorize(&client.node_id(),store.lineage()).unwrap();client.configure(&offer,"127.0.0.1").await.unwrap();(server,client)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resumes_verified_blocks_after_restart_and_preserves_completed_files() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source");
-    let target = root.path().join("destination");
-    let bytes = (0..8_000_000).map(|i| ((i * 31) % 251) as u8).collect::<Vec<_>>();
-    std::fs::write(&source, &bytes).unwrap();
-    std::fs::write(&target, b"previous complete file").unwrap();
-    let provider = TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    for corrupt in [false, true] {
-        std::fs::write(&target, b"previous complete file").unwrap();
-        let first = TransferDownload::new();
-        let mut offer = provider.offer(File::open(&source).unwrap(), &first.node_id(), MAX_FILE_BYTES).await.unwrap();
-        let server = format!("127.0.0.1:{}", offer.port).parse().unwrap();
-        let proxy = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        offer.port = proxy.local_addr().unwrap().port();
-        let relay = tokio::spawn(async move {
-            let mut buffer = [0; 2048];
-            let mut client = None;
-            let mut sequence = 0;
-            let mut packets = tokio::task::JoinSet::new();
-            loop {
-                tokio::select! {
-                    packet = proxy.recv_from(&mut buffer) => {
-                        let (len, sender) = packet.unwrap();
-                        let destination = if sender == server { client.unwrap() } else { client = Some(sender); server };
-                        sequence += 1;
-                        if sequence % 101 == 0 { continue; }
-                        let bytes = buffer[..len].to_vec();
-                        let socket = proxy.clone();
-                        packets.spawn(async move {
-                            sleep(Duration::from_millis(20)).await;
-                            let _ = socket.send_to(&bytes, destination).await;
-                        });
-                    }
-                    _ = packets.join_next(), if !packets.is_empty() => {}
-                }
-            }
-        });
-        first.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
-        timeout(Duration::from_secs(30), async {
-            loop {
-                let status = first.status();
-                assert!(!status.done, "transfer finished before interruption: {status:?}");
-                if status.transferred >= 1_000_000 { break; }
-                sleep(Duration::from_millis(10)).await;
-            }
-        }).await.unwrap();
-        first.cancel();
-        let stopped = finished(&first).await;
-        assert!(stopped.failure.as_deref().unwrap().contains("cancelled"), "{stopped:?}");
-        first.join();
-        drop(first);
-        relay.abort();
-        assert_eq!(std::fs::read(&target).unwrap(), b"previous complete file");
-        assert!(root.path().join(".destination.part").is_dir());
-
-        if corrupt {
-            let data = std::fs::read_dir(root.path().join(".destination.part/data")).unwrap()
-                .map(|entry| entry.unwrap().path()).find(|path| path.extension().is_some_and(|ext| ext == "data")).unwrap();
-            let mut damaged = std::fs::OpenOptions::new().write(true).open(data).unwrap();
-            damaged.write_all(&[255]).unwrap();
-            damaged.sync_all().unwrap();
-        }
-        let resumed = TransferDownload::new();
-        let offer = provider.offer(File::open(&source).unwrap(), &resumed.node_id(), MAX_FILE_BYTES).await.unwrap();
-        resumed.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
-        let result = finished(&resumed).await;
-        resumed.join();
-        assert!(result.failure.is_none(), "{result:?}");
-        if corrupt {
-            assert!(result.network_bytes > 8_000_000, "corrupt retained data was not repaired: {result:?}");
-        } else {
-            assert!(result.network_bytes < 7_500_000, "resume retransmitted completed blocks: {result:?}");
-        }
-        assert_eq!(result.transferred, bytes.len() as u64);
-        assert_eq!(std::fs::read(&target).unwrap(), bytes);
-        assert!(!root.path().join(".destination.part").exists());
-        println!("resumed transfer (corrupt={corrupt}): {result:?}");
-    }
-
-    let changed = TransferDownload::new();
-    let offer = provider.offer(File::open(&source).unwrap(), &changed.node_id(), MAX_FILE_BYTES).await.unwrap();
-    let mut file = std::fs::OpenOptions::new().write(true).open(&source).unwrap();
-    file.seek(SeekFrom::Start(0)).unwrap();
-    file.write_all(b"changed after grant").unwrap();
-    file.sync_all().unwrap();
-    changed.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
-    let failed = finished(&changed).await;
-    changed.join();
-    assert!(failed.failure.is_some(), "changed source was accepted");
-    assert_eq!(std::fs::read(&target).unwrap(), bytes);
-    provider.shutdown().await;
+#[tokio::test]
+async fn interrupted_upload_resumes_durable_bytes_after_both_endpoints_restart() {
+    let root=tempfile::tempdir().unwrap();let path=root.path().join("source.db");let store=Store::open(&path);
+    let bytes=(0..900_000).map(|n|((n*31)%251) as u8).collect::<Vec<_>>();
+    let spec=UploadSpec {id:"operation".into(),length:bytes.len() as u64,hash:blake3::hash(&bytes).to_hex().to_string(),purpose:UploadPurpose::Command};
+    let (server,client)=connect(store.clone()).await;
+    let mut upload=client.uploader(spec.clone()).await.unwrap();
+    for chunk in bytes[..128*1024].chunks(BLOCK_CHUNK_BYTES) {upload.write(chunk).await.unwrap();}
+    // A second stream proves progress is committed, not just client queued.
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {let status=uploads::status(&store.db.lock().unwrap(),&spec).unwrap();if status.offset>=64*1024 {break;}tokio::task::yield_now().await;}
+    }).await.unwrap();
+    drop(upload);client.shutdown().await;server.shutdown().await;drop(client);drop(server);drop(store);
+    let store=Store::open(&path);let saved=uploads::status(&store.db.lock().unwrap(),&spec).unwrap().offset;
+    assert!(saved>=64*1024 && saved<spec.length);
+    let (server,client)=connect(store.clone()).await;
+    let mut upload=client.uploader(spec.clone()).await.unwrap();assert_eq!(upload.status.offset,saved);
+    for chunk in bytes[saved as usize..].chunks(BLOCK_CHUNK_BYTES) {upload.write(chunk).await.unwrap();}
+    let status=upload.finish().await.unwrap();assert!(status.sealed);drop(upload);
+    let retry=client.uploader(spec.clone()).await.unwrap();assert!(retry.status.sealed);assert_eq!(retry.status.offset,spec.length);drop(retry);
+    assert_eq!(cached_content(&store.db.lock().unwrap(),UPLOAD_SCOPE,&spec.id).unwrap(),bytes);
+    let mut wrong=spec.clone();wrong.hash=blake3::hash(b"other").to_hex().to_string();assert!(client.uploader(wrong).await.is_err());
+    let mut feed=client.watch(BlockWatch::Feed(FeedRequest {scope:UPLOAD_SCOPE.into(),parent:None,cursor:None,floor:0,before:None})).await.unwrap();
+    assert!(matches!(feed.next().await.unwrap().0.header,Header::Record {..}));
+    client.shutdown().await;server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restricts_grants_and_completes_empty_and_small_files() {
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("source");
-    let target = root.path().join("destination");
-    std::fs::write(&source, b"private source").unwrap();
-    let provider = TransferProvider::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let owner = TransferDownload::new();
-    let offer = provider.offer(File::open(&source).unwrap(), &owner.node_id(), MAX_FILE_BYTES).await.unwrap();
-    let intruder = TransferDownload::new();
-    intruder.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
-    assert!(finished(&intruder).await.failure.is_some());
-    intruder.join();
-    assert!(!target.exists());
-
-    let mut wrong = offer.clone();
-    wrong.hash = blake3::hash(b"another file").to_hex().to_string();
-    owner.start(serde_json::to_string(&wrong).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
-    assert!(finished(&owner).await.failure.is_some());
-    owner.join();
-    assert!(!target.exists());
-    let bounded = TransferDownload::new();
-    assert!(bounded.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), 1).is_err());
-
-    for size in [0, 4900] {
-        let bytes = (0..size).map(|i| (i % 251) as u8).collect::<Vec<_>>();
-        std::fs::write(&source, &bytes).unwrap();
-        let download = TransferDownload::new();
-        let offer = provider.offer(File::open(&source).unwrap(), &download.node_id(), MAX_FILE_BYTES).await.unwrap();
-        download.start(serde_json::to_string(&offer).unwrap(), "127.0.0.1".into(), target.to_string_lossy().into_owned(), MAX_FILE_BYTES).unwrap();
-        let result = finished(&download).await;
-        download.join();
-        assert!(result.failure.is_none(), "{result:?}");
-        assert_eq!(result.transferred, bytes.len() as u64);
-        assert_eq!(result.total, bytes.len() as u64);
-        assert_eq!(std::fs::read(&target).unwrap(), bytes);
-        assert!(!root.path().join(".destination.part").exists());
-    }
-    provider.shutdown().await;
+#[tokio::test]
+async fn upload_checks_authorization_hashes_size_gaps_and_unsealed_references() {
+    let root=tempfile::tempdir().unwrap();let store=Store::open(&root.path().join("source.db"));
+    let (server,client)=connect(store.clone()).await;
+    let spec=UploadSpec {id:"bound".into(),length:4,hash:blake3::hash(b"good").to_hex().to_string(),purpose:UploadPurpose::Command};
+    let mut upload=client.uploader(spec.clone()).await.unwrap();upload.write(b"evil").await.unwrap();assert!(upload.finish().await.is_err());drop(upload);
+    assert!(!uploads::status(&store.db.lock().unwrap(),&spec).unwrap().sealed);
+    let reference=ContentRef {lineage:store.lineage(),scope:UPLOAD_SCOPE.into(),id:spec.id.clone(),length:4,hash:spec.hash.clone()};
+    assert!(uploads::input(&store.db.lock().unwrap(),&reference).is_err());
+    let mut too_big=spec.clone();too_big.length=MAX_COMMAND_BYTES+1;assert!(client.uploader(too_big).await.is_err());
+    let outsider=Client::bind().await.unwrap();
+    let offer=server.authorize(&client.node_id(),store.lineage()).unwrap();outsider.configure(&offer,"127.0.0.1").await.unwrap();
+    assert!(outsider.uploader(spec.clone()).await.is_err());
+    server.revoke(&client.node_id());assert!(client.uploader(spec).await.is_err());
+    outsider.shutdown().await;client.shutdown().await;server.shutdown().await;
 }

@@ -56,23 +56,29 @@ impl SessionContent {
         agent.tokens = saved.tokens; agent.needs_turn = saved.needs_turn;
         self.publish(id,change)
     }
-    pub fn publish(&mut self, id: &str, change: TranscriptChange) -> Result<()> {
+    pub fn publish(&mut self, _id: &str, change: TranscriptChange) -> Result<()> {
         let transcript = self.transcript.as_mut().unwrap();
         transcript.apply(&change)?;
-        let _ = self.events.send(Arc::new(ServerMessage::TranscriptUpdate { session_id:id.into(), generation:transcript.generation.clone(), sequence:transcript.sequence, change:change.wire }));
         Ok(())
     }
     pub async fn save_queue(&mut self, id: &str, queue: QueueState, receipt: Option<Receipt>) -> Result<()> {
         self.commit(id,Vec::new(),Some(queue),receipt).await
     }
-    pub fn live(&mut self, id: &str, stream: &str, message: Value) -> Result<()> {
+    pub async fn live(&mut self, id: &str, stream: &str, message: Value) -> Result<()> {
         let transcript = self.transcript.as_mut().unwrap();
         let mut change = transcript.project(&json!({"streamId":stream,"parentId":transcript.head,"message":message}), true)?;
-        // Emit a delta for the common single growing block; avoid resending the whole response.
+        if let Some(agent) = &self.agent {
+            let values=change.events.iter().map(|event| {
+                let append=transcript.event(&event.id).filter(|old|old.kind==event.kind && event.text.starts_with(&old.text)).map(|old|old.text.len());
+                (event.clone(),append)
+            }).collect();
+            agent.store.project_live(id,values,change.removed.clone()).await?;
+        }
+        // Internal runtime updates also append tool input rather than re-copy it.
         change.events.retain(|event| transcript.event(&event.id).is_none_or(|old| old != event));
         if change.events.len() == 1 && let Some(old) = transcript.event(&change.events[0].id) {
             let event = &change.events[0];
-            if old.kind == event.kind && matches!(event.kind, crate::transcript::EventKind::Text | crate::transcript::EventKind::Thinking)
+            if old.kind == event.kind && matches!(event.kind, crate::transcript::EventKind::Text | crate::transcript::EventKind::Thinking | crate::transcript::EventKind::Tool)
                 && let Some(delta) = event.text.strip_prefix(&old.text) {
                 change.delta = Some(crate::transcript::TextDelta { event_id:event.id.clone(), text:delta.into() }); change.events.clear();
             }
@@ -109,8 +115,11 @@ impl AgentManager {
         if agent.running || queue.paused || queue.requests.is_empty() && !agent.needs_turn { return; }
         agent.running = true; agent.cancel = CancellationToken::new();
         let manager = self.clone(); let id = id.to_owned(); let runtime = runtime.clone();
-        self.set_runtime_state(&id, &runtime, SessionStatus::Running, None, None);
+        let cancel=agent.cancel.clone();
+        self.set_runtime_state(&id, &runtime, SessionStatus::Running, Some("Waiting for agent capacity".into()), None);
         agent.task = Some(tokio::spawn(async move {
+            let _admission=tokio::select! {_=cancel.cancelled()=>None,permit=manager.inner.agent_runs.acquire()=>permit.ok()};
+            if !cancel.is_cancelled() {manager.set_runtime_state(&id,&runtime,SessionStatus::Running,None,None);}
             loop {
             let mut result = manager.run_agent(&id, &runtime).await;
             let mut content = runtime.content.lock().await;
@@ -133,7 +142,10 @@ impl AgentManager {
                 let mut event = event.clone(); event.phase = crate::transcript::EventPhase::Interrupted;
                 interrupted.events.push(event);
             }
-            if !interrupted.events.is_empty() { let _ = content.publish(&id, interrupted); }
+            if !interrupted.events.is_empty() {
+                if let Some(agent) = &content.agent { let _ = agent.store.project_live(&id,interrupted.events.iter().cloned().map(|e|(e,None)).collect(),vec![]).await; }
+                let _ = content.publish(&id, interrupted);
+            }
             manager.set_runtime_state(&id, &runtime, if result.is_err() && !cancelled { SessionStatus::Error } else { SessionStatus::Idle },
                 result.err().map(|e| bounded(&e.to_string(), 480)), Some(usage));
             drop(content);
@@ -148,7 +160,7 @@ impl AgentManager {
         let mut project_prompt = None;
         loop {
             let settings = self.inner.settings.get();
-            let (selected, thinking, cancel, messages, tokens) = {
+            let (selected, thinking, cancel, store, tokens) = {
                 let mut content = runtime.content.lock().await;
                 if content.agent.as_ref().unwrap().cancel.is_cancelled() { return Ok(()); }
                 let mut queue = content.transcript.as_ref().unwrap().queue.clone();
@@ -178,11 +190,16 @@ impl AgentManager {
                 // Consuming queued messages and saving their user entries is one transaction.
                 content.commit(id,entries,Some(queue),None).await?;
                 let agent = content.agent.as_ref().unwrap();
-                let entries = agent.store.context(id,&agent.model).await?;
-                let mut system = settings.system_prompt(&agent.model, &self.inner.config.cwd).await?;
-                if let Some(prompt) = project_prompt.as_ref().filter(|p| !p.is_empty()) { system.push_str("\n\n"); system.push_str(prompt); }
-                let messages = history::messages(&entries,system, &agent.model, &self.inner.config.attachment_root).await?;
-                (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), messages, agent.tokens)
+                (agent.model.clone(),agent.thinking.clone(),agent.cancel.clone(),agent.store.clone(),agent.tokens)
+            };
+            // Preparing a provider request cannot own the queue/content mutex.
+            // New intents and aborts remain independently durable while this runs.
+            let entries=tokio::select! {_=cancel.cancelled()=>return Ok(()),result=store.context(id,&selected)=>result?};
+            let mut system = settings.system_prompt(&selected, &self.inner.config.cwd).await?;
+            if let Some(prompt) = project_prompt.as_ref().filter(|p| !p.is_empty()) {system.push_str("\n\n");system.push_str(prompt);}
+            let messages = tokio::select! {
+                _=cancel.cancelled()=>return Ok(()),
+                result=history::messages(&entries,system,&selected,&self.inner.config.attachment_root)=>result?,
             };
             settings.model(&selected)?;
             let context_window = self.context_window(&settings, &selected);
@@ -208,7 +225,7 @@ impl AgentManager {
                     _ = cancel.cancelled() => break Err(anyhow::anyhow!("Aborted")),
                     Some(message) = receiver.recv() => {
                         partial = message;
-                        runtime.content.lock().await.live(id, &stream, assistant_message(&partial, &selected, "", &mut started))?;
+                        runtime.content.lock().await.live(id, &stream, assistant_message(&partial, &selected, "", &mut started)).await?;
                     }
                     result = &mut generation => break result,
                 }
@@ -322,9 +339,12 @@ impl AgentManager {
     }
     async fn compact_with_project(&self, id: &str, runtime: &Arc<SessionRuntime>, instructions: &str, project: Option<&str>) -> Result<()> {
         let settings = self.inner.settings.get();
-        let (selected, thinking, cancel, first_kept, prefix, before_tokens) = {
-            let content = runtime.content.lock().await; let agent = content.agent.as_ref().unwrap();
-            let entries = agent.store.context(id,&agent.model).await?;
+        let (selected,thinking,cancel,store,before_tokens)={
+            let content=runtime.content.lock().await;let agent=content.agent.as_ref().unwrap();
+            (agent.model.clone(),agent.thinking.clone(),agent.cancel.clone(),agent.store.clone(),agent.tokens)
+        };
+        let entries=tokio::select! {_=cancel.cancelled()=>bail!("Compaction cancelled"),result=store.context(id,&selected)=>result?};
+        let (first_kept,prefix)={
             let users = entries.iter().enumerate().filter(|(_, entry)| entry["message"]["role"] == "user").map(|(index,_)| index).collect::<Vec<_>>();
             if users.len() < 2 { bail!("Not enough completed turns to compact safely"); }
             let mut cut = *users.last().unwrap(); let mut size = 0;
@@ -336,7 +356,7 @@ impl AgentManager {
             let mut prefix = entries[..cut].to_vec();
             // An earlier checkpoint can sit after its retained boundary in append order.
             prefix.extend(entries[cut..].iter().filter(|entry| entry["type"] == "compaction").cloned());
-            (agent.model.clone(), agent.thinking.clone(), agent.cancel.clone(), entries[cut]["id"].clone(), prefix, agent.tokens)
+            (entries[cut]["id"].clone(),prefix)
         };
         settings.model(&selected)?;
         self.set_runtime_state(id, runtime, SessionStatus::Running, Some("Compacting context".into()), None);
@@ -374,7 +394,8 @@ impl AgentManager {
         let Ok(Some(stored)) = self.inner.state.get(id).await else { return; };
         if stored.title != "New chat" { self.broadcast_sessions().await; return; }
         let settings=self.inner.settings.get();
-        let generated=if settings.daemon.generate_titles {
+        let permit=self.inner.title_requests.try_acquire();
+        let generated=if settings.daemon.generate_titles && permit.is_ok() {
             let text=bounded(text,8000);
             let messages=vec![json!({"role":"system","content":"Return only a short literal session title, no quotes or commentary."}),
                 json!({"role":"user","content":settings.daemon.title_prompt.replace("{text}",&text)})];

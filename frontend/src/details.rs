@@ -32,6 +32,8 @@ impl Line {
 pub struct Tools<'a> {
     calls: HashSet<&'a str>,
     results: HashMap<&'a str, Vec<&'a Event>>,
+    lengths: Option<&'a HashMap<String,u64>>,
+    states: Option<&'a HashMap<String,String>>,
 }
 impl<'a> Tools<'a> {
     pub fn new(events: impl Iterator<Item = &'a Event>) -> Self {
@@ -46,8 +48,11 @@ impl<'a> Tools<'a> {
                 }
             }
         }
-        Self { calls, results }
+        Self { calls, results, lengths:None, states:None }
     }
+    pub fn with_lengths(mut self, lengths: &'a HashMap<String,u64>) -> Self { self.lengths = Some(lengths); self }
+    pub fn with_states(mut self, states:&'a HashMap<String,String>) -> Self {self.states=Some(states);self}
+    fn length(&self, event: &Event) -> u64 { self.lengths.and_then(|lengths|lengths.get(&event.id)).copied().unwrap_or(event.text.len() as u64) }
     pub fn paired_result(&self, e: &Event) -> bool {
         e.role == EventRole::Tool
             && e.tool_call_id.as_deref().is_some_and(|id| {
@@ -62,6 +67,7 @@ impl<'a> Tools<'a> {
     pub fn copy(&self, group: &[&Event]) -> String {
         let mut parts = vec![];
         for e in group {
+            if e.kind==EventKind::Text && e.role!=EventRole::Tool {parts.push(e.text.clone());continue;}
             if e.kind == EventKind::Thinking && e.role != EventRole::Tool {
                 if !e.text.is_empty() {
                     parts.push(format!("Thinking\n{}", e.text));
@@ -99,14 +105,7 @@ impl<'a> Tools<'a> {
     }
     pub fn lines(&self, group: &[&Event], local: &LocalChat) -> Vec<Line> {
         // Reuse an explicitly toggled group key when a previous page prepends more details.
-        let key = group
-            .iter()
-            .map(|e| format!("details:{}", e.id))
-            .find(|key| local.expansion.contains_key(key))
-            .unwrap_or_else(|| format!("details:{}", group[0].id));
-        let open = local.expansion.get(&key).copied().unwrap_or_else(|| {
-            local.details_default || group.iter().any(|e| local.expanded.contains(&e.id))
-        });
+        let (key,open) = group_state(group,local);
         let mut lines = vec![Line::label(key, "Details".into(), 0., Some(open), false)];
         if !open {
             return lines;
@@ -142,11 +141,12 @@ impl<'a> Tools<'a> {
                         vec![]
                     }
                 });
-            let error = results.last().is_some_and(|e| e.is_error);
+            let error = e.is_error || results.last().is_some_and(|e| e.is_error);
             let open = local.expansion.get(&key).copied().unwrap_or(false);
             lines.push(Line::label(
                 key.clone(),
-                format!("Tool · {}", e.tool_name.as_deref().unwrap_or("tool")),
+                format!("Tool · {}{}", e.tool_name.as_deref().unwrap_or("tool"),
+                    self.states.and_then(|states|states.get(&e.id)).map(|state|format!(" · {state}")).unwrap_or_default()),
                 8.,
                 Some(open),
                 error,
@@ -165,15 +165,17 @@ impl<'a> Tools<'a> {
                 .map(|e| e.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            for (label, text) in [
-                ("Input", input),
-                (if error { "Error" } else { "Output" }, output.as_str()),
+            let input_length = if e.role == EventRole::Tool {0} else {self.length(e)};
+            let output_length = results.iter().filter(|e|e.kind == EventKind::Text).map(|e|self.length(e)).sum::<u64>();
+            for (label, text, length) in [
+                ("Input", input, input_length),
+                (if error { "Error" } else { "Output" }, output.as_str(), output_length),
             ] {
-                if text.is_empty() {
+                if text.is_empty() && length == 0 {
                     continue;
                 }
                 let section = format!("{key}:{label}");
-                let large = text.chars().count() > 1200
+                let large = length > 1200
                     || text.bytes().filter(|b| *b == b'\n').count() >= 16;
                 let open = !large || local.expansion.get(&section).copied().unwrap_or(false);
                 lines.push(Line::label(
@@ -187,7 +189,7 @@ impl<'a> Tools<'a> {
                     lines.push(Line {
                         key: format!("{section}:text"),
                         label: String::new(),
-                        source: crate::app::code(text),
+                        source: if text.is_empty() { "Loading…".into() } else {crate::app::code(text)},
                         indent: 16.,
                         toggle: None,
                         code: true,
@@ -199,4 +201,31 @@ impl<'a> Tools<'a> {
         }
         lines
     }
+}
+
+fn group_state(group: &[&Event], local: &LocalChat) -> (String,bool) {
+    let key = group.iter().map(|e|format!("details:{}",e.id)).find(|key|local.expansion.contains_key(key))
+        .unwrap_or_else(||format!("details:{}",group[0].id));
+    let open = local.expansion.get(&key).copied().unwrap_or_else(||local.details_default || group.iter().any(|e|local.expanded.contains(&e.id)));
+    (key,open)
+}
+
+/// The same disclosure grouping used by rendering, operating on headers alone.
+pub(crate) fn open_items<'a>(events: impl Iterator<Item=&'a Event>, local: &LocalChat) -> HashSet<String> {
+    let events = events.collect::<Vec<_>>();
+    let tools = Tools::new(events.iter().copied());
+    let visible = events.into_iter().filter(|e| {
+        let empty = e.attachment.is_none() && e.error_message.is_none() && !e.is_error &&
+            (e.kind == EventKind::Hidden || matches!(e.kind,EventKind::Thinking|EventKind::Text) && e.text.is_empty());
+        !empty && !(e.attachment.is_none() && tools.paired_result(e))
+    }).collect::<Vec<_>>();
+    let detail = |e:&Event|e.attachment.is_none() && (matches!(e.kind,EventKind::Thinking|EventKind::Tool) || e.role == EventRole::Tool);
+    let mut open = HashSet::new(); let mut i=0;
+    while i < visible.len() {
+        if !detail(visible[i]) {i+=1;continue;}
+        let start=i; while i<visible.len() && detail(visible[i]) {i+=1;}
+        let group=&visible[start..i];
+        if group_state(group,local).1 {open.extend(group.iter().map(|e|e.id.clone()));}
+    }
+    open
 }

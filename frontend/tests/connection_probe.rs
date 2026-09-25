@@ -26,7 +26,7 @@ async fn fixture(reply: bool) -> (Settings, tokio::task::JoinHandle<()>) {
             ws.on_upgrade(move |mut socket| async move {
                 let hello = ServerMessage::Hello {
                     protocol_version: PROTOCOL_VERSION,
-                    daemon_version: "fixture".into(),
+                    daemon_version: "fixture".into(),lineage:Some("fixture".into()),
                 };
                 socket
                     .send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
@@ -70,6 +70,7 @@ async fn event(network: &mut Network) -> Event {
 async fn probe_uses_ping_pong_not_session_list_and_reports_measured_rtt() {
     let (settings, server) = fixture(true).await;
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
     assert!(matches!(event(&mut network).await, Event::Ready(1)));
     let started = Instant::now();
     let sent = match event(&mut network).await {
@@ -96,6 +97,7 @@ async fn probe_uses_ping_pong_not_session_list_and_reports_measured_rtt() {
 async fn unanswered_ping_reconnects_on_deadline_not_on_next_probe() {
     let (settings, server) = fixture(false).await;
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
     assert!(matches!(event(&mut network).await, Event::Ready(1)));
     let sent = match event(&mut network).await {
         Event::HeartbeatSent { epoch: 1, at } => at,
@@ -114,16 +116,12 @@ async fn unanswered_ping_reconnects_on_deadline_not_on_next_probe() {
     server.abort();
 }
 
-// Characterizes a known protocol-15 failure, not a desired behavior. An ordinary
-// large snapshot frame precedes the pong on a throttled TCP stream. The server
-// is responsive and receives the ping, but the client still times out. Keep this
-// isolated from production networking; replace it with an isolation assertion
-// when transcript bodies leave the control connection.
+// Even a legacy/malicious peer cannot force a large allocation or occupy the
+// control reader until heartbeat timeout: the WS length header is rejected.
 #[tokio::test]
-async fn audit_slow_transcript_frame_blocks_a_responsive_peers_pong() {
+async fn oversized_legacy_frame_is_rejected_before_reading_its_body() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tau_protocol::{EventKind, EventPhase, EventRole, Origin, QueueState, TranscriptSnapshot};
     let pings = Arc::new(AtomicUsize::new(0));
     let counted = pings.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -131,19 +129,10 @@ async fn audit_slow_transcript_frame_blocks_a_responsive_peers_pong() {
     let app = Router::new().route("/v1/ws", get(move |ws: WebSocketUpgrade| {
         let counted = counted.clone();
         async move { ws.on_upgrade(move |mut socket| async move {
-            let hello = ServerMessage::Hello { protocol_version:PROTOCOL_VERSION, daemon_version:"audit".into() };
+            let hello = ServerMessage::Hello { protocol_version:PROTOCOL_VERSION, daemon_version:"audit".into(),lineage:Some("fixture".into()) };
             socket.send(Message::Text(serde_json::to_string(&hello).unwrap().into())).await.unwrap();
-            let snapshot = ServerMessage::TranscriptSnapshot { session_id:"chat".into(), snapshot:TranscriptSnapshot {
-                generation:"audit".into(), sequence:0, before:None, delivered:vec![], queue:QueueState::native(),
-                events:vec![tau_protocol::Event {
-                    id:"tool".into(), order:0, entry_id:"entry".into(), phase:EventPhase::Live,
-                    origin:Origin::default(), role:EventRole::Assistant, kind:EventKind::Tool,
-                    text:"x".repeat(512 * 1024), timestamp:None, timestamp_ms:None,
-                    tool_call_id:Some("call".into()), tool_name:Some("write".into()),
-                    stop_reason:None, error_message:None, is_error:false, attachment:None,
-                }],
-            }};
-            if socket.send(Message::Text(serde_json::to_string(&snapshot).unwrap().into())).await.is_err() { return; }
+            let legacy=serde_json::json!({"type":"transcript_snapshot","body":"x".repeat(512*1024)});
+            if socket.send(Message::Text(legacy.to_string().into())).await.is_err() {return;}
             while let Some(Ok(frame)) = socket.next().await {
                 if let Message::Ping(payload) = frame {
                     if socket.send(Message::Pong(payload)).await.is_err() { break; }
@@ -184,14 +173,43 @@ async fn audit_slow_transcript_frame_blocks_a_responsive_peers_pong() {
     });
     let settings = Settings { server_url:format!("http://{address}"), token:"audit-fixture".into() };
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
     assert!(matches!(event(&mut network).await, Event::Ready(1)));
-    assert!(matches!(event(&mut network).await, Event::HeartbeatSent { epoch:1, .. }));
+    let started=Instant::now();
     match event(&mut network).await {
-        Event::Disconnected(reason) => assert!(reason.contains("Ping timed out"), "{reason}"),
-        _ => panic!("Expected the known head-of-line timeout before the large frame completes"),
+        Event::Disconnected(reason)=>assert!(!reason.contains("Ping timed out"),"{reason}"),
+        _=>panic!("Expected immediate oversized-frame rejection"),
     }
-    assert!(pings.load(Ordering::SeqCst) > 0, "The peer received and answered a real ping");
+    assert!(started.elapsed()<HEARTBEAT_TIMEOUT);
+    assert_eq!(pings.load(Ordering::SeqCst),0);
     drop(network);
     proxy.abort();
     server.abort();
+}
+
+#[tokio::test]
+async fn paused_ui_coalesces_state_without_blocking_heartbeats_or_losing_receipts() {
+    use std::sync::atomic::{AtomicUsize,Ordering};
+    let pings=Arc::new(AtomicUsize::new(0));let seen=pings.clone();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+    let app=Router::new().route("/v1/ws",get(move |ws:WebSocketUpgrade| {let seen=seen.clone();async move {ws.on_upgrade(move |mut socket|async move {
+        socket.send(Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into())}).unwrap().into())).await.unwrap();
+        for n in 0..1500 {
+            let state=ServerMessage::SessionState {revision:0,restore_review:None,session_id:"chat".into(),status:tau_protocol::SessionStatus::Running,context_usage:None,detail:Some(n.to_string())};
+            socket.send(Message::Text(serde_json::to_string(&state).unwrap().into())).await.unwrap();
+            if n<200 {socket.send(Message::Text(serde_json::to_string(&ServerMessage::success(format!("receipt-{n}"),None,None)).unwrap().into())).await.unwrap();}
+        }
+        while let Some(Ok(frame))=socket.next().await {if let Message::Ping(payload)=frame {seen.fetch_add(1,Ordering::SeqCst);if socket.send(Message::Pong(payload)).await.is_err() {break;}}}
+    })}}));
+    let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
+    let mut network=Network::start(Settings {server_url:format!("http://{address}"),token:"fixture".into()},Arc::new(||{}));
+    // Deliberately no UI reads for longer than the old heartbeat deadline.
+    tokio::time::sleep(HEARTBEAT_INTERVAL+HEARTBEAT_TIMEOUT+Duration::from_millis(200)).await;
+    assert!(pings.load(Ordering::SeqCst)>=3,"UI backpressure blocked control probes");
+    let mut receipts=std::collections::HashSet::new();let mut detail=None;
+    while let Ok(event)=network.events.try_recv() {match event {
+        Event::Message(_,message)=>match *message {ServerMessage::Response {request_id,..}=>{receipts.insert(request_id);},ServerMessage::SessionState {detail:d,..}=>detail=d,_=>{}},
+        Event::Disconnected(reason)=>panic!("{reason}"),_=>{},
+    }}
+    assert_eq!(receipts.len(),200);assert_eq!(detail.as_deref(),Some("1499"));drop(network);server.abort();
 }

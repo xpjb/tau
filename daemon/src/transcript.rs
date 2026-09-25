@@ -12,13 +12,14 @@ pub const PAGE_BYTES: usize = 256 * 1024;
 pub const IMAGE_LIMIT: u64 = 10_000_000;
 pub const FILE_LIMIT: u64 = 50_000_000;
 
-pub use tau_protocol::{ChatAttachment, AttachmentKind, Event, EventPhase, EventRole, Origin, EventKind, QueuedRequest, QueueControl, QueueState, TranscriptSnapshot, HistoryPage, TextDelta};
+pub use tau_protocol::{ChatAttachment, AttachmentKind, Event, EventPhase, EventRole, Origin, EventKind, QueuedRequest, QueueControl, QueueState,  HistoryPage, TextDelta};
 
 pub struct AttachmentRequest {
     pub kind: AttachmentKind,
     pub path: PathBuf,
     pub caption: Option<String>,
     pub size: Option<u64>,
+    pub sha256: Option<String>,
 }
 
 pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
@@ -53,6 +54,7 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
         path: PathBuf::from(attachment.get("path")?.as_str()?),
         caption,
         size,
+        sha256:attachment.get("sha256").and_then(Value::as_str).map(str::to_owned),
     })
 }
 
@@ -205,16 +207,6 @@ impl Transcript {
         }
         events.reverse();
         HistoryPage { before: if more || self.has_older { events.first().map(|event| event.order) } else { None }, events }
-    }
-
-    pub fn snapshot(&self) -> TranscriptSnapshot {
-        let mut page = self.page(None);
-        for event in self.events.values().filter(|event| event.phase == EventPhase::Live) {
-            if page.before.is_some_and(|before| event.order < before) { page.events.push(event.clone()); }
-        }
-        page.events.sort_by_key(|event| event.order);
-        TranscriptSnapshot { generation:self.generation.clone(),sequence:self.sequence,events:page.events,
-            queue:self.queue.clone(),before:page.before,delivered:Vec::new() }
     }
 
     pub fn project(&self, entry: &Value, live: bool) -> Result<TranscriptChange> {

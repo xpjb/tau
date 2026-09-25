@@ -1,5 +1,10 @@
 # Tau2 protocol audit and proposed contract
 
+> Historical audit/design record. Current implementation, validation and remaining
+> release gates are in [tau2-block-sync.md](tau2-block-sync.md) and
+> [../HANDOFF.md](../HANDOFF.md). Protocol 17 now uses native uploads and strict
+> 4 KiB control descriptors; legacy transcript/file wire paths have been retired.
+
 2026-09-25. Audited source: **`35b3b24`**, protocol **15**.
 This includes the explicitly requested merge of `fix/tau2-immediate-intent`
 (`5c5ef4d`) into `tau2` (`6d30668`), not the older deployed beta binary.

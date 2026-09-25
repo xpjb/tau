@@ -1,15 +1,17 @@
 [package]
 name = "taud"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"
 
 [dependencies]
+tau-blocks = { path = "../blocks" }
 tau-protocol = { path = "../protocol" }
 anyhow = "1"
+blake3 = "1.8"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 libc = "0.2"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tempfile = "3"
 tau-transfer = { path = "../transfer" }

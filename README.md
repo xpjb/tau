@@ -4,8 +4,9 @@ Rust client, daemon, coding agent, shared protocol, Markdown and verified file t
 No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Python title
 helper. Android retains a small Java bridge for Android OS APIs.
 
-**0.7.3 beta · protocol 15.**
-Beta daemon deployed; Windows x64 installer and Android ARM64 APK delivered.
+**0.7.4 beta · protocol 18 (native block sync).**
+Matched beta daemon, Windows x64 installer and Android ARM64 APK are required.
+See `INTEGRATION.md` for the actual deployment/delivery status.
 This is a separate installation, not a stable-Tau cutover.
 The maintained frontend branch is `tau2-rust-frontend`; the integrated release
 branch is `tau2`. Frontend work lands on the frontend branch before integration.
@@ -107,7 +108,9 @@ drafts, and read markers remain account-scoped client state. Existing `projectId
 wire fields and SQLite names remain unchanged so beta history stays compatible.
 Concurrent topic edits
 use revision checks and preserve the losing editor’s text. Both clients and daemon
-must use protocol 15 in beta 0.7.3. Stable Tau is unchanged.
+must use protocol 18 in beta 0.7.4. Stable Tau is unchanged.
+
+The native rewrite is merged into the beta release line. See [native block sync](docs/tau2-block-sync.md) for the protocol, bounds, recovery and restore contract.
 
 ## Build and validate
 
@@ -134,7 +137,8 @@ remains in `%LOCALAPPDATA%\Tau2`. No JVM or extra runtime installer is required.
 `scripts/install-daemon.sh` is **beta-only**. It installs:
 
 - `tau2-beta.service`, executable `/usr/local/lib/tau2-beta/taud`;
-- HTTP/WebSocket `127.0.0.1:8791`, transfer UDP `127.0.0.1:8792`;
+- HTTP/WebSocket `127.0.0.1:8791`, native UDP port `8792` in both IP families;
+  userspace Tailscale forwards to loopback; kernel-mode installs bind Tailnet addresses only;
 - Tailnet URL **http://vibe:8789**;
 - `/var/lib/tau2-beta/{tau.sqlite3,settings.json,auth.json}`;
 - `/root/.local/share/tau2-beta/{outbox,uploads}`;

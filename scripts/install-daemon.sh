@@ -24,6 +24,23 @@ with os.fdopen(fd,'w') as f: f.write('TAU_TOKEN='+shlex.quote(token)+'\n')
 PY
 fi
 chmod 0600 /etc/tau2-beta.env
+# Native data is direct UDP. Kernel-mode Tailnet addresses can be bound
+# directly; userspace tailscaled forwards inbound UDP to loopback instead.
+# Never expose public wildcard sockets in either mode.
+v4=$(tailscale ip -4)
+v6=$(tailscale ip -6)
+read -r bind4 bind6 < <(V4="$v4" V6="$v6" python3 - <<'PYADDR'
+import ipaddress, json, os, subprocess
+v4=str(ipaddress.IPv4Address(os.environ['V4']))
+v6=str(ipaddress.IPv6Address(os.environ['V6']))
+local={a['local'] for iface in json.loads(subprocess.check_output(['ip','-j','address'])) for a in iface.get('addr_info',[])}
+print(v4 if v4 in local else '127.0.0.1', v6 if v6 in local else '::1')
+PYADDR
+)
+install -d -m 0755 /etc/systemd/system/tau2-beta.service.d
+printf '[Service]\nEnvironment=TAU_TRANSFER_BIND=%s:8792\nEnvironment=TAU_TRANSFER_BIND_V6=[%s]:8792\n' "$bind4" "$bind6" > /etc/systemd/system/tau2-beta.service.d/native-bind.conf.new
+chmod 0644 /etc/systemd/system/tau2-beta.service.d/native-bind.conf.new
+mv /etc/systemd/system/tau2-beta.service.d/native-bind.conf.new /etc/systemd/system/tau2-beta.service.d/native-bind.conf
 # Atomic executable replacement leaves an already-running beta mapped to its old inode.
 install -m 0755 "$binary" /usr/local/lib/tau2-beta/taud.new
 mv -f /usr/local/lib/tau2-beta/taud.new /usr/local/lib/tau2-beta/taud

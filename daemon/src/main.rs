@@ -14,6 +14,12 @@ async fn main() -> ExitCode {
         .init();
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.len()==2 && args[0]=="--rotate-lineage" {
+        return match taud::maintenance::rotate_lineage(std::path::Path::new(&args[1])).await {
+            Ok(lineage)=>{tracing::info!(%lineage,"Restored database fenced; interrupted effects require reconciliation");ExitCode::SUCCESS}
+            Err(error)=>{error!(%error,"Lineage rotation failed");ExitCode::FAILURE}
+        };
+    }
     if args == ["--login-codex"] {
         return match taud::login_codex().await { Ok(()) => ExitCode::SUCCESS, Err(error) => { error!(%error, "Codex login failed"); ExitCode::FAILURE } };
     }
@@ -22,7 +28,7 @@ async fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS, Err(error) => { error!(%error,"History export failed"); ExitCode::FAILURE }
         };
     }
-    if !args.is_empty() && !(args.len() == 2 && args[0] == "--import-state") { error!("Usage: taud [--login-codex | --import-state PATH | --export-session ID PATH]"); return ExitCode::FAILURE; }
+    if !args.is_empty() && !(args.len() == 2 && args[0] == "--import-state") { error!("Usage: taud [--login-codex | --import-state PATH | --export-session ID PATH | --rotate-lineage DATABASE]"); return ExitCode::FAILURE; }
 
     let config = match taud::Config::from_env() {
         Ok(config) => config,

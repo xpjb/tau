@@ -41,18 +41,9 @@ fn retained_history_delta_gap_and_stale_page_are_transactional() {
         },
     )
     .unwrap();
-    // Optional fields really are absent in a protocol-10 delta (not null/[]).
-    let patch:ServerMessage=serde_json::from_value(json!({"type":"transcript_update","sessionId":"chat","generation":"g","sequence":5,"change":{"delta":{"eventId":"live","text":"world** 🦀"}}})).unwrap();
-    let ServerMessage::TranscriptUpdate {
-        generation,
-        sequence,
-        change,
-        ..
-    } = patch
-    else {
-        unreachable!()
-    };
-    feed.update(&generation, sequence, change).unwrap();
+    // The renderer's internal delta adapter is not a network message.
+    let change:TranscriptChange=serde_json::from_value(json!({"delta":{"eventId":"live","text":"world** 🦀"}})).unwrap();
+    feed.update("g",5,change).unwrap();
     assert_eq!(feed.event("live").unwrap().text, "Hello **world** 🦀");
     let change: TranscriptChange =
         serde_json::from_value(json!({"events":[event("collision",1,"saved")],"removed":["live"]}))
@@ -204,15 +195,20 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     }
     async fn ws(State(peer): State<Peer>, ws: WebSocketUpgrade) -> impl IntoResponse {
         ws.on_upgrade(move|mut socket|async move {
-        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&tau_protocol::ServerMessage::Hello { protocol_version:tau_protocol::PROTOCOL_VERSION,daemon_version:"fixture".into() }).unwrap().into())).await.unwrap();
+        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&tau_protocol::ServerMessage::Hello { protocol_version:tau_protocol::PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into()) }).unwrap().into())).await.unwrap();
         while let Some(Ok(axum::extract::ws::Message::Text(text)))=socket.recv().await {
             let request:Value=serde_json::from_str(&text).unwrap();
             match request["type"].as_str().unwrap() {
                 "prompt"=>{peer.prompts.fetch_add(1,Ordering::SeqCst);*peer.id.lock().unwrap()=Some(request["id"].as_str().unwrap().into());let _=socket.close().await;return;}
-                "open_session"=>{
-                    let mut cut=serde_json::to_value(snapshot(vec![],None,0)).unwrap();
-                    if peer.deliver.load(Ordering::SeqCst){cut["delivered"]=json!([peer.id.lock().unwrap().clone().unwrap()]);}
-                    socket.send(axum::extract::ws::Message::Text(json!({"type":"transcript_snapshot","sessionId":"chat","snapshot":cut}).to_string().into())).await.unwrap();
+                "get_session"=>{
+                    socket.send(axum::extract::ws::Message::Text(json!({"type":"response","requestId":request["id"],"ok":true,"uncertain":false}).to_string().into())).await.unwrap();
+                }
+                "get_receipts"=>{
+                    if peer.deliver.load(Ordering::SeqCst) {
+                        socket.send(axum::extract::ws::Message::Text(json!({"type":"receipts","sessionId":"chat","reports":[{
+                            "id":peer.id.lock().unwrap().clone().unwrap(),"accepted":true,"complete":true,"error":null,"notice":null
+                        }]}).to_string().into())).await.unwrap();
+                    }
                 }
                 _=>{},
             }
@@ -258,7 +254,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     }
     wait(&mut c, |c| c.epoch.is_some()).await;
     c.select("chat").unwrap();
-    wait(&mut c, |c| c.selected().unwrap().feed.synchronized).await;
+    wait(&mut c, |c| c.epoch.is_some() && !c.selected().unwrap().feed.opening).await;
     c.draft("send exactly once, even if the ack is lost".into())
         .unwrap();
     c.send_prompt().unwrap();
@@ -270,7 +266,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     drop(c);
     let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     assert_eq!(c.selected().unwrap().local.pending[0].request.id, original);
-    wait(&mut c, |c| c.selected().unwrap().feed.synchronized).await;
+    wait(&mut c, |c| c.epoch.is_some() && !c.selected().unwrap().feed.opening).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     c.poll();
     assert_eq!(peer.prompts.load(Ordering::SeqCst), 1);
@@ -345,7 +341,7 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         ws.send(tokio_tungstenite::tungstenite::Message::Text(
             serde_json::to_string(&tau_protocol::ServerMessage::Hello {
                 protocol_version: tau_protocol::PROTOCOL_VERSION,
-                daemon_version: "fixture".into(),
+                daemon_version: "fixture".into(),lineage:Some("fixture".into()),
             })
             .unwrap()
             .into(),
@@ -364,6 +360,7 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         },
         Arc::new(|| {}),
     );
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(3),n.events.recv()).await.unwrap(),Some(NetworkEvent::Source(1,_))));
     let epoch = match tokio::time::timeout(Duration::from_secs(3), n.events.recv())
         .await
         .unwrap()
@@ -400,4 +397,93 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[test]
+fn accepted_queue_edit_retains_optimistic_text_until_complete_replication_after_restart() {
+    let root=tempfile::tempdir().unwrap();
+    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
+    c.ensure_chat("chat").unwrap();c.account.selected=Some("chat".into());
+    c.store.put(&c.identity,"account",&c.account).unwrap();
+    let pending=tau_frontend::store::Pending {request:ClientRequest {id:"edit".into(),command:ClientCommand::QueueControl {session_id:"chat".into(),generation:"g".into(),operation:QueueOperation::Edit {request_id:"queued".into(),revision:0,text:"new complete text".into()}}},started_at_ms:None,text:"new complete text".into(),files:vec![],status:Delivery::Sending,detail:None};
+    let chat=c.chats.get_mut("chat").unwrap();chat.local.pending.push(pending);chat.feed.queue=QueueState::native();
+    chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:0,kind:"steer".into(),text:"old text".into(),images:0,timestamp_ms:None});
+    c.message(ServerMessage::success("edit".into(),Some("chat".into()),None)).unwrap();
+    assert_eq!(c.chats["chat"].local.pending[0].status,Delivery::Accepted);
+    drop(c);
+    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
+    let chat=c.chats.get_mut("chat").unwrap();assert_eq!(chat.local.pending[0].status,Delivery::Accepted);
+    chat.feed.queue=QueueState::native();chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:1,kind:"steer".into(),text:"new".into(),images:0,timestamp_ms:None});
+    chat.feed.incomplete.insert("queued:queued".into());
+    chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);assert_eq!(chat.local.pending.len(),1);
+    chat.feed.queue.requests[0].text="new complete text".into();chat.feed.incomplete.clear();
+    chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);assert!(chat.local.pending.is_empty());
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn generic_control_outbox_recovers_original_outcome_without_reexecuting_after_restart() {
+    #[derive(Clone)]
+    struct Peer {request:Arc<Mutex<Option<ClientRequest>>>,mutations:Arc<AtomicUsize>}
+    let peer=Peer {request:Arc::new(Mutex::new(None)),mutations:Arc::new(AtomicUsize::new(0))};
+    let counted=peer.clone();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+    let app=Router::new().route("/v1/ws",get(move |ws:WebSocketUpgrade| {let peer=peer.clone();async move {ws.on_upgrade(move |mut socket|async move {
+        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into())}).unwrap().into())).await.unwrap();
+        while let Some(Ok(frame))=socket.recv().await {
+            let axum::extract::ws::Message::Text(text)=frame else {continue;};
+            let request:ClientRequest=serde_json::from_str(&text).unwrap();
+            match &request.command {
+                ClientCommand::RenameSession {..}=>{peer.mutations.fetch_add(1,Ordering::SeqCst);*peer.request.lock().unwrap()=Some(request);let _=socket.close().await;return;}
+                ClientCommand::GetOperation {operation_id}=>{
+                    let saved=peer.request.lock().unwrap().clone().unwrap();assert_eq!(&saved.id,operation_id);
+                    let response=ServerMessage::Operation {operation_id:operation_id.clone(),registered:true,response:Some(Box::new(ServerMessage::success(saved.id,Some("chat".into()),None)))};
+                    socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&response).unwrap().into())).await.unwrap();
+                }
+                _=>{},
+            }
+        }
+    })}}));
+    let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
+    let root=tempfile::tempdir().unwrap();let store=Store::open(root.path().into()).unwrap();
+    store.put("","settings",&Settings {server_url:format!("http://{address}"),token:"fixture".into()}).unwrap();
+    let mut c=Controller::new(store,Arc::new(||{})).unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {loop {c.poll();if c.epoch.is_some() {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+    let id=c.request(ClientCommand::RenameSession {session_id:"chat".into(),title:"durable title".into()}).unwrap();
+    assert_eq!(c.account.pending_controls[&id].request.id,id);
+    tokio::time::timeout(Duration::from_secs(5),async {while counted.mutations.load(Ordering::SeqCst)==0 {tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+    drop(c);
+    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();assert!(c.account.pending_controls.contains_key(&id));
+    tokio::time::timeout(Duration::from_secs(5),async {loop {c.poll();if c.account.pending_controls.is_empty() {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+    assert_eq!(counted.mutations.load(Ordering::SeqCst),1,"Receipt reconciliation must not execute another mutation");
+    drop(c);server.abort();
+}
+
+#[test]
+fn alias_transaction_fault_preserves_both_drafts_with_their_own_files() {
+    use tau_frontend::store::LocalChat;
+    let root=tempfile::tempdir().unwrap();let store=Store::open(root.path().join("local")).unwrap();
+    let raw=root.path().join("source.txt");std::fs::write(&raw,b"source contents").unwrap();
+    let mut source=LocalChat {draft:"source draft".into(),..Default::default()};source.files.push(store.import("pair","provisional",&raw,None).unwrap());
+    let raw2=root.path().join("target.txt");std::fs::write(&raw2,b"target contents").unwrap();
+    let mut target=LocalChat {draft:"target draft".into(),..Default::default()};target.files.push(store.import("pair","confirmed",&raw2,None).unwrap());
+    store.save_chat("pair","provisional",&source).unwrap();store.save_chat("pair","confirmed",&target).unwrap();
+    let db=rusqlite::Connection::open(root.path().join("local/client.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_alias BEFORE INSERT ON chat_aliases BEGIN SELECT RAISE(ABORT,'alias fault');END").unwrap();
+    assert!(store.merge_chat("pair","provisional","confirmed",&source,Some(&target)).is_err());
+    assert_eq!(store.load_chat("pair","provisional").unwrap().draft,"source draft");assert_eq!(store.load_chat("pair","confirmed").unwrap().draft,"target draft");assert!(source.files[0].path.exists());
+    db.execute_batch("DROP TRIGGER fail_alias").unwrap();
+    let merged=store.merge_chat("pair","provisional","confirmed",&source,Some(&target)).unwrap();assert_eq!(merged.files[0].name,"target.txt");
+    assert_eq!(merged.pending[0].text,"source draft");assert_eq!(merged.pending[0].files[0].name,"source.txt");assert_eq!(merged.pending[0].status,Delivery::Rejected);
+    assert!(!source.files[0].path.exists());assert_eq!(std::fs::read(&merged.pending[0].files[0].path).unwrap(),b"source contents");
+    drop(store);let store=Store::open(root.path().join("local")).unwrap();assert_eq!(store.resolve_chat("pair","provisional").unwrap(),"confirmed");
+    assert_eq!(store.load_chat("pair","provisional").unwrap().pending[0].files[0].path,merged.pending[0].files[0].path);
+}
+
+#[test]
+fn failed_attachment_commit_is_clean_and_explicit_remove_frees_only_unreferenced_files() {
+    let root=tempfile::tempdir().unwrap();let mut c=Controller::new(Store::open(root.path().join("local")).unwrap(),Arc::new(||{})).unwrap();c.select("chat").unwrap();
+    let source=root.path().join("photo.png");std::fs::write(&source,b"owned bytes").unwrap();
+    let db=rusqlite::Connection::open(root.path().join("local/client.sqlite3")).unwrap();db.execute_batch("CREATE TRIGGER fail_file BEFORE INSERT ON local WHEN NEW.key='chat:chat' BEGIN SELECT RAISE(ABORT,'full');END").unwrap();
+    assert!(c.attach(&source,None).is_err());assert!(c.selected().unwrap().local.files.is_empty());assert!(c.store.load_chat(&c.identity,"chat").unwrap().files.is_empty());
+    db.execute_batch("DROP TRIGGER fail_file").unwrap();c.attach(&source,None).unwrap();let file=c.selected().unwrap().local.files[0].clone();c.remove_file(&file.id).unwrap();assert!(!file.path.exists());assert!(source.exists());
 }

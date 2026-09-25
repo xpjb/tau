@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 pub struct Config {
     pub bind: SocketAddr,
     pub transfer_bind: SocketAddrV4,
+    pub transfer_bind_v6: Option<SocketAddrV6>,
     pub token: Arc<str>,
     pub settings_path: PathBuf,
     pub import_pi_dir: Option<PathBuf>,
@@ -41,6 +42,7 @@ impl Config {
             .unwrap_or_else(|_| "127.0.0.1:8788".to_owned())
             .parse()
             .context("TAU_TRANSFER_BIND must be an IPv4 address and UDP port")?;
+        let transfer_bind_v6=std::env::var("TAU_TRANSFER_BIND_V6").ok().map(|value|value.parse()).transpose().context("TAU_TRANSFER_BIND_V6 must be an IPv6 address and UDP port")?;
         let settings_path = std::env::var_os("TAU_SETTINGS_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/var/lib/tau/settings.json".into());
@@ -77,6 +79,7 @@ impl Config {
         Ok(Self {
             bind,
             transfer_bind,
+            transfer_bind_v6,
             token: Arc::from(token),
             settings_path,
             import_pi_dir,

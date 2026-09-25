@@ -152,7 +152,7 @@ fn finished_reply_stays_unread_in_background_until_its_chat_is_visible_and_focus
     let selected = &app.controller.account.sessions[0];
     assert!(app.controller.unread(selected), "background streaming must not mark the chat read");
     app.controller.message(ServerMessage::SessionState {
-        session_id: selected.id.clone(), status: SessionStatus::Idle, detail: None, context_usage: None,
+        session_id: selected.id.clone(), revision:1, restore_review:None, status: SessionStatus::Idle, detail: None, context_usage: None,
     }).unwrap();
     app.tick(0.);
     assert!(app.controller.unread(&app.controller.account.sessions[0]), "completion must stay unread while unfocused");
@@ -209,4 +209,22 @@ fn hidden_card_wakes_only_when_the_dot_crosses_a_color_boundary() {
         app.counter_bucket, None,
         "hidden card must not start a 50ms loop"
     );
+}
+
+#[test]
+fn saved_actions_and_restore_warning_fit_mobile_and_preserve_intents() {
+    use crate::store::PendingControl;
+    for size in [(360,740),(1000,700)] {
+        let root=tempfile::tempdir().unwrap();let ctx=HeadlessCtx::new(&Config {size,device_limits:crate::desktop::limits(),..Default::default()}).unwrap();
+        let mut app=App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),size.0<500).unwrap();app.back();app.resize(ctx.size(),1.,Vec2::new(0.,0.));
+        for n in 0..12 {let id=format!("saved-{n:02}");app.controller.account.pending_controls.insert(id.clone(),PendingControl {request:ClientRequest {id,command:ClientCommand::RenameSession {session_id:"chat".into(),title:"Owned title".into()}},deleted_chats:vec![],blocked:true,accepted:false});}
+        app.controller.store.put(&app.controller.identity,"account",&app.controller.account).unwrap();
+        for action in [Action::Settings,Action::Outbox(0),Action::Outbox(1),Action::InspectControl("saved-00".into()),Action::ReviewRestore("chat".into())] {
+            app.apply(action).unwrap();app.tick(0.);app.frame(&ctx,ctx.view());
+            for hit in &app.hits {assert!(hit.rect.y>=0. && hit.rect.y+hit.rect.height<=size.1 as f32,"Unreachable modal action at {:?}",hit.rect);}
+        }
+        let modal=app.modal.as_ref().unwrap();let width=(size.0 as f32-24.).min(620.)-40.;assert!(app.renderer.label_height(&modal.title,width,17.,true)>60.,"Fixture must exercise the complete multi-line warning");
+        if size.0<500 {image::save_buffer("/tmp/tau2-restore-mobile.png",&ctx.read_rgba8().unwrap(),size.0,size.1,image::ColorType::Rgba8).unwrap();}
+        assert_eq!(app.controller.account.pending_controls.len(),12);app.apply(Action::ForgetControl("saved-00".into())).unwrap();assert_eq!(app.controller.account.pending_controls.len(),12);app.apply(Action::Confirm).unwrap();assert_eq!(app.controller.account.pending_controls.len(),11);
+    }
 }
