@@ -35,6 +35,16 @@ impl Harness {
 fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_ui() {
     for (size,mobile) in [((1000,800),false),((360,720),true)] {
         let mut h = Harness::new(size,mobile); h.frame();
+        if !mobile {
+            // When the tab strip overflows, its clipped shapes/text and hit
+            // targets must stop before the sidebar/chat separator at x=299.
+            let pixels = h.ctx.read_rgba8().unwrap();
+            let at = |y: usize| &pixels[(y*size.0 as usize+299)*4..(y*size.0 as usize+299)*4+3];
+            for y in 140..175 {
+                assert_eq!(at(y), at(130), "tab strip painted over the separator at y={y}");
+            }
+            assert!(h.app.project_areas.iter().all(|(r,_)| r.x+r.width<=299.));
+        }
         assert!(h.app.controller.project_unread("p24"));
         assert_eq!(h.app.chat_areas.iter().filter(|(r,_)| contains(h.app.list_rect, Vec2::new(r.x+1.,r.y+1.))).count(),2,"Only General's chats appear");
         assert!(!h.app.hits.iter().any(|hit| matches!(hit.action,Action::NewProject)),"The plus belongs at the scrolling end");
@@ -85,11 +95,14 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
         h.app.project_scroll=h.app.max_project_scroll; h.frame();
         h.click(|a| matches!(a,Action::NewProject));
         assert!(matches!(h.app.modal.as_ref().unwrap().kind,ModalKind::NewProject(_)));
-        h.app.input("New work");
+        h.app.input("gypqj New work"); // descenders in the compact Name editor
         h.app.focus=Some(Some(1)); h.app.input("  Exact\ncontext\n"); h.frame();
         assert_eq!(h.app.modal.as_ref().unwrap().fields[1].1.value,"  Exact\ncontext\n");
         h.dump(if mobile {"projects-phone-new.png"} else {"projects-desktop-new.png"});
         h.click(|a| matches!(a,Action::CancelModal));
+        h.app.apply(Action::RenameProject("p1".into())).unwrap(); h.frame();
+        assert_eq!(h.app.hits.iter().find(|h| matches!(h.action,Action::Focus(Some(0)))).unwrap().rect.height, 40., "Rename topic uses the same compact Name field");
+        h.app.apply(Action::CancelModal).unwrap();
         h.app.apply(Action::DeleteProject("p24".into())).unwrap(); h.frame();
         h.click(|a| matches!(a,Action::Confirm));
         assert!(matches!(h.app.modal.as_ref().unwrap().kind,ModalKind::DeleteProjectChoice(ref p) if p.id=="p24"));

@@ -2279,7 +2279,9 @@ impl App {
             s,
             true,
         );
-        self.project_tabs(layer, Rect::new(b.x, b.y + 140. * s, b.width, 34. * s));
+        // Reserve the sidebar's rightmost column for its separator. The
+        // scrolling tabs (including the clipped add tab) must not paint over it.
+        self.project_tabs(layer, Rect::new(b.x, b.y + 140. * s, b.width - s, 34. * s));
         let clip = Rect::new(b.x, b.y + 182. * s, b.width, (b.height - 190. * s).max(0.));
         self.list_rect = clip;
         let sessions = self.controller.account.sessions.iter().filter(|c| c.project_id == self.controller.account.selected_project);
