@@ -285,3 +285,22 @@ fn inserting_a_base_before_a_combining_mark_places_after_the_new_grapheme() {
     f.key(&mut e, "Backspace", false, false);
     assert_eq!(e.value, " end");
 }
+
+#[test]
+fn short_single_line_fields_keep_full_text_and_caret_inside_the_clip() {
+    let mut f = Fixture::new();
+    for height in [36., 40., 48., 56.] {
+        let mut e = Editor::line("gypqj".into());
+        e.view = Some(View { rect: Rect::new(0., 0., 200., height), size: 15., secret: false });
+        e.visible = true;
+        let block = e.prepare_view(&mut f.text, f.chain, true).unwrap();
+        let layout = f.text.measure(block);
+        let inner = e.view.unwrap().inner();
+        if height == 40. {
+            assert!(layout.height_em() * 15. > height - 1.5 * 15., "fixture must reproduce the old 40px clipping");
+        }
+        assert!(layout.height_em() * 15. <= inner.height, "{height}px name/setting field clips the font's line box");
+        let caret = e.ime_rect(&f.text).unwrap();
+        assert!(caret.y >= inner.y && caret.y + caret.height <= inner.y + inner.height + 0.01);
+    }
+}

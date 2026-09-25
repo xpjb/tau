@@ -90,12 +90,15 @@ impl Health {
             (min.min(rtt), max.max(rtt))
         }))
     }
+    pub fn latest(&self) -> Option<Duration> {
+        self.recent.iter().rev().find_map(|sample| *sample)
+    }
     pub fn color(&self, now: Instant) -> u32 {
         match self.phase {
             Phase::Offline | Phase::Blocked | Phase::Reconnecting => RED,
             Phase::Connecting => ORANGE,
             Phase::Connected => {
-                let recent = self.recent.iter().rev().find_map(|sample| *sample);
+                let recent = self.latest();
                 let pending = self
                     .pending_since
                     .map(|sent| now.saturating_duration_since(sent));
@@ -147,7 +150,8 @@ impl Health {
         if let Some(title) = title {
             lines.push(title.into());
         }
-        lines.extend([format!("min: {min}"), format!("max: {max}")]);
+        let latest = self.latest().map_or_else(|| "—".into(), |rtt| format!("{}ms", rtt.as_millis()));
+        lines.extend([format!("min: {min}"), format!("max: {max}"), format!("latest: {latest}")]);
         lines.push(match self.counter(now) {
             Some((label, ms)) => format!("{label}: {ms}ms"),
             None => "received: —".into(),
@@ -235,7 +239,7 @@ mod tests {
         let now = Instant::now();
         let mut health = Health::connecting();
         health.connected();
-        assert_eq!(health.details("", now), "min: —\nmax: —\nreceived: —");
+        assert_eq!(health.details("", now), "min: —\nmax: —\nlatest: —\nreceived: —");
         for ms in 100..110 {
             ack(&mut health, now, ms);
         }
@@ -250,7 +254,7 @@ mod tests {
         );
         assert_eq!(
             health.details("", now + Duration::from_millis(347)),
-            "min: 101ms\nmax: 109ms\nwaiting: 347ms"
+            "min: 101ms\nmax: 109ms\nlatest: 109ms\nwaiting: 347ms"
         );
         health.disconnected(false); // The unanswered attempt is not a fabricated 5s RTT.
         assert_eq!(
@@ -258,7 +262,7 @@ mod tests {
                 "Ping timed out. Reconnecting…",
                 now + Duration::from_secs(5)
             ),
-            "Reconnecting…\nmin: 101ms\nmax: 109ms\nreceived: 5000ms\nPing timed out"
+            "Reconnecting…\nmin: 101ms\nmax: 109ms\nlatest: 109ms\nreceived: 5000ms\nPing timed out"
         );
         health.connected();
         assert_eq!(
@@ -271,10 +275,30 @@ mod tests {
             health.connected();
         }
         assert_eq!(health.min_max(), None, "only the last ten attempts count");
+        assert_eq!(health.latest(), None, "expired acknowledgements cannot masquerade as latest");
         assert_eq!(
             health.counter(now + Duration::from_secs(6)),
             Some(("received", 6000))
         );
+    }
+
+    #[test]
+    fn latest_is_the_last_acknowledged_rtt_not_an_extreme_or_pending_wait() {
+        let now = Instant::now();
+        let mut health = Health::connecting();
+        health.connected();
+        for ms in [120, 400, 210] {
+            ack(&mut health, now, ms);
+        }
+        assert_eq!(health.min_max(), Some((Duration::from_millis(120), Duration::from_millis(400))));
+        assert_eq!(health.latest(), Some(Duration::from_millis(210)));
+        health.sent(now);
+        assert_eq!(health.latest(), Some(Duration::from_millis(210)));
+        assert_eq!(health.details("", now + Duration::from_millis(50)),
+            "min: 120ms\nmax: 400ms\nlatest: 210ms\nwaiting: 50ms");
+        health.disconnected(false);
+        health.connected();
+        assert_eq!(health.latest(), Some(Duration::from_millis(210)));
     }
 
     #[test]
@@ -297,7 +321,7 @@ mod tests {
         );
         assert_eq!(
             health.details("", now + Duration::from_millis(5555)),
-            "min: 4321ms\nmax: 4321ms\nreceived: 1234ms"
+            "min: 4321ms\nmax: 4321ms\nlatest: 4321ms\nreceived: 1234ms"
         );
         health.sent(now + Duration::from_millis(5555));
         assert_eq!(

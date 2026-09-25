@@ -24,9 +24,14 @@ struct View {
 }
 impl View {
     fn inner(self) -> Rect {
-        let pad = self.size * 0.75;
-        Rect::new(self.rect.x + pad, self.rect.y + pad,
-            (self.rect.width - pad * 2.).max(1.), (self.rect.height - pad * 2.).max(1.))
+        let horizontal = self.size * 0.75;
+        // A compact single-line field (e.g. a 40px topic name) cannot spare
+        // 0.75em on *both* vertical sides: the font line box and descenders
+        // would be clipped. Keep the normal padding on taller editors, but
+        // reserve at least 2em of height for text and the caret when possible.
+        let vertical = horizontal.min(((self.rect.height - 2. * self.size) / 2.).max(0.));
+        Rect::new(self.rect.x + horizontal, self.rect.y + vertical,
+            (self.rect.width - horizontal * 2.).max(1.), (self.rect.height - vertical * 2.).max(1.))
     }
 }
 struct CachedLayout {

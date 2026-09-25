@@ -1,3 +1,20 @@
+# Tau 2 QA stream — September 25, 2026 (unreleased)
+
+- Connection status shows **min / max / latest** acknowledged RTT from the last
+  ten ping attempts, separately from the live `received:` age or `waiting:`
+  duration. Pending/failed probes never become a `latest` sample. The status
+  card remains dynamically sized for the extra line.
+- Compact editor viewports reserve enough vertical space for font line boxes
+  and descenders, including the 40px New/Rename topic Name fields; the same
+  shared geometry also covers other short text fields.
+- The scrolling topic strip and its add button are clipped before the desktop
+  sidebar/chat divider, leaving its full-height separator visible and its
+  hit region out of the chat side.
+
+These are local changes on a single QA branch, **not** a beta deployment or
+physical Windows/Android acceptance. Headless rendering and tests are local
+checks only; device QA remains open.
+
 # Topics — 0.7.2 beta acceptance (protocol 14)
 
 Topic-label and layout follow-up: tabs are shorter and less padded; desktop/mobile
