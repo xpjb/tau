@@ -13,6 +13,32 @@ use tau_protocol::*;
 pub struct Download {
     pub status: tau_transfer::TransferStatus,
     pub path: PathBuf,
+    pub bytes_per_second: Option<u64>,
+    last_progress: Option<(std::time::Instant, u64)>,
+}
+impl Download {
+    pub fn new(status: tau_transfer::TransferStatus, path: PathBuf) -> Self {
+        let last_progress = (!status.done).then(|| (std::time::Instant::now(), status.transferred));
+        Self { status, path, bytes_per_second: None, last_progress }
+    }
+    fn update(&mut self, status: tau_transfer::TransferStatus, path: PathBuf) {
+        let now = std::time::Instant::now();
+        if status.done || self.path != path || status.transferred < self.status.transferred {
+            self.bytes_per_second = None;
+            self.last_progress = None;
+        } else if let Some((at, bytes)) = self.last_progress {
+            let elapsed = now.duration_since(at);
+            if elapsed >= std::time::Duration::from_millis(100) {
+                self.bytes_per_second = (status.transferred > bytes).then(||
+                    (u128::from(status.transferred - bytes) * 1000 / elapsed.as_millis().max(1)).min(u128::from(u64::MAX)) as u64);
+            }
+        }
+        if !status.done && (self.last_progress.is_none() || now.duration_since(self.last_progress.unwrap().0) >= std::time::Duration::from_millis(100)) {
+            self.last_progress = Some((now, status.transferred));
+        }
+        self.status = status;
+        self.path = path;
+    }
 }
 pub struct Chat {
     pub local: LocalChat,
@@ -35,6 +61,7 @@ pub struct Controller {
     pub model_preferences: crate::models::Preferences,
     pub chats: HashMap<String, Chat>,
     pub downloads: HashMap<String, Download>,
+    saved_downloads: HashMap<String, Option<SavedDownload>>,
     pub viewing_chat: bool,
     pub project_result: Option<(String, bool)>,
     pub settings_result: Option<(String, bool)>,
@@ -77,6 +104,7 @@ impl Controller {
             model_preferences,
             chats: HashMap::new(),
             downloads: HashMap::new(),
+            saved_downloads: HashMap::new(),
             viewing_chat: true,
             project_result: None,
             settings_result: None,
@@ -132,6 +160,7 @@ impl Controller {
         self.model_preferences = self.store.get(&self.identity, "quick-models")?;
         self.chats.clear();
         self.downloads.clear();
+        self.saved_downloads.clear();
         self.requests.clear();
         self.project_deletions.clear();
         self.create_failed_epoch = None;
@@ -750,6 +779,34 @@ impl Controller {
     pub fn download_key(session: &str, entry: &str) -> String {
         format!("{}:{}", session.len(), session) + entry
     }
+    pub fn saved_download(&mut self, session: &str, entry: &str) -> Option<SavedDownload> {
+        let key=Self::download_key(session,entry);
+        if !self.saved_downloads.contains_key(&key) {
+            let lineage=self.account.source_lineage.as_deref().unwrap_or_default();
+            match self.store.saved_download(&self.identity,lineage,session,entry) {
+                Ok(saved) => {self.saved_downloads.insert(key.clone(),saved);}
+                Err(error) => {self.notice=Some(error.to_string());return None;}
+            }
+        }
+        self.saved_downloads.get(&key).cloned().flatten()
+    }
+    pub fn record_download(&mut self, identity:&str, lineage:&str, session:&str, entry:&str, saved:SavedDownload) -> Result<()> {
+        self.store.record_download(identity,lineage,session,entry,&saved)?;
+        if identity==self.identity && self.account.source_lineage.as_deref().unwrap_or_default()==lineage {
+            self.saved_downloads.insert(Self::download_key(session,entry),Some(saved));
+        }
+        Ok(())
+    }
+    pub fn forget_download(&mut self, session:&str, entry:&str) -> Result<()> {
+        self.forget_download_for(&self.identity.clone(),&self.account.source_lineage.clone().unwrap_or_default(),session,entry)
+    }
+    pub fn forget_download_for(&mut self, identity:&str, lineage:&str, session:&str, entry:&str) -> Result<()> {
+        self.store.forget_download(identity,lineage,session,entry)?;
+        if identity==self.identity && self.account.source_lineage.as_deref().unwrap_or_default()==lineage {
+            self.saved_downloads.insert(Self::download_key(session,entry),None);
+        }
+        Ok(())
+    }
     /// The data endpoint is authorized independently of control readiness.
     pub fn content_authorized(&self) -> bool { self.remote.authorized() }
     pub fn attachment_path(&self, session:&str, entry:&str) -> PathBuf {
@@ -758,7 +815,16 @@ impl Controller {
     }
     pub fn download(&mut self, session: &str, entry: &str, limit: u64) -> Result<PathBuf> {
         let path = self.attachment_path(session,entry);
-        if self.remote.file_ready(session,&format!("file:{entry}"),&path,limit)? {return Ok(path);}
+        if self.remote.file_ready(session,&format!("file:{entry}"),&path,limit)? {
+            let key=Self::download_key(session,entry);
+            if let Some(download)=self.downloads.get_mut(&key)
+                && download.path==path && (!download.status.done || download.status.failure.is_some()) {
+                let size=path.metadata()?.len();
+                download.update(tau_transfer::TransferStatus {transferred:size,total:size,
+                    network_bytes:download.status.network_bytes,done:true,failure:None},path.clone());
+            }
+            return Ok(path);
+        }
         ensure!(self.network.is_some() && (self.remote.authorized() || self.remote.has_file(session,&format!("file:{entry}"))), "Content connection is not authorized yet");
         let key = Self::download_key(session, entry);
         if self.downloads.get(&key).is_some_and(|d| !d.status.done) {
@@ -773,16 +839,13 @@ impl Controller {
         })?;
         self.downloads.insert(
             key,
-            Download {
-                path: path.clone(),
-                status: tau_transfer::TransferStatus {
-                    transferred: 0,
-                    total: 0,
-                    network_bytes: 0,
-                    done: false,
-                    failure: None,
-                },
-            },
+            Download::new(tau_transfer::TransferStatus {
+                transferred: 0,
+                total: 0,
+                network_bytes: 0,
+                done: false,
+                failure: None,
+            }, path.clone()),
         );
         Ok(path)
     }
@@ -908,6 +971,7 @@ impl Controller {
             transport::Event::Source(epoch,lineage)=>{
                 self.source_guard=Some((epoch,false));
                 if self.store.bind_source(&self.identity,&lineage)? {
+                    self.saved_downloads.clear();
                     self.account=self.store.get(&self.identity,"account")?;
                     for (id,chat) in &mut self.chats {chat.local=self.store.load_chat(&self.identity,id)?;chat.feed=Feed::default();}
                     self.notice=Some("Source lineage changed. Saved work was preserved, but old intents will not be automatically executed. Review any effects after the restored snapshot before retrying.".into());
@@ -1015,7 +1079,11 @@ impl Controller {
                 }
             }
             transport::Event::Download { key, status, path } => {
-                self.downloads.insert(key, Download { status, path });
+                if let Some(download) = self.downloads.get_mut(&key) {
+                    download.update(status, path);
+                } else {
+                    self.downloads.insert(key, Download::new(status, path));
+                }
             }
             transport::Event::Metrics(stats)=>self.native_metrics=stats,
             transport::Event::Message(epoch, message)|transport::Event::SizedMessage(epoch,message,_) if self.epoch == Some(epoch) => {

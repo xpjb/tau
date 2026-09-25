@@ -1,3 +1,31 @@
+# Download lifecycle follow-up (unreleased)
+
+The same compact transfer card now appears in the chat and Attachments view.
+It displays human-readable bytes, percent and observed speed with a determinate
+bar, or an indeterminate moving bar if total size is unknown; failure/cancel
+and save failures stay inline with Retry. Sparse attachment metadata no longer
+shows a misleading `Loading…` body above the filename. The image preview has
+reserved space even before its content arrives.
+
+A file's Download action fetches and verifies it, then saves **without a picker**
+to the user's `Downloads/Tau` (Android uses MediaStore); a cached file can be
+saved offline. Existing names get numbered suffixes instead of being replaced.
+Export completion is distinct from cache completion: once the OS save succeeds,
+Tau remembers the user-owned file across restarts and offers Open, plus Show and
+safe, bounded ZIP extraction on desktop. Missing files can be downloaded again;
+a removed private cache never removes the user-owned copy. Image previews are
+cache-only until Save is pressed. The record is account/source/chat/file scoped,
+not attached to the evictable replica. Save failures do not claim completion.
+
+Checked with managed frontend all-target compilation, 83/83 frontend nextest,
+frontend rustdoc, Android ARM64 and Windows x64 cross-target compiler checks,
+Android Java compilation, and inspected offline desktop/phone screenshots via
+`--downloads-preview`. These are local checks, **not** a new beta deployment or
+physical Windows/Android acceptance. Stable Tau was not modified. The prior
+attachments view release/status below is historical.
+
+---
+
 # Attachments view — September 25, 2026 (unreleased)
 
 - A round folded-paper button sits beside Play/Stop and stays available while idle

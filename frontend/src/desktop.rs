@@ -1,6 +1,6 @@
 use crate::{
     app::{App, ConnectionPreview, PlatformAction},
-    store::{Settings, Store},
+    store::{SavedDownload, Settings, Store},
 };
 use chad::winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -18,15 +18,19 @@ use std::{
 use tau_protocol::SessionStatus;
 
 // Account/session are captured when the document picker is opened.
-type PickResult = Result<(String, String, Vec<PathBuf>), String>;
+enum DesktopEvent {
+    Pick(Result<(String, String, Vec<PathBuf>), String>),
+    Saved(String, Result<SavedDownload, String>),
+    Used(Result<(), String>),
+}
 struct Desktop {
     app: App,
     cursor: Vec2,
     cursor_icon: CursorIcon,
     modifiers: ModifiersState,
     clipboard: Option<arboard::Clipboard>,
-    rx: mpsc::Receiver<PickResult>,
-    tx: mpsc::Sender<PickResult>,
+    rx: mpsc::Receiver<DesktopEvent>,
+    tx: mpsc::Sender<DesktopEvent>,
     attention_identity: String,
     seen_finished: HashMap<String, u64>,
     attention_requested: bool,
@@ -194,9 +198,9 @@ impl ChadApp for Desktop {
     fn update(&mut self, ctx: &mut Ctx) {
         self.app
             .resize(ctx.size(), ctx.scale_factor() as f32, Vec2::new(0., 0.));
-        while let Ok(result) = self.rx.try_recv() {
-            match result {
-                Ok((identity, session, paths)) => {
+        while let Ok(event) = self.rx.try_recv() {
+            match event {
+                DesktopEvent::Pick(Ok((identity, session, paths))) => {
                     for path in paths {
                         let result = self
                             .app
@@ -205,7 +209,9 @@ impl ChadApp for Desktop {
                         self.app.report(result);
                     }
                 }
-                Err(error) => self.app.report(Err(anyhow::anyhow!(error))),
+                DesktopEvent::Pick(Err(error)) => self.app.report(Err(anyhow::anyhow!(error))),
+                DesktopEvent::Saved(key, result) => self.app.complete_save(&key,result),
+                DesktopEvent::Used(result) => self.app.report(result.map_err(anyhow::Error::msg)),
             }
         }
         if self.app.tick(ctx.dt) {
@@ -292,28 +298,35 @@ impl Desktop {
                     let waker = ctx.waker();
                     std::thread::spawn(move || {
                         if let Some(files) = rfd::FileDialog::new().pick_files() {
-                            let _ = tx.send(Ok((identity, session, files)));
+                            let _ = tx.send(DesktopEvent::Pick(Ok((identity, session, files))));
                             waker.wake();
                         }
                     });
                 }
-                PlatformAction::Export(source, name) => {
+                PlatformAction::SaveDownload {key,source,name} => {
                     let tx = self.tx.clone();
                     let waker = ctx.waker();
                     std::thread::spawn(move || {
-                        let safe = Path::new(&name)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "download".into());
-                        if let Some(path) = rfd::FileDialog::new().set_file_name(safe).save_file() {
-                            let result = std::fs::copy(&source, &path)
-                                .and_then(|_| std::fs::OpenOptions::new().write(true).open(&path)?.sync_all());
-                            if let Err(e) = result {
-                                let _ = tx.send(Err(e.to_string()));
-                                waker.wake();
-                            }
-                        }
+                        let result=crate::downloads::default_directory()
+                            .and_then(|root|crate::downloads::save_into(&root,&source,&name))
+                            .map_err(|e|e.to_string());
+                        let _=tx.send(DesktopEvent::Saved(key,result));waker.wake();
                     });
+                }
+                PlatformAction::UseDownload(saved, action, target) => {
+                    let path=PathBuf::from(saved.reference);
+                    if !path.is_file() {
+                        let result=self.app.controller.forget_download_for(&target.identity,&target.lineage,&target.session,&target.entry);
+                        self.app.report(result.and_then(|_|Err(anyhow::anyhow!("The downloaded file no longer exists. Download it again."))));
+                    } else if matches!(action,crate::app::SavedAction::Extract) {
+                        let tx=self.tx.clone();let waker=ctx.waker();
+                        std::thread::spawn(move || {
+                            let result=crate::downloads::use_saved(&path,action).map_err(|e|e.to_string());
+                            let _=tx.send(DesktopEvent::Used(result));waker.wake();
+                        });
+                    } else {
+                        self.app.report(crate::downloads::use_saved(&path,action));
+                    }
                 }
                 PlatformAction::OpenUrl(url) => {
                     if let Err(e) = open::that(url) {
@@ -348,6 +361,7 @@ pub fn run() -> Result<(), String> {
             Path::new(args.get(1).ok_or("Missing output path")?),
             args.iter().any(|a| a == "--phone"),
             preview,
+            args.iter().any(|a| a == "--downloads-preview"),
         );
     }
     #[cfg(windows)]
@@ -387,7 +401,7 @@ pub fn limits() -> wgpu::Limits {
         ..wgpu::Limits::downlevel_defaults()
     }
 }
-pub fn screenshot(path: &Path, phone: bool, connection_preview: Option<ConnectionPreview>) -> Result<(), String> {
+pub fn screenshot(path: &Path, phone: bool, connection_preview: Option<ConnectionPreview>, downloads_preview: bool) -> Result<(), String> {
     let size = if phone { (1080, 2160) } else { (1280, 900) };
     let ctx = chad::HeadlessCtx::new(&Config {
         size,
@@ -399,6 +413,10 @@ pub fn screenshot(path: &Path, phone: bool, connection_preview: Option<Connectio
     let mut app = App::new(&ctx, store, Arc::new(|| {}), phone).map_err(|e| e.to_string())?;
     app.back(); // The offline fixture bypasses first-run connection setup.
     crate::demo::populate(&mut app.controller).map_err(|e| e.to_string())?;
+    if downloads_preview {
+        crate::demo::populate_downloads(&mut app.controller).map_err(|e| e.to_string())?;
+        app.preview_attachments();
+    }
     app.resize(size, if phone { 2.5 } else { 1. }, Vec2::new(0., 0.));
     app.tick(0.);
     if let Some(preview) = connection_preview { app.preview_connection(preview); }

@@ -52,6 +52,14 @@ pub fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
+/// A user-owned export, separate from the evictable verified content cache.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SavedDownload {
+    pub location: String,
+    pub reference: String,
+    pub mime_type: String,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Account {
@@ -296,6 +304,19 @@ impl Store {
         impl std::io::Write for Count {fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {self.0+=bytes.len();if self.0>32*1024*1024 {return Err(std::io::Error::other("Local chat exceeds 32 MiB; reconcile saved work before adding more"));}Ok(bytes.len())}fn flush(&mut self)->std::io::Result<()> {Ok(())}}
         serde_json::to_writer(Count(0),chat)?;
         self.put(account, &format!("chat:{session}"), chat)
+    }
+    fn download_record_key(lineage: &str, session: &str, entry: &str) -> String {
+        format!("saved-download:{lineage}:{}:{}", hash(session), hash(entry))
+    }
+    pub fn saved_download(&self, account: &str, lineage: &str, session: &str, entry: &str) -> Result<Option<SavedDownload>> {
+        self.get(account, &Self::download_record_key(lineage,session,entry))
+    }
+    pub fn record_download(&self, account: &str, lineage: &str, session: &str, entry: &str, saved: &SavedDownload) -> Result<()> {
+        self.put(account, &Self::download_record_key(lineage,session,entry), saved)
+    }
+    pub fn forget_download(&self, account: &str, lineage: &str, session: &str, entry: &str) -> Result<()> {
+        self.db.execute("DELETE FROM local WHERE account=?1 AND key=?2", params![account,Self::download_record_key(lineage,session,entry)])?;
+        Ok(())
     }
     pub fn attachment_path(&self, account: &str, session: &str, entry: &str) -> PathBuf {
         self.root

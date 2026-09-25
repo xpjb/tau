@@ -35,6 +35,8 @@ fn image_viewer_closes_on_background_tap_but_not_image_controls_or_pan() {
             app.viewer = Some(Viewer {
                 path: path.clone(),
                 name: "sample.png".into(),
+                session: "demo".into(),
+                entry: "entry-1".into(),
                 zoom: 1.,
                 pan: Vec2::new(0., 0.),
             });
