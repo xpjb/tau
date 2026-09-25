@@ -280,6 +280,7 @@ pub struct App {
     field_selection: Option<Rect>,
     platform: Vec<PlatformAction>,
     pub mobile: bool,
+    pub(crate) window_focused: bool,
     dirty: bool,
 }
 impl App {
@@ -360,6 +361,7 @@ impl App {
             field_selection: None,
             platform: vec![],
             mobile,
+            window_focused: true,
             dirty: true,
         };
         if needs_setup {
@@ -536,7 +538,7 @@ impl App {
         self.dirty = true;
     }
     pub fn tick(&mut self, dt: f32) -> bool {
-        let visible = (self.size.0 as f32 / self.scale >= 760. || !self.show_chats) && self.modal.is_none() && self.viewer.is_none();
+        let visible = self.window_focused && (self.size.0 as f32 / self.scale >= 760. || !self.show_chats) && self.modal.is_none() && self.viewer.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.notice = Some(error.to_string()); }
         self.dirty |= self.controller.poll();
         self.dirty |= self.usage.tick();

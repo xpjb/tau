@@ -128,6 +128,42 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
 }
 
 #[test]
+fn finished_reply_stays_unread_in_background_until_its_chat_is_visible_and_focused() {
+    let root = tempfile::tempdir().unwrap();
+    let ctx = HeadlessCtx::new(&Config {
+        size: (1000, 700),
+        device_limits: crate::desktop::limits(),
+        ..Default::default()
+    }).unwrap();
+    let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(|| {}), false).unwrap();
+    app.back();
+    crate::demo::populate(&mut app.controller).unwrap();
+    app.resize(ctx.size(), 1., Vec2::new(0., 0.));
+    app.tick(0.);
+    app.controller.message(ServerMessage::Sessions { sessions: app.controller.account.sessions.clone() }).unwrap();
+    assert!(!app.controller.unread(&app.controller.account.sessions[0]));
+
+    app.window_focused = false;
+    app.tick(0.);
+    let mut sessions = app.controller.account.sessions.clone();
+    sessions[0].updated_at_ms += 1;
+    sessions[0].status = SessionStatus::Running;
+    app.controller.message(ServerMessage::Sessions { sessions }).unwrap();
+    let selected = &app.controller.account.sessions[0];
+    assert!(app.controller.unread(selected), "background streaming must not mark the chat read");
+    app.controller.message(ServerMessage::SessionState {
+        session_id: selected.id.clone(), status: SessionStatus::Idle, detail: None, context_usage: None,
+    }).unwrap();
+    app.tick(0.);
+    assert!(app.controller.unread(&app.controller.account.sessions[0]), "completion must stay unread while unfocused");
+
+    app.window_focused = true;
+    app.tick(0.);
+    assert!(!app.controller.unread(&app.controller.account.sessions[0]));
+    assert!(app.controller.unread(&app.controller.account.sessions[1]), "other chats stay unread after focusing");
+}
+
+#[test]
 fn hidden_card_wakes_only_when_the_dot_crosses_a_color_boundary() {
     let root = tempfile::tempdir().unwrap();
     let ctx = HeadlessCtx::new(&Config {
