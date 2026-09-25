@@ -1,6 +1,6 @@
 # Tau2 native block sync
 
-**Implementation and automated local validation complete. Not deployed or device/WAN certified.** [HANDOFF](../HANDOFF.md) records the branch, final checks and operational restrictions. The [original protocol audit](tau2-protocol-audit.md) is historical design/evidence, not the current wire contract.
+**Implementation and automated local validation complete. Beta 0.7.4 / protocol 18 is deployed; matched Windows and Android packages were delivered. Device/WAN certification is not claimed.** [HANDOFF](../HANDOFF.md) records the branch, final checks and operational restrictions. The [original protocol audit](tau2-protocol-audit.md) is historical design/evidence, not the current wire contract.
 
 ## Wire and ownership
 
@@ -101,7 +101,7 @@ Client export GC touches only the private hashed download namespace, never arbit
 
 Normal restart preserves lineage. **Restoring an older backup with its old lineage and then serving it is unsupported.**
 
-1. Obtain deployment/maintenance approval and stop only the target daemon. The current task did **not** authorize starting beta or touching stable.
+1. Obtain deployment/maintenance approval and stop only the target daemon. The 0.7.4 beta rollout was explicitly authorized; it is not standing authorization to modify stable or perform later restores.
 2. Preserve the pre-change database, configured outbox/upload trees, settings/auth files and matching binaries. Use a consistent SQLite backup or an offline database **with its committed WAL**; copying only the main file while WAL contains commits is not a backup. Keep secrets private. Portable history export is not a backup of receipts, queues, operations or file ownership.
 3. Restore the consistent database and owned trees at their original absolute paths. Do not mix snapshots, relocate file references silently, or discard unclaimed paid outputs. Quiesce other writers to those trees too.
 4. Before serving, run the matching implementation's offline tool:
@@ -130,4 +130,4 @@ The loss test exposed a fatal `iroh-quinn-proto 0.13.0` multi-datagram pacing as
 
 Diagnostics expose native attempts/connections/streams, occupied class slots, verified content and Tau-frame bytes, requested resume offsets, cancellations and integrity failures, plus current-connection QUIC UDP/loss/RTT counters. Native samples update every five seconds. App-frame credit is not UDP traffic; requested offsets are not unique bandwidth savings. Slot occupancy is not a full queue-depth metric.
 
-**Still operationally required:** authorized Pixel/Shlap/native-device testing, real WAN/Tailscale path and sustained resource/throughput checks, target-specific packaging, and explicit deployment approval. Loopback shaping and headless rendering do not certify arbitrary WAN latency, radio behavior, hardware power-loss durability or device frame rate. Beta remains stopped; stable remains untouched.
+**Not certified by this rollout:** physical Pixel/Shlap/native-device behavior, arbitrary WAN paths or sustained device resource/throughput performance. Loopback shaping and headless rendering do not certify arbitrary WAN latency, radio behavior, hardware power-loss durability or device frame rate. The authorized beta deployment and Windows/Android packaging/delivery are complete; stable remained untouched. See [the release log](../INTEGRATION.md) for deployed versions and checksums.
