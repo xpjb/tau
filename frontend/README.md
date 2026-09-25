@@ -21,7 +21,9 @@ Desktop development can seed connection settings with `TAU2_SERVER` and `TAU2_TO
 renders the explicitly offline demo through the real GPU shader path.
 `target/debug/tau --screenshot PATH --connection-preview [received|waiting|disconnected|unconfigured]`
 pins a mocked connection card (defaults to waiting; no network connection or
-credentials).
+credentials). `--screenshot PATH --downloads-preview [--phone]` renders offline
+file cards in waiting, active, failed, cache-only and saved states. It never
+starts a transfer or writes to the real Downloads folder.
 
 ## UI and ownership
 

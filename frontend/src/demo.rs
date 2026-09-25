@@ -55,3 +55,43 @@ pub fn populate(c: &mut Controller) -> Result<()> {
     c.connection = "Offline preview".into();
     Ok(())
 }
+
+/// Screenshot-only sample transfers. No content service or OS picker is started.
+pub fn populate_downloads(c: &mut Controller) -> Result<()> {
+    use crate::controller::Download;
+    use tau_transfer::TransferStatus;
+    let mut events = c.chats["demo"].feed.events.values().cloned().collect::<Vec<_>>();
+    for (order, name, size) in [(4,"queued-report.txt",None), (5,"cached-notes.txt",Some(2*1024*1024)),
+        (6,"saved-notes.txt",Some(2*1024*1024)), (7,"interrupted-package.zip",Some(12*1024*1024)),
+        (8,"tau-beta-installer.zip",Some(12*1024*1024))] {
+        events.push(Event {id:format!("event-{order}"),order,entry_id:format!("entry-{order}"),
+            phase:EventPhase::Saved,origin:Origin::default(),role:EventRole::Assistant,kind:EventKind::Text,
+            text:String::new(),timestamp:None,timestamp_ms:None,tool_call_id:None,tool_name:None,
+            stop_reason:None,error_message:None,is_error:false,
+            attachment:Some(ChatAttachment {source_path:None,kind:AttachmentKind::File,
+                file_name:name.into(),caption:Some("A file sent with this chat".into()),size})});
+    }
+    c.message(ServerMessage::TranscriptSnapshot {session_id:"demo".into(),
+        snapshot:TranscriptSnapshot {generation:"demo".into(),sequence:1,events,
+            queue:QueueState::default(),before:None,delivered:vec![]}})?;
+    for (order, transferred, total, done, failure) in [
+        (7, 1024*1024, 12*1024*1024, true, Some("Download interrupted")),
+        (8, 3*1024*1024, 12*1024*1024, false, None)] {
+        let mut download=Download::new(TransferStatus {transferred,total,network_bytes:transferred,
+            done,failure:failure.map(str::to_owned)}, c.attachment_path("demo",&format!("entry-{order}")));
+        if !done { download.bytes_per_second=Some(256*1024); }
+        c.downloads.insert(Controller::download_key("demo",&format!("entry-{order}")),download);
+    }
+    let path=c.attachment_path("demo","entry-5");
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::File::create(path)?.set_len(2*1024*1024)?;
+    let path=c.store.root.join("preview-Downloads/Tau/saved-notes.txt");
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::File::create(&path)?.set_len(2*1024*1024)?;
+    let identity=c.identity.clone();
+    let lineage=c.account.source_lineage.clone().unwrap_or_default();
+    c.record_download(&identity,&lineage,"demo","entry-6",crate::store::SavedDownload {
+        location:path.to_string_lossy().into_owned(),reference:path.to_string_lossy().into_owned(),
+        mime_type:"text/plain".into()})?;
+    Ok(())
+}

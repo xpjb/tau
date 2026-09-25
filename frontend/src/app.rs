@@ -93,8 +93,9 @@ enum Action {
     Queue(QueueOperation),
     EditQueue(String, u64, String),
     Attachment(String, String, String, bool),
+    SaveAttachment(String, String, String),
+    UseSaved(String, String, SavedAction),
     CancelDownload(String),
-    Export(PathBuf, String),
     Zoom(f32),
     Fit,
     Suggest(String),
@@ -209,7 +210,8 @@ pub enum PlatformAction {
         session: String,
     },
     OpenUrl(String),
-    Export(PathBuf, String),
+    SaveDownload { key: String, source: PathBuf, name: String },
+    UseDownload(crate::store::SavedDownload, SavedAction, ExportTarget),
     Edit {
         title: String,
         value: String,
@@ -218,9 +220,15 @@ pub enum PlatformAction {
     },
     Background,
 }
+#[derive(Clone, Copy)]
+pub enum SavedAction { Open, #[cfg(not(target_os = "android"))] Show, #[cfg(not(target_os = "android"))] Extract }
+#[derive(Clone)]
+pub struct ExportTarget { pub(crate) identity:String, pub(crate) lineage:String, pub(crate) session:String, pub(crate) entry:String }
 struct Viewer {
     path: PathBuf,
     name: String,
+    session: String,
+    entry: String,
     zoom: f32,
     pan: Vec2,
 }
@@ -272,6 +280,13 @@ pub struct App {
     attachment_scroll: f32,
     max_attachment_scroll: f32,
     attachment_velocity: f32,
+    pending_exports: HashMap<String, (PathBuf, String)>,
+    export_targets: HashMap<String, ExportTarget>,
+    saving_downloads: HashSet<String>,
+    export_errors: HashMap<String, String>,
+    download_identity: String,
+    progress_clock: Instant,
+    progress_bucket: Option<u128>,
     waiting_settings: bool,
     daemon_draft: Option<crate::daemon_settings::Draft>,
     saving_settings: Option<String>,
@@ -309,6 +324,7 @@ impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
         let controller = Controller::new(store, wake.clone())?;
         let dot_color = controller.health.color(Instant::now());
+        let download_identity = controller.identity.clone();
         let composer_session = controller.account.selected.clone();
         let composer = Editor::composer(
             controller
@@ -358,6 +374,13 @@ impl App {
             attachment_scroll: 0.,
             max_attachment_scroll: 0.,
             attachment_velocity: 0.,
+            pending_exports: HashMap::new(),
+            export_targets: HashMap::new(),
+            saving_downloads: HashSet::new(),
+            export_errors: HashMap::new(),
+            download_identity,
+            progress_clock: Instant::now(),
+            progress_bucket: None,
             waiting_settings: false,
             daemon_draft: None,
             saving_settings: None,
@@ -396,6 +419,9 @@ impl App {
         }
         Ok(app)
     }
+    /// Headless-only attachment preview; never starts a transfer.
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn preview_attachments(&mut self) { self.show_attachments = true; }
     /// Headless-only heartbeat injection; never starts a socket or uses credentials.
     #[cfg(not(target_os = "android"))]
     pub fn preview_connection(&mut self, preview: ConnectionPreview) {
@@ -574,6 +600,11 @@ impl App {
             && self.modal.is_none() && self.viewer.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.notice = Some(error.to_string()); }
         self.dirty |= self.controller.poll();
+        if self.download_identity != self.controller.identity {
+            self.download_identity = self.controller.identity.clone();
+            self.export_errors.clear();
+        }
+        self.finish_exports();
         if let Some(text)=self.controller.copied.take() && !text.is_empty() {self.platform.push(PlatformAction::Copy(text));self.dirty=true;}
         self.dirty |= self.usage.tick();
         self.dirty |= self.info_tip.tick();
@@ -685,6 +716,15 @@ impl App {
         } else {
             self.controller.health.next_color_wake(now)
         };
+        let indeterminate = self.connection_visible && self.modal.is_none() && self.viewer.is_none()
+            && (!self.mobile || !self.show_chats || self.show_attachments)
+            && (self.controller.downloads.values().any(|d|!d.status.done && d.status.total==0)
+                || !self.saving_downloads.is_empty());
+        let progress_bucket=indeterminate.then(||now.duration_since(self.progress_clock).as_millis()/80);
+        self.dirty |= self.progress_bucket!=progress_bucket;
+        self.progress_bucket=progress_bucket;
+        let next_wake=if indeterminate {Some(next_wake.map_or(std::time::Duration::from_millis(80),
+            |duration|duration.min(std::time::Duration::from_millis(80))))} else {next_wake};
         self.connection_counter.sync(next_wake);
         // Redraw only when the visible counter or dot actually changes.
         self.dirty |= self.counter_bucket != counter_bucket;
@@ -2024,27 +2064,57 @@ impl App {
                 })
             }
             Action::Attachment(session, entry, name, image) => {
-                let path = self.controller.download(
-                    &session,
-                    &entry,
-                    if image { 10_000_000 } else { 50_000_000 },
-                )?;
-                if path.is_file() {
-                    if image {
+                let key=Controller::download_key(&session,&entry);
+                let path = match self.controller.download(&session,&entry,if image {10_000_000} else {50_000_000}) {
+                    Ok(path)=>path,
+                    Err(error)=>{let text=error.to_string();self.export_errors.insert(key.clone(),text.clone());
+                        self.controller.notice=Some(text);return Ok(());}
+                };
+                let in_progress = self.controller.downloads.get(&key).is_some_and(|d| !d.status.done);
+                if image {
+                    if path.is_file() && !in_progress {
                         self.viewer_image = None;
                         self.viewer = Some(Viewer {
                             path,
                             name,
+                            session,
+                            entry,
                             zoom: 1.,
                             pan: Vec2::new(0., 0.),
                         });
-                    } else {
-                        self.platform.push(PlatformAction::Export(path, name));
                     }
+                } else if path.is_file() && !in_progress {
+                    self.begin_save(&session,&entry,path,name);
+                } else {
+                    self.export_targets.insert(key.clone(), self.export_target(&session,&entry));
+                    self.export_errors.remove(&key);
+                    self.pending_exports.insert(key, (path, name));
                 }
             }
-            Action::CancelDownload(key) => self.controller.cancel_download(&key)?,
-            Action::Export(path, name) => self.platform.push(PlatformAction::Export(path, name)),
+            Action::SaveAttachment(session,entry,name) => {
+                let key=Controller::download_key(&session,&entry);
+                let path=match self.controller.download(&session,&entry,10_000_000) {
+                    Ok(path)=>path,
+                    Err(error)=>{let text=error.to_string();self.export_errors.insert(key.clone(),text.clone());
+                        self.controller.notice=Some(text);return Ok(());}
+                };
+                if path.is_file() && !self.controller.downloads.get(&key).is_some_and(|d|!d.status.done) {
+                    self.begin_save(&session,&entry,path,name);
+                } else {
+                    self.export_targets.insert(key.clone(),self.export_target(&session,&entry));
+                    self.pending_exports.insert(key,(path,name));
+                }
+            }
+            Action::UseSaved(session,entry,action) => {
+                if let Some(saved)=self.controller.saved_download(&session,&entry) {
+                    self.platform.push(PlatformAction::UseDownload(saved,action,self.export_target(&session,&entry)));
+                }
+            }
+            Action::CancelDownload(key) => {
+                self.pending_exports.remove(&key);
+                self.export_targets.remove(&key);
+                self.controller.cancel_download(&key)?;
+            },
             Action::Zoom(factor) => {
                 if let Some(v) = &mut self.viewer {
                     v.zoom = (v.zoom * factor).clamp(1., 16.);
@@ -2171,7 +2241,7 @@ impl App {
             let viewport = Rect::new(b.x + s, b.y + 57. * s, b.width - s, (b.height - 57. * s).max(0.));
             self.attachments_rect = viewport;
             let heights = files.iter().map(|(_, _, file)|
-                (166. + if file.kind == AttachmentKind::Image { 240. } else { 0. }) * s).collect::<Vec<_>>();
+                (104. + if file.kind == AttachmentKind::Image { 240. } else { 0. }) * s).collect::<Vec<_>>();
             let content_height = 12. * s + heights.iter().map(|h| h + 12. * s).sum::<f32>();
             self.max_attachment_scroll = (content_height + if older { 52. * s } else { 0. } - viewport.height).max(0.);
             self.attachment_scroll = self.attachment_scroll.clamp(0., self.max_attachment_scroll);
@@ -2313,7 +2383,7 @@ impl App {
                 ("−", Action::Zoom(0.8)),
                 ("Fit", Action::Fit),
                 ("+", Action::Zoom(1.25)),
-                ("Save", Action::Export(path, name)),
+                ("↓", Action::SaveAttachment(viewer.session.clone(), viewer.entry.clone(), name)),
             ];
             for (i, (label, action)) in buttons.into_iter().enumerate() {
                 button(
@@ -2628,7 +2698,9 @@ impl App {
                 } else {
                     e.role
                 },
-                source: if user {
+                source: if e.attachment.is_some() && chat.feed.incomplete.contains(&e.id) && e.text == "Loading…" {
+                    String::new()
+                } else if user {
                     literal(&e.text)
                 } else {
                     e.text.clone()
@@ -2939,15 +3011,8 @@ impl App {
             if let Some(message) = self.renderer.messages.get(&row.key) {
                 self.max_horizontal = self.max_horizontal.max(message.view.width - text_width);
             }
-            let attachment = if let Some((entry, a)) = &row.attachment {
-                (96. + if a.kind == AttachmentKind::Image
-                    && self.controller.attachment_path(&session,entry)
-                        .is_file()
-                {
-                    240.
-                } else {
-                    0.
-                }) * s
+            let attachment = if let Some((_, a)) = &row.attachment {
+                (72. + if a.kind == AttachmentKind::Image { 240. } else { 0. }) * s
             } else {
                 0.
             };

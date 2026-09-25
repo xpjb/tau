@@ -30,6 +30,8 @@ enum NativeEvent {
     Edit(String),
     File(PathBuf, String),
     Paste(String),
+    Saved(String, Result<crate::store::SavedDownload,String>),
+    Missing(String,String,String,String),
     Error(String),
 }
 struct Runtime {
@@ -99,6 +101,7 @@ impl Android {
     }
     fn actions(&mut self, ctx: &Ctx) {
         for action in self.app.actions() {
+            let save_key=match &action {PlatformAction::SaveDownload {key,..}=>Some(key.clone()),_=>None};
             let result = (|| -> Result<(), String> {
                 let vm = unsafe { JavaVM::from_raw(ctx.app.vm_as_ptr().cast()) }
                     .map_err(|e| e.to_string())?;
@@ -134,15 +137,29 @@ impl Android {
                                 &[JValue::Object(&url)],
                             )?;
                         }
-                        PlatformAction::Export(path, name) => {
-                            let path = env.new_string(path.to_string_lossy())?;
+                        PlatformAction::SaveDownload {key,source,name} => {
+                            let key = env.new_string(key)?;
+                            let source = env.new_string(source.to_string_lossy())?;
                             let name = env.new_string(name)?;
                             env.call_method(
                                 &activity,
                                 "exportFile",
-                                "(Ljava/lang/String;Ljava/lang/String;)V",
-                                &[JValue::Object(&path), JValue::Object(&name)],
+                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                                &[JValue::Object(&key),JValue::Object(&source),JValue::Object(&name)],
                             )?;
+                        }
+                        PlatformAction::UseDownload(saved, action, target) => {
+                            debug_assert!(matches!(action, crate::app::SavedAction::Open));
+                            let reference=env.new_string(saved.reference)?;
+                            let mime=env.new_string(saved.mime_type)?;
+                            let identity=env.new_string(target.identity)?;
+                            let lineage=env.new_string(target.lineage)?;
+                            let session=env.new_string(target.session)?;
+                            let entry=env.new_string(target.entry)?;
+                            env.call_method(&activity,"openSaved",
+                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                                &[JValue::Object(&reference),JValue::Object(&mime),JValue::Object(&identity),
+                                  JValue::Object(&lineage),JValue::Object(&session),JValue::Object(&entry)])?;
                         }
                         PlatformAction::Edit {
                             title,
@@ -172,7 +189,11 @@ impl Android {
                     "Android action failed".to_owned()
                 })
             })();
-            self.app.report(result.map_err(anyhow::Error::msg));
+            if let (Some(key),Err(error))=(&save_key,&result) {
+                self.app.complete_save(key,Err(error.clone()));
+            } else {
+                self.app.report(result.map_err(anyhow::Error::msg));
+            }
         }
     }
 }
@@ -267,6 +288,11 @@ impl chad::android::App for Android {
                     self.app.report(result);
                     let _ = std::fs::remove_file(path);
                 }
+                NativeEvent::Saved(key,result) => self.app.complete_save(&key,result),
+                NativeEvent::Missing(identity,lineage,session,entry) => {
+                    let result=self.app.controller.forget_download_for(&identity,&lineage,&session,&entry);
+                    self.app.report(result.and_then(|_|Err(anyhow::anyhow!("The downloaded file no longer exists. Download it again."))));
+                }
                 NativeEvent::Error(error) => self.app.report(Err(anyhow::anyhow!(error))),
             }
         }
@@ -312,6 +338,12 @@ pub extern "system" fn Java_app_tau_rust_MainActivity_nativeResult(
         0 => NativeEvent::Edit(a),
         1 => NativeEvent::File(a.into(), b),
         2 => NativeEvent::Paste(a),
+        4 => NativeEvent::Saved(a,serde_json::from_str(&b).map_err(|e|e.to_string())),
+        5 => NativeEvent::Saved(a,Err(b)),
+        6 => match serde_json::from_str::<(String,String,String)>(&b) {
+            Ok((lineage,session,entry))=>NativeEvent::Missing(a,lineage,session,entry),
+            Err(_) =>NativeEvent::Error("Invalid missing-download response".into()),
+        },
         _ => NativeEvent::Error(a),
     });
 }

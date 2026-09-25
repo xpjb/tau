@@ -28,3 +28,5 @@ mod tooltip;
 pub use desktop::run;
 
 mod disk;
+#[cfg(not(target_os = "android"))]
+mod downloads;
