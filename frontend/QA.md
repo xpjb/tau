@@ -1,3 +1,41 @@
+# Attachments view — September 25, 2026 (unreleased)
+
+- A round folded-paper button sits beside Play/Stop and stays available while idle
+  or offline. Its selected state indicates that Attachments is open.
+- Desktop windows at least 1000dp wide show a separate 320dp right sidebar; the
+  existing chat list stays on the left. Mobile and narrower windows use a separate
+  screen. Back/Escape returns to chat; resizing into that screen clears editor focus.
+- The current chat's sent files appear newest first, with filenames, captions,
+  image previews and the same download/cancel/view/save actions as transcript cards.
+  Wheel, touch momentum and scrollbar dragging use a separate scroll position.
+- Existing root-history paging loads older file metadata near the bottom, with a
+  retry button. Closed tool bodies and non-image files stay on demand. Visible file
+  captions and transcript content share one combined viewport request, not competing
+  requests. There is no new protocol, storage schema or saved attachment list.
+
+Validation after merging the concurrent Tau 2 QA fixes:
+
+- Managed `cargo check --locked -p tau-frontend --all-targets`: passed.
+- Managed frontend library nextest run: **58 passed**, including 57 retained tests
+  and one temporary headless interaction driver. Run ID:
+  `fd1cd2d6-7e15-4170-a91e-761b552dcc33`; 15.9 seconds.
+- One retained native-cache test covers multiple history pages, newest-first file
+  enumeration, loading completion, and no hidden tool/file body requests. The
+  existing full-caption test also passes. Native history already clears its loading
+  flag; no change to that path was needed.
+- The temporary GPU driver used synthetic chats and cached, hash-verified files at
+  1280×900, 1000×800, 800×700, 1080×2160 (2.5×) and mobile 1280×800. It exercised
+  button clicks, image viewing and Back, file-save actions, wheel/touch/scrollbar
+  routing, Back/Escape, resize/focus, idle controls, new file arrival, chat switching,
+  and preservation of the draft and transcript anchor. No UI layout test was retained.
+- Inspected desktop and phone renders below. These are local headless checks, not
+  physical Windows/Android acceptance. No package, version bump or deployment.
+
+![Desktop attachments sidebar](gallery/attachments-desktop.png)
+![Mobile attachments screen](gallery/attachments-phone.png)
+
+---
+
 # Tau 2 QA stream — September 25, 2026 (unreleased)
 
 - Connection status shows **min / max / latest** acknowledged RTT from the last

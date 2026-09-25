@@ -77,6 +77,14 @@ configurable; unset uses the chat model. Cache rings are estimates from existing
 reply timestamps, not native runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.
 
+## Attachments
+
+The folded-paper button beside Play/Stop opens the current chat's sent files,
+newest first. Desktop uses a second sidebar on the right; mobile and narrow
+windows use a separate screen. Image previews and download/save controls work
+as they do in the conversation, and older files load as you scroll.
+See [frontend QA](frontend/QA.md) for source validation and release status.
+
 ## Topics
 
 Small, horizontally scrolling topic tabs sit above the chat list. General is
