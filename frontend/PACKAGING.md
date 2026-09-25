@@ -1,5 +1,9 @@
 # Beta packaging sizes
 
+Future releases use [the automated rollout](../docs/beta-release.md). Non-debug
+Windows release builds no longer request unused SDK PDBs; 0.7.4 artifacts below
+are historical and were not rebuilt just to remove that build-time warning.
+
 ## 0.7.4 protocol-18 native block-sync beta
 
 | Measured component | MiB |

@@ -41,6 +41,8 @@ install -d -m 0755 /etc/systemd/system/tau2-beta.service.d
 printf '[Service]\nEnvironment=TAU_TRANSFER_BIND=%s:8792\nEnvironment=TAU_TRANSFER_BIND_V6=[%s]:8792\n' "$bind4" "$bind6" > /etc/systemd/system/tau2-beta.service.d/native-bind.conf.new
 chmod 0644 /etc/systemd/system/tau2-beta.service.d/native-bind.conf.new
 mv /etc/systemd/system/tau2-beta.service.d/native-bind.conf.new /etc/systemd/system/tau2-beta.service.d/native-bind.conf
+# Stop only beta before replacement; never overlap old/new source writers.
+systemctl stop tau2-beta.service
 # Atomic executable replacement leaves an already-running beta mapped to its old inode.
 install -m 0755 "$binary" /usr/local/lib/tau2-beta/taud.new
 mv -f /usr/local/lib/tau2-beta/taud.new /usr/local/lib/tau2-beta/taud
@@ -49,10 +51,10 @@ systemctl daemon-reload
 systemctl enable tau2-beta.service
 systemctl restart tau2-beta.service
 for _ in $(seq 1 100); do
-    if curl --fail --silent http://127.0.0.1:8791/v1/health >/dev/null; then break; fi
+    if curl --fail --silent --max-time 2 http://127.0.0.1:8791/v1/health >/dev/null; then break; fi
     sleep 0.1
 done
-curl --fail --silent http://127.0.0.1:8791/v1/health >/dev/null
+curl --fail --silent --max-time 2 http://127.0.0.1:8791/v1/health >/dev/null
 tailscale serve --bg --yes --http=8789 http://127.0.0.1:8791 >/dev/null
 systemctl --no-pager --full status tau2-beta.service | sed -n '1,12p'
 echo 'Beta URL: http://vibe:8789 (Tailnet only). Token: /etc/tau2-beta.env.'

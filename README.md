@@ -114,6 +114,20 @@ The native rewrite is merged into the beta release line. See [native block sync]
 
 ## Build and validate
 
+For a beta rollout, use **[`scripts/release-beta.sh`](docs/beta-release.md)** rather
+than manually repeating builds/checks/deployment. It has resumable stage receipts,
+sequential low-resource builds, package verification and an ordered delivery
+manifest. No tests or service changes run implicitly:
+
+```sh
+scripts/release-beta.sh --plan --version 0.7.5 --push --deploy
+scripts/release-beta.sh --version 0.7.5 --push --deploy
+```
+
+Choose the next unused version. Add `--merge feat/name` when needed; `--check` and
+`--test` are explicit, cached opt-ins. The commands below remain for development,
+not an instruction to repeat a whole suite during every deployment.
+
 Use the host's managed Cargo wrapper. Keep `CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=1`,
 build targets sequentially, and defer on shared-lock exit 75. Use nextest, not
 `cargo test`; the wrapper supplies its test-concurrency limit.

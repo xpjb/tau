@@ -1,3 +1,22 @@
+# Release automation — use this instead of manual rollout steps
+
+`/root/tau2/scripts/release-beta.sh` now owns the process. See
+[docs/beta-release.md](docs/beta-release.md). It defaults to no tests, no push and
+no deployment; the operator opts into those actions. Successful stages are reused,
+Windows/Android build sequentially, and outputs are verified/checksummed. Use its
+`delivery.json` for the two Tau file attachments, or an explicit real sender hook.
+Do not replace those receipts with repeated ad-hoc builds, polling or hash commands.
+
+Non-debug Windows release builds now use `/DEBUG:NONE`, removing the unused SDK
+PDB dependency rather than hiding LNK4099. A tiny managed launcher build verified
+that change (0.39 s, no warning). Seven isolated automation checks took 2.5 s; no
+Rust suite, full package rebuild or redeployment was performed for this change.
+Already delivered/running **0.7.4 / 18** remains unchanged. Pick a new version for
+the next release; existing delivered artifacts without automation receipts are
+not blindly adopted or overwritten.
+
+---
+
 # Integration release override — beta 0.7.4 / protocol 18
 
 The user explicitly authorized pushing/merging the native rewrite and redeploying

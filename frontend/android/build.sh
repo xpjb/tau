@@ -2,6 +2,9 @@
 set -euo pipefail
 app=$(cd "$(dirname "$0")/.." && pwd)
 root=$(cd "$app/.." && pwd)
+cargo=/usr/local/bin/cargo
+export CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=1
+export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-XX:ActiveProcessorCount=1"
 sdk=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/android-sdk}}
 ndk=${ANDROID_NDK_HOME:-$sdk/ndk/27.2.12479018}
 tools=$sdk/build-tools/${ANDROID_BUILD_TOOLS_VERSION:-35.0.0}
@@ -20,10 +23,11 @@ for tool in "$llvm/llvm-strip" "$llvm/$clang" "$tools/aapt2" "$tools/d8" "$tools
     test -x "$tool" || { echo "Missing Android build tool: $tool" >&2; exit 1; }
 done
 test -f "$jar" || { echo "Install Android SDK platform 35" >&2; exit 1; }
+test -f "$keystore" || { echo "Existing beta signing key required: $keystore (refusing to create a new identity)" >&2; exit 1; }
 cd "$root"
 variable=${triple//-/_}
 export "CC_$variable=$llvm/$clang" "AR_$variable=$llvm/llvm-ar"
-cargo build --release --locked --target "$triple" -p tau-frontend --lib --target-dir "$target" \
+"$cargo" build --release --locked --target "$triple" -p tau-frontend --lib --target-dir "$target" \
     --config net.git-fetch-with-cli=true \
     --config "target.$triple.linker=\"$llvm/$clang\"" \
     --config "target.$triple.rustflags=[\"-C\", \"link-arg=-Wl,-z,max-page-size=16384\", \"-C\", \"link-arg=-Wl,-z,common-page-size=16384\"]"
@@ -51,12 +55,6 @@ with zipfile.ZipFile(sys.argv[1], 'a', compression=zipfile.ZIP_DEFLATED, compres
     apk.write(sys.argv[4], 'classes.dex', compress_type=zipfile.ZIP_DEFLATED)
 PY
 "$tools/zipalign" -f -P 16 4 "$out/unsigned.apk" "$out/aligned.apk"
-if ! test -f "$keystore"; then
-    mkdir -p "$(dirname "$keystore")"
-    keytool -genkeypair -keystore "$keystore" -storepass android -keypass android \
-        -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-        -dname "CN=Android Debug,O=Android,C=US"
-fi
 "$tools/apksigner" sign --ks "$keystore" --ks-key-alias androiddebugkey \
     --ks-pass pass:android --key-pass pass:android \
     --out "$out/tau-frontend-$abi.apk" "$out/aligned.apk"
