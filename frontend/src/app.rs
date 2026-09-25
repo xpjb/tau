@@ -446,6 +446,10 @@ impl App {
     pub fn resize(&mut self, size: (u32, u32), scale: f32, origin: Vec2) {
         if self.size != size || self.scale != scale || self.origin != origin {
             self.cancel_pointer();
+            if self.show_attachments && (self.mobile || size.0 as f32 / scale < 1000.) {
+                self.cancel_preedit();
+                self.focus = None;
+            }
             self.revealed_project.clear();
             self.size = size;
             self.scale = scale;
@@ -1541,6 +1545,7 @@ impl App {
                 self.cancel_pointer();
                 self.focus = None;
                 self.show_attachments = !self.show_attachments;
+                self.show_chats = false;
                 self.history_attempt = None;
             }
             Action::History => {
@@ -2209,8 +2214,10 @@ impl App {
             }
             self.scrollbar(&mut chrome, Lane::Attachments, viewport);
         }
-        if !interests.is_empty() || !self.show_chats || file_side {
-            if let Some(session) = self.controller.account.selected.clone() { self.controller.viewport(&session, interests); }
+        if (wide || !self.show_chats || self.show_attachments)
+            && let Some(session) = self.controller.account.selected.clone()
+        {
+            self.controller.viewport(&session, interests);
         }
         if let Some((rect, _)) = self
             .info_areas
