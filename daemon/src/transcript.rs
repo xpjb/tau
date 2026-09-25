@@ -19,6 +19,7 @@ pub struct AttachmentRequest {
     pub path: PathBuf,
     pub caption: Option<String>,
     pub size: Option<u64>,
+    pub sha256: Option<String>,
 }
 
 pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
@@ -53,6 +54,7 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
         path: PathBuf::from(attachment.get("path")?.as_str()?),
         caption,
         size,
+        sha256:attachment.get("sha256").and_then(Value::as_str).map(str::to_owned),
     })
 }
 

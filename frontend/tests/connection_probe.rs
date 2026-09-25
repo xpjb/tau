@@ -26,7 +26,7 @@ async fn fixture(reply: bool) -> (Settings, tokio::task::JoinHandle<()>) {
             ws.on_upgrade(move |mut socket| async move {
                 let hello = ServerMessage::Hello {
                     protocol_version: PROTOCOL_VERSION,
-                    daemon_version: "fixture".into(),
+                    daemon_version: "fixture".into(),lineage:Some("fixture".into()),
                 };
                 socket
                     .send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
@@ -70,6 +70,7 @@ async fn event(network: &mut Network) -> Event {
 async fn probe_uses_ping_pong_not_session_list_and_reports_measured_rtt() {
     let (settings, server) = fixture(true).await;
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
     assert!(matches!(event(&mut network).await, Event::Ready(1)));
     let started = Instant::now();
     let sent = match event(&mut network).await {
@@ -96,6 +97,7 @@ async fn probe_uses_ping_pong_not_session_list_and_reports_measured_rtt() {
 async fn unanswered_ping_reconnects_on_deadline_not_on_next_probe() {
     let (settings, server) = fixture(false).await;
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
     assert!(matches!(event(&mut network).await, Event::Ready(1)));
     let sent = match event(&mut network).await {
         Event::HeartbeatSent { epoch: 1, at } => at,
@@ -127,7 +129,7 @@ async fn oversized_legacy_frame_is_rejected_before_reading_its_body() {
     let app = Router::new().route("/v1/ws", get(move |ws: WebSocketUpgrade| {
         let counted = counted.clone();
         async move { ws.on_upgrade(move |mut socket| async move {
-            let hello = ServerMessage::Hello { protocol_version:PROTOCOL_VERSION, daemon_version:"audit".into() };
+            let hello = ServerMessage::Hello { protocol_version:PROTOCOL_VERSION, daemon_version:"audit".into(),lineage:Some("fixture".into()) };
             socket.send(Message::Text(serde_json::to_string(&hello).unwrap().into())).await.unwrap();
             let legacy=serde_json::json!({"type":"transcript_snapshot","body":"x".repeat(512*1024)});
             if socket.send(Message::Text(legacy.to_string().into())).await.is_err() {return;}
@@ -171,6 +173,7 @@ async fn oversized_legacy_frame_is_rejected_before_reading_its_body() {
     });
     let settings = Settings { server_url:format!("http://{address}"), token:"audit-fixture".into() };
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
     assert!(matches!(event(&mut network).await, Event::Ready(1)));
     let started=Instant::now();
     match event(&mut network).await {
@@ -190,9 +193,9 @@ async fn paused_ui_coalesces_state_without_blocking_heartbeats_or_losing_receipt
     let pings=Arc::new(AtomicUsize::new(0));let seen=pings.clone();
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
     let app=Router::new().route("/v1/ws",get(move |ws:WebSocketUpgrade| {let seen=seen.clone();async move {ws.on_upgrade(move |mut socket|async move {
-        socket.send(Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into()}).unwrap().into())).await.unwrap();
+        socket.send(Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into())}).unwrap().into())).await.unwrap();
         for n in 0..1500 {
-            let state=ServerMessage::SessionState {session_id:"chat".into(),status:tau_protocol::SessionStatus::Running,context_usage:None,detail:Some(n.to_string())};
+            let state=ServerMessage::SessionState {revision:0,restore_review:None,session_id:"chat".into(),status:tau_protocol::SessionStatus::Running,context_usage:None,detail:Some(n.to_string())};
             socket.send(Message::Text(serde_json::to_string(&state).unwrap().into())).await.unwrap();
             if n<200 {socket.send(Message::Text(serde_json::to_string(&ServerMessage::success(format!("receipt-{n}"),None,None)).unwrap().into())).await.unwrap();}
         }

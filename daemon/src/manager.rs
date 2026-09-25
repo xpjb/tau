@@ -4,14 +4,13 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use tokio::fs;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 use tracing::warn;
 
 use crate::agent::{AgentSession, auth::AuthStore};
 use crate::config::Config;
 use crate::catalog::ModelCatalog;
-use crate::protocol::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, SessionSummary, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
+use crate::protocol::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
 use crate::settings::{SettingsStore, Settings};
 use crate::state::{StateStore, Receipt, SessionModel};
 use crate::transcript::{QueuedRequest, QueueControl, Transcript};
@@ -30,10 +29,16 @@ pub(crate) struct ManagerInner {
     pub projects: Mutex<()>,
     pub catalog: ModelCatalog,
     pub catalog_requests: Semaphore,
-    pub block_imports: Semaphore,
+    pub agent_runs:Semaphore,
+    pub title_requests:Semaphore,
+    pub block_imports: Arc<Semaphore>,
+    pub upload_finishes:Mutex<HashMap<String,std::sync::Weak<Mutex<()>>>>,
+    pub upload_publication:Mutex<()>,
     pub runtimes: Mutex<HashMap<String, Arc<SessionRuntime>>>,
     pub events: broadcast::Sender<ServerMessage>,
     pub shutting_down: AtomicBool,
+    pub state_clock:std::sync::atomic::AtomicU64,
+    pub deleting:std::sync::Mutex<HashSet<String>>,
 }
 pub(crate) struct SessionRuntime {
     pub operation: Mutex<()>,
@@ -48,7 +53,7 @@ impl Default for SessionContent {
     fn default() -> Self { Self { agent: None, transcript: None } }
 }
 #[derive(Clone, Default)]
-pub(crate) struct RuntimeState { pub status: SessionStatus, pub detail: Option<String>, pub idle_since: Option<Instant>, pub context_usage: Option<ContextUsage> }
+pub(crate) struct RuntimeState { pub revision:u64, pub status: SessionStatus, pub detail: Option<String>, pub idle_since: Option<Instant>, pub context_usage: Option<ContextUsage> }
 impl SessionRuntime {
     fn new() -> Self { Self { operation: Mutex::new(()), content: Mutex::new(SessionContent::default()), state: StdRwLock::new(RuntimeState::default()) } }
     pub fn snapshot(&self) -> RuntimeState { self.state.read().unwrap_or_else(|e| e.into_inner()).clone() }
@@ -62,8 +67,8 @@ impl AgentManager {
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
         let catalog = ModelCatalog::load(config.settings_path.with_file_name("model-catalog.json")).await;
         Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
-            projects: Mutex::new(()), catalog, catalog_requests: Semaphore::new(2), block_imports: Semaphore::new(2),
-            runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false) }) })
+            projects: Mutex::new(()), catalog, catalog_requests: Semaphore::new(2), agent_runs:Semaphore::new(8), title_requests:Semaphore::new(2), block_imports: Arc::new(Semaphore::new(2)), upload_finishes:Mutex::new(HashMap::new()),upload_publication:Mutex::new(()),
+            runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false),state_clock:std::sync::atomic::AtomicU64::new(0),deleting:std::sync::Mutex::new(HashSet::new()) }) })
     }
     pub(crate) fn context_window(&self, settings: &Settings, model: &SessionModel) -> Option<u64> {
         self.inner.catalog.capacity(settings, model)
@@ -112,25 +117,6 @@ impl AgentManager {
         Ok(format!("Refreshed {provider} model catalog: {count} models"))
     }
     pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> { self.inner.events.subscribe() }
-    pub async fn sessions_message(&self) -> Result<ServerMessage> {
-        let runtimes = self.inner.runtimes.lock().await;
-        let settings = self.inner.settings.get();
-        let sessions = self.inner.state.list().await?;
-        let mut providers = HashSet::new();
-        for (_, s) in &sessions {
-            if providers.len() >= 8 { break; }
-            if providers.insert(&s.model.provider) { self.schedule_catalog(&s.model.provider); }
-        }
-        Ok(ServerMessage::Sessions { sessions: sessions.into_iter().map(|(id, s)| {
-            let runtime = runtimes.get(&id).map(|r| r.snapshot()).unwrap_or_default();
-            // Sleeping chats (including those never opened since restart) retain the
-            // last saved value; active chats may have newer in-memory turn usage.
-            let tokens = if runtime.status == SessionStatus::Sleeping { s.tokens } else { runtime.context_usage.and_then(|usage| usage.tokens) };
-            let context_usage = self.context_usage(&settings, &s.model, tokens);
-            SessionSummary { id, project_id:s.project_id, title:s.title, starter:s.starter, status:runtime.status, detail:runtime.detail, context_usage,
-                model:Some(s.model), parent_id:s.parent_id, created_at_ms:s.created_at_ms, updated_at_ms:s.updated_at_ms }
-        }).collect() })
-    }
     #[cfg(test)]
     pub async fn create_session(&self, keep_session_id: Option<&str>, project_id: &str) -> Result<String> {
         self.create_session_requested(keep_session_id, project_id, None).await
@@ -168,11 +154,13 @@ impl AgentManager {
     /// Viewing persisted state never loads an agent or waits for a provider.
     pub async fn session_state_message(&self, id: &str) -> Result<ServerMessage> {
         let stored = self.inner.state.get(id).await?.context("Unknown session")?;
-        let state = self.inner.runtimes.lock().await.get(id).map(|runtime|runtime.snapshot());
+        let restore_review=self.inner.state.restore_review(id).await?;
+        let (state,revision)={let runtimes=self.inner.runtimes.lock().await;let state=runtimes.get(id).map(|runtime|runtime.snapshot());
+            let revision=state.as_ref().map_or_else(||self.inner.state_clock.load(Ordering::Acquire),|s|s.revision);(state,revision)};
         let tokens=state.as_ref().filter(|s|s.status!=SessionStatus::Sleeping).and_then(|s|s.context_usage).and_then(|u|u.tokens).or(stored.tokens);
         let usage = self.context_usage(&self.inner.settings.get(),&stored.model,tokens);
-        Ok(ServerMessage::SessionState { session_id:id.into(),status:state.as_ref().map_or(SessionStatus::Sleeping,|s|s.status),
-            detail:state.as_ref().and_then(|s|s.detail.clone()),context_usage:usage })
+        Ok(ServerMessage::SessionState { revision,restore_review:Some(restore_review),session_id:id.into(),status:state.as_ref().map_or(SessionStatus::Sleeping,|s|s.status),
+            detail:if restore_review {Some("Restored history: review external effects before execution".into())} else {state.as_ref().and_then(|s|s.detail.clone())},context_usage:usage })
     }
     pub async fn receipt_message(&self, id: &str, requests: &[String]) -> Result<ServerMessage> {
         anyhow::ensure!(requests.len() <= 4,"Receipt requests are limited to four IDs");
@@ -201,6 +189,7 @@ impl AgentManager {
             if let Some(error) = receipt.error { bail!("{error}"); }
             return Ok(PromptOutcome { disposition:receipt.disposition,notice:receipt.notice });
         }
+        self.inner.state.require_execution(id).await?;
         if let Some(rest) = text.strip_prefix('/') {
             let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             if ["compact", "model", "thinking", "name", "fast"].contains(&name) {
@@ -211,8 +200,10 @@ impl AgentManager {
                     let agent=content.agent.as_mut().unwrap();agent.running=true;agent.cancel=tokio_util::sync::CancellationToken::new();
                     let manager=self.clone();let session=id.to_owned();let rt=runtime.clone();let arguments=args.trim().to_owned();
                     self.set_runtime_state(id,&runtime,SessionStatus::Running,Some("Compacting context".into()),None);
+                    let cancel=agent.cancel.clone();
                     agent.task=Some(tokio::spawn(async move {
-                        let result=manager.compact(&session,&rt,&arguments).await.map(|()|PromptOutcome {disposition:PromptDisposition::Handled,notice:Some("Context compacted.".into())});
+                        let admission=tokio::select! {_=cancel.cancelled()=>None,p=manager.inner.agent_runs.acquire()=>p.ok()};
+                        let result=if admission.is_none() {Err(anyhow::anyhow!("Compaction cancelled before execution"))} else {manager.compact(&session,&rt,&arguments).await.map(|()|PromptOutcome {disposition:PromptDisposition::Handled,notice:Some("Context compacted.".into())})};
                         let mut content=rt.content.lock().await;
                         if let Some(agent)=&mut content.agent {agent.running=false;}
                         if let Err(error)=manager.inner.state.finish_command(&session,receipt.clone(),&result).await {warn!(%error,"Could not persist compaction outcome");}
@@ -260,6 +251,7 @@ impl AgentManager {
             if receipt.command.as_deref() != Some("queue_control") || receipt.text != payload { bail!("Request ID was already used for another control"); }
             return Ok("accepted".into());
         }
+        if matches!(operation,QueueOperation::Resume {..}) {self.inner.state.require_execution(id).await?;}
         let transcript = content.transcript.as_ref().unwrap();
         if transcript.generation != generation { bail!("Queue changed; reopen this chat"); }
         let mut queue = transcript.queue.clone();
@@ -340,13 +332,14 @@ impl AgentManager {
     }
     pub async fn delete_session(&self, id: &str) -> Result<()> {
         let _gate = self.inner.projects.lock().await;
-        let runtime = self.runtime(id).await?;
+        let _deleting=self.deleting(vec![id.into()]);
+        let runtime=self.inner.runtimes.lock().await.get(id).cloned().unwrap_or_else(||Arc::new(SessionRuntime::new()));
         if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); }
         let _guard = runtime.operation.lock().await;
         self.retire_session(id, &runtime).await;
         self.inner.state.remove(id).await?;
         self.inner.runtimes.lock().await.remove(id);
-        match fs::remove_dir_all(self.inner.config.upload_root.join(id)).await { Ok(()) => {}, Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}, Err(e) => return Err(e.into()) }
+        self.maintain_uploads().await?;
         self.broadcast_sessions().await; Ok(())
     }
     pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
@@ -365,6 +358,9 @@ impl AgentManager {
         let result = self.inner.state.branch(id,entry_id).await?;
         self.broadcast_sessions().await; Ok(result)
     }
+    pub(crate) fn deleting(&self,ids:Vec<String>)->Deleting {
+        self.inner.deleting.lock().unwrap().extend(ids.iter().cloned());Deleting {inner:self.inner.clone(),ids}
+    }
     pub async fn shutdown(&self) {
         if self.inner.shutting_down.swap(true, Ordering::AcqRel) { return; }
         let runtimes = self.inner.runtimes.lock().await.iter().map(|(id,r)| (id.clone(),r.clone())).collect::<Vec<_>>();
@@ -373,8 +369,12 @@ impl AgentManager {
     }
     pub(crate) async fn runtime(&self, id: &str) -> Result<Arc<SessionRuntime>> {
         if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
-        if self.inner.state.get(id).await?.is_none() { bail!("Unknown session {id}"); }
-        Ok(self.inner.runtimes.lock().await.entry(id.into()).or_insert_with(|| Arc::new(SessionRuntime::new())).clone())
+        let mut runtimes=self.inner.runtimes.lock().await;
+        anyhow::ensure!(!self.inner.deleting.lock().unwrap().contains(id),"Chat is being deleted");
+        if self.inner.state.get(id).await?.is_none() {bail!("Unknown session {id}");}
+        runtimes.retain(|_,runtime|Arc::strong_count(runtime)>1 || runtime.snapshot().status!=SessionStatus::Sleeping);
+        anyhow::ensure!(runtimes.len()<128 || runtimes.contains_key(id),"Runtime admission is full (128 chats); close idle chats before starting another");
+        Ok(runtimes.entry(id.into()).or_insert_with(|| {let runtime=SessionRuntime::new();runtime.state.write().unwrap().revision=self.inner.state_clock.fetch_add(1,Ordering::AcqRel)+1;Arc::new(runtime)}).clone())
     }
     pub(crate) async fn ensure_loaded(&self, id: &str, runtime: &Arc<SessionRuntime>, content: &mut SessionContent) -> Result<()> {
         if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
@@ -386,7 +386,9 @@ impl AgentManager {
         if !queue.requests.is_empty() || stored.needs_turn { queue.paused = true; }
         let detail = (queue.paused && (stored.needs_turn || !queue.requests.is_empty())).then(|| "Pending work is paused; resume when ready".to_owned());
         let usage = self.context_usage(&settings, &stored.model, stored.tokens);
-        let page = self.inner.state.page(id,None).await?;
+        // The agent needs only the durable queue/head, not display history.
+        // Provider context is loaded by the owned run *after* acceptance.
+        let page = crate::transcript::HistoryPage {events:vec![],before:None};
         let mut transcript = Transcript::new(page,stored.head,stored.next_order,queue);
         transcript.generation = format!("{}:{id}",self.inner.state.block_cursor().await?.lineage);
         content.transcript = Some(transcript);
@@ -400,8 +402,9 @@ impl AgentManager {
         if current.status == status && current.detail == detail && current.context_usage == usage { return; }
         let schedule = status == SessionStatus::Idle && current.status != SessionStatus::Idle;
         let idle_since = if status == SessionStatus::Idle { current.idle_since.or(Some(Instant::now())) } else { None };
-        *current = RuntimeState { status, detail:detail.clone(), context_usage:usage, idle_since }; drop(current);
-        let _ = self.inner.events.send(ServerMessage::SessionState { session_id:id.into(), status, detail, context_usage:usage });
+        let revision=self.inner.state_clock.fetch_add(1,Ordering::AcqRel)+1;
+        *current = RuntimeState { revision,status, detail:detail.clone(), context_usage:usage, idle_since }; drop(current);
+        let _ = self.inner.events.send(ServerMessage::SessionState { revision,restore_review:None,session_id:id.into(), status, detail, context_usage:usage });
         let timeout = self.inner.settings.get().daemon.idle_timeout_seconds;
         if schedule && timeout > 0 {
             let manager = self.clone(); let id = id.to_owned(); let runtime = runtime.clone();
@@ -433,3 +436,6 @@ pub(crate) fn safe_file_name(file_name: &str) -> String {
     if safe.is_empty() { "attachment".into() } else { safe }
 }
 pub(crate) fn bounded(value: &str, max: usize) -> String { value.chars().take(max).collect() }
+
+pub(crate) struct Deleting {inner:Arc<ManagerInner>,ids:Vec<String>}
+impl Drop for Deleting {fn drop(&mut self) {let mut set=self.inner.deleting.lock().unwrap();for id in &self.ids {set.remove(id);}}}

@@ -436,7 +436,7 @@ async fn files_share_native_blocks_authorization_and_verified_offline_cache() {
     async fn ws(State(peer):State<Peer>, headers:HeaderMap, ws:WebSocketUpgrade) -> impl axum::response::IntoResponse {
         assert_eq!(headers["authorization"],"Bearer fixture-token");
         ws.on_upgrade(move |mut ws|async move {
-            ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into()}).unwrap().into())).await.unwrap();
+            ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into())}).unwrap().into())).await.unwrap();
             while let Some(Ok(frame))=ws.recv().await {
                 let axum::extract::ws::Message::Text(text)=frame else {continue;};
                 let req:ClientRequest=serde_json::from_str(&text).unwrap();

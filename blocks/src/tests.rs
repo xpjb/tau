@@ -277,3 +277,34 @@ fn cache_byte_quota_evicts_old_bodies_without_advancing_or_deleting_metadata() {
     assert_eq!(db.query_row("SELECT bytes FROM block_usage",[],|r|r.get::<_,u64>(0)).unwrap(),6);
     assert!(cached_feed(&db,"chat",None).unwrap().is_none());
 }
+
+#[test]
+fn metadata_quotas_rollback_headers_cas_and_journal_together() {
+    let mut db=db();save(&mut db,block("a",None,0,BlockKind::Text),b"kept");
+    let before=cursor(&db).unwrap();
+    let usage=|db:&Connection|db.query_row("SELECT headers,bytes FROM block_metadata_usage",[],|r|Ok((r.get::<_,u64>(0)?,r.get::<_,u64>(1)?))).unwrap();
+    let original=usage(&db);db.execute("UPDATE block_limits SET headers=1",[]).unwrap();
+    {let tx=db.transaction().unwrap();assert!(put(&tx,"chat",block("b",None,1,BlockKind::Text),b"not owned").is_err());}
+    assert_eq!(usage(&db),original);assert_eq!(cursor(&db).unwrap(),before);assert!(header(&db,"chat","b").unwrap().is_none());
+    db.execute("UPDATE block_limits SET bytes=?1",[original.1]).unwrap();
+    {let tx=db.transaction().unwrap();let mut h=header(&tx,"chat","a").unwrap().unwrap();h.meta=json!({"large":"🦀".repeat(300)});assert!(set_header(&tx,"chat",h).is_err());}
+    assert_eq!(usage(&db),original);assert_eq!(cursor(&db).unwrap(),before);
+    {let tx=db.transaction().unwrap();remove(&tx,"chat","a").unwrap();tx.commit().unwrap();}
+    assert_eq!(usage(&db),(0,0));assert_eq!(db.query_row("SELECT bytes FROM block_usage",[],|r|r.get::<_,u64>(0)).unwrap(),0);
+}
+
+#[test]
+fn pruned_journal_resets_the_whole_cached_scope_not_just_the_recent_window() {
+    let mut source=db();let mut cache=db();save(&mut source,block("forgotten",None,0,BlockKind::Text),b"old");
+    let page=feed(&source,&root()).unwrap();apply(&mut cache,&root(),&page);download(&source,&mut cache,"forgotten");
+    let request=FeedRequest {cursor:Some(page.cursor),..root()};
+    for i in 1..50 {save(&mut source,block(&format!("n{i}"),None,i,BlockKind::Text),b"new");}
+    {let tx=source.transaction().unwrap();remove(&tx,"chat","forgotten").unwrap();tx.commit().unwrap();}
+    source.execute_batch("WITH RECURSIVE n(x) AS (SELECT 100 UNION ALL SELECT x+1 FROM n WHERE x<66999)
+        INSERT INTO block_changes SELECT x,'noise','','n-'||x,x,json_object('type','remove','id','n-'||x,'revision',x) FROM n;
+        UPDATE block_state SET sequence=67583;").unwrap();
+    save(&mut source,block("last",None,100,BlockKind::Text),b"last");
+    assert_eq!(source.query_row("SELECT count(*) FROM block_changes",[],|r|r.get::<_,u64>(0)).unwrap(),65536);
+    let page=feed(&source,&request).unwrap();assert!(page.reset);assert!(page.before.is_some());apply(&mut cache,&request,&page);
+    assert!(header(&cache,"chat","forgotten").unwrap().is_none());assert_eq!(cache.query_row("SELECT count(*) FROM block_parts WHERE id='forgotten'",[],|r|r.get::<_,u64>(0)).unwrap(),0);
+}

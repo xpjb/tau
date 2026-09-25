@@ -92,7 +92,7 @@ pub enum BlockWatch { Feed(FeedRequest), Feeds { requests:Vec<FeedRequest> }, Bl
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BulkOffer { pub node_id: String, pub port: u16, pub lineage: String }
+pub struct BulkOffer { pub node_id: String, pub port: u16, #[serde(default)] pub port_v6:Option<u16>, pub lineage: String }
 
 /// Immutable, verified input. Retrying an ID with a different specification is
 /// an error, including after a disconnect or a process restart.

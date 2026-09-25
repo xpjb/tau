@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS block_cache_tombstones (
     PRIMARY KEY(scope,id)
 );
 CREATE TABLE IF NOT EXISTS block_usage (singleton INTEGER PRIMARY KEY CHECK(singleton=1), bytes INTEGER NOT NULL, clock INTEGER NOT NULL DEFAULT 0);
-INSERT OR IGNORE INTO block_usage(singleton,bytes) SELECT 1,coalesce(sum(length(data)),0) FROM block_chunks;
+INSERT OR IGNORE INTO block_usage(singleton,bytes) SELECT 1,(SELECT coalesce(sum(length(data)),0) FROM block_chunks) WHERE NOT EXISTS(SELECT 1 FROM block_usage);
 CREATE TRIGGER IF NOT EXISTS block_bytes_insert AFTER INSERT ON block_chunks BEGIN
     UPDATE block_usage SET bytes=bytes+length(NEW.data) WHERE singleton=1;
 END;
@@ -64,3 +64,21 @@ CREATE TRIGGER IF NOT EXISTS block_bytes_update AFTER UPDATE OF data ON block_ch
     UPDATE block_usage SET bytes=bytes+length(NEW.data)-length(OLD.data) WHERE singleton=1;
 END;
 CREATE TABLE IF NOT EXISTS block_cache_access (scope TEXT NOT NULL,id TEXT NOT NULL,touched INTEGER NOT NULL,PRIMARY KEY(scope,id),FOREIGN KEY(scope,id) REFERENCES blocks(scope,id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS block_metadata_usage(singleton INTEGER PRIMARY KEY CHECK(singleton=1),headers INTEGER NOT NULL,bytes INTEGER NOT NULL);
+INSERT OR IGNORE INTO block_metadata_usage SELECT 1,(SELECT count(*) FROM blocks),(SELECT coalesce(sum(length(CAST(header AS BLOB))),0) FROM blocks) WHERE NOT EXISTS(SELECT 1 FROM block_metadata_usage);
+CREATE TABLE IF NOT EXISTS block_limits(singleton INTEGER PRIMARY KEY CHECK(singleton=1),headers INTEGER NOT NULL,bytes INTEGER NOT NULL);
+INSERT OR IGNORE INTO block_limits VALUES(1,250000,268435456);
+CREATE TRIGGER IF NOT EXISTS block_header_insert AFTER INSERT ON blocks BEGIN
+ UPDATE block_metadata_usage SET headers=headers+1,bytes=bytes+length(CAST(NEW.header AS BLOB));
+ SELECT CASE WHEN EXISTS(SELECT 1 FROM block_metadata_usage u JOIN block_limits l ON u.singleton=l.singleton WHERE u.headers>l.headers OR u.bytes>l.bytes) THEN RAISE(ABORT,'Block metadata quota reached; archive/delete old chats or clear replica cache') END;
+END;
+CREATE TRIGGER IF NOT EXISTS block_header_update AFTER UPDATE OF header ON blocks BEGIN
+ UPDATE block_metadata_usage SET bytes=bytes+length(CAST(NEW.header AS BLOB))-length(CAST(OLD.header AS BLOB));
+ SELECT CASE WHEN EXISTS(SELECT 1 FROM block_metadata_usage u JOIN block_limits l ON u.singleton=l.singleton WHERE u.bytes>l.bytes) THEN RAISE(ABORT,'Block metadata quota reached; archive/delete old chats or clear replica cache') END;
+END;
+CREATE TRIGGER IF NOT EXISTS block_header_delete AFTER DELETE ON blocks BEGIN
+ UPDATE block_metadata_usage SET headers=headers-1,bytes=bytes-length(CAST(OLD.header AS BLOB));
+END;
+CREATE TRIGGER IF NOT EXISTS block_tombstone_limit AFTER INSERT ON block_cache_tombstones BEGIN
+ SELECT CASE WHEN (SELECT count(*) FROM block_cache_tombstones)>100000 THEN RAISE(ABORT,'Replica tombstone quota reached; clear replica cache') END;
+END;

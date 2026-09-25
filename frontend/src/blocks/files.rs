@@ -22,10 +22,13 @@ impl Cache {
         use sha2::Digest;
         let mut file=std::fs::File::open(path)?; let mut buffer=[0;BLOCK_CHUNK_BYTES]; let mut hash=sha2::Sha256::new();
         loop {let n=file.read(&mut buffer)?;if n==0 {break;} hash.update(&buffer[..n]);}
-        Ok(format!("{:x}",hash.finalize())==expected)
+        let valid=format!("{:x}",hash.finalize())==expected;
+        if valid && self.exports.as_ref().is_some_and(|root|path.starts_with(root)) && let Ok(file)=std::fs::OpenOptions::new().write(true).open(path) {let _=file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()));}
+        Ok(valid)
     }
     fn export(&self, lineage:&str, scope:&str, header:&BlockHeader, target:&Path, cancel:&watch::Receiver<bool>) -> Result<()> {
         use sha2::Digest;
+        let epoch=self.epoch();
         let parent=target.parent().context("Invalid cache path")?;
         std::fs::create_dir_all(parent)?;
         let mut temp=tempfile::NamedTempFile::new_in(parent)?;
@@ -34,7 +37,7 @@ impl Cache {
             ensure!(!*cancel.borrow(),"Download cancelled");
             let range={
                 let db=self.db.lock().unwrap();
-                ensure!(tau_blocks::cursor(&db)?.lineage==lineage,"Data source changed");
+                ensure!(super::replica_epoch(&db)?==epoch && tau_blocks::cursor(&db)?.lineage==lineage,"Data source changed");
                 tau_blocks::read(&db,&BlockRequest {scope:scope.into(),id:header.id.clone(),version:header.version,offset,follow:false})?
             };
             ensure!(range.header.version==header.version && range.offset==offset && !range.bytes.is_empty(),"Cached file changed or is incomplete");
@@ -43,8 +46,15 @@ impl Cache {
         if let Some(expected)=header.meta.get("sha256").and_then(|v|v.as_str()) {
             ensure!(format!("{:x}",hash.finalize())==expected,"Cached file checksum mismatch");
         }
-        ensure!(!*cancel.borrow() && self.lineage()?==lineage,"Download cancelled or data source changed");
-        temp.as_file().sync_all()?; temp.persist(target)?;
+        temp.as_file().sync_all()?;
+        static EXPORT_GATE:std::sync::Mutex<()>=std::sync::Mutex::new(());
+        let _gate=EXPORT_GATE.lock().unwrap();
+        if let Some(root)=&self.exports && target.starts_with(root) {crate::disk::collect_downloads(root,target,header.length,1024*1024*1024)?;}
+        // Hold the cache fence through the final rename: clear/reset cannot be
+        // followed by late publication from a previously verified generation.
+        let db=self.db.lock().unwrap();
+        ensure!(!*cancel.borrow() && super::replica_epoch(&db)?==epoch && tau_blocks::cursor(&db)?.lineage==lineage,"Download cancelled or data source changed");
+        temp.persist(target)?;
         #[cfg(unix)] std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     }
@@ -66,6 +76,7 @@ impl Downloads {
     }
     async fn fetch(&mut self, key:&str, scope:&str, id:&str, path:&Path, limit:u64, cancel:&watch::Receiver<bool>, status:&mut TransferStatus) -> Result<()> {
         ensure!(limit<=MAX_BLOCK_BYTES,"Download limit exceeds the block limit");
+        let epoch=self.cache.epoch();
         let original_lineage=self.cache.lineage()?;
         let mut request=self.cache.block_request(scope,id)?;
         let cached=self.cache.file_header(scope,id)?;
@@ -89,7 +100,7 @@ impl Downloads {
                         if request.version!=block.version {status.transferred=0;request.version=block.version;}
                         status.total=block.length;
                         let (cache,scope,lineage,h)=(self.cache.clone(),scope.to_owned(),lineage.clone(),block.clone());
-                        tokio::task::spawn_blocking(move ||cache.header(&lineage,&scope,&h)).await??;
+                        tokio::task::spawn_blocking(move ||cache.header_at(&lineage,&scope,&h,epoch)).await??;
                         head=Some(block.clone());
                     }
                     Header::Data {version,offset,hash,..} => {
@@ -98,7 +109,7 @@ impl Downloads {
                         let bytes=frame.decoded()?; let length=bytes.len();
                         let range=ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes};
                         let (cache,scope,lineage)=(self.cache.clone(),scope.to_owned(),lineage.clone());
-                        tokio::task::spawn_blocking(move ||cache.range(&lineage,&scope,&range)).await??;
+                        tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope,&range,epoch)).await??;
                         status.transferred+=length as u64;
                     }
                     Header::End => break,

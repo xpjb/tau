@@ -52,6 +52,16 @@ enum Action {
     Abort,
     Tail,
     DismissNotice,
+    CopyDiagnostics,
+    ClearReplica,
+    CopyRecoveredDraft(String),
+    ForgetRecovered(String),
+    ReviewRestore(String),
+    Outbox(usize),
+    InspectControl(String),
+    CheckControl(String),
+    RetryControl(String),
+    ForgetControl(String),
     Focus(Option<usize>),
     Confirm,
     CancelModal,
@@ -107,6 +117,10 @@ enum ModalKind {
     AgentCommand(String, String),
     QueueEdit(String, u64),
     ConfirmLink(String),
+    Outbox,
+    ForgetControl(String),
+    ForgetRecovered(String),
+    ReviewRestore(String),
 }
 struct Modal {
     kind: ModalKind,
@@ -1532,6 +1546,34 @@ impl App {
                 }
             }
             Action::ChooseModel(session, slug) => self.controller.choose_model(&session, &slug)?,
+            Action::CopyRecoveredDraft(id)=>{self.controller.copy_missing_draft(&id)?;self.composer.value=self.controller.selected().map(|c|c.local.draft.clone()).unwrap_or_default();}
+            Action::ForgetRecovered(id)=>{self.modal=Some(Modal {kind:ModalKind::ForgetRecovered(id),title:"Forget this local chat, its drafts and files? This does not undo or cancel source work. Saved daemon actions remain in Settings.".into(),fields:vec![],options:vec![("Forget local chat".into(),Action::Confirm),("Keep".into(),Action::CancelModal)]});self.focus=None;}
+            Action::ReviewRestore(id)=>{
+                self.modal=Some(Modal {kind:ModalKind::ReviewRestore(id),title:"Restored history may omit external effects or paid work. Inspect those outcomes first. This acknowledgment only permits future explicit execution; it does not resume or resend anything.".into(),fields:vec![],options:vec![("Allow future explicit execution".into(),Action::Confirm),("Keep execution blocked".into(),Action::CancelModal)]});self.focus=None;
+            }
+            Action::ClearReplica=>{self.controller.clear_replica()?;self.modal=None;self.controller.notice=Some("Replica cache cleared. Drafts, attachments and saved intents were preserved.".into());}
+            Action::Outbox(page) => {
+                let mut options=self.controller.account.pending_controls.iter().skip(page*5).take(5).map(|(id,saved)| {
+                    let kind=serde_json::to_value(&saved.request.command).ok().and_then(|v|v["type"].as_str().map(str::to_owned)).unwrap_or_default();
+                    (format!("{kind} · {}",if saved.blocked {"needs reconciliation"} else if saved.accepted {"accepted"} else {"unconfirmed"}),Action::InspectControl(id.clone()))
+                }).collect::<Vec<_>>();
+                if page>0 {options.push(("Previous".into(),Action::Outbox(page-1)));}
+                if (page+1)*5<self.controller.account.pending_controls.len() {options.push(("Next".into(),Action::Outbox(page+1)));}
+                options.push(("Close".into(),Action::CancelModal));
+                self.modal=Some(Modal {kind:ModalKind::Outbox,title:"Saved immutable actions".into(),fields:vec![],options});self.focus=None;
+            }
+            Action::InspectControl(id) => {
+                let saved=self.controller.account.pending_controls.get(&id).ok_or_else(||anyhow::anyhow!("Action already reconciled"))?;
+                let text=serde_json::to_string_pretty(&saved.request)?;
+                self.modal=Some(Modal {kind:ModalKind::Outbox,title:format!("Action {id}"),fields:vec![],options:vec![
+                    ("Copy complete saved intent".into(),Action::Copy(text)),("Check daemon receipt (no execution)".into(),Action::CheckControl(id.clone())),
+                    ("Explicitly retry original ID".into(),Action::RetryControl(id.clone())),("Forget local intent…".into(),Action::ForgetControl(id)),("Back".into(),Action::Outbox(0))]});self.focus=None;
+            }
+            Action::CheckControl(id) => {self.controller.check_control(&id)?;self.modal=None;self.controller.notice=Some("Checking the original operation; nothing is being reexecuted".into());}
+            Action::RetryControl(id) => {self.controller.retry_control(&id)?;self.modal=None;self.controller.notice=Some("Submitted the original immutable ID; uncertain effects are not automatically repeated".into());}
+            Action::ForgetControl(id) => {
+                self.modal=Some(Modal {kind:ModalKind::ForgetControl(id),title:"Forget this saved intent? This does NOT undo or cancel a daemon action.".into(),fields:vec![],options:vec![("Forget locally".into(),Action::Confirm),("Keep".into(),Action::Outbox(0))]});self.focus=None;
+            }
             Action::Settings => {
                 self.controller.notice = None;
                 self.connecting = false;
@@ -1553,6 +1595,9 @@ impl App {
                     options: vec![
                         ("Connect".into(), Action::Confirm),
                         ("Daemon settings".into(), Action::DaemonSettings),
+                        (format!("Saved actions ({})",self.controller.account.pending_controls.len()),Action::Outbox(0)),
+                        ("Copy connection diagnostics".into(),Action::CopyDiagnostics),
+                        ("Clear replica cache (keep local work)".into(),Action::ClearReplica),
                         ("Cancel".into(), Action::CancelModal),
                     ],
                 });
@@ -1666,6 +1711,10 @@ impl App {
                         }))?;
                     }
                     ModalKind::ConfirmLink(url) => self.platform.push(PlatformAction::OpenUrl(url)),
+                    ModalKind::Outbox=>{},
+                    ModalKind::ForgetControl(id)=>self.controller.forget_control(&id)?,
+                    ModalKind::ForgetRecovered(id)=>{self.controller.forget_missing_chat(&id)?;}
+                    ModalKind::ReviewRestore(id)=>{self.controller.request(ClientCommand::ReviewRestore {session_id:id})?;}
                 }
                 self.modal = None;
                 self.focus = None;
@@ -1836,6 +1885,7 @@ impl App {
                 self.remember_scroll();
             }
             Action::DismissNotice => self.controller.notice = None,
+            Action::CopyDiagnostics => {self.platform.push(PlatformAction::Copy(self.controller.diagnostics()));}
             Action::Copy(text) => {self.controller.cancel_copy();self.platform.push(PlatformAction::Copy(text));}
             Action::CopyDetails(session, ids) => self.controller.copy_details(&session,ids)?,
             Action::CopySelection => {
@@ -2418,7 +2468,7 @@ impl App {
                     }
                 )
             };
-            let mut actions = if chat.feed.incomplete.contains(&e.id) {vec![]} else {vec![("Copy message".into(), Action::Copy(e.text.clone()))]};
+            let mut actions = if chat.feed.incomplete.contains(&e.id) {vec![("Fetch complete message to copy".into(),Action::CopyDetails(session.into(),vec![e.id.clone()]))]} else {vec![("Copy message".into(), Action::Copy(e.text.clone()))]};
             if e.phase == EventPhase::Saved {
                 actions.push(("Fork here".into(), Action::Fork(e.entry_id.clone())));
             }
@@ -2824,6 +2874,13 @@ impl App {
         {
             wheel.target = (wheel.target + self.scroll - old_scroll).clamp(0., self.max_scroll);
         }
+        let mut tool_roots=std::collections::HashMap::new();
+        for event in self.controller.chats[&session].feed.events.values() {
+            if let Some(call)=event.tool_call_id.as_deref() {
+                if event.kind==EventKind::Tool && event.role!=EventRole::Tool {tool_roots.insert(call,&event.id);}
+                else {tool_roots.entry(call).or_insert(&event.id);}
+            }
+        }
         let mut interests=std::collections::BTreeSet::new();
         let top=self.scroll-viewport.height;let bottom=self.scroll+2.*viewport.height;
         for (row,p) in rows.iter().zip(&placements).filter(|(_,p)|p.top+p.height>=top && p.top<=bottom) {
@@ -2832,9 +2889,14 @@ impl App {
             } else if let Some(layout)=detail_layouts.get(&row.key) {
                 for (line,(offset,height)) in row.details.iter().zip(layout) {
                     if p.top+offset+height<top || p.top+offset>bottom {continue;}
-                    for event in self.controller.chats[&session].feed.events.values() {
-                        let tool=format!("tool:{}",event.tool_call_id.as_deref().unwrap_or(&event.id));
-                        if line.key==format!("thinking:{}",event.id) || line.key==tool || line.key.starts_with(&format!("{tool}:")) {interests.insert(event.id.clone());}
+                    if let Some(id)=line.key.strip_prefix("thinking:") {interests.insert(id.into());}
+                    if let Some(key)=line.key.strip_prefix("tool:") {
+                        let mut key=key;
+                        if !tool_roots.contains_key(key) {
+                            key=key.strip_suffix(":body").unwrap_or(key);
+                            for suffix in [":Input",":Output",":Error"] {if let Some(base)=key.strip_suffix(suffix) {key=base;break;}}
+                        }
+                        if let Some(id)=tool_roots.get(key) {interests.insert((*id).clone());}
                     }
                 }
             }
@@ -3582,10 +3644,14 @@ impl App {
                 ),
                 ("Move to topic  ›".into(), Action::MoveMenu(id.clone())),
                 ("Rename…".into(), Action::Rename(id.clone())),
+                ("Review restored history…".into(),Action::ReviewRestore(id.clone())),
                 ("Clone chat".into(), Action::Clone(id.clone())),
                 ("Release idle runtime".into(), Action::Sleep(id.clone())),
                 ("Delete chat…".into(), Action::Delete(id.clone())),
             ];
+        }
+        if let Some(id)=&chat && self.controller.account.missing_chats.contains(id) {
+            options=vec![("Copy draft to a new chat (not sent)".into(),Action::CopyRecoveredDraft(id.clone())),("Forget this local recovery…".into(),Action::ForgetRecovered(id.clone()))];
         }
         self.context_menu = (!options.is_empty()).then(|| ContextMenu {
             at: point,
@@ -3704,10 +3770,7 @@ impl App {
             return;
         }
         self.info_tip.text = match &self.info_target {
-            Info::Connection => self
-                .controller
-                .health
-                .details(&self.controller.connection, Instant::now()),
+            Info::Connection => self.controller.health.details(&self.controller.connection,Instant::now()),
             Info::CacheTtl(id) => {
                 let Some(session) = self
                     .controller
@@ -4408,7 +4471,8 @@ impl App {
         let long = matches!(modal.kind, ModalKind::QueueEdit(..));
         let field_h = if long { 180. } else { 60. };
         let width = (b.width - 24. * s).min(620. * s);
-        let height = ((96.
+        let title_h=self.renderer.label_height(&modal.title,width-40.*s,17.*s,true).max(36.*s);
+        let height = ((title_h/s+36.
             + modal.fields.len() as f32 * (field_h + 26.)
             + modal.options.len() as f32 * 44.)
             * s)
@@ -4423,12 +4487,12 @@ impl App {
         self.renderer.label(
             layer,
             &modal.title,
-            Rect::new(rect.x + 20. * s, rect.y + 18. * s, width - 40. * s, 60. * s),
+            Rect::new(rect.x + 20. * s, rect.y + 18. * s, width - 40. * s, title_h),
             17. * s,
             color(0xe5eaf0),
             true,
         );
-        let mut y = rect.y + 84. * s;
+        let mut y = rect.y + title_h + 24. * s;
         for (i, (name, e, secret)) in modal.fields.iter_mut().enumerate() {
             self.renderer.label(
                 layer,

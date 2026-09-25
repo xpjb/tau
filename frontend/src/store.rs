@@ -55,6 +55,8 @@ pub fn hash(value: &str) -> String {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Account {
+    #[serde(default)] pub source_lineage:Option<String>,
+    pub create_blocked:bool,
     pub projects: Vec<Project>,
     pub selected_project: String,
     /// Per-topic resume target. Kept client-local; server membership is authoritative.
@@ -64,10 +66,11 @@ pub struct Account {
     pub read_at: BTreeMap<String, u64>,
     pub pending_create: Option<ClientRequest>,
     pub pending_controls:BTreeMap<String,PendingControl>,
+    #[serde(default)] pub missing_chats:BTreeSet<String>,
 }
 impl Default for Account {
     fn default() -> Self {
-        Self { projects: vec![Project::general()], selected_project: general_project_id(),
+        Self { missing_chats:BTreeSet::new(),source_lineage:None,create_blocked:false,projects: vec![Project::general()], selected_project: general_project_id(),
             last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, read_at: BTreeMap::new(), pending_create: None, pending_controls:BTreeMap::new() }
     }
 }
@@ -86,6 +89,7 @@ pub struct LocalFile {
     pub name: String,
     pub size: u64,
     pub path: PathBuf,
+    #[serde(default)] pub hash:Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -205,8 +209,9 @@ impl Store {
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 1, "Local state needs a newer Tau client");
-        db.execute_batch("CREATE TABLE IF NOT EXISTS local (account TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(account,key)); PRAGMA user_version=1;")?;
+        ensure!(version <= 2, "Local state needs a newer Tau client");
+        db.execute_batch("CREATE TABLE IF NOT EXISTS local (account TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(account,key)); CREATE TABLE IF NOT EXISTS chat_aliases(account TEXT NOT NULL,old TEXT NOT NULL,new TEXT NOT NULL,PRIMARY KEY(account,old)); PRAGMA user_version=2;")?;
+        let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;db.pragma_update(None,"max_page_count",512u64*1024*1024/page_size)?;
         Ok(Self { db, root })
     }
     pub fn get<T: DeserializeOwned + Default>(&self, account: &str, key: &str) -> Result<T> {
@@ -230,7 +235,45 @@ impl Store {
         self.db.execute("INSERT INTO local VALUES(?,?,?) ON CONFLICT(account,key) DO UPDATE SET value=excluded.value", params![account,key,serde_json::to_string(value)?])?;
         Ok(())
     }
+    pub fn bind_source(&self,account:&str,lineage:&str)->Result<bool> {
+        let tx=self.db.unchecked_transaction()?;
+        let mut state:Account=self.get(account,"account")?;
+        if state.source_lineage.as_deref()==Some(lineage) {return Ok(false);}
+        let changed=state.source_lineage.is_some();state.source_lineage=Some(lineage.into());
+        if changed {
+            state.create_blocked=true;
+            for saved in state.pending_controls.values_mut() {saved.blocked=true;}
+            let ids=self.db.prepare("SELECT substr(key,6) FROM local WHERE account=?1 AND key LIKE 'chat:%'")?.query_map([account],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in ids {
+                let mut chat=self.load_chat(account,&id)?;
+                for pending in &mut chat.pending {pending.status=Delivery::Unconfirmed;pending.detail=Some("Source lineage changed. Inspect the restored source; explicitly retry only if execution is intended.".into());}
+                tx.execute("UPDATE local SET value=?3 WHERE account=?1 AND key=?2",params![account,format!("chat:{id}"),serde_json::to_string(&chat)?])?;
+            }
+        }
+        tx.execute("INSERT INTO local(account,key,value) VALUES(?1,'account',?2) ON CONFLICT(account,key) DO UPDATE SET value=excluded.value",params![account,serde_json::to_string(&state)?])?;
+        tx.commit()?;Ok(changed)
+    }
+    pub fn work_chats(&self,account:&str)->Result<Vec<String>> {
+        Ok(self.db.prepare("SELECT substr(key,6) FROM local WHERE account=?1 AND key LIKE 'chat:%' AND (length(json_extract(value,'$.draft'))>0 OR json_array_length(value,'$.files')>0 OR json_array_length(value,'$.pending')>0)")?
+            .query_map([account],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn discard_import(&self,account:&str,session:&str,file:&LocalFile)->Result<()> {
+        let expected=self.root.join("files").join(hash(account)).join(hash(&self.resolve_chat(account,session)?)).join(&file.id);
+        ensure!(file.path==expected,"Refusing to delete a file outside this chat's owned imports");
+        match std::fs::remove_file(expected) {Ok(())=>Ok(()),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(()),Err(e)=>Err(e.into())}
+    }
+    pub fn resolve_chat(&self,account:&str,session:&str)->Result<String> {
+        let mut id=session.to_owned();let mut seen=HashSet::new();
+        loop {
+            ensure!(seen.insert(id.clone()) && seen.len()<=32,"Invalid local chat alias chain");
+            let next=self.db.query_row("SELECT new FROM chat_aliases WHERE account=?1 AND old=?2",params![account,id],|r|r.get::<_,String>(0)).optional()?;
+            match next {Some(next)=>id=next,None=>return Ok(id)}
+        }
+    }
     pub fn load_chat(&self, account: &str, session: &str) -> Result<LocalChat> {
+        let session=self.resolve_chat(account,session)?;
+        let size:Option<u64>=self.db.query_row("SELECT length(CAST(value AS BLOB)) FROM local WHERE account=?1 AND key=?2",params![account,format!("chat:{session}")],|r|r.get(0)).optional()?;
+        ensure!(size.unwrap_or(0)<=32*1024*1024,"Local chat exceeds 32 MiB; preserve/export the authored store before repair");
         let mut chat: LocalChat = self.get(account, &format!("chat:{session}"))?;
         for p in &mut chat.pending {
             if matches!(p.status, Delivery::Sending | Delivery::Preparing) {
@@ -247,6 +290,11 @@ impl Store {
         Ok(chat)
     }
     pub fn save_chat(&self, account: &str, session: &str, chat: &LocalChat) -> Result<()> {
+        let session=self.resolve_chat(account,session)?;
+        ensure!(chat.pending.len()<=256 && chat.files.len()<=8,"Reconcile pending work before saving more (256 intents / eight draft attachments)");
+        struct Count(usize);
+        impl std::io::Write for Count {fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {self.0+=bytes.len();if self.0>32*1024*1024 {return Err(std::io::Error::other("Local chat exceeds 32 MiB; reconcile saved work before adding more"));}Ok(bytes.len())}fn flush(&mut self)->std::io::Result<()> {Ok(())}}
+        serde_json::to_writer(Count(0),chat)?;
         self.put(account, &format!("chat:{session}"), chat)
     }
     pub fn attachment_path(&self, account: &str, session: &str, entry: &str) -> PathBuf {
@@ -268,6 +316,7 @@ impl Store {
             meta.is_file() && meta.len() > 0 && meta.len() <= MAX_UPLOAD_BYTES as u64,
             "File must be between 1 byte and 50 MB"
         );
+        crate::disk::admit_import(&self.root.join("files"),meta.len())?;
         let id = uuid::Uuid::new_v4().to_string();
         let directory = self
             .root
@@ -278,20 +327,16 @@ impl Store {
         let path = directory.join(&id);
         // Bounded copy handles a source which grows after the metadata check.
         let mut input = std::fs::File::open(source)?;
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        let size = std::io::copy(
-            &mut std::io::Read::take(&mut input, MAX_UPLOAD_BYTES as u64 + 1),
-            &mut output,
-        )?;
+        let mut output=tempfile::NamedTempFile::new_in(&directory)?;
+        let (size,hash)=copy_bytes(&mut input,&mut output,MAX_UPLOAD_BYTES as u64+1)?;
+        let after=input.metadata()?;
+        ensure!(meta.len()==after.len() && meta.modified()?==after.modified()?,"Attachment changed while importing");
         if size == 0 || size > MAX_UPLOAD_BYTES as u64 {
             drop(output);
             let _ = std::fs::remove_file(&path);
             anyhow::bail!("File changed size during import");
         }
-        output.sync_all()?;
+        output.as_file().sync_all()?;output.persist(&path)?;
         #[cfg(unix)] {
             let mut at=directory.as_path();
             loop {std::fs::File::open(at)?.sync_all()?;if at==self.root {break;}at=at.parent().context("Attachment directory escaped local storage")?;}
@@ -304,7 +349,7 @@ impl Store {
             id,
             name,
             size,
-            path,
+            path,hash:Some(hash),
         })
     }
     /// Move an optimistic chat's local intent to the daemon-confirmed ID.
@@ -312,6 +357,7 @@ impl Store {
     /// the original local record and files intact for recovery.
     pub fn merge_chat(&self, account: &str, from: &str, into: &str,
         source: &LocalChat, loaded_target: Option<&LocalChat>) -> Result<LocalChat> {
+        if self.resolve_chat(account,from)?==into {return self.load_chat(account,into);}
         let mut source = source.clone();
         // A live chat's Sending receipts must not be reclassified as uncertain
         // merely because this local-only merge read them from disk.
@@ -321,7 +367,12 @@ impl Store {
             let dest = files.join(&file.id);
             if dest != file.path {
                 std::fs::create_dir_all(&files)?;
-                if !dest.exists() { std::fs::copy(&file.path, &dest)?; }
+                let mut source=std::fs::File::open(&file.path)?;let mut temp=tempfile::NamedTempFile::new_in(&files)?;
+                let (size,hash)=copy_bytes(&mut source,temp.as_file_mut(),MAX_UPLOAD_BYTES as u64+1)?;
+                ensure!(size==file.size && file.hash.as_ref().is_none_or(|expected|expected==&hash),"Local attachment failed integrity verification");
+                temp.as_file().sync_all()?;temp.persist(&dest)?;
+                #[cfg(unix)] {std::fs::File::open(&files)?.sync_all()?;std::fs::File::open(files.parent().unwrap())?.sync_all()?;}
+                file.hash=Some(hash);
                 file.path = dest;
             }
             Ok(())
@@ -331,22 +382,21 @@ impl Store {
             for file in &mut pending.files { copy(file)?; }
             if let ClientCommand::Prompt { session_id, .. } = &mut pending.request.command { *session_id = into.into(); }
         }
-        if !source.draft.is_empty() {
-            if target.draft.is_empty() { target.draft = source.draft; }
-            else if target.draft != source.draft {
-                // Keep both authored drafts without silently merging their text.
-                target.pending.push(Pending { request: ClientRequest { id:uuid::Uuid::new_v4().to_string(),
-                    command:ClientCommand::Prompt { session_id:into.into(), text:source.draft.clone() } },
-                    started_at_ms:None, text:source.draft, files:vec![], status:Delivery::Rejected,
-                    detail:Some("Another local draft was present; restore this draft explicitly".into()) });
+        if !source.draft.is_empty() || !source.files.is_empty() {
+            if target.draft.is_empty() && target.files.is_empty() {target.draft=source.draft;target.files=source.files;}
+            else if target.draft!=source.draft || target.files.iter().map(|f|&f.id).collect::<Vec<_>>()!=source.files.iter().map(|f|&f.id).collect::<Vec<_>>() {
+                // A draft and its attachments are one authored bundle. Do not
+                // silently attach the provisional files to a different draft.
+                target.pending.push(Pending {request:ClientRequest {id:uuid::Uuid::new_v4().to_string(),command:ClientCommand::Prompt {session_id:into.into(),text:source.draft.clone()}},started_at_ms:None,text:source.draft,files:source.files,status:Delivery::Rejected,detail:Some("Another local draft was present; restore this draft and its attachments explicitly".into())});
             }
         }
-        let file_ids: HashSet<_> = target.files.iter().map(|f| f.id.clone()).collect();
-        target.files.extend(source.files.into_iter().filter(|file| !file_ids.contains(&file.id)));
         let pending_ids: HashSet<_> = target.pending.iter().map(|p| p.request.id.clone()).collect();
         target.pending.extend(source.pending.into_iter().filter(|p| !pending_ids.contains(&p.request.id)));
-        self.save_chat(account, into, &target)?;
-        self.db.execute("DELETE FROM local WHERE account=?1 AND key=?2", params![account,format!("chat:{from}")])?;
+        let tx=self.db.unchecked_transaction()?;
+        self.save_chat(account,into,&target)?;
+        tx.execute("DELETE FROM local WHERE account=?1 AND key=?2",params![account,format!("chat:{from}")])?;
+        tx.execute("INSERT INTO chat_aliases VALUES(?1,?2,?3)",params![account,from,into])?;
+        tx.commit()?;
         let old = self.root.join("files").join(hash(account)).join(hash(from));
         if old.exists() { let _ = std::fs::remove_dir_all(old); }
         Ok(target)
@@ -363,5 +413,23 @@ impl Store {
             }
         }
         Ok(())
+    }
+}
+
+fn copy_bytes(input:&mut impl std::io::Read,output:&mut impl std::io::Write,limit:u64)->Result<(u64,String)> {
+    let mut hash=blake3::Hasher::new();let mut count=0;let mut buffer=[0;32*1024];
+    while count<limit {
+        let n=input.read(&mut buffer[..(limit-count).min(32*1024) as usize])?;if n==0 {break;}
+        output.write_all(&buffer[..n])?;hash.update(&buffer[..n]);count+=n as u64;
+    }
+    Ok((count,hash.finalize().to_hex().to_string()))
+}
+
+#[cfg(all(test,target_os="linux"))]
+mod disk_fault_tests {
+    #[test]
+    fn kernel_enospc_aborts_the_bounded_import_copy() {
+        let mut input=std::io::Cursor::new(vec![5;32768]);let mut full=std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+        let error=super::copy_bytes(&mut input,&mut full,50000).unwrap_err();assert!(format!("{error:#}").contains("No space left"));
     }
 }

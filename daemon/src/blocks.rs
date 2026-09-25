@@ -33,13 +33,16 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
     }
     // Tool result children link to the original call. Imported orphan results
     // remain root blocks; no missing parent is fabricated from provider IDs.
-    let parent = if value.role == EventRole::Tool {
+    // Delivered attachment cards stay in the root feed even when their tool is
+    // collapsed; their binary payload remains a separately requested child.
+    let call_parent = if value.role == EventRole::Tool {
         value.tool_call_id.as_ref().map(|call| {
             db.query_row("SELECT id FROM blocks WHERE scope=?1 AND json_extract(header,'$.kind')='tool'
-                AND json_extract(header,'$.meta.event.toolCallId')=?2 ORDER BY position DESC LIMIT 1",params![session,call_key(call)],|r|r.get::<_,String>(0))
+                AND json_extract(header,'$.meta.event.toolCallId')=?2 AND position<=?3 ORDER BY position DESC LIMIT 1",params![session,call_key(call),value.order*2],|r|r.get::<_,String>(0))
                 .optional()
         }).transpose()?.flatten()
     } else { None };
+    let parent=if value.attachment.is_none() {call_parent.clone()} else {None};
     let kind = match value.kind {
         EventKind::Tool => BlockKind::Tool,
         EventKind::Thinking => BlockKind::Thinking,
@@ -58,7 +61,7 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
         Ok(())
     };
     let mut attributes=json!({"event":meta});
-    if overflow {attributes["fullEvent"]=json!({"id":format!("{}/meta",value.id),"hash":blake3::hash(&full_meta).to_hex().to_string()});}
+    if overflow {attributes["fullEvent"]=json!({"id":format!("{}/meta",value.id),"hash":blake3::hash(&full_meta).to_hex().to_string(),"length":full_meta.len()});}
     let h = header(value.id.clone(),parent.clone(),value.order*2,kind,attributes,sealed);
     if value.kind == EventKind::Tool {
         // The card itself carries no argument bytes, even while they stream.
@@ -73,7 +76,7 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
         let metadata=header(format!("{}/meta",value.id),Some(value.id.clone()),2,BlockKind::State,json!({"eventMetadata":true}),true);
         tau_blocks::put(db,session,metadata,&full_meta)?;
     }
-    if let Some(parent) = parent {
+    if let Some(parent) = call_parent {
         // A collapsed tool can show completion/error without downloading output.
         if let Some(mut call) = tau_blocks::header(db,session,&parent)? {
             call.meta["event"]["isError"] = json!(value.is_error);
@@ -137,10 +140,12 @@ pub fn project_existing(db: &Connection) -> Result<()> {
 /// keeps its IDs, chunks and offsets, and no paid work is restarted by viewing it.
 fn recover(db: &Connection) -> Result<()> {
     tau_blocks::discard_staging(db)?;
-    let mut q = db.prepare("SELECT scope,header FROM blocks WHERE json_extract(header,'$.meta.event.phase')='live'
-        OR (json_extract(header,'$.kind')='tool' AND json_extract(header,'$.meta.toolState') IS NULL)")?;
-    let rows = q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for (scope,raw) in rows {
+    let mut after=(String::new(),String::new());
+    loop {
+        let mut q=db.prepare("SELECT scope,id,header FROM blocks WHERE (scope,id)>(?1,?2) AND (json_extract(header,'$.meta.event.phase')='live' OR (json_extract(header,'$.kind')='tool' AND json_extract(header,'$.meta.toolState') IS NULL)) ORDER BY scope,id LIMIT 64")?;
+        let rows=q.query_map(params![after.0,after.1],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.is_empty() {break;}
+        for (scope,id,raw) in rows {after=(scope.clone(),id);
         let mut h: BlockHeader = serde_json::from_str(&raw)?;
         h.meta["event"]["phase"] = json!("interrupted"); h.sealed = true;
         if h.kind == BlockKind::Tool {
@@ -149,10 +154,14 @@ fn recover(db: &Connection) -> Result<()> {
             if let Some(mut input) = tau_blocks::header(db,&scope,&input_id(&h.id))? { input.sealed = true; tau_blocks::set_header(db,&scope,input)?; }
         }
         tau_blocks::set_header(db,&scope,h)?;
+        }
     }
-    let mut q = db.prepare("SELECT id,data,queue FROM sessions")?;
-    let rows = q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id,raw,state) in rows {
+    let mut after=String::new();
+    loop {
+        let mut q=db.prepare("SELECT id,data,queue FROM sessions WHERE id>?1 ORDER BY id LIMIT 32")?;
+        let rows=q.query_map([&after],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.is_empty() {break;}
+        for (id,raw,state) in rows {after=id.clone();
         let stored: crate::state::StoredSession = serde_json::from_str(&raw)?;
         let mut value: QueueState = serde_json::from_str(&state)?;
         value.run_id = None;
@@ -167,6 +176,7 @@ fn recover(db: &Connection) -> Result<()> {
         value.requests.clear();
         let encoded = serde_json::to_string(&value)?;
         if encoded != state { db.execute("UPDATE sessions SET queue=?2 WHERE id=?1",params![id,encoded])?; }
+        }
     }
     // An accepted built-in is never replayed after a crash. Preserve its outcome
     // explicitly so reconnect can distinguish it from an absent receipt.
@@ -232,7 +242,9 @@ impl AgentManager {
         }
         let after=file.metadata().await?;
         ensure!(offset==before.len() && before.len()==after.len() && before.modified()?==after.modified()?,"File changed while importing");
-        let mut meta=h.meta.clone(); meta["materialized"]=json!(true);meta["sha256"]=json!(format!("{:x}",hash.finalize()));
+        let digest=format!("{:x}",hash.finalize());
+        ensure!(attachment.sha256.is_none_or(|expected|expected==digest),"Owned file failed integrity verification");
+        let mut meta=h.meta.clone(); meta["materialized"]=json!(true);meta["sha256"]=json!(digest);
         let stage=staging.id.clone();
         self.inner.state.access(move |db| {
             let tx=db.transaction()?;

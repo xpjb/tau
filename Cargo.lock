@@ -5217,6 +5217,7 @@ dependencies = [
  "futures-util",
  "image",
  "jni 0.21.1",
+ "libc",
  "log",
  "open",
  "png 0.18.1",

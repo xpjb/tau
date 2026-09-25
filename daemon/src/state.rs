@@ -6,7 +6,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use crate::protocol::PromptDisposition;
-use crate::transcript::{EventProjection, Event, HistoryPage, QueueState, PAGE_EVENTS, PAGE_BYTES};
+use crate::transcript::{EventProjection, Event, QueueState};
+#[cfg(test)] use crate::transcript::{HistoryPage,PAGE_EVENTS,PAGE_BYTES};
 
 pub(crate) use tau_protocol::settings::DEFAULT_TITLE_PROMPT;
 pub(crate) const MAX_FLAG_CHARS: usize = 4096;
@@ -47,7 +48,7 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 #[derive(Clone)]
-pub struct StateStore { connection: Arc<Mutex<Connection>>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>>, pub(crate) block_changes: tokio::sync::watch::Sender<u64> }
+pub struct StateStore { connection: Arc<Mutex<Connection>>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>>, pub(crate) block_changes: tokio::sync::watch::Sender<u64>, #[cfg(test)] pub(crate) context_gate:Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>> }
 
 impl StateStore {
     pub async fn load(path: PathBuf) -> Result<Self> {
@@ -64,7 +65,11 @@ impl StateStore {
             db.busy_timeout(std::time::Duration::from_secs(5))?;
             db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
             let version: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version > 4 { bail!("Unsupported Tau database version {version}"); }
+            if version > 5 { bail!("Unsupported Tau database version {version}"); }
+            let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;
+            let pages:u64=db.query_row("PRAGMA page_count",[],|r|r.get(0))?;
+            anyhow::ensure!(pages<=8u64*1024*1024*1024/page_size,"Source exceeds the 8 GiB database quota; archive it offline before migration");
+            db.pragma_update(None,"max_page_count",(8u64*1024*1024*1024)/page_size)?;
             if version == 0 {
                 let tx = db.transaction()?;
                 tx.execute_batch(include_str!("schema.sql"))?;
@@ -87,10 +92,43 @@ impl StateStore {
                 tx.execute_batch("CREATE TABLE operations(id TEXT PRIMARY KEY,payload TEXT NOT NULL,response TEXT); CREATE INDEX receipts_request ON receipts(request_id); PRAGMA user_version=4;")?;
                 tx.commit()?;
             }
+            if version<5 {
+                let tx=db.transaction()?;tau_blocks::initialize(&tx)?;
+                tx.execute_batch("CREATE TABLE file_publications(id TEXT PRIMARY KEY,session TEXT NOT NULL,path TEXT NOT NULL,size INTEGER NOT NULL,created INTEGER NOT NULL,sealed INTEGER NOT NULL DEFAULT 0);
+                    CREATE TABLE file_owners(id TEXT NOT NULL REFERENCES file_publications(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(id,session));
+                    INSERT INTO file_publications SELECT id,json_extract(header,'$.meta.upload.purpose.sessionId'),json_extract(header,'$.meta.file.path'),json_extract(header,'$.length'),position,1 FROM blocks WHERE scope='@uploads' AND json_extract(header,'$.sealed')=1 AND json_extract(header,'$.meta.file.path') IS NOT NULL;
+                    WITH RECURSIVE ownership(id,session) AS (SELECT id,session FROM file_publications UNION SELECT o.id,s.id FROM ownership o JOIN sessions s ON json_extract(s.data,'$.parent_id')=o.session)
+                    INSERT INTO file_owners SELECT o.id,o.session FROM ownership o JOIN sessions s ON s.id=o.session;
+                    CREATE TABLE restore_guards(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,lineage TEXT NOT NULL);
+                    CREATE TABLE catalogue_clock(singleton INTEGER PRIMARY KEY,revision INTEGER NOT NULL);
+                    INSERT INTO catalogue_clock VALUES(1,1);
+                    CREATE TRIGGER catalogue_insert AFTER INSERT ON sessions BEGIN UPDATE catalogue_clock SET revision=revision+1; END;
+                    CREATE TRIGGER catalogue_delete AFTER DELETE ON sessions BEGIN UPDATE catalogue_clock SET revision=revision+1; END;
+                    CREATE TRIGGER catalogue_session AFTER UPDATE OF data ON sessions WHEN json_extract(NEW.data,'$.title')!=json_extract(OLD.data,'$.title') OR json_extract(NEW.data,'$.project_id')!=json_extract(OLD.data,'$.project_id') OR json_extract(NEW.data,'$.model')!=json_extract(OLD.data,'$.model') OR NEW.starter!=OLD.starter BEGIN UPDATE catalogue_clock SET revision=revision+1; END;
+                    CREATE TRIGGER catalogue_project_insert AFTER INSERT ON projects BEGIN UPDATE catalogue_clock SET revision=revision+1; END;
+                    CREATE TRIGGER catalogue_project_update AFTER UPDATE ON projects BEGIN UPDATE catalogue_clock SET revision=revision+1; END;
+                    CREATE TRIGGER catalogue_project_delete AFTER DELETE ON projects BEGIN UPDATE catalogue_clock SET revision=revision+1; END;
+                    CREATE TRIGGER session_admission BEFORE INSERT ON sessions WHEN (SELECT count(*) FROM sessions)>=20000 BEGIN SELECT RAISE(ABORT,'Session quota reached; archive/delete old chats'); END;
+                    PRAGMA user_version=5")?;
+                {
+                    let mut rows=tx.prepare("SELECT session_id,data FROM events WHERE json_type(data,'$.attachment')='object'")?;
+                    for row in rows.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
+                        let (scope,data)=row?;crate::blocks::event(&tx,&scope,&serde_json::from_str(&data)?)?;
+                    }
+                    let mut rows=tx.prepare("SELECT scope,header FROM blocks WHERE json_type(header,'$.meta.fullEvent')='object' AND json_extract(header,'$.meta.fullEvent.length') IS NULL")?;
+                    for row in rows.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
+                        let (scope,raw)=row?;let mut h:tau_blocks::BlockHeader=serde_json::from_str(&raw)?;
+                        if let Some(id)=h.meta["fullEvent"]["id"].as_str() && let Some(meta)=tau_blocks::header(&tx,&scope,id)? {
+                            h.meta["fullEvent"]["length"]=json!(meta.length);tau_blocks::set_header(&tx,&scope,h)?;
+                        }
+                    }
+                }
+                tx.commit()?;
+            }
             if let Some(parent) = location.parent() { std::fs::File::open(parent)?.sync_all()?; }
             Ok(db)
         }).await??;
-        Ok(Self { connection:Arc::new(Mutex::new(connection)), path, flag_gate:Arc::new(tokio::sync::Mutex::new(())), block_changes:tokio::sync::watch::channel(0).0 })
+        Ok(Self { connection:Arc::new(Mutex::new(connection)), path, flag_gate:Arc::new(tokio::sync::Mutex::new(())), block_changes:tokio::sync::watch::channel(0).0, #[cfg(test)] context_gate:Arc::new(std::sync::Mutex::new(None)) })
     }
     pub(crate) async fn access<T: Send + 'static>(&self, action: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static) -> Result<T> {
         // Wait asynchronously; don't fill the blocking pool with database lock waiters.
@@ -109,6 +147,7 @@ impl StateStore {
         self.access(move |db| db.query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| row.get::<_,String>(0)).optional()?
             .map(|data| serde_json::from_str(&data).map_err(Into::into)).transpose()).await
     }
+    #[cfg(test)]
     pub async fn list(&self) -> Result<Vec<(String, StoredSession)>> {
         self.access(|db| {
             let mut query = db.prepare("SELECT id,data FROM sessions ORDER BY activity DESC,id")?;
@@ -263,6 +302,7 @@ impl StateStore {
             Ok(serde_json::from_str(&data)?)
         }).await
     }
+    #[cfg(test)]
     pub async fn page(&self, id: &str, before: Option<u64>) -> Result<HistoryPage> {
         let id = id.to_owned();
         self.access(move |db| {
@@ -279,20 +319,52 @@ impl StateStore {
     }
     // Only the latest applicable checkpoint and its retained suffix enter memory.
     // Display paging and attachment lookup never load provider history.
-    pub async fn context(&self, id: &str, selected: &SessionModel) -> Result<Vec<Value>> {
-        let id = id.to_owned(); let selected = selected.clone();
-        self.access(move |db| {
+    pub(crate) async fn restore_review(&self,id:&str)->Result<bool> {
+        let id=id.to_owned();self.access(move |db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM restore_guards WHERE session_id=?1)",[id],|r|r.get(0))?)).await
+    }
+    pub(crate) async fn review_restore(&self,id:&str)->Result<()> {
+        let id=id.to_owned();self.access(move |db| {db.execute("DELETE FROM restore_guards WHERE session_id=?1",[id])?;Ok(())}).await
+    }
+    pub(crate) async fn require_execution(&self,id:&str)->Result<()> {
+        anyhow::ensure!(!self.restore_review(id).await?,"Restored chat: effects after the snapshot may have happened. Inspect external/paid work, then choose Review restored history in the chat menu before explicitly resubmitting.");Ok(())
+    }
+    pub async fn context(&self, id:&str, selected:&SessionModel)->Result<Vec<Value>> {
+        #[cfg(test)] {let gate=self.context_gate.lock().unwrap().clone();if let Some(gate)=gate {gate.notified().await;}}
+        let id=id.to_owned();let selected=selected.clone();let scope=id.clone();
+        let (mut after,end)=self.access(move |db| {
             let checkpoint: Option<String> = db.query_row("SELECT data FROM entries WHERE session_id=?1 AND kind='compaction'
                 AND (coalesce(json_extract(data,'$.details.kind'),'')!='codex-native-compaction'
                     OR (json_extract(data,'$.details.model')=?2 AND json_extract(data,'$.details.provider')=?3)) ORDER BY position DESC LIMIT 1",
-                params![id,selected.model_id,selected.provider],|row| row.get(0)).optional()?;
+                params![scope,selected.model_id,selected.provider],|row| row.get(0)).optional()?;
             let start = if let Some(raw) = checkpoint {
                 let entry: Value = serde_json::from_str(&raw)?;
-                db.query_row("SELECT position FROM entries WHERE session_id=?1 AND id=?2",params![id,entry["firstKeptEntryId"].as_str().context("Compaction has no boundary")?],|row| row.get::<_,i64>(0)).context("Compaction boundary is missing")?
+                db.query_row("SELECT position FROM entries WHERE session_id=?1 AND id=?2",params![scope,entry["firstKeptEntryId"].as_str().context("Compaction has no boundary")?],|row| row.get::<_,i64>(0)).context("Compaction boundary is missing")?
             } else { 0 };
-            let mut query = db.prepare("SELECT data FROM entries WHERE session_id=?1 AND position>=?2 ORDER BY position")?;
-            query.query_map(params![id,start],|row| row.get::<_,String>(0))?.map(|raw| Ok(serde_json::from_str(&raw?)?)).collect()
-        }).await
+            let end=db.query_row("SELECT coalesce(max(position),0) FROM entries WHERE session_id=?1",[&scope],|r|r.get::<_,i64>(0))?;
+            Ok((start-1,end))
+        }).await?;
+        let mut result=vec![];let mut total=0usize;
+        while after<end {
+            let scope=id.clone();
+            let (next,bytes)=self.access(move |db| {
+                let mut q=db.prepare("SELECT position,length(CAST(data AS BLOB)),data FROM entries WHERE session_id=?1 AND position>?2 AND position<=?3 ORDER BY position LIMIT 64")?;
+                let mut rows=q.query(params![scope,after,end])?;let mut next=after;let mut bytes=vec![];let mut size=0usize;
+                while let Some(row)=rows.next()? {
+                    let len:usize=row.get(1)?;
+                    anyhow::ensure!(len<=64*1024*1024,"A history entry exceeds the 64 MiB limit; export/fork a smaller conversation");
+                    if size>0 && size+len>1024*1024 {break;}
+                    bytes.push(row.get::<_,String>(2)?);size+=len;next=row.get(0)?;
+                }
+                Ok((next,bytes))
+            }).await?;
+            if next==after {break;}after=next;
+            total+=bytes.iter().map(String::len).sum::<usize>();
+            anyhow::ensure!(total<=128*1024*1024,"Provider context exceeds 128 MiB; export/fork a smaller conversation");
+            result.extend(tokio::task::spawn_blocking(move ||bytes.into_iter().map(|s|serde_json::from_str::<Value>(&s).map_err(anyhow::Error::from)).collect::<Result<Vec<_>>>()).await??);
+            anyhow::ensure!(result.len()<=10000,"Provider context exceeds 10000 entries; export/fork a smaller conversation");
+            tokio::task::yield_now().await;
+        }
+        Ok(result)
     }
     pub async fn branch(&self, id: &str, entry_id: Option<&str>) -> Result<(String, Option<String>)> {
         let id = id.to_owned(); let entry_id = entry_id.map(str::to_owned);
@@ -312,6 +384,9 @@ impl StateStore {
             session.created_at_ms = activity(&tx)?; session.updated_at_ms = session.created_at_ms;
             tx.execute("INSERT INTO sessions(id,starter,activity,data,queue) VALUES(?1,0,?2,?3,?4)",params![child,session.updated_at_ms,serde_json::to_string(&session)?,serde_json::to_string(&QueueState::native())?])?;
             tx.execute("INSERT INTO entries(session_id,id,kind,data) SELECT ?1,id,kind,data FROM entries WHERE session_id=?2 AND position<=?3 ORDER BY position",params![child,id,cut])?;
+            // A fork may keep immutable upload paths from its parent's history.
+            tx.execute("INSERT INTO file_owners SELECT id,?1 FROM file_owners WHERE session=?2",params![child,id])?;
+            tx.execute("INSERT INTO restore_guards SELECT ?1,lineage FROM restore_guards WHERE session_id=?2",params![child,id])?;
             tx.execute("INSERT INTO events(session_id,position,id,entry_id,data) SELECT ?1,position,id,entry_id,data FROM events WHERE session_id=?2
                 AND entry_id IN (SELECT id FROM entries WHERE session_id=?1)",params![child,id])?;
             // Only already-consumed user receipts belong to the copied history.
@@ -342,6 +417,7 @@ impl StateStore {
         self.access(move |db| {
             let tx = db.transaction()?;
             tau_blocks::remove_scope(&tx,&id)?;
+            tx.execute("DELETE FROM blocks WHERE scope='@uploads' AND json_extract(header,'$.meta.upload.purpose.sessionId')=?1",[&id])?;
             if tx.execute("DELETE FROM sessions WHERE id=?1",[&id])? != 1 { bail!("Unknown session"); }
             tx.execute("UPDATE sessions SET data=json_set(data,'$.parent_id',NULL) WHERE json_extract(data,'$.parent_id')=?1",[&id])?;
             tx.commit()?; Ok(())
@@ -413,15 +489,35 @@ impl StateStore {
     }
     /// Portable conversation export, not a backup of pending jobs or receipts.
     pub async fn export_history(&self, id: &str, destination: &std::path::Path) -> Result<()> {
-        let id=id.to_owned();
-        let bytes=self.access(move |db| {
+        let id=id.to_owned();let destination=destination.to_owned();let source=self.path.clone();
+        self.access(move |db| {
+            use std::io::Write;
+            let canonical=source.canonicalize()?;
+            anyhow::ensure!(destination.canonicalize().ok().as_ref()!=Some(&canonical),"Export destination is the source database");
+            #[cfg(unix)] if let Ok(target)=std::fs::metadata(&destination) {use std::os::unix::fs::MetadataExt;let original=std::fs::metadata(&source)?;anyhow::ensure!((target.dev(),target.ino())!=(original.dev(),original.ino()),"Export destination is a link to the source database");}
+            let parent=destination.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));std::fs::create_dir_all(parent)?;
+            let mut temp=tempfile::NamedTempFile::new_in(parent)?;
             let tx=db.transaction()?;
-            let session:String=tx.query_row("SELECT data FROM sessions WHERE id=?1",[&id],|row|row.get(0)).context("Unknown session")?;
-            let mut query=tx.prepare("SELECT data FROM entries WHERE session_id=?1 ORDER BY position")?;
-            let entries=query.query_map([&id],|row|row.get::<_,String>(0))?.map(|raw|Ok(serde_json::from_str::<Value>(&raw?)?)).collect::<Result<Vec<_>>>()?;
-            Ok(serde_json::to_vec_pretty(&json!({"format":"tau-history","version":1,"sessionId":id,"session":serde_json::from_str::<Value>(&session)?,"entries":entries}))?)
-        }).await?;
-        crate::settings::atomic_write(destination,&bytes).await
+            {
+                let mut output=std::io::BufWriter::new(temp.as_file_mut());
+                write!(output,"{{\"format\":\"tau-history\",\"version\":1,\"sessionId\":{},\"session\":",serde_json::to_string(&id)?)?;
+                let row:i64=tx.query_row("SELECT rowid FROM sessions WHERE id=?1",[&id],|r|r.get(0)).context("Unknown session")?;
+                // Canonical JSON is already owned by the store. Stream SQLite
+                // blobs rather than parsing/duplicating an entire conversation.
+                std::io::copy(&mut tx.blob_open("main","sessions","data",row,true)?,&mut output)?;
+                output.write_all(b",\"entries\":[")?;
+                let mut query=tx.prepare("SELECT rowid FROM entries WHERE session_id=?1 ORDER BY position")?;
+                let mut first=true;
+                for row in query.query_map([id],|r|r.get::<_,i64>(0))? {
+                    if !first {output.write_all(b",")?;}first=false;
+                    std::io::copy(&mut tx.blob_open("main","entries","data",row?,true)?,&mut output)?;
+                }
+                output.write_all(b"]}")?;output.flush()?;
+            }
+            tx.commit()?;temp.as_file().sync_all()?;temp.persist(&destination)?;
+            #[cfg(unix)] std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        }).await
     }
     pub async fn flag(&self, id: &str, text: &str) -> Result<Flag> {
         use tokio::io::AsyncWriteExt;

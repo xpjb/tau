@@ -2,7 +2,8 @@
 //! gate orders membership changes against runtime retirement; SQLite commits first.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
-use tau_protocol::{DeleteProjectMode, Project, GENERAL_PROJECT_ID, MAX_PROJECT_NAME_CHARS, MAX_PROJECT_PROMPT_CHARS};
+#[cfg(test)] use tau_protocol::Project;
+use tau_protocol::{DeleteProjectMode, GENERAL_PROJECT_ID, MAX_PROJECT_NAME_CHARS, MAX_PROJECT_PROMPT_CHARS};
 use crate::{manager::AgentManager, state::StateStore};
 
 fn validate(name: &str, prompt: &str) -> Result<()> {
@@ -12,6 +13,7 @@ fn validate(name: &str, prompt: &str) -> Result<()> {
     Ok(())
 }
 impl StateStore {
+    #[cfg(test)]
     pub async fn projects(&self) -> Result<Vec<Project>> {
         self.access(|db| {
             let mut query = db.prepare("SELECT id,name,prompt,revision FROM projects ORDER BY id='general' DESC,rowid")?;
@@ -94,9 +96,6 @@ impl StateStore {
     }
 }
 impl AgentManager {
-    pub async fn projects_message(&self) -> Result<tau_protocol::ServerMessage> {
-        Ok(tau_protocol::ServerMessage::Projects { projects:self.inner.state.projects().await? })
-    }
     async fn broadcast_projects(&self) -> Result<()> {
         let _ = self.inner.events.send(tau_protocol::ServerMessage::ResyncRequired {session_id:None});
         Ok(())
@@ -121,10 +120,11 @@ impl AgentManager {
     pub async fn delete_project(&self, id: String, revision: u64, mode: DeleteProjectMode) -> Result<()> {
         let _gate = self.inner.projects.lock().await;
         let sessions = self.inner.state.project_sessions(&id,revision).await?;
+        let _deleting=(mode==DeleteProjectMode::DeleteChats).then(||self.deleting(sessions.clone()));
         let mut runtimes = Vec::new();
         if mode == DeleteProjectMode::DeleteChats {
             for session in &sessions {
-                let runtime = self.runtime(session).await?;
+                let Some(runtime)=self.inner.runtimes.lock().await.get(session).cloned() else {continue;};
                 if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); }
                 runtimes.push((session.clone(),runtime));
             }
@@ -140,12 +140,10 @@ impl AgentManager {
         if mode == DeleteProjectMode::DeleteChats {
             for session in &sessions {
                 self.inner.runtimes.lock().await.remove(session);
-                if let Err(error) = tokio::fs::remove_dir_all(self.inner.config.upload_root.join(session)).await
-                    && error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(%error, "Deleted project chat uploads could not be removed");
-                }
+
             }
         }
+        self.maintain_uploads().await?;
         self.broadcast_projects().await?;
         self.broadcast_sessions().await;
         Ok(())
@@ -184,7 +182,7 @@ mod tests {
         let again = StateStore::load(path).await.unwrap();
         assert_eq!(again.project_prompt(&chat).await.unwrap(),"Pinned");
         again.access(|db| {
-            assert_eq!(db.query_row("PRAGMA user_version",[],|r|r.get::<_,u32>(0))?,4);
+            assert_eq!(db.query_row("PRAGMA user_version",[],|r|r.get::<_,u32>(0))?,5);
             assert_eq!(db.query_row("SELECT count(*) FROM entries WHERE session_id='old'",[],|r|r.get::<_,u32>(0))?,1);
             Ok(())
         }).await.unwrap();

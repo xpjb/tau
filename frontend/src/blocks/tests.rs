@@ -119,3 +119,87 @@ fn copy_interest_advances_in_bounded_cohorts_instead_of_starving_after_thirty_ca
     }
     assert_eq!(fetched.len(),100);assert_eq!(f.cache.copy_ready("chat",&ids).unwrap().unwrap().matches("thought").count(),100);
 }
+
+#[test]
+fn sqlite_full_and_cross_handle_reset_never_advance_a_verified_prefix() {
+    let mut f=Fixture::new();f.put("body",None,0,BlockKind::Text,event("body",0,"text"),&vec![7;BLOCK_CHUNK_BYTES*2]);f.page(None,None);
+    let req=f.cache.block_request("chat","body").unwrap();let range=tau_blocks::read(&f.source,&req).unwrap();
+    {let db=f.cache.db.lock().unwrap();let pages:u64=db.query_row("PRAGMA page_count",[],|r|r.get(0)).unwrap();db.pragma_update(None,"max_page_count",pages).unwrap();}
+    let error=f.cache.range(&f.lineage,"chat",&range).unwrap_err();assert!(error.to_string().contains("full"),"{error:#}");
+    assert_eq!(f.cache.block_request("chat","body").unwrap().offset,0);
+    let old=f.cache.epoch();let second=Cache::open(&f._root.path().join("cache.db")).unwrap();second.clear().unwrap();
+    assert!(f.cache.header_at(&f.lineage,"chat",&range.header,old).is_err());assert!(f.cache.range_at(&f.lineage,"chat",&range,old).is_err());
+    assert!(tau_blocks::header(&f.cache.db.lock().unwrap(),"chat","body").unwrap().is_none());
+}
+
+#[test]
+fn sparse_projection_and_retained_previews_are_bounded_across_many_updates() {
+    let mut f=Fixture::new();let bytes=vec![b'x';300*1024];
+    for i in 0..128 {let id=format!("e{i:03}");f.put(&id,None,i,BlockKind::Text,event(&id,i,"text"),&bytes);}
+    f.page(None,None);
+    loop {let before=f.cache.history_cursor("chat").unwrap();if let Some(before)=before {f.page(None,Some(before));} else {break;}}
+    let mut feed=crate::feed::Feed::default();feed.native_view(f.cache.changes("chat",None,true).unwrap().unwrap()).unwrap();
+    for i in 0..128 {
+        let id=format!("e{i:03}");f.body(&id);let visible=BTreeSet::from([id.clone()]);
+        let view=f.cache.changes("chat",Some(&visible),false).unwrap().unwrap();assert!(view.partial);assert_eq!(view.snapshot.events.len(),1);
+        assert!(view.incomplete.contains(&id));assert!(view.snapshot.events[0].text.contains("Preview limited"));
+        feed.native_view(view).unwrap();
+        assert!(feed.events.values().map(|e|e.text.len()).sum::<usize>()<=8*1024*1024+16000);
+    }
+    assert_eq!(feed.events.len(),128);assert!(feed.event("e000").unwrap().text.len()<100);
+    let text=f.cache.copy_ready("chat",&["e127".into()]).unwrap().unwrap();assert_eq!(text.as_bytes(),bytes);
+    // Native full views replace the authoritative cache cut, unlike the legacy
+    // display adapter's overlapping history merge.
+    f.cache.clear().unwrap();f.page(None,None);feed.native_view(f.cache.changes("chat",None,true).unwrap().unwrap()).unwrap();
+    assert_eq!(feed.events.len(),MAX_FEED_PAGE);
+}
+
+#[test]
+fn copy_preflights_all_metadata_even_when_an_earlier_body_is_missing() {
+    let mut f=Fixture::new();
+    for (i,id) in ["a","b"].into_iter().enumerate() {let mut meta=event(id,i as u64,"text");meta["fullEvent"]=json!({"id":format!("{id}/meta"),"hash":"a".repeat(64),"length":40*1024*1024});f.put(id,None,i as u64,BlockKind::Text,meta,b"missing");}
+    f.page(None,None);
+    assert!(f.cache.copy_ready("chat",&["a".into(),"b".into()]).unwrap_err().to_string().contains("64 MiB"));
+    let plan=f.cache.plan("chat",&LocalChat::default(),&[]).unwrap();assert!(!plan.blocks.iter().any(|(id,_)|id.ends_with("/meta")));
+    let view=f.cache.preview("chat",None).unwrap().unwrap();assert!(view.incomplete.contains("a"));
+}
+
+#[test]
+fn giant_previews_stop_prefetching_and_copy_can_target_a_closed_child() {
+    let mut f=Fixture::new();let bytes=vec![b'x';300*1024];f.put("tool",None,0,BlockKind::Tool,event("tool",0,"tool"),b"");
+    let mut meta=event("result",1,"text");meta["event"]["role"]=json!("tool");f.put("result",Some("tool"),1,BlockKind::Code,meta,&bytes);
+    f.page(None,None);f.page(Some("tool"),None);
+    let plan=f.cache.plan_visible("chat",&LocalChat::default(),&["result".into()],Some(&BTreeSet::new())).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="result"));
+    let mut local=LocalChat {details_default:true,..Default::default()};local.expansion.insert("tool:tool".into(),true);local.expansion.insert("tool:tool:Output".into(),true);
+    for _ in 0..16 {let req=f.cache.block_request("chat","result").unwrap();let range=tau_blocks::read(&f.source,&req).unwrap();f.cache.range(&f.lineage,"chat",&range).unwrap();}
+    let plan=f.cache.plan("chat",&local,&[]).unwrap();assert!(!plan.blocks.iter().any(|(id,_)|id=="result"));
+    let plan=f.cache.plan("chat",&local,&["result".into()]).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="result"));f.body("result");let text=f.cache.copy_ready("chat",&["result".into()]).unwrap().unwrap();assert_eq!(text.bytes().filter(|b|*b==b'x').count(),bytes.len());assert!(!text.contains("Preview limited"));
+}
+
+#[test]
+fn cache_migrates_without_losing_verified_bytes_and_rejects_future_versions() {
+    let mut f=Fixture::new();f.put("kept",None,0,BlockKind::Text,event("kept",0,"text"),b"verified");f.page(None,None);f.body("kept");
+    f.cache.db.lock().unwrap().execute_batch("DROP TABLE replica_epoch; PRAGMA user_version=1").unwrap();
+    let cache=Cache::open(&f._root.path().join("cache.db")).unwrap();assert_eq!(cache.epoch(),0);assert_eq!(cache.copy_ready("chat",&["kept".into()]).unwrap().unwrap(),"verified");
+    cache.db.lock().unwrap().execute_batch("PRAGMA user_version=999").unwrap();assert!(Cache::open(&f._root.path().join("cache.db")).is_err());assert_eq!(tau_blocks::cached_content(&cache.db.lock().unwrap(),"chat","kept").unwrap(),b"verified");
+}
+
+#[test]
+fn native_tool_pairing_uses_block_parents_not_reused_provider_call_ids() {
+    let mut f=Fixture::new();
+    for (id,order) in [("a",0),("b",2)] {let mut meta=event(id,order,"tool");meta["event"]["toolCallId"]=json!("provider-reused");f.put(id,None,order,BlockKind::Tool,meta,b"");}
+    for (id,parent,order,text) in [("one","a",1,b"first".as_slice()),("two","b",3,b"second".as_slice())] {let mut meta=event(id,order,"text");meta["event"]["role"]=json!("tool");meta["event"]["toolCallId"]=json!("provider-reused");f.put(id,Some(parent),order,BlockKind::Code,meta,text);}
+    f.page(None,None);f.page(Some("a"),None);f.page(Some("b"),None);f.body("one");f.body("two");
+    let view=f.cache.snapshot("chat").unwrap().unwrap();let tools=crate::details::Tools::new(view.snapshot.events.iter());
+    let a=view.snapshot.events.iter().find(|e|e.id=="a").unwrap();let text=tools.copy(&[a]);assert!(text.contains("first"));assert!(!text.contains("second"));
+}
+
+#[test]
+fn visible_file_captions_load_full_metadata_without_requesting_binary_payloads() {
+    let mut f=Fixture::new();let mut meta=event("card",0,"text");meta["event"]["role"]=json!("tool");meta["event"]["attachment"]=json!({"fileName":"report.txt","kind":"file","caption":"short","size":12});
+    let caption="🦀".repeat(1024);let mut full=meta["event"].clone();full["attachment"]["caption"]=json!(caption);let bytes=serde_json::to_vec(&full).unwrap();
+    meta["fullEvent"]=json!({"id":"card/meta","length":bytes.len(),"hash":blake3::hash(&bytes).to_hex().to_string()});
+    f.put("card",None,0,BlockKind::Code,meta,b"");f.put("card/meta",Some("card"),0,BlockKind::State,json!({"eventMetadata":true}),&bytes);f.page(None,None);
+    let visible=BTreeSet::from(["card".into()]);let plan=f.cache.plan_visible("chat",&LocalChat::default(),&[],Some(&visible)).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="card/meta"));assert!(!plan.blocks.iter().any(|(id,_)|id.starts_with("file:")));
+    f.body("card/meta");let view=f.cache.preview("chat",Some(&visible)).unwrap().unwrap();assert_eq!(view.snapshot.events[0].attachment.as_ref().unwrap().caption.as_deref(),Some(caption.as_str()));
+}

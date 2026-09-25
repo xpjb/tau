@@ -204,3 +204,21 @@ async fn metadata_fanout_cannot_consume_foreground_or_descriptor_slots() {
     assert_eq!(collect(client.watch_descriptor(block_request("answer",0,0,false)).await.unwrap()).await.0,b"reserved");
     client.shutdown().await;server.shutdown().await;
 }
+
+#[tokio::test]
+async fn native_ipv6_direct_route_and_many_peer_live_fanout() {
+    let backend=Memory::new();backend.put("live",None,BlockKind::Text,b"prefix",false);
+    let server=Server::bind("127.0.0.1:0".parse().unwrap(),backend.clone()).await.unwrap();
+    let mut peers=Vec::new();
+    for n in 0..16 {
+        let client=Client::bind().await.unwrap();let offer=server.authorize(&client.node_id(),backend.lineage()).unwrap();assert!(offer.port_v6.is_some());
+        client.configure(&offer,if n%2==0 {"[::1]"} else {"127.0.0.1"}).await.unwrap();
+        let mut watcher=client.watch(block_request("live",0,0,true)).await.unwrap();assert!(matches!(frame(&mut watcher).await.header,Header::Block {..}));assert_eq!(frame(&mut watcher).await.decoded().unwrap(),b"prefix");
+        peers.push((client,watcher));
+    }
+    let bytes=[b"prefix".as_slice(),&vec![9;128*1024]].concat();backend.put("live",None,BlockKind::Text,&bytes,true);
+    let results=futures_util::future::join_all(peers.into_iter().map(|(client,watcher)|async move {
+        let (tail,_)=collect(watcher).await;assert_eq!(tail,vec![9;128*1024]);let stats=client.stats();assert_eq!(stats.connections,1);assert_eq!(stats.integrity_failures,0);assert_eq!(stats.content_rx_bytes,128*1024+6);
+    })).await;
+    assert_eq!(results.len(),16);
+}

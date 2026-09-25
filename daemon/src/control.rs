@@ -17,6 +17,9 @@ impl StateStore {
     pub(crate) async fn control_frame(&self, message: &ServerMessage) -> Result<String> {
         let bytes = serde_json::to_vec(message)?;
         if bytes.len() <= MAX_CONTROL_BYTES {return Ok(String::from_utf8(bytes)?);}
+        let mut payload=message.clone();
+        let route=match &mut payload {ServerMessage::SessionPage {catalog_id,..}|ServerMessage::ProjectPage {catalog_id,..}=>Some(std::mem::take(catalog_id)),_=>None};
+        let bytes=serde_json::to_vec(&payload)?;
         ensure!(bytes.len() as u64 <= MAX_BLOCK_BYTES,"Descriptor exceeds its content limit");
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let id = hash.clone();
@@ -47,7 +50,7 @@ impl StateStore {
             _ => (None,vec![]),
         };
         let operation_id=if let ServerMessage::Operation {operation_id,registered:true,..}=message {Some(operation_id.clone())} else {None};
-        let descriptor = ServerMessage::Data {operation_id,key:message.replication_key().unwrap_or_else(||format!("receipt:{hash}")),content:ContentRef {lineage,scope:CONTROL_SCOPE.into(),id:hash.clone(),length,hash},session_id,reports};
+        let descriptor = ServerMessage::Data {operation_id,route,key:message.replication_key().unwrap_or_else(||format!("receipt:{hash}")),content:ContentRef {lineage,scope:CONTROL_SCOPE.into(),id:hash.clone(),length,hash},session_id,reports};
         let encoded = serde_json::to_string(&descriptor)?;
         ensure!(encoded.len() <= MAX_CONTROL_BYTES,"Receipt summary exceeds the control limit");
         Ok(encoded)

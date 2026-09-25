@@ -67,6 +67,7 @@ impl<'a> Tools<'a> {
     pub fn copy(&self, group: &[&Event]) -> String {
         let mut parts = vec![];
         for e in group {
+            if e.kind==EventKind::Text && e.role!=EventRole::Tool {parts.push(e.text.clone());continue;}
             if e.kind == EventKind::Thinking && e.role != EventRole::Tool {
                 if !e.text.is_empty() {
                     parts.push(format!("Thinking\n{}", e.text));

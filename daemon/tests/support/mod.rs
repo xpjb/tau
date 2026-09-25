@@ -1,4 +1,4 @@
-//! Real protocol-17 test client: bounded control plus explicit native reads.
+//! Real protocol-18 test client: bounded control plus explicit native reads.
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value,json};
@@ -23,6 +23,7 @@ impl Client {
         let hello=client.until(|m|m["type"]=="hello").await;
         assert_eq!(hello["protocolVersion"],tau_protocol::PROTOCOL_VERSION);
         client.request(json!({"id":"data","type":"connect_blocks","nodeId":client.data.node_id()})).await;
+        client.request(json!({"id":"initial-head","type":"list_sessions"})).await;
         client
     }
     pub async fn until(&mut self, predicate: impl Fn(&Value)->bool) -> Value {
@@ -47,6 +48,8 @@ impl Client {
                         if value["type"]=="resync_required" && value["sessionId"].is_null() {
                             self.socket.send(Message::Text(json!({"id":"head-sync","type":"list_sessions"}).to_string().into())).await.unwrap();
                         }
+                        if value["type"]=="session_page" {assert!(value["next"].is_null(),"Use the paged frontend for large-catalogue scenarios");value["type"]=json!("sessions");}
+                        if value["type"]=="project_page" {assert!(value["next"].is_null());value["type"]=json!("projects");}
                         self.seen.push(value.clone());if predicate(&value) {return value;}
                     }
                     Message::Ping(_)=>self.socket.flush().await.unwrap(),

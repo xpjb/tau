@@ -68,6 +68,15 @@ fn journal(db: &Connection, scope: &str, parent: Option<&str>, order: u64, recor
     db.execute("INSERT INTO block_changes(sequence,scope,parent,id,position,record) VALUES(?1,?2,?3,?4,?5,?6)
         ON CONFLICT(scope,parent,id) DO UPDATE SET sequence=excluded.sequence,position=excluded.position,record=excluded.record",
         params![sequence,scope,parent.unwrap_or_default(),id,order,serde_json::to_string(record)?])?;
+    // Bound change/tombstone retention independently of authored headers. A
+    // cursor below the floor must reset; no deletion is silently forgotten.
+    if sequence%1024==0 {
+        let cutoff:Option<u64>=db.query_row("SELECT sequence FROM block_changes ORDER BY sequence DESC LIMIT 1 OFFSET 65535",[],|r|r.get(0)).optional()?;
+        if let Some(cutoff)=cutoff {
+            db.execute("DELETE FROM block_changes WHERE sequence<?1",[cutoff])?;
+            db.execute("UPDATE block_state SET retained_from=max(retained_from,?1)",[cutoff])?;
+        }
+    }
     Ok(())
 }
 
@@ -249,6 +258,11 @@ pub fn cache_page(db: &Connection, request: &FeedRequest, page: &FeedPage) -> Re
     cache_lineage(db,&page.cursor.lineage)?;
     if request.before.is_none() && let Some(old) = cached_feed(db,&request.scope,request.parent.as_deref())?
         && old.cursor.lineage == page.cursor.lineage && old.cursor.sequence > page.cursor.sequence { return Ok(()); }
+    if page.reset && request.before.is_none() && request.cursor.is_some() {
+        db.execute("DELETE FROM blocks WHERE scope=?1",[&request.scope])?;
+        db.execute("DELETE FROM block_cache_feeds WHERE scope=?1",[&request.scope])?;
+        db.execute("DELETE FROM block_cache_tombstones WHERE scope=?1",[&request.scope])?;
+    }
     if page.reset {
         let ids = page.records.iter().filter_map(|r| match r { BlockRecord::Put { block } => Some(block.id.as_str()), _ => None }).collect::<Vec<_>>();
         let first = page.records.iter().filter_map(|r|match r {BlockRecord::Put {block}=>Some((block.order,block.id.as_str())),_=>None}).min();
@@ -360,13 +374,14 @@ pub fn cached_prefix(db: &Connection, scope: &str, id: &str) -> Result<u64> {
     Ok(offset)
 }
 
-pub fn cached_content(db: &Connection, scope: &str, id: &str) -> Result<Vec<u8>> {
+pub fn cached_content(db:&Connection,scope:&str,id:&str)->Result<Vec<u8>> {cached_preview(db,scope,id,MAX_BLOCK_BYTES as usize)}
+pub fn cached_preview(db: &Connection, scope: &str, id: &str, limit:usize) -> Result<Vec<u8>> {
     let Some(h) = header(db,scope,id)? else { return Ok(vec![]); };
     let mut result = Vec::new();
-    while (result.len() as u64) < h.length {
+    while (result.len() as u64) < h.length && result.len()<limit {
         let Some((hash,bytes)) = part(db,scope,id,h.version,result.len() as u64)? else { break; };
         ensure!(!bytes.is_empty() && bytes.len() <= BLOCK_CHUNK_BYTES && blake3::hash(&bytes).to_hex().as_str() == hash,"Cached content is corrupt");
-        let n = bytes.len(); result.extend(bytes);
+        let n = bytes.len();let remaining=limit-result.len();result.extend(bytes.into_iter().take(remaining));
         if n < BLOCK_CHUNK_BYTES { break; }
     }
     Ok(result)

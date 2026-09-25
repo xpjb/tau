@@ -49,9 +49,11 @@ impl files::Downloads {
             let mut buffer = vec![0;BLOCK_CHUNK_BYTES];
             loop {let n=source.read(&mut buffer).await?;if n==0 {break;}hasher.update(&buffer[..n]);}
             ensure!(source.metadata().await?.modified()? == before.modified()?,"Attachment changed while hashing");
+            let hash=hasher.finalize().to_hex().to_string();
+            ensure!(file.hash.as_ref().is_none_or(|expected|expected==&hash),"Local attachment failed integrity verification; original intent was not sent");
             let spec = UploadSpec {
                 id:blake3::hash(format!("file\0{session}\0{}",file.id).as_bytes()).to_hex().to_string(),
-                length:file.size,hash:hasher.finalize().to_hex().to_string(),
+                length:file.size,hash,
                 purpose:UploadPurpose::File {session_id:session.clone(),file_name:file.name.clone()},
             };
             let mut published = None;
@@ -86,6 +88,7 @@ impl files::Downloads {
         ensure!(reference.scope == CONTROL_SCOPE && reference.length <= MAX_BLOCK_BYTES,"Invalid data descriptor");
         let (client,lineage) = self.connection().await?;
         ensure!(reference.lineage == lineage,"Descriptor belongs to an old data source");
+        let epoch=self.cache.epoch();
         let mut request = self.cache.block_request(&reference.scope,&reference.id)?;
         request.follow = false;
         let mut watcher = client.watch_descriptor(BlockWatch::Block(request)).await?;
@@ -95,7 +98,7 @@ impl files::Downloads {
             match &frame.header {
                 Header::Block {block} => {
                     ensure!(block.id == reference.id && block.length == reference.length && block.sealed && block.version == 1,"Descriptor changed");
-                    self.cache.header(&lineage,&reference.scope,block)?;
+                    self.cache.header_at(&lineage,&reference.scope,block,epoch)?;
                     head = Some(block.clone());
                 }
                 Header::Data {version,offset,hash,..} => {
@@ -103,7 +106,7 @@ impl files::Downloads {
                     ensure!(*version == h.version,"Descriptor version changed");
                     let range = ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes:frame.decoded()?};
                     let (cache,scope,lineage) = (self.cache.clone(),reference.scope.clone(),lineage.clone());
-                    tokio::task::spawn_blocking(move ||cache.range(&lineage,&scope,&range)).await??;
+                    tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope,&range,epoch)).await??;
                 }
                 Header::End => break,
                 Header::Error {message} => anyhow::bail!("{message}"),
@@ -111,14 +114,14 @@ impl files::Downloads {
             }
             let _ = watcher.consumed(n).await;
         }
-        let bytes = {
-            let db=self.cache.db.lock().unwrap();
-            ensure!(tau_blocks::cursor(&db)?.lineage == lineage,"Descriptor source changed");
-            tau_blocks::cached_content(&db,&reference.scope,&reference.id)?
-        };
-        ensure!(bytes.len() as u64 == reference.length && blake3::hash(&bytes).to_hex().as_str() == reference.hash,"Descriptor integrity check failed");
-        let message = serde_json::from_slice(&bytes)?;
-        ensure!(!matches!(message,tau_protocol::ServerMessage::Data {..} | tau_protocol::ServerMessage::BlockConnection {..}),"Recursive descriptor");
-        Ok(message)
+        let cache=self.cache.clone();
+        tokio::task::spawn_blocking(move || {
+            let db=cache.db.lock().unwrap();
+            ensure!(super::replica_epoch(&db)?==epoch && tau_blocks::cursor(&db)?.lineage==lineage,"Descriptor source changed");
+            let bytes=tau_blocks::cached_content(&db,&reference.scope,&reference.id)?;drop(db);
+            ensure!(bytes.len() as u64==reference.length && blake3::hash(&bytes).to_hex().as_str()==reference.hash,"Descriptor integrity check failed");
+            let message=serde_json::from_slice(&bytes)?;
+            ensure!(!matches!(message,tau_protocol::ServerMessage::Data {..}|tau_protocol::ServerMessage::BlockConnection {..}),"Recursive descriptor");Ok(message)
+        }).await?
     }
 }

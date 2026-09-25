@@ -44,9 +44,12 @@ pub enum Command {
 }
 pub enum Event {
     Ready(u64),
+    Source(u64,String),
     HeartbeatSent { epoch: u64, at: Instant },
     HeartbeatReply { epoch: u64, at: Instant, rtt: Duration },
     Message(u64, Box<ServerMessage>),
+    SizedMessage(u64,Box<ServerMessage>,usize),
+    Metrics(tau_transfer::blocks::Stats),
     Disconnected(String),
     Fatal(String),
     NotSent(String, String),
@@ -150,7 +153,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
     let mut delay = 1;
     let mut jobs = tokio::task::JoinSet::new();
     let (prepared_tx,mut prepared_rx) = mpsc::channel::<(u64,Result<ClientRequest,(String,String)>)>(8);
-    let (resolved_tx,mut resolved_rx)=mpsc::channel::<(u64,String,u64,Result<ServerMessage>,tokio::sync::OwnedSemaphorePermit)>(8);
+    let (resolved_tx,mut resolved_rx)=mpsc::channel::<(u64,String,u64,Result<ServerMessage>,tokio::sync::OwnedSemaphorePermit,usize)>(8);
     let descriptor_budget=Arc::new(tokio::sync::Semaphore::new(128*1024*1024));
     let mut generations=HashMap::<String,u64>::new();let mut generation=0u64;
     let mut downloads = HashMap::<String, tokio::sync::watch::Sender<bool>>::new();
@@ -178,37 +181,52 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             let hello = tokio::time::timeout(Duration::from_secs(15), socket.next()).await?.context("No hello")??;
             let Message::Text(hello) = hello else { bail!("Expected Tau hello"); };
             ensure!(hello.len() <= MAX_CONTROL_BYTES,"Tau hello exceeds the control limit");
-            let ServerMessage::Hello { protocol_version, .. } = serde_json::from_str(&hello)? else { bail!("Expected Tau hello"); };
+            let ServerMessage::Hello { protocol_version, lineage, .. } = serde_json::from_str(&hello)? else { bail!("Expected Tau hello"); };
             if protocol_version != PROTOCOL_VERSION {
                 events.send(Event::Fatal(format!("Protocol {protocol_version} requires a matching client (this client uses {PROTOCOL_VERSION})"))).await;
                 commands.close();
                 return Ok(());
             }
+            let (mut writer,mut reader)=socket.split();
+            let (outgoing,mut writes)=mpsc::channel::<Message>(32);
+            let (health,mut probes)=mpsc::channel::<Message>(8);
+            // Owned by this connection epoch; dropping the scope aborts a stalled
+            // writer. No control reader/heartbeat waits for outbound socket IO.
+            let mut writer_task=tokio::task::JoinSet::new();
+            writer_task.spawn(async move {loop {
+                let message=tokio::select! {biased;message=probes.recv()=>message,message=writes.recv()=>message};
+                let Some(message)=message else {return Ok::<_,anyhow::Error>(());};
+                tokio::time::timeout(Duration::from_secs(5),writer.send(message)).await??;
+            }});
             if let Some(identity) = &mut block_identity && let Some(node_id) = identity.borrow_and_update().clone() {
                 let request = ClientRequest { id:"block-connection".into(),command:ClientCommand::ConnectBlocks { node_id } };
-                socket.send(Message::Text(serde_json::to_string(&request)?.into())).await?;
+                outgoing.try_send(Message::Text(serde_json::to_string(&request)?.into())).context("Control writer is full")?;
             }
             epoch += 1;
             generations.clear();
-            delay = 1;
+            let connected_at=Instant::now();let mut good_probes=0u32;
+            if !events.send(Event::Source(epoch,lineage.context("Missing source lineage")?)).await {return Ok(());}
             if !events.send(Event::Ready(epoch)).await { return Ok(()); }
             let mut heartbeat = tokio::time::interval_at(
                 tokio::time::Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut waiting: Option<(Vec<u8>, Instant)> = None;
+            let mut metrics=tokio::time::interval_at(tokio::time::Instant::now()+Duration::from_secs(5),Duration::from_secs(5));
             let mut renew_blocks=Instant::now()+Duration::from_secs(1800);
             loop {
                 let deadline = waiting.as_ref().map(|(_, at)|
                     tokio::time::Instant::from_std(*at + HEARTBEAT_TIMEOUT));
                 tokio::select! {
+                    result=writer_task.join_next()=>{result.context("Control writer stopped")???;bail!("Control writer stopped");}
                     _ = async {
                         if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; }
                         else { std::future::pending::<()>().await; }
                     } => return Err(HeartbeatTimeout.into()),
-                    Some((requested,key,serial,result,_budget)) = resolved_rx.recv() => {
+                    _=metrics.tick()=>{if let Some(service)=&block_service {if let Some(stats)=service.stats() {if !events.send(Event::Metrics(stats)).await {return Ok(());}}}}
+                    Some((requested,key,serial,result,_budget,bytes)) = resolved_rx.recv() => {
                         if requested==epoch && generations.get(&key)==Some(&serial) {
                             match result {
-                                Ok(message)=>{if !events.send(Event::Message(epoch,Box::new(message))).await {return Ok(());}}
+                                Ok(message)=>{if !events.send(Event::SizedMessage(epoch,Box::new(message),bytes)).await {return Ok(());}}
                                 Err(_)=>{events.send(Event::Message(epoch,Box::new(ServerMessage::ResyncRequired {session_id:None}))).await;}
                             }
                             if key.starts_with("receipt:") {generations.remove(&key);}
@@ -219,7 +237,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             Ok(request) if requested == epoch => {
                                 let encoded=serde_json::to_string(&request)?;
                                 ensure!(encoded.len()<=MAX_CONTROL_BYTES,"Input reference exceeds the control limit");
-                                tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Text(encoded.into()))).await??;
+                                if outgoing.try_send(Message::Text(encoded.into())).is_err() {events.send(Event::NotSent(request.id,"Control writer is full; intent was not sent".into())).await;}
                             }
                             Ok(request) => {events.send(Event::NotSent(request.id,"Connection changed before input submission; command was not sent".into())).await;}
                             Err((id,error)) => {events.send(Event::NotSent(id,error)).await;}
@@ -243,7 +261,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                 });
                                 continue;
                             }
-                            tokio::time::timeout(Duration::from_secs(15), socket.send(Message::Text(encoded.into()))).await??;
+                            if outgoing.try_send(Message::Text(encoded.into())).is_err() {events.send(Event::NotSent(request.id,"Control writer is full; intent was not sent".into())).await;}
                         }
                         Some(Command::Upload { epoch: requested, id, session, text, files }) => {
                             if requested != epoch { events.send(Event::NotSent(id, "Connection changed before upload".into())).await; continue; }
@@ -267,10 +285,10 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                         if !identity_changed {block_identity=None;}
                         if let Some(identity) = &mut block_identity && let Some(node_id) = identity.borrow_and_update().clone() {
                             let request = ClientRequest { id:"block-connection".into(),command:ClientCommand::ConnectBlocks { node_id } };
-                            socket.send(Message::Text(serde_json::to_string(&request)?.into())).await?;
+                            outgoing.try_send(Message::Text(serde_json::to_string(&request)?.into())).context("Control writer is full")?;
                         }
                     }
-                    frame = socket.next() => {
+                    frame = reader.next() => {
                         match frame.context("Connection closed")?? {
                             Message::Text(text) => {
                                 ensure!(text.len() <= MAX_CONTROL_BYTES, "Tau control frame is too large");
@@ -284,7 +302,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                 }
                                 generation+=1;
                                 if let Some(key)=message.replication_key() {generations.insert(key,generation);}
-                                if let ServerMessage::Data {content,key,session_id,reports,operation_id} = message {
+                                if let ServerMessage::Data {content,key,session_id,reports,operation_id,route} = message {
                                     if let Some(operation_id)=operation_id {
                                         if !events.send(Event::Message(epoch,Box::new(ServerMessage::Operation {operation_id,registered:true,response:None}))).await {return Ok(());}
                                     }
@@ -297,17 +315,22 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                     let data=service.downloads();let tx=resolved_tx.clone();let serial=generation;let budget=descriptor_budget.clone();
                                     jobs.spawn(async move {
                                         let Ok(permit)=budget.acquire_many_owned(content.length.min(tau_protocol::blocks::MAX_BLOCK_BYTES).max(1) as u32).await else {return;};
-                                        let result=data.descriptor(content).await;let _=tx.send((epoch,key,serial,result,permit)).await;
+                                        let length=content.length as usize;
+                                        let result=data.descriptor(content).await.and_then(|mut message| {
+                                            if let Some(route)=route {match &mut message {ServerMessage::SessionPage {catalog_id,..}|ServerMessage::ProjectPage {catalog_id,..}=>*catalog_id=route,_=>bail!("Unexpected descriptor route")}}
+                                            Ok(message)
+                                        });let _=tx.send((epoch,key,serial,result,permit,length)).await;
                                     });
                                     continue;
                                 }
                                 if !events.send(Event::Message(epoch, Box::new(message))).await { return Ok(()); }
                             }
-                            Message::Ping(payload) => { tokio::time::timeout(Duration::from_secs(15), socket.send(Message::Pong(payload))).await??; }
+                            Message::Ping(payload) => {health.try_send(Message::Pong(payload)).context("Control health writer is full")?;}
                             Message::Pong(payload) => {
                                 if waiting.as_ref().is_some_and(|(bytes, _)| bytes.as_slice() == payload.as_ref()) {
                                     let (_, sent) = waiting.take().unwrap();
-                                    let at = Instant::now();
+                                    let at = Instant::now();good_probes+=1;
+                                    if healthy_for_backoff(good_probes,connected_at.elapsed()) {delay=1;}
                                     if !events.send(Event::HeartbeatReply { epoch, at, rtt: at.duration_since(sent) }).await { return Ok(()); }
                                 }
                             }
@@ -318,14 +341,14 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                     _ = heartbeat.tick() => {
                         if waiting.is_some() { continue; } // Timeout is independent of the probe cadence.
                         let payload = uuid::Uuid::new_v4().as_bytes().to_vec();
-                        tokio::time::timeout(Duration::from_secs(15), socket.send(Message::Ping(payload.clone().into()))).await??;
+                        health.try_send(Message::Ping(payload.clone().into())).context("Control health writer is full")?;
                         let sent = Instant::now();
                         waiting = Some((payload, sent));
                         if !events.send(Event::HeartbeatSent { epoch, at: sent }).await { return Ok(()); }
                         if sent>=renew_blocks {
                             if let Some(identity)=&block_identity && let Some(node_id)=identity.borrow().clone() {
                                 let request=ClientRequest {id:"block-connection".into(),command:ClientCommand::ConnectBlocks {node_id}};
-                                socket.send(Message::Text(serde_json::to_string(&request)?.into())).await?;
+                                outgoing.try_send(Message::Text(serde_json::to_string(&request)?.into())).context("Control writer is full")?;
                             }
                             renew_blocks=sent+Duration::from_secs(1800);
                         }
@@ -372,7 +395,8 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         if !events.send(Event::Disconnected(detail.into())).await {
             break;
         }
-        let wait = tokio::time::sleep(Duration::from_secs(delay));
+        let jitter=u64::from(uuid::Uuid::new_v4().as_bytes()[0]);
+        let wait = tokio::time::sleep(Duration::from_millis(delay*1000+jitter));
         tokio::pin!(wait);
         delay = (delay * 2).min(15);
         loop {
@@ -439,5 +463,17 @@ async fn reject_offline(command: Command, events: &Events) {
                 .await;
         }
         Command::CancelDownload(_) | Command::Blocks(_) => {}
+    }
+}
+
+fn healthy_for_backoff(probes:u32,elapsed:Duration)->bool {probes>=2 && elapsed>=Duration::from_secs(30)}
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+    #[test] fn flapping_hello_or_one_probe_does_not_reset_retry_backoff() {
+        assert!(!healthy_for_backoff(0,Duration::from_secs(60)));
+        assert!(!healthy_for_backoff(1,Duration::from_secs(60)));
+        assert!(!healthy_for_backoff(20,Duration::from_secs(29)));
+        assert!(healthy_for_backoff(2,Duration::from_secs(30)));
     }
 }

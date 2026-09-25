@@ -195,7 +195,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     }
     async fn ws(State(peer): State<Peer>, ws: WebSocketUpgrade) -> impl IntoResponse {
         ws.on_upgrade(move|mut socket|async move {
-        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&tau_protocol::ServerMessage::Hello { protocol_version:tau_protocol::PROTOCOL_VERSION,daemon_version:"fixture".into() }).unwrap().into())).await.unwrap();
+        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&tau_protocol::ServerMessage::Hello { protocol_version:tau_protocol::PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into()) }).unwrap().into())).await.unwrap();
         while let Some(Ok(axum::extract::ws::Message::Text(text)))=socket.recv().await {
             let request:Value=serde_json::from_str(&text).unwrap();
             match request["type"].as_str().unwrap() {
@@ -341,7 +341,7 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         ws.send(tokio_tungstenite::tungstenite::Message::Text(
             serde_json::to_string(&tau_protocol::ServerMessage::Hello {
                 protocol_version: tau_protocol::PROTOCOL_VERSION,
-                daemon_version: "fixture".into(),
+                daemon_version: "fixture".into(),lineage:Some("fixture".into()),
             })
             .unwrap()
             .into(),
@@ -360,6 +360,7 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         },
         Arc::new(|| {}),
     );
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(3),n.events.recv()).await.unwrap(),Some(NetworkEvent::Source(1,_))));
     let epoch = match tokio::time::timeout(Duration::from_secs(3), n.events.recv())
         .await
         .unwrap()
@@ -427,7 +428,7 @@ async fn generic_control_outbox_recovers_original_outcome_without_reexecuting_af
     let counted=peer.clone();
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
     let app=Router::new().route("/v1/ws",get(move |ws:WebSocketUpgrade| {let peer=peer.clone();async move {ws.on_upgrade(move |mut socket|async move {
-        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into()}).unwrap().into())).await.unwrap();
+        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into())}).unwrap().into())).await.unwrap();
         while let Some(Ok(frame))=socket.recv().await {
             let axum::extract::ws::Message::Text(text)=frame else {continue;};
             let request:ClientRequest=serde_json::from_str(&text).unwrap();
@@ -455,4 +456,34 @@ async fn generic_control_outbox_recovers_original_outcome_without_reexecuting_af
     tokio::time::timeout(Duration::from_secs(5),async {loop {c.poll();if c.account.pending_controls.is_empty() {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
     assert_eq!(counted.mutations.load(Ordering::SeqCst),1,"Receipt reconciliation must not execute another mutation");
     drop(c);server.abort();
+}
+
+#[test]
+fn alias_transaction_fault_preserves_both_drafts_with_their_own_files() {
+    use tau_frontend::store::LocalChat;
+    let root=tempfile::tempdir().unwrap();let store=Store::open(root.path().join("local")).unwrap();
+    let raw=root.path().join("source.txt");std::fs::write(&raw,b"source contents").unwrap();
+    let mut source=LocalChat {draft:"source draft".into(),..Default::default()};source.files.push(store.import("pair","provisional",&raw,None).unwrap());
+    let raw2=root.path().join("target.txt");std::fs::write(&raw2,b"target contents").unwrap();
+    let mut target=LocalChat {draft:"target draft".into(),..Default::default()};target.files.push(store.import("pair","confirmed",&raw2,None).unwrap());
+    store.save_chat("pair","provisional",&source).unwrap();store.save_chat("pair","confirmed",&target).unwrap();
+    let db=rusqlite::Connection::open(root.path().join("local/client.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_alias BEFORE INSERT ON chat_aliases BEGIN SELECT RAISE(ABORT,'alias fault');END").unwrap();
+    assert!(store.merge_chat("pair","provisional","confirmed",&source,Some(&target)).is_err());
+    assert_eq!(store.load_chat("pair","provisional").unwrap().draft,"source draft");assert_eq!(store.load_chat("pair","confirmed").unwrap().draft,"target draft");assert!(source.files[0].path.exists());
+    db.execute_batch("DROP TRIGGER fail_alias").unwrap();
+    let merged=store.merge_chat("pair","provisional","confirmed",&source,Some(&target)).unwrap();assert_eq!(merged.files[0].name,"target.txt");
+    assert_eq!(merged.pending[0].text,"source draft");assert_eq!(merged.pending[0].files[0].name,"source.txt");assert_eq!(merged.pending[0].status,Delivery::Rejected);
+    assert!(!source.files[0].path.exists());assert_eq!(std::fs::read(&merged.pending[0].files[0].path).unwrap(),b"source contents");
+    drop(store);let store=Store::open(root.path().join("local")).unwrap();assert_eq!(store.resolve_chat("pair","provisional").unwrap(),"confirmed");
+    assert_eq!(store.load_chat("pair","provisional").unwrap().pending[0].files[0].path,merged.pending[0].files[0].path);
+}
+
+#[test]
+fn failed_attachment_commit_is_clean_and_explicit_remove_frees_only_unreferenced_files() {
+    let root=tempfile::tempdir().unwrap();let mut c=Controller::new(Store::open(root.path().join("local")).unwrap(),Arc::new(||{})).unwrap();c.select("chat").unwrap();
+    let source=root.path().join("photo.png");std::fs::write(&source,b"owned bytes").unwrap();
+    let db=rusqlite::Connection::open(root.path().join("local/client.sqlite3")).unwrap();db.execute_batch("CREATE TRIGGER fail_file BEFORE INSERT ON local WHEN NEW.key='chat:chat' BEGIN SELECT RAISE(ABORT,'full');END").unwrap();
+    assert!(c.attach(&source,None).is_err());assert!(c.selected().unwrap().local.files.is_empty());assert!(c.store.load_chat(&c.identity,"chat").unwrap().files.is_empty());
+    db.execute_batch("DROP TRIGGER fail_file").unwrap();c.attach(&source,None).unwrap();let file=c.selected().unwrap().local.files[0].clone();c.remove_file(&file.id).unwrap();assert!(!file.path.exists());assert!(source.exists());
 }

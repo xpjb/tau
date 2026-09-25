@@ -1,109 +1,133 @@
-# Tau2 native block sync — implementation status
+# Tau2 native block sync
 
-**Native read/write/control cutover implemented; release certification is not complete.** See [../HANDOFF.md](../HANDOFF.md) for the branch, safety rules and validation. The earlier [protocol audit](tau2-protocol-audit.md) is historical design/evidence, not the current implementation status.
+**Implementation and automated local validation complete. Not deployed or device/WAN certified.** [HANDOFF](../HANDOFF.md) records the branch, final checks and operational restrictions. The [original protocol audit](tau2-protocol-audit.md) is historical design/evidence, not the current wire contract.
 
-## Wire contract
+## Wire and ownership
 
-Control protocol **17** (original integration: 15; read checkpoint: 16). Production has **one authenticated control WebSocket and one shared Iroh/QUIC endpoint/connection per client/daemon**. Chat bodies, descriptors, large command inputs, uploads and downloads use ALPN `tau/blocks/1`. There is no second per-file transport.
+Control protocol **18**; daemon database schema **5**; authored client store schema **2**; disposable replica schema **2**. Both client and daemon must match the control protocol.
 
-- Uniform flat `BlockHeader`: ID, optional parent, sibling order, kind, metadata, content version, byte length, seal and metadata revision.
-- Direct-child header/change feeds use durable `(lineage, sequence)` cursors; history positions are `(order, id)`. Feeds contain headers/tombstones, never bodies or implicit descendants.
-- Explicit body reads use version + verified byte offset, optionally following appends. Replacement increments the version; append/seal do not resend complete prefixes.
-- `ConnectBlocks`, `GetSession`, `GetReceipts`, `GetOperation` are small control operations. Receipt queries never require opening a transcript or loading provider history.
-- Large outgoing requests upload the complete immutable `ClientRequest`, then send `Input(ContentRef)`. The daemon checks lineage, hash, sealing and matching inner/outer request IDs before reserving/executing it.
-- Large responses, settings, lists/catalogs, project prompts and notices become immutable `@control` bodies with a small `Data` descriptor. Small acceptance reports/registered-operation markers travel before descriptor bodies. Full errors/notices remain in the body, not silently truncated.
-- Retired `OpenSession`, `GetHistory`, `TranscriptSnapshot/Page/Update` cannot serialize/deserialize on the wire. Some types remain internal render/test adapters. HTTP file/download/offer/upload routes and the legacy Iroh-blobs stack have been removed. Health, WebSocket and crash telemetry HTTP routes remain.
+Production uses one authenticated control WebSocket and one shared Iroh/QUIC endpoint/connection per client/daemon, ALPN `tau/blocks/1`. There is no per-file transport. Both IP families are supported, including an independently advertised IPv6 port.
 
-### Bounds
+- Flat `BlockHeader`: ID, optional parent, sibling order, kind, metadata, content version, byte length, seal and metadata revision.
+- Direct-child feeds carry headers/tombstones, not bodies or implicit descendants. Cursors are `(lineage, sequence)`; history positions are `(order, id)`.
+- Explicit body interests use content version and verified offset. Append/seal retain identity and prefixes; replacement changes version. Durable cache commits precede credit and advertised resume offsets.
+- Large requests upload the immutable `ClientRequest`, then send `Input(ContentRef)`. Lineage, digest, sealing and inner/outer request IDs are checked before execution.
+- Large replies become immutable `@control` bodies plus small `Data` references and receipt/ownership summaries. Page routing IDs stay in the small reference rather than defeating body reuse.
+- HTTP file/upload/offer routes, Iroh-blobs and transcript wire messages are removed. Internal transcript types remain renderer/test adapters. Health, WebSocket and crash telemetry HTTP routes remain.
 
-| Resource | Bound |
+The source owns canonical history, queues, receipts, operation reservations and retained files. Replicas are disposable. Client drafts, imported files and pending intents are **not** replica data.
+
+## Durable operations, recovery and local work
+
+Prompt/queue receipts commit before execution; cold acceptance loads queue/head metadata, not display/provider history. Owned runs prepare bounded provider context outside the queue mutex and database gate. Abort durably pauses before cancellation, including while waiting for execution capacity. Compaction returns acceptance independently of its provider result.
+
+Generic mutations reserve their complete canonical command in `operations` before effects. IDs cannot be rebound. Duplicate requests return stored outcomes. Interrupted reservations become explicit uncertain outcomes; recovery never reexecutes them. This is **not** a claim that filesystem effects and every database response share one universal transaction.
+
+Provider context preserves opaque private items and complete tool-call IDs. Aborted/error assistant turns are not reintroduced through private metadata. Missing results are repaired per assistant turn with an unknown-outcome warning, not fabricated success or automatic retry. Native display pairing follows block parents/IDs rather than assuming provider call IDs are unique across turns.
+
+Client intents are saved before network effects. Restart/reconnect queries outcomes rather than replaying uncertain work. Receipt queries and waiting submissions use bounded cohorts; the latter require the durable source-identity gate. A failed lineage transaction prevents Ready/automatic submission. Queue edit/delete overlays remain until complete replicated convergence.
+
+Settings → **Saved actions** provides paged inspection, full intent copy, receipt checks, explicit retry of the original ID and confirmed local forgetting. Forgetting is not cancellation or undo. Diagnostics are copied at click time. **Clear replica cache** preserves authored work.
+
+Legacy aliases use verified file copies and one transaction for target state, source removal and alias publication. An interrupted account update can recover the persisted alias. Distinct drafts retain their own attachments as separate recoverable bundles. Failed attachment saves leave no advertised local reference; explicit removal frees only unreferenced owned imports.
+
+Source-missing chats with local work remain reachable as **Local recovery** in General. Their old intents do not resend. The menu can copy only the draft/files into a new, unsent chat, or explicitly forget the local recovery. Original pending intents are never silently retargeted to that new chat.
+
+## Paging, projection and scheduling
+
+Sessions use 64-row keyset pages; projects use eight-row pages. Structural/name/model/topic changes fence a traversal. Activity alone does not force a restart. Resyncs coalesce until both traversals finish, preventing busy chats from starving a large catalogue. Per-session status stamps fence delayed pages, including statuses received before list membership. Lists do not load histories or create cold runtimes.
+
+Metadata watches batch within request-count and byte budgets. Hard stream classes reserve capacity; live watches yield after five seconds and reopen from committed cursors/prefixes. Metadata, descriptor and foreground priorities are distinct from bulk priority. Grants renew without replacing a healthy same-peer connection.
+
+The WebSocket reader never waits on an outbound socket write. A bounded writer has a separate health lane and write deadline; RTT includes time waiting for that writer. Retry backoff has jitter and only resets after two good probes and 30 healthy seconds, not merely Hello. UI event enqueue is bounded and independent of UI consumption; overflow fails closed once, rather than accumulating fatal events.
+
+Cache projection is sparse for dirty roots/parents, with separate queue convergence. Viewport planning uses point lookups; idle plans are not rebuilt continuously. Retained previews are bounded across sparse updates. Large ordinary bodies stop prefetching after their preview prefix; explicit Copy resumes the rest. Closed tool children do not fetch merely because their headers exist. Delivered attachment cards remain visible independently of collapsed tools, without fetching binary payloads.
+
+Copy requires sealed content, complete relevant metadata and terminal tool state. It preflights aggregate body **and metadata** size, deduplicates interests and supports individual closed result children. It copies a complete **observed sealed** snapshot, not a source-linearizable cut of a changing hidden tree. Full native cache cuts replace old UI history, so a pruned reset cannot retain ghost off-window rows.
+
+Replica reset epochs are stored in SQLite and checked inside page/header/range transactions, descriptor reads and final export publication. They fence outstanding jobs even across independent cache handles. Lineage checks independently fence old sources.
+
+## Resource and retention policy
+
+| Resource | Admission/bound |
 |---|---:|
-| WebSocket frame and whole message, both directions | 4 KiB |
+| Control frame/message, either direction | 4 KiB |
 | Raw native chunk | 16 KiB |
-| Serialized block / transport header | 4 KiB / 5 KiB |
-| Block / descriptor body | 64 MiB |
-| Uploaded command | 8 MiB |
-| Uploaded file | 50 MB |
-| Feed page | 32 records |
-| Feed batch | 16 requests and encoded request budget |
-| Per-stream credit | 64 KiB encoded frame bytes |
-| Client stream classes | 2 metadata + 4 foreground + 6 bulk/upload + 2 descriptor |
+| Block / transport header | 4 KiB / 5 KiB |
+| Block / descriptor / clipboard body | 64 MiB |
+| Uploaded command / file | 8 MiB / 50 MB |
+| Feed page / batch | 32 records / 16 requests plus encoded-size budget |
+| Per-stream application credit | 64 KiB encoded frame bytes |
+| Client stream classes | 2 metadata, 4 foreground, 6 bulk/upload, 2 descriptor |
 | Server streams per connection | 16 |
 | File imports / frontend downloads | 2 each |
-| Source pending upload reservations | 1 GiB / 4096 records |
-| Source descriptor leases | 256 MiB / 4096 bodies, 24-hour expiry |
-| Verified client body cache | 512 MiB logical CAS bytes |
-| Selected viewport body working set | 128 MiB, up to 30 root interests |
-| Frontend control event mailbox | 512 events / 128 MiB, plus terminal overflow indication |
-| Control output queue / health queue | 32 / 8 bounded frames |
+| Owned agent runs / title jobs / resident runtimes | 8 / 2 / 128 |
+| Provider context | 128 MiB raw and prepared JSON; 10,000 entries; 64 MiB per raw entry |
+| Source sessions / projects | 20,000 / 128 |
+| Source headers / serialized header metadata | 250,000 / 256 MiB |
+| Replica headers / metadata / tombstones | 100,000 / 128 MiB / 100,000 |
+| Retained source change index | approximately 65,536–66,559 records |
+| Source SQLite page budget | 8 GiB, installed before migration |
+| Pending upload reservations | 1 GiB / 4,096 records |
+| Descriptor leases | 256 MiB / 4,096 bodies, 24-hour expiry |
+| Published upload manifests | 4 GiB / 8,192 files |
+| Physical upload / outbox admission scans | 4 GiB each; 100,000 entries |
+| Authored client SQLite / individual chat | 512 MiB / 32 MiB; 256 per-chat intents |
+| Imported client files | 2 GiB / 8,192 files; never automatic authored-file eviction |
+| Verified CAS / replica SQLite | 512 MiB logical bytes / 1 GiB pages per database |
+| Account replica databases | four; inactive LRU/expired replicas can be collected, live handles are leased |
+| Disposable download exports | 1 GiB / 4,096 files, seven-day TTL |
+| Viewport body admission / root interests | 128 MiB / 30 |
+| Preview payload | 256 KiB per group; 8 MiB and 32 retained groups, plus small labels |
+| Frontend event mailbox | 512 events / 128 MiB, plus one terminal overflow |
+| Control output / health lanes | 32 / 8 frames |
 | Daemon control jobs | 32 global / 8 per socket |
-| Outstanding generic client mutation intents | 32 / 16 MiB serialized inputs |
-| In-flight/queued descriptor payload reservations | 128 MiB |
+| Generic client mutation outbox | 32 intents / 16 MiB inputs |
+| Descriptor payload reservations | 128 MiB |
 
-Credit counts encoded application frames, **not raw decompressed bytes or actual UDP traffic**. Decompression/hash validation are separately bounded per chunk. These bounds are not a proof of complete metadata, retained-file or whole-system memory quotas.
+These are application/page/admission limits, **not** a single process-RSS or physical-filesystem ceiling. SQLite WAL, temporary copies, parsed representations and render metadata require headroom. Alias migration/finalization also need temporary space. Layout can still walk retained metadata; sparse projection and bounded body rendering do not imply constant-time layout at the maximum header count. Existing oversized authored stores are not silently erased to satisfy a new limit.
 
-## Durable data and uploads
+Metadata counters/quotas participate in the caller's transaction. Journal pruning forces old cursors to reset the entire cached scope, including off-window deletions. Body eviction preserves metadata and authored work.
 
-`tau-blocks` stores headers, CAS chunks, version/offset references, coalesced changes, feed checkpoints and tombstones. Mutators require the caller's SQLite transaction. Verified bytes/checkpoints are committed before credit or advertised resume offsets. Hash-corrupt shared CAS entries can be repaired with verified bytes.
+Uploads bind their IDs to immutable specs. A manifest and owner precede publication; a detached owned finalizer retains capacity through rename/fsync and SQLite sealing even if its caller disappears. Sealed retries verify the owned file. Retained publication IDs cannot be rebound to different files. Forks inherit ownership; parent deletion does not delete a fork's uploads. Deletion invalidates late upload writes.
 
-The change index retains latest Put/Remove per `(scope, parent, id)`, not every token. Parent moves leave old-directory tombstones. Finite history pages cannot advance live cursors past unread changes. Equal/max-order siblings and queue-only initial windows are covered by tests. Tombstone/metadata retention still needs further bounds.
+Maintenance runs at startup and every 600 seconds. It collects bounded batches of unowned/expired unpublished upload manifests and expired pure leases. Seven-day pure upload expiry does not expire operation ownership. Unknown legacy files are retained conservatively and counted against physical admission, not silently adopted/deleted. Existing published records are migrated through surviving transitive fork relationships.
 
-Unpublished lazy file imports use `@staging`, bounded async reads and atomic chunk-reference publication. Startup removes staging; requests cannot read that scope. This is distinct from durable `@uploads` reservations, which survive restart.
+Outbox deliveries are private durable snapshots, even when the original is already inside outbox. New snapshots record SHA-256; lazy materialization and image-context rehydration reject changed owned bytes. Retained/ambiguous paid outputs are not automatically collected. Failures must not cause automatic regeneration. This does not make a paid provider call, disk publication and receipt commit atomic, or guarantee preservation through arbitrary external filesystem damage.
 
-`blocks/src/uploads.rs` binds upload IDs to complete specs, verifies contiguous prefixes and idempotent duplicate chunks, rejects conflicting IDs/gaps/hashes, and seals only complete content. Old pure-data leases expire after seven days on a subsequent begin; operation receipts do not expire with them. A command reference includes the content hash, so a changed or expired upload cannot substitute different bytes into an old reference.
+Client export GC touches only the private hashed download namespace, never arbitrary user export destinations. Replica GC cannot unlink a leased live database or the authored store. Portable conversation export streams SQLite blobs to a fsynced temporary file and atomic publication, rather than collecting the whole conversation in memory; it rejects the source database as its destination.
 
-`daemon/src/uploads.rs` hashes completed input in bounded reads outside the DB gate. Files are fsynced and atomically published to a deterministic destination derived from the complete upload spec; directory publication is fsynced before recording sealed ownership. Retry after a lost final ACK returns the same path. After publication, the export owns the bytes and redundant upload chunk references are removed. Completed exports are not counted as outstanding upload reservations; this is **not** a global retained-file quota. Unsealed reservations remain resumable. Export-orphan cleanup and more cancellation/power-loss cases remain to be tested.
+## Backup, restore and rollback operations
 
-Frontend imports fsync file and directory ancestry before saving an attachment intent. Native uploads hash/read bounded chunks, seek to durable resume offsets, and use the same shared `Client`. Large command uploads and file preparation run outside the WebSocket reader; an epoch check prevents submitting an old prepared request on a new control connection.
+Normal restart preserves lineage. **Restoring an older backup with its old lineage and then serving it is unsupported.**
 
-## Mutation ownership and recovery
+1. Obtain deployment/maintenance approval and stop only the target daemon. The current task did **not** authorize starting beta or touching stable.
+2. Preserve the pre-change database, configured outbox/upload trees, settings/auth files and matching binaries. Use a consistent SQLite backup or an offline database **with its committed WAL**; copying only the main file while WAL contains commits is not a backup. Keep secrets private. Portable history export is not a backup of receipts, queues, operations or file ownership.
+3. Restore the consistent database and owned trees at their original absolute paths. Do not mix snapshots, relocate file references silently, or discard unclaimed paid outputs. Quiesce other writers to those trees too.
+4. Before serving, run the matching implementation's offline tool:
 
-Daemon database schema **4** adds `operations(id, payload, response)` for create/fork/clone/rename/close/delete session, project mutations/moves and settings updates. The full canonical command is reserved before `Accepted` and before its effect. IDs cannot be rebound. A lost response is recovered by `GetOperation`; a duplicate does not execute the mutation again. Registry rows survive session deletion. Compatible legacy creation receipts are reconciled rather than treating them as new creates.
+   ```sh
+   taud --rotate-lineage /absolute/path/to/tau.sqlite3
+   ```
 
-Reservation, existing effect transactions/filesystem work and final response persistence are not one universal transaction. Startup records an explicit uncertain/interrupted outcome for a reserved operation without a final response; it **never replays the effect**. Failures after reservation are conservatively uncertain. Native prompt/queue receipts remain their existing scoped journal; it is not automatically correct to treat every path as a single global transactional actor.
+   It requires an existing absolute database path, shares the serving daemon's writer lease, recovers interrupted state without replay, rotates lineage, invalidates pure old inputs/descriptors, and places every restored chat behind an execution-review guard. Verify successful completion and the reported new lineage. If interrupted/failed, keep the daemon stopped and rerun/repair; do not serve a partially completed restore procedure.
+5. On reconnect, clients invalidate old namespaces and fence old intents. Review external/paid effects that may have happened after the snapshot. **Review restored history** merely permits future explicit execution; it does not resume, resend or regenerate anything. Forks inherit the guard.
+6. Roll back data only through this same restore/fence procedure with schema-compatible binaries. There is **no in-place downgrade** from schema 5/protocol 18 to the earlier cutover. Keep old backups and matching clients/binaries, but do not run an older writer against upgraded state or claim an untested downgrade path.
 
-Frontend generic mutations are saved in `Account.pending_controls` before submission. Reconnect/restart queries outcomes in bounded cohorts rather than replaying effects. Unknown/uncertain intent stays local; explicitly repeating an identical command reuses its ID. Acceptance is recorded independently of descriptor completion. Deleted-project chat ownership is retained for outcome recovery. Local outcome application finishes before removing the saved intent; an existing recovered fork draft is preserved rather than overwritten. A comprehensive outbox inspector/cleanup UX and multi-record local crash audit are still needed.
+Use one configured database path, not hard-link aliases. The writer lease protects ordinary serving/import/export/rotation on that path; it is not a substitute for stopping the target before filesystem replacement.
 
-Prompt, queue, abort and model-selection intents use the durable per-chat outbox. Queue edit/delete acceptance retains the optimistic overlay until complete revision/text/directory convergence, including across restart. Partial text cannot be copied or edited. Abort commits paused queue/receipt before signaling cancellation.
+## Automated evidence and limits
 
-Compaction reserves its builtin receipt, publishes Running, starts owned work and immediately returns Accepted instead of holding the operation mutex through the provider call. Completion is persisted/reported separately; restart makes interrupted work explicit and does not rerun it. **The general first-prompt path still constructs/loads the runtime before acceptance; moving acceptance completely ahead of cold provider-history loading needs a further actor/queue audit.**
+The managed compiler check, complete nextest suite and rustdoc pass; see HANDOFF for final run IDs. No Clippy or built-in Cargo test runner was invoked.
 
-New client-named creation keeps its exact UUID rather than aliasing an older starter. Legacy alias recovery remains, and its filesystem/SQLite/account crash windows need explicit migration fault coverage.
+Coverage includes existing actual-process crash/restart tests and native E2E workflows, plus cold context gating, SQLite FULL rollback, kernel `/dev/full` copy failure, post-rename cancellation, duplicate finish, fork ownership/deletion, changed-file rejection, alias transaction failure, source-fence rollback, missing-source local recovery, paginated catalogues/status races, migration/future-version rejection, metadata quotas/pruning, cross-handle epochs, sparse preview bounds, full copy, dormant replica collection and backoff stability. A 16-peer test uses both IPv4 and direct IPv6 live body fanout. Real headless GPU tests exercise desktop/mobile-size settings, saved-action and complete restore-warning dialogs.
 
-## Scheduling, projection and UI
+`frontend/tests/native_link.rs` runs the **actual daemon and two production controllers** against a local unpaid provider fixture. Transparent TCP and UDP proxies share 64 KiB/s capacity per direction, add 35 ms one-way delay and drop every 23rd UDP packet. They do not terminate WebSocket or auto-answer probes. The scenario uploads 256 KiB, receives >40 KiB fenced code, opens 24 tool disclosures on one client while the other remains collapsed, cancels/resumes a 512 KiB download and renames the chat during it. It checks hashes, connection reuse, real shaper traffic/minimum transfer duration, zero unread-file materialization and exactly two fixture provider calls.
 
-- Hard stream classes prevent an arbitrary metadata queue from taking foreground/descriptor permits or bulk uploads from taking health/control resources.
-- Metadata watches batch within both count and encoded-size limits. Frontend live watches yield their class permit after five seconds and reopen from committed cursors/prefixes, so queued cohorts are not permanently starved. This is not a measured WAN latency guarantee.
-- Feed hints coalesce at 100 ms; followed body hints at 50 ms, with polling fallback. Grants last an hour and renew at 30 minutes without replacing a healthy same-peer connection.
-- Plans/configuration use latest-value channels; history requests are bounded. Scope changes cancel explicit history jobs. Drop cancels stream/task ownership.
-- UI layout supplies viewport plus overscan interests. Offscreen disclosure preferences do not cause unconditional body prefetch. Headless/bootstrap selection uses recent roots. Queue bodies remain separately required for operation correctness.
-- Copy Details advances through bounded cohorts without changing disclosure preferences. It waits for sealed bodies, complete relevant metadata and completed/failed/interrupted tool state. It is a complete **observed sealed** snapshot, not a source-linearizable cut of an actively changing hidden subtree. Clipboard output is capped at 64 MiB; replacement/deletion/source-swap waiting cases need broader tests.
-- Long event attributes become hash-referenced `<event>/meta` bodies; small summaries remain in headers. Tool correlation IDs are normalized when oversized. The frontend preserves authoritative phase/error/order metadata while resolving full attributes.
-- Growing live source events use append hints and `tau_blocks::append` instead of repeatedly reading/validating the complete old DB prefix. Existing provider/render adapters can still allocate full growing values; cache snapshots still materialize more history than the active viewport.
-- WebSocket health has a separate prioritized bounded write lane. Frontend event enqueue does not await UI consumption; ephemeral state/heartbeat events coalesce while durable responses are preserved within the mailbox bound. Overflow fails closed with a visible reconnect/reconcile error rather than allowing unbounded memory.
-- Session/project broadcasts are small resync/head notices, not queued copies of growing lists. Descriptor jobs have epoch/key generation fencing so a slow old descriptor does not overwrite a newer received state for the same key. This is not a universal source revision fence for every cross-message UI transition.
+Two final focused repeats took about 25.2 seconds, with control receipts **207 ms / 203 ms**, worst observed control RTT **366 ms / 224 ms**, roughly **1.15 MB shaped UDP**, one native connection per client, at least **64 KiB resumed offset**, and zero integrity failures. Runs: `f0b0fb1e-3a40-4418-bf3a-c0db38481990`, `7e53784c-b23b-4d21-9fd8-384d3151290d`.
 
-## Validation
+The loss test exposed a fatal `iroh-quinn-proto 0.13.0` multi-datagram pacing assertion (`untracked_bytes <= segment_size`). The supported workaround disables segmentation offload while retaining ordinary QUIC reliability/congestion control. Do not reenable it or upgrade the pinned transport without rerunning the real shared-link regression.
 
-See HANDOFF for the latest commands/run ID. Compiler checks and rustdoc use the managed Cargo wrapper; behavioral tests use nextest. No Clippy and no built-in Cargo test runner.
+Diagnostics expose native attempts/connections/streams, occupied class slots, verified content and Tau-frame bytes, requested resume offsets, cancellations and integrity failures, plus current-connection QUIC UDP/loss/RTT counters. Native samples update every five seconds. App-frame credit is not UDP traffic; requested offsets are not unique bandwidth savings. Slot occupancy is not a full queue-depth metric.
 
-Coverage includes:
-
-- Existing block integrity, suffix-only append/seal/resume, CAS repair, replacement, tombstones, compound paging/cursor races and staging tests.
-- Persistent native uploads across client/server restart, conflicting IDs, bad hashes, incomplete input, authentication/revocation; shared connection with feeds.
-- Actual daemon native chat, queue, a large uploaded prompt, file upload/download, settings/projects, fork/delete, cached frontend restart and model-selection intent ordering.
-- Legacy file routes return 404; no legacy transcript serialization; bounded descriptors preserve large escaped Unicode error/draft content.
-- Generic lost-ACK outbox recovery without reexecuting the mutation, interrupted source reservation without replay, and delayed queue edit convergence across frontend restart.
-- Closed disclosure interests, viewport limits, sealed-copy guard, 100-card copy in bounded cohorts, body-cache eviction without deleting metadata, long metadata preservation and split UTF-8.
-- Saturated bulk admission and saturated metadata admission leave other reserved classes usable. A paused UI still allows probes and keeps durable responses. Oversized old WebSocket frames are rejected from their header rather than buffered until heartbeat timeout.
-- Existing actual-process SQLite crash tests, native tool execution/file materialization and in-place legacy schema migration.
-
-## Remaining release gates
-
-Do not label this branch release-ready or silently replace these gates with the passing unit/integration suite:
-
-1. **Finish the intent/state audit:** cold first-prompt acceptance before runtime/history load; every early/delayed response versus data-convergence transition; legacy alias and multi-record local/file crash windows; generic uncertain-action inspection/reconciliation UX; interrupted tool/private-context behavior. No uncertain paid/external work may be automatically replayed.
-2. **Complete aggregate resource/retention policies:** source/client header/tombstone growth, retained/orphan exports, lease GC maintenance, source list pagination, broader byte-based admission. Test disk-full/ENOSPC, upload/export deletion races, channel closure, many peers and extreme live fanout. Incremental cache snapshot/render/copy work remains to be proven, not just wire/storage append behavior.
-3. **Define restore/migration operations:** restoring an old source backup with the old lineage is unsupported. An authorized offline restore must rotate lineage before serving, preserve/reconcile ownership records and invalidate old cache namespaces. There is no tested admin rotation/rollback tool yet. Expand native source/cache migration tests before deployment/downgrade decisions.
-4. **Measure the actual new path:** production/test byte, metadata, resume, connection, queue, hash and cancellation counters; native delayed/lossy/low-bandwidth scenarios with uploads, unread files, large code, many disclosures and both clients. Also audit client send waits, reconnect backoff stability/jitter and dual-stack/direct-address reachability. The removed legacy transfer fixture/loss test is not evidence for native weak-link performance. Logical-plane tests do not certify shared-link congestion behavior or a hard end-to-end latency bound.
-5. **Manual/mobile checks and deployment approval:** no real Pixel/Shlap or full UI certification has been performed. Re-run checks/nextest after further changes. Beta must remain stopped and stable untouched until explicitly authorized.
+**Still operationally required:** authorized Pixel/Shlap/native-device testing, real WAN/Tailscale path and sustained resource/throughput checks, target-specific packaging, and explicit deployment approval. Loopback shaping and headless rendering do not certify arbitrary WAN latency, radio behavior, hardware power-loss durability or device frame rate. Beta remains stopped; stable remains untouched.

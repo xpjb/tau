@@ -18,7 +18,8 @@ fn key(event:&Event)->Option<String> {
     match event {
         Event::HeartbeatSent {epoch,..}=>Some(format!("sent:{epoch}")),
         Event::HeartbeatReply {epoch,..}=>Some(format!("reply:{epoch}")),
-        Event::Message(epoch,message)=>match message.as_ref() {
+        Event::Metrics(_)=>Some("native-metrics".into()),
+        Event::Message(epoch,message)|Event::SizedMessage(epoch,message,_)=>match message.as_ref() {
             ServerMessage::SessionState {session_id,..}=>Some(format!("state:{epoch}:{session_id}")),
             ServerMessage::Sessions {..}=>Some(format!("sessions:{epoch}")),
             ServerMessage::Projects {..}=>Some(format!("projects:{epoch}")),
@@ -33,17 +34,19 @@ fn key(event:&Event)->Option<String> {
 impl Events {
     pub async fn send(&self,event:Event)->bool {self.send_now(event)}
     pub fn send_now(&self,event:Event)->bool {
-        let bytes=match &event {Event::Message(_,message)=>serde_json::to_vec(message).map_or(4096,|v|v.len()),_=>1024};
+        let bytes=match &event {Event::SizedMessage(_,_,bytes)=>*bytes,Event::Prepared {result,..}=>match result {Ok(text)=>text.len(),Err(error)=>error.len()},Event::Message(_,message)=>serde_json::to_vec(message).map_or(4096,|v|v.len()),_=>1024};
         let mut queue=self.shared.queue.lock().unwrap();
         if queue.closed {return false;}
         if let Some(key)=key(&event) && let Some(at)=queue.events.iter().position(|(old,_)|self::key(old).as_ref()==Some(&key)) {
+            let revision=|event:&Event|match event {Event::Message(_,message)|Event::SizedMessage(_,message,_)=>match message.as_ref() {ServerMessage::SessionState {revision,..}=>*revision,_=>0},_=>0};
+            if revision(&queue.events[at].0)>revision(&event) {return true;}
             let (_,bytes)=queue.events.remove(at).unwrap();queue.bytes-=bytes;
         }
         // An overflowing durable lane fails closed instead of blocking probes.
         // Its receipts remain in the daemon journal for explicit reconciliation.
         if queue.events.len()>=512 || queue.bytes.saturating_add(bytes)>128*1024*1024 {
             let fatal=Event::Fatal("UI event backlog exceeded its limit. Reconnect to reconcile durable operations.".into());
-            queue.events.push_back((fatal,0));drop(queue);self.shared.notify.notify_one();(self.wake)();return false;
+            queue.events.push_back((fatal,0));queue.closed=true;drop(queue);self.shared.notify.notify_one();(self.wake)();return false;
         }
         queue.bytes+=bytes;queue.events.push_back((event,bytes));drop(queue);
         self.shared.notify.notify_one();(self.wake)();true

@@ -6,7 +6,7 @@ mod transcript;
 pub use transcript::*;
 
 // Protocol 17 uses bounded control and one native data connection in both directions.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
@@ -57,6 +57,8 @@ pub enum ClientCommand {
     GetReceipts { session_id: String, requests: Vec<String> },
     GetOperation { operation_id: String },
     ListSessions,
+    ReviewRestore {session_id:String},
+    ListPage {catalog_id:String,projects:bool,after:Option<String>,revision:u64},
     CreateProject { project_id: String, name: String, prompt: String },
     UpdateProject { project_id: String, revision: u64, name: String, prompt: String },
     DeleteProject { project_id: String, revision: u64, mode: DeleteProjectMode },
@@ -118,7 +120,7 @@ pub enum ClientCommand {
 
 impl ClientCommand {
     pub fn journalled_control(&self)->bool {
-        matches!(self,Self::CreateSession {..}|Self::CreateProject {..}|Self::UpdateProject {..}|Self::DeleteProject {..}
+        matches!(self,Self::ReviewRestore {..}|Self::CreateSession {..}|Self::CreateProject {..}|Self::UpdateProject {..}|Self::DeleteProject {..}
             |Self::MoveSession {..}|Self::SetSettings {..}|Self::CloseSession {..}|Self::DeleteSession {..}
             |Self::RenameSession {..}|Self::ForkSession {..}|Self::CloneSession {..})
     }
@@ -166,13 +168,14 @@ pub enum QueueOperation {
 pub enum ServerMessage {
     BlockConnection { offer: blocks::BulkOffer },
     /// Large descriptors travel over native data, never as a WebSocket body.
-    Data { content: blocks::ContentRef, key: String, session_id: Option<String>, reports: Vec<OperationReceipt>, operation_id: Option<String> },
+    Data { content: blocks::ContentRef, key: String, session_id: Option<String>, reports: Vec<OperationReceipt>, operation_id: Option<String>, route:Option<String> },
     Receipts { session_id: String, reports: Vec<OperationReceipt> },
     Accepted { request_id: String },
     Operation { operation_id: String, registered: bool, response: Option<Box<ServerMessage>> },
     Hello {
         protocol_version: u32,
         daemon_version: String,
+        #[serde(default)] lineage:Option<String>,
     },
     Response {
         request_id: String,
@@ -197,6 +200,8 @@ pub enum ServerMessage {
         commands: Vec<SlashCommand>,
     },
     Notice { session_id: String, message: String },
+    SessionPage {catalog_id:String,revision:u64,after:Option<String>,next:Option<String>,sessions:Vec<SessionSummary>,states:std::collections::BTreeMap<String,u64>},
+    ProjectPage {catalog_id:String,revision:u64,after:Option<String>,next:Option<String>,projects:Vec<Project>},
     Projects { projects: Vec<Project> },
     Sessions {
         sessions: Vec<SessionSummary>,
@@ -223,6 +228,8 @@ pub enum ServerMessage {
     },
     SessionState {
         session_id: String,
+        #[serde(default)] revision:u64,
+        #[serde(default)] restore_review:Option<bool>,
         status: SessionStatus,
         context_usage: Option<ContextUsage>,
         #[serde(skip_serializing_if = "Option::is_none")]

@@ -1058,7 +1058,9 @@ async fn moving_during_tool_run_keeps_that_turn_stable_and_project_delete_cancel
     assert!(next["messages"][0]["content"].as_str().unwrap().ends_with("\n\nDESTINATION"));
     assert_eq!(manager.inner.state.get(&session).await.unwrap().unwrap().project_prompt,"DESTINATION");
     let upload = root.path().join("uploads").join(&session);
-    tokio::fs::create_dir_all(&upload).await.unwrap(); tokio::fs::write(upload.join("file"),"private upload").await.unwrap();
+    let bytes=b"private upload";let hash=blake3::hash(bytes).to_hex().to_string();
+    let spec=tau_blocks::UploadSpec {id:"project-delete-file".into(),length:bytes.len() as u64,hash:hash.clone(),purpose:tau_blocks::UploadPurpose::File {session_id:session.clone(),file_name:"file".into()}};
+    manager.begin_upload(spec.clone()).await.unwrap();manager.write_upload(spec.clone(),0,bytes.to_vec()).await.unwrap();manager.finish_upload(spec).await.unwrap();
     // A forced transaction failure leaves the project and every chat intact.
     manager.inner.state.access(|db| { db.execute_batch("CREATE TRIGGER fail_project_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END;")?; Ok(()) }).await.unwrap();
     assert_eq!(client.request(json!({"id":"fail-delete","type":"delete_project","projectId":project,"revision":1,"mode":"delete_chats"})).await["ok"],false);
@@ -1079,3 +1081,22 @@ async fn moving_during_tool_run_keeps_that_turn_stable_and_project_delete_cancel
     }).await.unwrap();
     manager.shutdown().await; server.abort();
 }
+
+#[tokio::test]
+async fn cold_acceptance_and_abort_do_not_wait_for_provider_context_preparation() {
+    let model=ModelServer::start(vec![]).await;
+    let (_root,manager,_,server)=fixture(&model,Api::ChatCompletions).await;
+    let id=manager.create_session(None,"general").await.unwrap();manager.close_session(&id).await.unwrap();
+    let gate=Arc::new(Notify::new());*manager.inner.state.context_gate.lock().unwrap()=Some(gate.clone());
+    let first=tokio::time::timeout(Duration::from_millis(500),manager.prompt(&id,"first","cold-first")).await.unwrap().unwrap();
+    assert!(matches!(first.disposition,crate::protocol::PromptDisposition::Submitted));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_millis(500),manager.prompt(&id,"second","cold-second")).await.unwrap().unwrap();
+    assert!(manager.inner.state.receipt(&id,"cold-second").await.unwrap().is_some());
+    tokio::time::timeout(Duration::from_millis(500),manager.abort(&id,"stop-cold")).await.unwrap().unwrap();
+    assert!(manager.inner.state.queue(&id).await.unwrap().paused);
+    gate.notify_waiters();manager.shutdown().await;server.abort();
+}
+
+#[path="agent_test_safety.rs"]
+mod safety;

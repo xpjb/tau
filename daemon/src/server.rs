@@ -58,6 +58,9 @@ pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::
         .with_state(state);
     info!(address = %config.bind, "Tau daemon is listening");
 
+    manager.maintain_uploads().await?;
+    let maintenance=manager.clone();let mut maintenance_task=tokio::task::JoinSet::new();
+    maintenance_task.spawn(async move {loop {tokio::time::sleep(Duration::from_secs(600)).await;if let Err(error)=maintenance.maintain_uploads().await {warn!(%error,"Upload maintenance requires attention");}}});
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             #[cfg(unix)]
@@ -120,19 +123,15 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
         }
     });
 
+    let Ok(cursor)=state.manager.inner.state.block_cursor().await else {writer.abort();return;};
     queue_server(
         &outbound_tx,
         &ServerMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
-            daemon_version: env!("CARGO_PKG_VERSION").into(),
+            daemon_version: env!("CARGO_PKG_VERSION").into(),lineage:Some(cursor.lineage),
         },
     )
     .await;
-    match state.manager.sessions_message().await {
-        Ok(message) => { queue_server(&outbound_tx,&message).await; }
-        Err(error) => { warn!(%error,"Could not read session list"); writer.abort(); return; }
-    }
-
     let mut events = state.manager.subscribe();
     let event_outbound = outbound_tx.clone();
     let event_forwarder = tokio::spawn(async move {
@@ -237,17 +236,23 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             Ok(message)=>{queue_server(&response_outbound,&message).await;ServerMessage::success(request_id,None,None)}
                             Err(error)=>ServerMessage::command_failure(request_id,error),
                         },
-                        ClientCommand::ListSessions => match manager.sessions_message().await {
-                            Ok(message) => {
-                                if !queue_server(&response_outbound,&message).await { return; }
-                                match manager.projects_message().await {
-                                    Ok(projects) => { if !queue_server(&response_outbound,&projects).await { return; } }
-                                    Err(error) => { queue_server(&response_outbound,&ServerMessage::command_failure(request_id,error)).await; return; }
+                        ClientCommand::ReviewRestore {session_id}=>match manager.inner.state.review_restore(&session_id).await {
+                            Ok(())=>{manager.broadcast_sessions().await;ServerMessage::success(request_id,Some(session_id),None)},
+                            Err(error)=>ServerMessage::command_failure(request_id,error)
+                        },
+                        ClientCommand::ListSessions => {
+                            let mut result=ServerMessage::success(request_id.clone(),None,None);
+                            for projects in [false,true] {
+                                match manager.list_page(request_id.clone(),projects,None,0).await {
+                                    Ok(page)=>{if !queue_server(&response_outbound,&page).await {return;}},
+                                    Err(error)=>{result=ServerMessage::command_failure(request_id.clone(),error);break;}
                                 }
-                                ServerMessage::success(request_id,None,None)
-                            }
-                            Err(error) => ServerMessage::command_failure(request_id,error),
+                            }result
                         }
+                        ClientCommand::ListPage {catalog_id,projects,after,revision}=>match manager.list_page(catalog_id,projects,after,revision).await {
+                            Ok(page)=>{if !queue_server(&response_outbound,&page).await {return;}ServerMessage::success(request_id,None,None)},
+                            Err(error)=>ServerMessage::command_failure(request_id,error)
+                        },
                         ClientCommand::RefreshModelCatalog { provider } => match manager.refresh_model_catalog(&provider).await {
                             Ok(notice) => {
                                 let mut response = ServerMessage::success(request_id, None, None);

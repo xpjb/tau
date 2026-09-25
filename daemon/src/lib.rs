@@ -4,6 +4,7 @@ mod catalog;
 mod commands;
 mod config;
 mod manager;
+mod listing;
 mod projects;
 mod agent;
 mod settings;
@@ -21,6 +22,7 @@ use manager::AgentManager;
 use state::StateStore;
 
 pub async fn run(mut config: Config) -> Result<()> {
+    let _lease=maintenance::DatabaseLease::acquire(&config.database_path)?;
     let cwd = fs::metadata(&config.cwd)
         .await
         .with_context(|| format!("working directory {} is unavailable", config.cwd.display()))?;
@@ -69,6 +71,7 @@ pub async fn login_codex() -> Result<()> {
 
 /// Read-only import of deployed Tau 1 metadata/Pi histories; the destination must be empty.
 pub async fn import_state(config: Config, path: std::path::PathBuf) -> Result<usize> {
+    let _lease=maintenance::DatabaseLease::acquire(&config.database_path)?;
     let legacy: serde_json::Value = serde_json::from_slice(&fs::read(path).await?)?;
     let settings = settings::SettingsStore::load(&config,legacy["title_prompt"].as_str().unwrap_or(state::DEFAULT_TITLE_PROMPT).into()).await?;
     StateStore::load(config.database_path).await?.import_legacy(legacy,settings.get()).await
@@ -76,9 +79,11 @@ pub async fn import_state(config: Config, path: std::path::PathBuf) -> Result<us
 
 pub async fn export_history(config: Config, session: &str, destination: &std::path::Path) -> Result<()> {
     if !config.database_path.is_file() { bail!("Database does not exist"); }
+    let _lease=maintenance::DatabaseLease::acquire(&config.database_path)?;
     StateStore::load(config.database_path).await?.export_history(session,destination).await
 }
 
 mod uploads;
 mod control;
 mod operations;
+pub mod maintenance;
