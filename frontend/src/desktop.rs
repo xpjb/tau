@@ -6,14 +6,16 @@ use chad::winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::CursorIcon,
+    window::{CursorIcon, UserAttentionType},
 };
 use chad::{ChadApp, Config, Ctx, wgpu};
 use sanscale::Vec2;
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
 };
+use tau_protocol::SessionStatus;
 
 // Account/session are captured when the document picker is opened.
 type PickResult = Result<(String, String, Vec<PathBuf>), String>;
@@ -25,6 +27,9 @@ struct Desktop {
     clipboard: Option<arboard::Clipboard>,
     rx: mpsc::Receiver<PickResult>,
     tx: mpsc::Sender<PickResult>,
+    attention_identity: String,
+    seen_finished: HashMap<String, u64>,
+    attention_requested: bool,
 }
 fn root() -> PathBuf {
     if let Some(path) = std::env::var_os("TAU2_DATA_DIR") {
@@ -57,10 +62,12 @@ impl ChadApp for Desktop {
                 .map_err(|e| e.to_string())?;
         }
         let waker = ctx.waker();
-        let app = App::new(ctx, store, Arc::new(move || waker.wake()), false)
+        let mut app = App::new(ctx, store, Arc::new(move || waker.wake()), false)
             .map_err(|e| e.to_string())?;
+        app.window_focused = ctx.window.has_focus();
         ctx.window.set_ime_allowed(true);
         let (tx, rx) = mpsc::channel();
+        let attention_identity = app.controller.identity.clone();
         Ok(Self {
             app,
             cursor: Vec2::new(0., 0.),
@@ -69,6 +76,9 @@ impl ChadApp for Desktop {
             clipboard: arboard::Clipboard::new().ok(),
             rx,
             tx,
+            attention_identity,
+            seen_finished: HashMap::new(),
+            attention_requested: false,
         })
     }
     fn event(&mut self, ctx: &mut Ctx, event: &WindowEvent) {
@@ -88,8 +98,14 @@ impl ChadApp for Desktop {
             }
             WindowEvent::CursorLeft { .. } => self.app.hover(None),
             WindowEvent::Occluded(occluded) => self.app.set_connection_visible(!occluded),
-            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Focused(true) => {
-                ctx.request_redraw()
+            WindowEvent::ScaleFactorChanged { .. } => ctx.request_redraw(),
+            WindowEvent::Focused(true) => {
+                self.app.window_focused = true;
+                if self.attention_requested {
+                    ctx.window.request_user_attention(None);
+                    self.attention_requested = false;
+                }
+                ctx.request_redraw();
             }
             WindowEvent::MouseInput {
                 state,
@@ -158,6 +174,7 @@ impl ChadApp for Desktop {
                 self.app.report(result);
             }
             WindowEvent::Focused(false) => {
+                self.app.window_focused = false;
                 self.modifiers = ModifiersState::empty();
                 self.app.cancel_preedit();
                 self.app.cancel_pointer();
@@ -195,7 +212,30 @@ impl ChadApp for Desktop {
             ctx.request_redraw();
         }
         self.actions(ctx);
-
+        if self.attention_identity != self.app.controller.identity {
+            self.attention_identity = self.app.controller.identity.clone();
+            self.seen_finished.clear();
+        }
+        let finished = self.app.controller.account.sessions.iter()
+            .filter(|s| !self.app.controller.is_creating(&s.id)
+                && s.status != SessionStatus::Running && self.app.controller.unread(s))
+            .map(|s| (s.id.clone(), s.updated_at_ms))
+            .collect::<HashMap<_, _>>();
+        let new_delivery = finished.iter().any(|(id, at)|
+            self.seen_finished.get(id).is_none_or(|seen| seen < at));
+        self.seen_finished = finished;
+        if self.app.window_focused {
+            if self.attention_requested {
+                ctx.window.request_user_attention(None);
+                self.attention_requested = false;
+            }
+        } else if new_delivery {
+            ctx.window.request_user_attention(Some(UserAttentionType::Informational));
+            self.attention_requested = true;
+        } else if self.attention_requested && self.seen_finished.is_empty() {
+            ctx.window.request_user_attention(None);
+            self.attention_requested = false;
+        }
     }
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
         self.app.frame(ctx, view);

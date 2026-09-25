@@ -96,8 +96,11 @@ control. Moves may invalidate the provider’s prefix cache.
 
 Tabs accept vertical mouse-wheel input, horizontal trackpad scrolling, and touch or
 mouse dragging. The selected tab is bold and underlined; unread dots aggregate the
-chat list’s unread state. Switching topics resumes that topic’s last-open chat
-(or its newest available chat); only a chat actually shown is marked read. Empty
+chat list’s unread state. On desktop, a newly finished unread chat requests window
+attention while Tau is unfocused. Focusing Tau clears the window alert; the unread
+dot stays until its chat is viewed. Switching topics resumes that topic’s
+last-open chat (or its newest available chat); only a chat actually shown is
+marked read. Empty
 topics show the chat list without inventing a selection. Topics and membership
 are daemon-owned, durable, and shared across devices; per-topic last selections,
 drafts, and read markers remain account-scoped client state. Existing `projectId`
