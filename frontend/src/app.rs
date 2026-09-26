@@ -47,6 +47,7 @@ enum Action {
     ToggleQuickModel(String),
     ChooseModel(String, String),
     Usage,
+    RefreshUsage,
     Info(Info),
     Back,
     Send,
@@ -561,7 +562,8 @@ impl App {
             && self.context_menu.is_none()
             && (self.info_tip.contains_card(point) || self.usage.contains_card(point))
         {
-            return CursorIcon::Default;
+            return if self.hits.iter().rev().find(|hit|contains(hit.rect,point))
+                .is_some_and(|hit|matches!(hit.action,Action::RefreshUsage)) {CursorIcon::Pointer} else {CursorIcon::Default};
         }
         if self.modal.is_none()
             && self.viewer.is_none()
@@ -651,6 +653,17 @@ impl App {
         {
             self.composer = Editor::composer(chat.local.draft.clone());
             self.dirty = true;
+        }
+        if visible && self.usage.region.width > 0. && (self.usage.progress > 0. || self.usage.pinned) {
+            match self.controller.refresh_codex_usage(false) {
+                Ok(sent) => self.dirty |= sent,
+                Err(error) => self.controller.notice = Some(error.to_string()),
+            }
+            let quota = self.controller.codex_usage.text(self.controller.epoch.is_some());
+            if self.controller.account.selected.as_ref().and_then(|id|self.controller.account.sessions.iter().find(|s|&s.id==id))
+                .and_then(|s|s.model.as_ref()).is_some_and(|m|m.provider=="openai-codex") && !self.usage.text.ends_with(&quota) {
+                self.dirty=true;
+            }
         }
         if self.waiting_settings
             && let Some(document) = self.controller.daemon_settings.clone()
@@ -1052,15 +1065,16 @@ impl App {
             && self.viewer.is_none()
             && self.context_menu.is_none()
             && (self.info_tip.contains_card(point) || self.usage.contains_card(point))
+            && !self.hits.iter().rev().find(|h|contains(h.rect,point)).is_some_and(|h|matches!(h.action,Action::RefreshUsage))
         {
-            // Informational cards must not activate the list/message behind them.
+            // Cards must not activate the list/message behind them; refresh is interactive.
             self.dirty = true;
             return;
         }
-        if !contains(self.usage.region, point) {
+        if !self.usage.contains(point) {
             self.usage.dismiss();
         }
-        if !contains(self.info_tip.region, point) {
+        if !self.info_tip.contains(point) {
             self.info_tip.dismiss();
         }
         self.wheel = None;
@@ -1580,6 +1594,7 @@ impl App {
                 self.usage.pinned = !self.usage.pinned;
                 self.usage.suppressed = !self.usage.pinned;
             }
+            Action::RefreshUsage => {self.controller.refresh_codex_usage(true)?;}
             Action::New => {
                 self.controller.new_chat()?;
                 self.show_chats = false;
@@ -3398,6 +3413,14 @@ impl App {
         {
             self.usage.text.push_str("\nLast known value");
         }
+        match summary.as_ref().and_then(|s|s.model.as_ref()).map(|m|m.provider.as_str()) {
+            Some("openai-codex") => {
+                self.usage.text.push_str("\n");
+                self.usage.text.push_str(&self.controller.codex_usage.text(connected));
+            }
+            Some(_) => self.usage.text.push_str("\nAccount quota unavailable for this provider"),
+            None => self.usage.text.push_str("\nAccount quota unavailable (model unknown)"),
+        }
         let can_send = !self.composer.value.trim().is_empty() || !files.is_empty();
         self.icon_button(
             ctx,
@@ -3846,7 +3869,11 @@ impl App {
         }
         let s = self.scale;
         let w = (300. * s).min(bounds.width - 16. * s);
-        let h = (self.usage.text.lines().count() as f32 * 17. + 20.) * s;
+        let refresh = self.controller.epoch.is_some() && self.controller.account.selected.as_ref()
+            .and_then(|id|self.controller.account.sessions.iter().find(|session|&session.id==id))
+            .and_then(|session|session.model.as_ref()).is_some_and(|model|model.provider=="openai-codex");
+        let footer = if refresh {32. * s} else {0.};
+        let h = (self.usage.text.lines().count() as f32 * 17. + 20.) * s + footer;
         let anchor = self.usage.region;
         let x = (anchor.x + anchor.width / 2. - w / 2.)
             .clamp(bounds.x + 8. * s, bounds.x + bounds.width - w - 8. * s);
@@ -3864,13 +3891,18 @@ impl App {
                 full.x + 10. * s,
                 full.y + 10. * s,
                 full.width - 20. * s,
-                full.height - 20. * s,
+                full.height - 20. * s - footer,
             ),
             12. * s,
             color(0x303038),
             false,
             animated,
         );
+        if refresh && t >= 0.99 {
+            button(&mut self.renderer, layer, &mut self.hits,
+                Rect::new(full.x + 10. * s, full.y + full.height - 30. * s, full.width - 20. * s, 24. * s),
+                "Refresh quota", Action::RefreshUsage, s, false);
+        }
     }
     fn info_frame(&mut self, layer: &mut Layer, bounds: Rect) {
         if self.info_tip.progress <= 0.

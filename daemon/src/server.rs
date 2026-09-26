@@ -253,6 +253,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             Ok(page)=>{if !queue_server(&response_outbound,&page).await {return;}ServerMessage::success(request_id,None,None)},
                             Err(error)=>ServerMessage::command_failure(request_id,error)
                         },
+                        ClientCommand::GetCodexUsage { force } => {
+                            let result = manager.codex_usage(force).await;
+                            ServerMessage::CodexUsage { request_id, report: result.report, error: result.error }
+                        },
                         ClientCommand::RefreshModelCatalog { provider } => match manager.refresh_model_catalog(&provider).await {
                             Ok(notice) => {
                                 let mut response = ServerMessage::success(request_id, None, None);
@@ -579,6 +583,39 @@ mod tests {
 
     use super::authorized;
     use crate::manager::safe_file_name;
+
+    #[tokio::test]
+    async fn authenticated_quota_control_is_read_only_and_returns_an_explicit_unavailable_state() {
+        use super::*;
+        use crate::state::StateStore;
+        use tokio_tungstenite::{connect_async, tungstenite::{Message as ClientMessage, client::IntoClientRequest}};
+        let root=tempfile::tempdir().unwrap();
+        let config=Config {bind:"127.0.0.1:0".parse().unwrap(),transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,
+            token:Arc::from("fixture-token"),settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
+            cwd:root.path().into(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),
+            attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
+        let manager=AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
+        let transfers=Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap());
+        let state=AppState {config,manager,telemetry_gate:Arc::new(Mutex::new(())),transfers,requests:Arc::new(tokio::sync::Semaphore::new(32))};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url=format!("ws://{}/v1/ws",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move {axum::serve(listener,Router::new().route("/v1/ws",get(websocket)).with_state(state)).await.unwrap();});
+        assert!(connect_async(&url).await.is_err(),"Unauthenticated clients cannot see account quota");
+        let mut request=url.into_client_request().unwrap();request.headers_mut().insert("Authorization","Bearer fixture-token".parse().unwrap());
+        let (mut client,_)=connect_async(request).await.unwrap();
+        client.send(ClientMessage::Text(serde_json::json!({"id":"quota-1","type":"get_codex_usage","force":true}).to_string().into())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                let message=client.next().await.unwrap().unwrap();
+                let value:serde_json::Value=serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if value["requestId"]!="quota-1" {continue;}
+                assert_eq!(value["type"],"codex_usage");assert!(value["report"].is_null());
+                assert!(value["error"].as_str().unwrap().contains("sign in"));
+                assert!(!value.to_string().contains("fixture-token"));break;
+            }
+        }).await.unwrap();
+        server.abort();
+    }
 
     #[tokio::test]
     async fn persists_bounded_crash_reports_with_safe_diagnostics() {

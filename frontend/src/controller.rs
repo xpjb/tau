@@ -1,4 +1,5 @@
 use crate::{
+    codex_usage::UsageView,
     feed::Feed,
     store::*,
     transport::{self, Command, Network, Wake},
@@ -71,6 +72,7 @@ pub struct Controller {
     pub native_metrics:tau_transfer::blocks::Stats,
     pub epoch: Option<u64>,
     pub notice: Option<String>,
+    pub codex_usage: UsageView,
     remote: crate::blocks::Cache,
     block_plan: Option<crate::blocks::Plan>,
     plan_dirty:std::cell::Cell<bool>,
@@ -114,6 +116,7 @@ impl Controller {
             health: crate::connection::Health::default(),native_metrics:Default::default(),
             epoch: None,
             notice: None,
+            codex_usage: UsageView::default(),
             remote,
             block_plan: None,plan_dirty:std::cell::Cell::new(true),
             viewport:None,
@@ -145,6 +148,7 @@ impl Controller {
         self.block_plan = None;self.plan_dirty.set(true);
         self.requests.clear();
         self.project_deletions.clear();
+        self.codex_usage.offline();
         self.network = Some(Network::start_cached(self.settings.clone(), self.wake.clone(),self.remote.clone()));
     }
     pub fn configure(&mut self, settings: Settings) -> Result<()> {
@@ -170,6 +174,7 @@ impl Controller {
         self.settings_result = None;
         self.project_result = None;
         self.notice = None;
+        self.codex_usage.clear();
         if let Some(id) = self.account.selected.clone() {
             self.ensure_chat(&id)?;
         }
@@ -416,6 +421,18 @@ impl Controller {
         if durable || matches!(request.command,ClientCommand::GetSession {..}|ClientCommand::GetSettings|ClientCommand::RefreshModelCatalog {..}) {self.requests.insert(request.id.clone(),request.command.clone());}
         self.network.as_ref().unwrap().send(Command::Request {epoch,request:request.clone()})?;
         Ok(request.id)
+    }
+    /// A short-lived account read. Never enters the prompt outbox or transcript.
+    pub fn refresh_codex_usage(&mut self, force: bool) -> Result<bool> {
+        if self.epoch.is_none() || !self.account.selected.as_ref().and_then(|id|self.account.sessions.iter().find(|s|&s.id==id))
+            .and_then(|s|s.model.as_ref()).is_some_and(|model|model.provider=="openai-codex") {return Ok(false);}
+        if !self.codex_usage.needs_refresh(force) {return Ok(false);}
+        let now=std::time::Instant::now();
+        self.codex_usage.attempted=Some(now);
+        match self.request(ClientCommand::GetCodexUsage {force}) {
+            Ok(id) => {self.codex_usage.in_flight=Some((id,now));Ok(true)}
+            Err(_) => {self.codex_usage.error=Some("Codex quota request could not be sent; reconnect and try again.".into());Ok(false)}
+        }
     }
     pub fn diagnostics(&self)->String {
         let n=&self.native_metrics;
@@ -854,6 +871,7 @@ impl Controller {
             .send(Command::CancelDownload(key.into()))
     }
     fn not_sent(&mut self, id: &str, detail: &str, retryable: bool) -> Result<()> {
+        if self.codex_usage.complete(id,None,Some(format!("Codex quota request could not be sent: {detail}"))) {return Ok(());}
         self.project_deletions.remove(id);
         let mut retrying = false;
         if self.receipt_inflight.as_ref().is_some_and(|(request,_,_,_)|request==id) {let (_,session,ids,_)=self.receipt_inflight.take().unwrap();self.receipt_queue.push_back((session,ids));}
@@ -1004,6 +1022,7 @@ impl Controller {
             }
             transport::Event::Disconnected(detail) | transport::Event::Fatal(detail) => {
                 self.epoch = None;
+                self.codex_usage.offline();
                 self.connection = detail;
                 self.health.disconnected(fatal);
                 self.requests.clear();
@@ -1331,6 +1350,9 @@ impl Controller {
                 chat.commands = commands;
                 chat.commands_loaded = true;
             }
+            ServerMessage::CodexUsage {request_id,report,error} => {
+                self.codex_usage.complete(&request_id,report,error);
+            }
             ServerMessage::Settings {
                 settings,
                 ..
@@ -1361,6 +1383,7 @@ impl Controller {
                 error,
                 ..
             } => {
+                if self.codex_usage.complete(&request_id,None,Some(error.clone().unwrap_or_else(||"Codex quota unavailable".into()))) {return Ok(());}
                 if let Some(notice) = notice {
                     self.notice = Some(notice);
                 }
