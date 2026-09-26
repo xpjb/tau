@@ -1,3 +1,12 @@
+# Mobile QA source update — September 26, 2026
+
+See [the focused acceptance record](../docs/mobile-qa.md). Mobile input, notice
+capture, topic navigation, arrows, font axes, durable send recovery and connection
+health are implemented. Tests/compiler checks passed; no packages or deployment
+were produced, and physical-device acceptance remains outstanding.
+
+---
+
 # Download lifecycle follow-up (unreleased)
 
 The same compact transfer card now appears in the chat and Attachments view.

@@ -46,11 +46,17 @@ The daemon records client-named creation receipts transactionally, so a lost cre
 ack can be retried without creating a duplicate. If it reuses an existing starter,
 local drafts, files and queued sends move to that chat without losing the old
 session's work. A send is acknowledged after its server-side queue/receipt commit,
-not after a model response. A socket lost after a sent prompt leaves the receipt
-**unconfirmed** until history verifies it; potentially billed prompts are not
-blindly retransmitted. New sends accepted into a paused queue clear a stale error
-indicator while still showing that work must be resumed. This behavior ships in
-beta 0.7.3.
+not after a model response. A socket lost after an ordinary message starts a
+receipt check. If the daemon has
+not accepted it, Tau retries the saved message with the **same request ID**, so a
+late acknowledgement cannot create a duplicate. Temporary transport failures back
+off and retry; saved pending messages also recover after restart while another
+chat is selected. Explicit server rejections, invalid attachments, uncertain
+controls and source-lineage changes remain available for deliberate recovery.
+**Retry saved message** reuses the original ID for an older “Not sent” item.
+New sends accepted into a paused queue clear a stale error indicator while still
+showing that work must be resumed. Offline draft support shipped in beta 0.7.3;
+the automatic recovery changes above await the next client release.
 
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
@@ -85,6 +91,25 @@ windows use a separate screen. Image previews and download/save controls work
 as they do in the conversation, and older files load as you scroll.
 See [frontend QA](frontend/QA.md) for source validation and release status.
 
+## Mobile input, text and connection health
+
+Mobile editing uses an opaque full-screen native editor. **Done** keeps the draft;
+Send remains in the chat. Keyboard and system-bar insets keep the editor visible,
+and queued keyboard edits apply before Send, navigation or suspension. Notice taps
+are consumed before controls underneath can act. Disclosure arrows are drawn shapes.
+Android's font matcher supplies the installed face, collection index and variation
+axes, including bold weight; application packages do not bundle fonts.
+
+The shared desktop/mobile connection dot uses the last ten heartbeat attempts.
+Stable latency up to 800 ms is green. Missed probes, a range over 400 ms, or native
+packet loss observed in the last 20 seconds make it yellow. Latency over 1 second
+is orange; over 3 seconds, or a disconnected socket, is red. A probe still waiting
+within the normal range is not counted as a loss.
+
+See [mobile QA acceptance](docs/mobile-qa.md) for the source changes, validation and
+remaining device checks. These changes require a new client build; this source QA
+pass did not deploy or deliver packages.
+
 ## Topics
 
 Small, horizontally scrolling topic tabs sit above the chat list. General is
@@ -107,9 +132,9 @@ Tabs accept vertical mouse-wheel input, horizontal trackpad scrolling, and touch
 mouse dragging. The selected tab is bold and underlined; unread dots aggregate the
 chat list’s unread state. On desktop, a newly finished unread chat requests window
 attention while Tau is unfocused. Focusing Tau clears the window alert; the unread
-dot stays until its chat is viewed. Switching topics resumes that topic’s
-last-open chat (or its newest available chat); only a chat actually shown is
-marked read. Empty
+dot stays until its chat is viewed. Desktop topic switches resume that topic’s
+last-open chat (or its newest available chat). Mobile topic switches stay on the
+chat list until a chat is tapped. Only a chat actually shown is marked read. Empty
 topics show the chat list without inventing a selection. Topics and membership
 are daemon-owned, durable, and shared across devices; per-topic last selections,
 drafts, and read markers remain account-scoped client state. Existing `projectId`

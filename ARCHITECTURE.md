@@ -57,7 +57,8 @@ snapshot. Provider requests append it to the ordinary resolved system instructio
 In-flight tool continuations pin their current snapshot until a new user turn.
 The UI calls these *topics*; existing `projectId` wire fields and SQLite table names
 remain stable. Each client persists its last-open chat per topic, validates it against
-current server membership, and falls back to the most recently active chat.
+current server membership, and falls back to the most recently active chat on
+desktop. Mobile topic switches stay on the list until the user selects a chat.
 
 Settings and auth are separate private, atomic files. Settings CAS preserves exact
 prompt text and distinguishes missing/inherited (`null`) from intentionally empty
@@ -76,10 +77,12 @@ text, selection, undo, composition and a persistent field viewport. Sanscale own
 placed-caret geometry and visual motion. Navigation requests an on-demand redraw,
 not a draft write or a new shape request while its cached layout remains live.
 
-The client owns drafts, account-scoped local views and uncertain-send presentation.
-The daemon owns sessions, queued prompts, durable receipts, tools and history. On
-reconnect, native receipts reconcile accepted work; unknown requests are not replayed
-automatically. Context actions retain their target session rather than silently
+The client owns drafts, account-scoped local views and the durable send outbox.
+The daemon owns sessions, queued prompts, durable receipts, tools and history.
+Ordinary messages retry temporary transport failures with their original IDs.
+After reconnect/restart, receipts distinguish accepted messages from missing sends;
+only missing sends retry automatically, in order within each chat. Source lineage
+changes, uncertain controls and explicit rejections still require review. Context actions retain their target session rather than silently
 acting on whichever chat is selected later.
 
 Client settings include server/token and quick favorites; daemon settings are fetched

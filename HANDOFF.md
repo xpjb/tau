@@ -1,3 +1,24 @@
+# Mobile QA source update — September 26, 2026
+
+Implemented on `fix/tau2-mobile-qa-20260926` in `/root/tau2-mobile-qa`, based on
+local beta 0.7.5. See [mobile QA acceptance](docs/mobile-qa.md) for exact behavior,
+commits, tests and logs. The changes cover mobile editing/keyboard insets, notice
+tap capture, topic navigation, drawn arrows, system variable-font bold, ordinary
+message retry/recovery and shared desktop/mobile connection health.
+
+Sanscale font support is on `fix/android-variable-fonts` in
+`/root/sanscale-mobile-fonts`; Tau pins `7bbe230` so newer unrelated API renames
+do not enter this patch. No fonts are bundled in the Android/Windows application.
+
+Automated acceptance is complete. **No packages, deployment or service restarts
+were requested or performed.** Physical Android keyboard/Back/rotation/font/touch
+acceptance remains with the user. Done still saves a draft, not a new send gesture.
+Do not downgrade a client while it has pending `Checking` delivery records; older
+clients do not recognize this new state. Older “Not sent” records have an explicit
+same-ID retry, not an unsafe automatic migration of unknown rejection reasons.
+
+---
+
 # Release automation — use this instead of manual rollout steps
 
 `/root/tau2/scripts/release-beta.sh` now owns the process. See
