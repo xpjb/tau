@@ -58,15 +58,15 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
         assert!(h.app.pointer.as_ref().unwrap().dragged); h.app.release(4,Vec2::new(35.,161.));
         assert!(h.app.context_menu.is_none(),"Swiping is not a long press or a tab selection");
         h.app.project_velocity=0.; h.app.apply(Action::SelectProject("p24".into())).unwrap(); h.frame();
-        assert_eq!(h.app.controller.account.selected.as_deref(),Some("three"),"Opening a topic resumes its last chat");
-        assert!(!h.app.controller.project_unread("p24"),"Visible resumed chat is read");
-        if mobile { h.app.show_chats=true; h.frame(); }
+        assert_eq!(h.app.controller.account.selected.as_deref(),if mobile { None } else { Some("three") },"Only desktop resumes the last chat");
+        assert_eq!(h.app.controller.project_unread("p24"), mobile, "Only a visible chat is read");
+        assert_eq!(h.app.show_chats, mobile, "Mobile topic switches keep the list open");
         assert_eq!(h.app.chat_areas.iter().filter(|(r,_)| contains(h.app.list_rect,Vec2::new(r.x+1.,r.y+1.))).map(|(_,id)| id.as_str()).collect::<Vec<_>>(),vec!["three"]);
         assert!(h.app.project_areas.iter().any(|(_,id)| id=="p24"),"Selected tab auto-reveals");
         h.click(|a| matches!(a,Action::Select(id) if id=="three"));
         assert!(!h.app.controller.project_unread("p24"));
         h.app.apply(Action::SelectProject("general".into())).unwrap(); h.frame();
-        assert_eq!(h.app.controller.account.selected.as_deref(),Some("demo"));
+        assert_eq!(h.app.controller.account.selected.as_deref(),if mobile { None } else { Some("demo") });
         h.app.controller.select("demo").unwrap(); h.app.tick(0.); h.app.show_chats=mobile; h.frame();
         let target = h.app.chat_areas.iter().find(|(_,id)| id=="two").unwrap().0;
         let point=Vec2::new(target.x+60.,target.y+20.);
@@ -135,22 +135,22 @@ fn topics_restore_the_last_open_chat_across_switches_restart_and_membership_chan
         assert!(h.app.controller.account.last_chat_by_project.is_empty());
         h.app.apply(Action::SelectProject("p24".into())).unwrap();
         h.frame();
-        assert_eq!(h.app.controller.account.selected.as_deref(), Some("three"), "unvisited topic opens its most recent chat");
-        assert!(!h.app.show_chats, "a restored chat opens instead of a blank pane");
+        assert_eq!(h.app.controller.account.selected.as_deref(), if mobile { None } else { Some("three") }, "Only desktop opens the most recent chat");
+        assert_eq!(h.app.show_chats, mobile, "Only desktop opens the remembered chat");
         h.app.apply(Action::Select("older".into())).unwrap();
         h.frame();
         h.app.apply(Action::SelectProject("general".into())).unwrap();
         h.frame();
-        assert_eq!(h.app.controller.account.selected.as_deref(), Some("demo"));
+        assert_eq!(h.app.controller.account.selected.as_deref(), if mobile { None } else { Some("demo") });
         h.app.apply(Action::SelectProject("p24".into())).unwrap();
         h.frame();
-        assert_eq!(h.app.controller.account.selected.as_deref(), Some("older"), "explicit last-open chat outranks recent activity");
+        assert_eq!(h.app.controller.account.selected.as_deref(), if mobile { None } else { Some("older") }, "Desktop remembers the last-open chat; mobile waits for a choice");
         let saved: crate::store::Account = h.app.controller.store.get(&h.app.controller.identity, "account").unwrap();
         assert_eq!(saved.last_chat_by_project.get("general").map(String::as_str), Some("demo"));
         assert_eq!(saved.last_chat_by_project.get("p24").map(String::as_str), Some("older"));
         let reopened = Store::open(h.app.controller.store.root.clone()).unwrap();
         let account: crate::store::Account = reopened.get(&h.app.controller.identity, "account").unwrap();
-        assert_eq!(account.selected.as_deref(), Some("older"));
+        assert_eq!(account.selected.as_deref(), if mobile { None } else { Some("older") });
         assert_eq!(account.last_chat_by_project, saved.last_chat_by_project);
 
         // A deleted or moved chat cannot be resurrected by stale local selection.
@@ -160,7 +160,7 @@ fn topics_restore_the_last_open_chat_across_switches_restart_and_membership_chan
         h.app.apply(Action::SelectProject("general".into())).unwrap();
         h.app.apply(Action::SelectProject("p24".into())).unwrap();
         h.frame();
-        assert_eq!(h.app.controller.account.selected.as_deref(), Some("three"));
+        assert_eq!(h.app.controller.account.selected.as_deref(), if mobile { None } else { Some("three") });
         let mut moved = h.app.controller.account.sessions.clone();
         moved.iter_mut().find(|s| s.id == "three").unwrap().project_id = "p1".into();
         h.app.controller.message(ServerMessage::Sessions { sessions: moved }).unwrap();

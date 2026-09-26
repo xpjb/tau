@@ -90,7 +90,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
             .text
             .starts_with("min: 21ms\nmax: 1350ms\nlatest: 21ms\nreceived: ")
     );
-    assert_eq!(app.controller.health.color(Instant::now()), 0x4ade80);
+    assert_eq!(app.controller.health.color(Instant::now()), 0xfbbf24, "recent jitter stays yellow");
 
     app.set_connection_visible(false); // Suspended Android / occluded desktop.
     assert!(!app.tick(0.), "hidden surface must not keep rendering");

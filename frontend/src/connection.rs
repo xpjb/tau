@@ -35,6 +35,8 @@ pub struct Health {
     recent: VecDeque<Option<Duration>>,
     pending_since: Option<Instant>,
     last_reply: Option<Instant>,
+    packet_counter: Option<(u64, u64)>,
+    last_packet_loss: Option<Instant>,
 }
 impl Health {
     pub fn connecting() -> Self {
@@ -93,42 +95,39 @@ impl Health {
     pub fn latest(&self) -> Option<Duration> {
         self.recent.iter().rev().find_map(|sample| *sample)
     }
+    pub fn packets(&mut self, connection: u64, lost: u64, now: Instant) {
+        let previous = self.packet_counter.filter(|(id, _)| *id == connection).map_or(0, |(_, n)| n);
+        if lost > previous { self.last_packet_loss = Some(now); }
+        self.packet_counter = Some((connection, lost));
+    }
     pub fn color(&self, now: Instant) -> u32 {
         match self.phase {
             Phase::Offline | Phase::Blocked | Phase::Reconnecting => RED,
             Phase::Connecting => ORANGE,
             Phase::Connected => {
-                let recent = self.latest();
-                let pending = self
-                    .pending_since
-                    .map(|sent| now.saturating_duration_since(sent));
-                match (recent, pending) {
-                    (Some(last), Some(waiting)) => latency_color(last.max(waiting)),
-                    (Some(last), None) => latency_color(last),
-                    (None, Some(waiting)) => {
-                        // A fresh socket is unverified until its first pong.
-                        if waiting.as_millis() <= 250 {
-                            YELLOW
-                        } else {
-                            latency_color(waiting)
-                        }
-                    }
-                    (None, None) => YELLOW,
-                }
+                let pending = self.pending_since.map(|sent| now.saturating_duration_since(sent));
+                let latency = self.latest().unwrap_or_default().max(pending.unwrap_or_default());
+                if latency > Duration::from_millis(3000) { return RED; }
+                if latency > Duration::from_millis(1000) { return ORANGE; }
+                let missed = self.recent.iter().take(self.recent.len().saturating_sub(usize::from(self.pending_since.is_some())))
+                    .any(Option::is_none);
+                let jitter = self.min_max().is_some_and(|(min, max)| max - min > Duration::from_millis(400));
+                let loss = self.last_packet_loss.is_some_and(|at| now.saturating_duration_since(at) < HEARTBEAT_INTERVAL * RECENT_ATTEMPTS as u32);
+                if self.latest().is_none() || latency > Duration::from_millis(800) || missed || jitter || loss {
+                    YELLOW
+                } else { GREEN }
             }
         }
     }
-    /// When the card is hidden, wake only as a pending ping crosses a color
-    /// boundary. The network worker handles the independent 5s timeout.
     pub fn next_color_wake(&self, now: Instant) -> Option<Duration> {
-        let sent = self
-            .pending_since
-            .filter(|_| self.phase == Phase::Connected)?;
-        let waited = now.saturating_duration_since(sent).as_millis();
-        [251u64, 1001, 3001]
-            .into_iter()
-            .find(|edge| u128::from(*edge) > waited)
-            .map(|edge| Duration::from_millis((u128::from(edge) - waited) as u64))
+        if self.phase != Phase::Connected { return None; }
+        let pending = self.pending_since.and_then(|sent| {
+            [801, 1001, 3001].into_iter().map(|ms| sent + Duration::from_millis(ms))
+                .find(|at| *at > now).map(|at| at.duration_since(now))
+        });
+        let loss = self.last_packet_loss.map(|at| at + HEARTBEAT_INTERVAL * RECENT_ATTEMPTS as u32)
+            .filter(|at| *at > now).map(|at| at.duration_since(now));
+        pending.into_iter().chain(loss).min()
     }
     /// Pure snapshot: `now` is injectable in tests and previews.
     pub fn details(&self, reason: &str, now: Instant) -> String {
@@ -167,15 +166,6 @@ impl Health {
         lines.join("\n")
     }
 }
-fn latency_color(rtt: Duration) -> u32 {
-    match rtt.as_millis() {
-        0..=250 => GREEN,
-        251..=1000 => YELLOW,
-        1001..=3000 => ORANGE,
-        _ => RED,
-    }
-}
-
 /// A single on-demand worker for the visible 50ms timer *or* the next hidden
 /// dot color boundary. It sleeps when neither is needed and stops on drop.
 pub struct CounterTicker {
@@ -342,8 +332,8 @@ mod tests {
         health.sent(now);
         for (ms, expected) in [
             (0, YELLOW),
-            (250, YELLOW),
-            (251, YELLOW),
+            (800, YELLOW),
+            (801, YELLOW),
             (1000, YELLOW),
             (1001, ORANGE),
             (3000, ORANGE),
@@ -357,16 +347,16 @@ mod tests {
         }
         assert_eq!(
             health.next_color_wake(now),
-            Some(Duration::from_millis(251))
+            Some(Duration::from_millis(801))
         );
         assert_eq!(
-            health.next_color_wake(now + Duration::from_millis(251)),
-            Some(Duration::from_millis(750))
+            health.next_color_wake(now + Duration::from_millis(801)),
+            Some(Duration::from_millis(200))
         );
         health.reply(Duration::from_millis(32), now);
         for (ms, expected) in [
-            (250, GREEN),
-            (251, YELLOW),
+            (800, GREEN),
+            (801, YELLOW),
             (1000, YELLOW),
             (1001, ORANGE),
             (3000, ORANGE),
@@ -381,7 +371,7 @@ mod tests {
             health.reply(Duration::from_millis(32), now);
         }
         ack(&mut health, now, 420);
-        assert_eq!(health.color(now), YELLOW);
+        assert_eq!(health.color(now), GREEN);
         ack(&mut health, now, 1500);
         assert_eq!(health.color(now), ORANGE);
         ack(&mut health, now, 3100);
@@ -389,4 +379,32 @@ mod tests {
         health.disconnected(false);
         assert_eq!(health.color(now), RED);
     }
+    #[test]
+    fn stable_latency_loss_and_jitter_use_recent_windows() {
+        let now = Instant::now();
+        let mut health = Health::default();
+        health.connected();
+        for ms in [250, 500, 270, 480, 300, 450, 310, 470, 340, 420] { ack(&mut health, now, ms); }
+        assert_eq!(health.color(now), GREEN);
+        health.sent(now);
+        assert_eq!(health.color(now + Duration::from_millis(500)), GREEN, "an in-flight probe is not loss");
+        health.disconnected(false);
+        health.connected();
+        ack(&mut health, now, 350);
+        assert_eq!(health.color(now), YELLOW, "missed probe stays in the window after reconnect");
+        for _ in 0..10 { ack(&mut health, now, 350); }
+        assert_eq!(health.color(now), GREEN);
+        ack(&mut health, now, 799);
+        assert_eq!(health.color(now), YELLOW, "large jitter below the latency limit");
+        for _ in 0..10 { ack(&mut health, now, 799); }
+        assert_eq!(health.color(now), GREEN);
+        health.packets(1, 0, now);
+        health.packets(1, 1, now);
+        assert_eq!(health.color(now), YELLOW);
+        health.packets(1, 1, now + Duration::from_secs(15));
+        assert_eq!(health.color(now + Duration::from_secs(20)), GREEN, "old cumulative loss is not new loss");
+        health.packets(2, 0, now + Duration::from_secs(21));
+        assert_eq!(health.color(now + Duration::from_secs(21)), GREEN, "connection counters can reset");
+    }
+
 }

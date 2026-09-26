@@ -518,7 +518,7 @@ async fn projects_sync_between_real_clients_preserve_drafts_and_recover_selectio
     a.request(ClientCommand::RenameSession { session_id:work.clone(),title:"Work started".into() }).unwrap();
     until(&mut b, |c| c.account.sessions.iter().any(|s| s.id == work && s.title == "Work started") && c.account.sessions.iter().all(|s| s.project_id == project)).await;
     assert!(b.project_unread(&project));
-    b.select_project(&project).unwrap(); assert!(b.project_unread(&project),"Opening the tab does not mark its chats read");
+    b.select_project(&project, true).unwrap(); assert!(b.project_unread(&project),"Opening the tab does not mark its chats read");
     b.select(&general).unwrap(); b.select(&work).unwrap(); assert!(!b.project_unread(&project));
     b.request(ClientCommand::UpdateProject { project_id:project.clone(),revision:0,name:"Build renamed".into(),prompt:"Revised".into() }).unwrap();
     until(&mut a, |c| c.account.projects.iter().any(|p| p.id == project && p.revision == 1)).await;

@@ -1036,6 +1036,12 @@ impl App {
         }
     }
     pub fn press(&mut self, id: u64, point: Vec2, touch: bool) {
+        if self.hits.iter().rev().find(|hit| contains(hit.rect, point))
+            .is_some_and(|hit| matches!(hit.action, Action::DismissNotice)) {
+            self.cancel_pointer();
+            self.activate(Action::DismissNotice);
+            return;
+        }
         if self.context_menu.is_some() && !contains(self.context_rect, point) {
             self.context_menu = None;
             self.dirty = true;
@@ -1533,7 +1539,7 @@ impl App {
                     return Ok(());
                 }
                 self.save()?;
-                self.controller.select_project(&id)?;
+                self.controller.select_project(&id, self.size.0 as f32 / self.scale >= 760.)?;
                 self.list_scroll = 0.;
                 self.show_chats = self.controller.account.selected.is_none();
                 self.focus = None;
@@ -3201,11 +3207,13 @@ impl App {
                             self.horizontal,
                         );
                     } else {
-                        let label = if let Some(open) = line.toggle {
-                            format!("{} {}", if open { "▾" } else { "▸" }, line.label)
-                        } else {
-                            line.label.clone()
-                        };
+                        let label_x = if let Some(open) = line.toggle {
+                            self.renderer.clipped_icon(ctx, layer,
+                                if open { Icon::ChevronDown } else { Icon::ChevronRight },
+                                Rect::new(lx, top + offset + 6. * s, 14. * s, 14. * s),
+                                if line.error { 0xffb4ab } else { 0xb7c2ce }, viewport);
+                            lx + 18. * s
+                        } else { lx };
                         if let Some(open) = line.toggle {
                             let hit = crate::render::intersect(line_rect, viewport);
                             if hit.height > 0. {
@@ -3217,11 +3225,11 @@ impl App {
                         }
                         self.renderer.clipped_label(
                             layer,
-                            &label,
+                            &line.label,
                             Rect::new(
-                                lx,
+                                label_x,
                                 top + offset + 5. * s,
-                                text_width - line.indent * s,
+                                text_width - line.indent * s - (label_x - lx),
                                 20. * s,
                             ),
                             if line.toggle.is_some() {
@@ -3648,6 +3656,7 @@ impl App {
         let x = b.x + (b.width - width) / 2.;
         if let Some(notice) = &self.controller.notice {
             let rect = Rect::new(x, b.y + 16. * s, width, 68. * s);
+            self.hits.push(Hit { rect, action: Action::DismissNotice });
             layer.rounded_rect(rect, 12. * s, color(0x452c2a));
             self.renderer.label(
                 layer,
@@ -3670,7 +3679,9 @@ impl App {
         }
     }
     pub fn context_at(&mut self, point: Vec2) {
-        if self.modal.is_some()
+        if self.hits.iter().rev().find(|hit| contains(hit.rect, point))
+                .is_some_and(|hit| matches!(hit.action, Action::DismissNotice))
+            || self.modal.is_some()
             || self.viewer.is_some()
             || self.usage.contains_card(point)
             || self.info_tip.contains_card(point)

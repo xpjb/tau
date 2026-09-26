@@ -124,7 +124,7 @@ fn offline_create_keeps_its_topic_across_reuse_and_late_ack_without_changing_sel
     let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     let topic = uuid::Uuid::new_v4().to_string();
     c.account.projects.push(Project { id:topic.clone(), name:"Work".into(), prompt:String::new(), revision:0 });
-    c.select_project(&topic).unwrap();
+    c.select_project(&topic, true).unwrap();
     c.new_chat().unwrap();
     let provisional = c.account.selected.clone().unwrap();
     assert_eq!(c.account.sessions[0].project_id,topic);
@@ -136,7 +136,7 @@ fn offline_create_keeps_its_topic_across_reuse_and_late_ack_without_changing_sel
     drop(c);
     let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     assert_eq!(c.account.selected_project,topic);
-    c.select_project(GENERAL_PROJECT_ID).unwrap();
+    c.select_project(GENERAL_PROJECT_ID, true).unwrap();
     c.message(ServerMessage::Sessions { sessions:vec![SessionSummary { id:"existing-work".into(), project_id:topic.clone(),
         title:"New chat".into(),starter:true,status:SessionStatus::Idle,detail:None,context_usage:None,model:None,
         parent_id:None,created_at_ms:1,updated_at_ms:1 }] }).unwrap();
@@ -147,7 +147,7 @@ fn offline_create_keeps_its_topic_across_reuse_and_late_ack_without_changing_sel
     assert_eq!(c.account.last_chat_by_project.get(&topic).map(String::as_str),Some("existing-work"));
     drop(c);
     let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
-    c.select_project(&topic).unwrap();
+    c.select_project(&topic, true).unwrap();
     assert_eq!(c.account.selected.as_deref(),Some("existing-work"));
     assert_eq!(c.selected().unwrap().local.pending[0].request.id,prompt);
     assert!(matches!(&c.selected().unwrap().local.pending[0].request.command,

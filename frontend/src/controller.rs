@@ -245,7 +245,7 @@ impl Controller {
             .or_else(|| self.account.sessions.iter().filter(|s| s.project_id == project)
                 .max_by_key(|s| (s.updated_at_ms, &s.id)).map(|s| s.id.clone()))
     }
-    pub fn select_project(&mut self, id: &str) -> Result<()> {
+    pub fn select_project(&mut self, id: &str, resume: bool) -> Result<()> {
         self.plan_dirty.set(true);
         // Older local accounts remember only a single selected chat; capture it
         // before replacing the global selection with this topic's resume target.
@@ -254,7 +254,7 @@ impl Controller {
             self.account.last_chat_by_project.insert(session.project_id.clone(), current.clone());
         }
         self.account.selected_project = id.into();
-        self.account.selected = self.last_chat_in_project(id);
+        self.account.selected = resume.then(|| self.last_chat_in_project(id)).flatten();
         // Tab selection itself is not a read receipt. The app marks the chat
         // read only when its pane is actually visible (including after restart).
         self.viewing_chat = false;
@@ -1085,7 +1085,10 @@ impl Controller {
                     self.downloads.insert(key, Download::new(status, path));
                 }
             }
-            transport::Event::Metrics(stats)=>self.native_metrics=stats,
+            transport::Event::Metrics(stats)=>{
+                self.health.packets(stats.connections, stats.quic_lost_packets, std::time::Instant::now());
+                self.native_metrics=stats;
+            },
             transport::Event::Message(epoch, message)|transport::Event::SizedMessage(epoch,message,_) if self.epoch == Some(epoch) => {
                 self.message(*message)?
             }
@@ -1446,7 +1449,7 @@ impl Controller {
                 } else {
                     match command {
                         Some(ClientCommand::CreateProject { project_id, .. }) => {
-                            self.select_project(&project_id)?;
+                            self.select_project(&project_id, true)?;
                         }
                         Some(ClientCommand::MoveSession { session_id, project_id }) => {
                             // The clicked chat, not the selected chat, owns this action.

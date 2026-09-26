@@ -8,6 +8,7 @@ pub enum Icon {
     Stop,
     Play,
     ChevronDown,
+    ChevronRight,
     Gear,
     Autoscroll,
     Context(Option<f32>),
@@ -22,6 +23,7 @@ impl Icon {
             Self::Stop => "stop",
             Self::Play => "play",
             Self::ChevronDown => "chevron-down",
+            Self::ChevronRight => "chevron-right",
             Self::Gear => "gear",
             Self::Autoscroll => "autoscroll",
             Self::Context(_) => "context",
@@ -108,10 +110,16 @@ impl Icon {
                 p.line_to(7., 19.5);
                 p.close();
             }
-            Self::ChevronDown => {
-                p.move_to(5.5, 9.);
-                p.line_to(12., 15.5);
-                p.line_to(18.5, 9.);
+            Self::ChevronDown | Self::ChevronRight => {
+                if matches!(self, Self::ChevronRight) {
+                    p.move_to(9., 5.5);
+                    p.line_to(15.5, 12.);
+                    p.line_to(9., 18.5);
+                } else {
+                    p.move_to(5.5, 9.);
+                    p.line_to(12., 15.5);
+                    p.line_to(18.5, 9.);
+                }
                 pixmap.stroke_path(
                     &p.finish().unwrap(),
                     &paint,

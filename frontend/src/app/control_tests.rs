@@ -51,6 +51,24 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
             .find(|h| matches!(h.action, Action::Abort))
             .unwrap()
             .rect;
+        app.controller.notice = Some("Saved for later".into());
+        frame(&mut app);
+        let notice = app.hits.iter().find(|h| matches!(h.action, Action::DismissNotice)).unwrap().rect;
+        let overlap = crate::render::intersect(stop, notice);
+        if overlap.width > 0. && overlap.height > 0. {
+            let point = Vec2::new(overlap.x + overlap.width / 2., overlap.y + overlap.height / 2.);
+            for touch in [true, false] {
+                app.controller.notice = Some("Saved for later".into());
+                frame(&mut app);
+                app.press(42, point, touch);
+                assert!(app.controller.notice.is_none());
+                frame(&mut app);
+                app.release(42, point);
+                assert!(app.controller.selected().unwrap().local.pending.is_empty(), "dismiss never requests Stop");
+            }
+        }
+        app.controller.notice = None;
+        frame(&mut app);
         let viewport_height = app.transcript.height;
         assert!(
             stop.y + stop.height < app.transcript.y,
