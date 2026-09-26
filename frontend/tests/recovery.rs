@@ -259,7 +259,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
         .unwrap();
     c.send_prompt().unwrap();
     wait(&mut c, |c| {
-        c.selected().unwrap().local.pending[0].status == Delivery::Unconfirmed
+        c.selected().unwrap().local.pending[0].status == Delivery::Checking
     })
     .await;
     let original = c.selected().unwrap().local.pending[0].request.id.clone();
@@ -486,4 +486,72 @@ fn failed_attachment_commit_is_clean_and_explicit_remove_frees_only_unreferenced
     let db=rusqlite::Connection::open(root.path().join("local/client.sqlite3")).unwrap();db.execute_batch("CREATE TRIGGER fail_file BEFORE INSERT ON local WHEN NEW.key='chat:chat' BEGIN SELECT RAISE(ABORT,'full');END").unwrap();
     assert!(c.attach(&source,None).is_err());assert!(c.selected().unwrap().local.files.is_empty());assert!(c.store.load_chat(&c.identity,"chat").unwrap().files.is_empty());
     db.execute_batch("DROP TRIGGER fail_file").unwrap();c.attach(&source,None).unwrap();let file=c.selected().unwrap().local.files[0].clone();c.remove_file(&file.id).unwrap();assert!(!file.path.exists());assert!(source.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_receipt_retries_original_intent_in_order_after_restart_in_another_chat() {
+    let attempts = Arc::new(Mutex::new(Vec::<ClientRequest>::new()));
+    let seen = attempts.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new().route("/v1/ws", get(move |ws: WebSocketUpgrade| {
+        let seen = seen.clone();
+        async move { ws.on_upgrade(move |mut socket| async move {
+            socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {
+                protocol_version: PROTOCOL_VERSION, daemon_version: "fixture".into(), lineage: Some("fixture".into()),
+            }).unwrap().into())).await.unwrap();
+            while let Some(Ok(frame)) = socket.recv().await {
+                let axum::extract::ws::Message::Text(text) = frame else { continue; };
+                let request: ClientRequest = serde_json::from_str(&text).unwrap();
+                let response = match request.command.clone() {
+                    ClientCommand::Prompt { session_id, .. } => {
+                        let first = { let mut seen = seen.lock().unwrap(); seen.push(request.clone()); seen.len() == 1 };
+                        if first { let _ = socket.close().await; return; }
+                        ServerMessage::Receipts { session_id, reports: vec![OperationReceipt {
+                            id: request.id, accepted: true, complete: true, error: None, notice: None,
+                        }] }
+                    }
+                    ClientCommand::GetReceipts { session_id, requests } => ServerMessage::Receipts {
+                        session_id, reports: requests.into_iter().map(|id| OperationReceipt {
+                            id, accepted: false, complete: false, error: None, notice: None,
+                        }).collect(),
+                    },
+                    ClientCommand::GetSession { session_id } => ServerMessage::success(request.id, Some(session_id), None),
+                    _ => continue,
+                };
+                if socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&response).unwrap().into())).await.is_err() { return; }
+            }
+        }) }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path().into()).unwrap();
+    store.put("", "settings", &Settings { server_url: format!("http://{address}"), token: "fixture".into() }).unwrap();
+    let mut c = Controller::new(store, Arc::new(|| {})).unwrap();
+    async fn wait(c: &mut Controller, ready: impl Fn(&Controller) -> bool) {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop { c.poll(); if ready(c) { break; } tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+    }
+    wait(&mut c, |c| c.epoch.is_some()).await;
+    c.select("chat").unwrap();
+    c.draft("first".into()).unwrap(); c.send_prompt().unwrap();
+    let original = c.selected().unwrap().local.pending[0].request.id.clone();
+    c.draft("second".into()).unwrap(); c.send_prompt().unwrap();
+    assert_eq!(c.selected().unwrap().local.pending[1].status, Delivery::WaitingForConnection);
+    wait(&mut c, |c| c.epoch.is_none()).await;
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::Checking);
+    c.select("elsewhere").unwrap();
+    drop(c);
+    let mut c = Controller::new(Store::open(root.path().into()).unwrap(), Arc::new(|| {})).unwrap();
+    assert_eq!(c.account.selected.as_deref(), Some("elsewhere"));
+    wait(&mut c, |c| c.chats.get("chat").is_some_and(|chat| chat.local.pending.is_empty())).await;
+    let seen = attempts.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].id, original); assert_eq!(seen[1].id, original);
+    assert_ne!(seen[2].id, original);
+    let texts = seen.iter().map(|r| match &r.command { ClientCommand::Prompt { text, .. } => text.as_str(), _ => unreachable!() }).collect::<Vec<_>>();
+    assert_eq!(texts, ["first", "first", "second"]);
+    assert_eq!(c.account.selected.as_deref(), Some("elsewhere"), "delivery does not steal navigation");
+    drop(seen); drop(c); server.abort();
 }

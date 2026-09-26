@@ -90,6 +90,7 @@ enum Action {
     Toggle(String, bool),
     Restore(String),
     Dismiss(String),
+    RetryPending(String),
     Queue(QueueOperation),
     EditQueue(String, u64, String),
     Attachment(String, String, String, bool),
@@ -2047,6 +2048,7 @@ impl App {
                 self.composer =
                     Editor::composer(self.controller.selected().unwrap().local.draft.clone());
             }
+            Action::RetryPending(id) => self.controller.retry_pending(&id)?,
             Action::Dismiss(id) => self.controller.dismiss_pending(&id)?,
             Action::Queue(operation) => {
                 if let Some(id) = selected {
@@ -2732,7 +2734,13 @@ impl App {
             // only if its target disappeared or it was explicitly rejected.
             if (edit || delete) && in_queue && !matches!(p.status, crate::store::Delivery::Rejected) { continue; }
             let mut actions = vec![("Copy text".into(), Action::Copy(p.text.clone()))];
-            if !control { actions.push(("Restore draft".into(), Action::Restore(p.request.id.clone()))); }
+            if !control && matches!(p.status, crate::store::Delivery::Rejected | crate::store::Delivery::Unconfirmed) {
+                actions.push(("Restore draft".into(), Action::Restore(p.request.id.clone())));
+            }
+            if matches!(p.request.command, ClientCommand::Prompt { .. })
+                && matches!(p.status, crate::store::Delivery::Rejected | crate::store::Delivery::Unconfirmed) {
+                actions.push(("Retry saved message".into(), Action::RetryPending(p.request.id.clone())));
+            }
             actions.push(("Dismiss".into(), Action::Dismiss(p.request.id.clone())));
             rows.push(Row {
                 details: vec![], header: true, key: format!("pending:{}", p.request.id),

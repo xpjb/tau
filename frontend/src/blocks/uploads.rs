@@ -4,6 +4,13 @@ use crate::store::LocalFile;
 use tau_protocol::{ClientCommand, ClientRequest, MAX_PROMPT_CHARS};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+#[derive(Debug)]
+pub(crate) struct InvalidAttachment;
+impl std::fmt::Display for InvalidAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Attachment needs attention") }
+}
+impl std::error::Error for InvalidAttachment {}
+
 impl files::Downloads {
     async fn connection(&mut self) -> Result<(Arc<Client>,String)> {
         while self.ready.borrow().is_none() {self.ready.changed().await.context("Content service stopped")?;}
@@ -42,15 +49,19 @@ impl files::Downloads {
         if !files.is_empty() {text.push_str("\n\nAttached files are available at:\n");}
         let (client,lineage) = self.connection().await?;
         for file in files {
-            let mut source = tokio::fs::File::open(&file.path).await?;
-            let before = source.metadata().await?;
-            ensure!(before.is_file() && before.len() == file.size && file.size <= tau_protocol::MAX_UPLOAD_BYTES as u64,"Attachment changed or exceeds 50 MB");
-            let mut hasher = blake3::Hasher::new();
+            let (mut source, before, hash) = async {
+                let mut source = tokio::fs::File::open(&file.path).await?;
+                let before = source.metadata().await?;
+                ensure!(before.is_file() && before.len() == file.size && file.size <= tau_protocol::MAX_UPLOAD_BYTES as u64,"Attachment changed or exceeds 50 MB");
+                let mut hasher = blake3::Hasher::new();
+                let mut buffer = vec![0;BLOCK_CHUNK_BYTES];
+                loop {let n=source.read(&mut buffer).await?;if n==0 {break;}hasher.update(&buffer[..n]);}
+                ensure!(source.metadata().await?.modified()? == before.modified()?,"Attachment changed while hashing");
+                let hash=hasher.finalize().to_hex().to_string();
+                ensure!(file.hash.as_ref().is_none_or(|expected|expected==&hash),"Local attachment failed integrity verification; original intent was not sent");
+                Ok::<_,anyhow::Error>((source, before, hash))
+            }.await.context(InvalidAttachment)?;
             let mut buffer = vec![0;BLOCK_CHUNK_BYTES];
-            loop {let n=source.read(&mut buffer).await?;if n==0 {break;}hasher.update(&buffer[..n]);}
-            ensure!(source.metadata().await?.modified()? == before.modified()?,"Attachment changed while hashing");
-            let hash=hasher.finalize().to_hex().to_string();
-            ensure!(file.hash.as_ref().is_none_or(|expected|expected==&hash),"Local attachment failed integrity verification; original intent was not sent");
             let spec = UploadSpec {
                 id:blake3::hash(format!("file\0{session}\0{}",file.id).as_bytes()).to_hex().to_string(),
                 length:file.size,hash,
@@ -80,7 +91,9 @@ impl files::Downloads {
             let file = published.context("Attachment upload failed")?;
             text.push_str(&format!("- {}: {}\n",file.name,file.path));
         }
-        ensure!(text.chars().count() <= MAX_PROMPT_CHARS,"Prompt and attachment paths are too long");
+        if text.chars().count() > MAX_PROMPT_CHARS {
+            return Err(anyhow::anyhow!("Prompt and attachment paths are too long")).context(InvalidAttachment);
+        }
         Ok(text)
     }
 

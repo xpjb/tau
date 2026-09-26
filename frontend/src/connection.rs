@@ -96,9 +96,10 @@ impl Health {
         self.recent.iter().rev().find_map(|sample| *sample)
     }
     pub fn packets(&mut self, connection: u64, lost: u64, now: Instant) {
+        if connection == 0 { return; }
         let previous = self.packet_counter.filter(|(id, _)| *id == connection).map_or(0, |(_, n)| n);
         if lost > previous { self.last_packet_loss = Some(now); }
-        self.packet_counter = Some((connection, lost));
+        self.packet_counter = Some((connection, lost.max(previous)));
     }
     pub fn color(&self, now: Instant) -> u32 {
         match self.phase {

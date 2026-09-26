@@ -108,6 +108,7 @@ pub enum Delivery {
     Preparing,
     Sending,
     Accepted,
+    Checking,
     Unconfirmed,
     Rejected,
 }
@@ -120,6 +121,7 @@ impl Delivery {
             Self::Preparing => "Preparing attachments",
             Self::Sending => "Sending",
             Self::Accepted => "Accepted",
+            Self::Checking => "Checking delivery — will retry if needed",
             Self::Unconfirmed => "Delivery unconfirmed — not resent",
             Self::Rejected => "Not sent",
         }
@@ -261,9 +263,9 @@ impl Store {
         tx.execute("INSERT INTO local(account,key,value) VALUES(?1,'account',?2) ON CONFLICT(account,key) DO UPDATE SET value=excluded.value",params![account,serde_json::to_string(&state)?])?;
         tx.commit()?;Ok(changed)
     }
-    pub fn work_chats(&self,account:&str)->Result<Vec<String>> {
-        Ok(self.db.prepare("SELECT substr(key,6) FROM local WHERE account=?1 AND key LIKE 'chat:%' AND (length(json_extract(value,'$.draft'))>0 OR json_array_length(value,'$.files')>0 OR json_array_length(value,'$.pending')>0)")?
-            .query_map([account],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    pub fn work_chats(&self,account:&str,pending_only:bool)->Result<Vec<String>> {
+        Ok(self.db.prepare("SELECT substr(key,6) FROM local WHERE account=?1 AND key LIKE 'chat:%' AND (json_array_length(value,'$.pending')>0 OR (NOT ?2 AND (length(json_extract(value,'$.draft'))>0 OR json_array_length(value,'$.files')>0)))")?
+            .query_map(params![account,pending_only],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
     pub fn discard_import(&self,account:&str,session:&str,file:&LocalFile)->Result<()> {
         let expected=self.root.join("files").join(hash(account)).join(hash(&self.resolve_chat(account,session)?)).join(&file.id);
@@ -285,11 +287,10 @@ impl Store {
         let mut chat: LocalChat = self.get(account, &format!("chat:{session}"))?;
         for p in &mut chat.pending {
             if matches!(p.status, Delivery::Sending | Delivery::Preparing) {
-                p.status = Delivery::Unconfirmed;
-                p.detail = Some(
-                    "The app stopped before confirmation. Check history before sending again."
-                        .into(),
-                );
+                p.status = if matches!(&p.request.command, ClientCommand::Prompt { text, .. } if !text.starts_with('/')) {
+                    Delivery::Checking
+                } else { Delivery::Unconfirmed };
+                p.detail = Some("The app stopped before confirmation; checking the original receipt".into());
             } else if p.status == Delivery::WaitingForModel {
                 p.status = Delivery::Rejected;
                 p.detail = Some("Model selection was not confirmed; check the current model, then restore this draft".into());

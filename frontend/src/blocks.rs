@@ -2,6 +2,7 @@
 //! the control socket. A collapsed tool never causes a content watch.
 mod files;
 mod uploads;
+pub(crate) use uploads::InvalidAttachment;
 use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
 use std::{collections::{BTreeSet, HashMap}, path::Path, sync::{Arc, Mutex}, time::Duration};

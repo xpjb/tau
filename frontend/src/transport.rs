@@ -57,6 +57,7 @@ pub enum Event {
         epoch: u64,
         id: String,
         result: Result<String, String>,
+        retryable: bool,
     },
     Download {
         key: String,
@@ -269,8 +270,10 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             let Some(service) = &block_service else {events.send(Event::NotSent(id,"Content service unavailable".into())).await;continue;};
                             let data=service.downloads();let events=events.clone();
                             jobs.spawn(async move {
-                                let result = data.upload(session, text, files).await.map_err(|e| format!("Attachment upload failed; prompt was not sent: {e}"));
-                                events.send(Event::Prepared { epoch: requested, id, result }).await;
+                                let result = data.upload(session, text, files).await;
+                                let retryable = result.as_ref().err().is_none_or(|e| !e.is::<crate::blocks::InvalidAttachment>());
+                                let result = result.map_err(|e| format!("Attachment upload failed; prompt was not sent: {e:#}"));
+                                events.send(Event::Prepared { epoch: requested, id, result, retryable }).await;
                             });
                         }
                     Some(Command::CancelDownload(key)) => { if let Some(cancel) = downloads.remove(&key) { cancel.send_replace(true); } }

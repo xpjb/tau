@@ -81,6 +81,7 @@ pub struct Controller {
     requests: HashMap<String, ClientCommand>,
     project_deletions: HashMap<String, Vec<String>>,
     create_failed_epoch: Option<u64>,
+    retry_after: Option<std::time::Instant>,
     control_check:Option<std::time::Instant>,
     control_cursor:usize,
     catalog:Option<Catalog>,state_versions:HashMap<String,(u64,SessionStatus,Option<String>,Option<ContextUsage>)>,
@@ -121,6 +122,7 @@ impl Controller {
             requests: HashMap::new(),
             project_deletions: HashMap::new(),
             create_failed_epoch: None,
+            retry_after: None,
             receipt_queue:Default::default(),receipt_inflight:None,control_check:None,control_cursor:0,catalog:None,state_versions:HashMap::new(),source_guard:None,restore_reviews:Default::default(),
             wake,
         };
@@ -349,7 +351,6 @@ impl Controller {
         let session = self.account.selected.clone().ok_or_else(|| anyhow::anyhow!("Select a chat"))?;
         ensure!(!self.account.missing_chats.contains(&session),"This source chat is missing. Copy the draft to a new chat; old intents are not resent");
         let provisional = self.is_creating(&session);
-        let epoch = self.epoch;
         let chat = self.chats.get_mut(&session).unwrap();
         let choosing = chat.model_request.is_some();
         ensure!(
@@ -370,18 +371,13 @@ impl Controller {
             },
         };
         let pending = Pending {
-            request: request.clone(),
+            request,
             started_at_ms: crate::clock::now_ms(),
-            text: text.clone(),
-            files: files.clone(),
+            text,
+            files,
             status: if provisional { Delivery::WaitingForChat }
                 else if choosing { Delivery::WaitingForModel }
-                else if epoch.is_none() { Delivery::WaitingForConnection }
-                else if files.is_empty() {
-                Delivery::Sending
-            } else {
-                Delivery::Preparing
-            },
+                else { Delivery::WaitingForConnection },
             detail: None,
         };
         let mut replacement = chat.local.clone();
@@ -394,25 +390,7 @@ impl Controller {
         self.store
             .save_chat(&self.identity, &session, &replacement)?;
         chat.local = replacement;
-        if provisional || choosing || epoch.is_none() { return Ok(()); }
-        let epoch = epoch.unwrap();
-        let command = if files.is_empty() {
-            Command::Request {
-                epoch,
-                request: request.clone(),
-            }
-        } else {
-            Command::Upload {
-                epoch,
-                id: request.id.clone(),
-                session,
-                text,
-                files,
-            }
-        };
-        if let Err(error) = self.network.as_ref().unwrap().send(command) {
-            self.not_sent(&request.id, &error.to_string())?;
-        }
+        self.send_waiting(&session, false)?;
         Ok(())
     }
     pub fn request(&mut self, command: ClientCommand) -> Result<String> {
@@ -514,9 +492,22 @@ impl Controller {
             epoch,
             request: request.clone(),
         }) {
-            self.not_sent(&request.id, &error.to_string())?;
+            self.not_sent(&request.id, &error.to_string(), true)?;
         }
         Ok(request.id)
+    }
+    pub fn retry_pending(&mut self, id: &str) -> Result<()> {
+        let session = self.account.selected.clone().context("Select a chat")?;
+        ensure!(!self.account.missing_chats.contains(&session), "Copy this draft to a live chat first");
+        let mut local = self.chats[&session].local.clone();
+        let pending = local.pending.iter_mut().find(|p| p.request.id == id).context("Saved message no longer exists")?;
+        ensure!(matches!(pending.request.command, ClientCommand::Prompt { .. }), "Only messages can be retried here");
+        ensure!(matches!(pending.status, Delivery::Rejected | Delivery::Unconfirmed), "This message is already being delivered");
+        pending.status = Delivery::WaitingForConnection;
+        pending.detail = None;
+        self.store.save_chat(&self.identity, &session, &local)?;
+        self.chats.get_mut(&session).unwrap().local = local;
+        self.send_waiting(&session, false)
     }
     pub fn restore_pending(&mut self, id: &str) -> Result<()> {
         let session = self
@@ -534,6 +525,7 @@ impl Controller {
                 matches!(p.request.command, ClientCommand::Prompt { .. }),
                 "Controls cannot become drafts"
             );
+            ensure!(matches!(p.status, Delivery::Rejected | Delivery::Unconfirmed), "This message is still being delivered; copy its text instead");
             chat.local.draft = p.text.clone();
             chat.local.files = p.files.clone();
         }
@@ -712,22 +704,28 @@ impl Controller {
         let Some(epoch) = self.epoch else { return Ok(()); };
         if self.is_creating(session) || self.account.missing_chats.contains(session) {return Ok(());}
         if model_confirmed && let Some(chat)=self.chats.get_mut(session) {
-            for p in &mut chat.local.pending {if p.status==Delivery::WaitingForModel {p.status=Delivery::WaitingForConnection;}}
-            self.store.save_chat(&self.identity,session,&chat.local)?;
+            let mut local = chat.local.clone();
+            for p in &mut local.pending {if p.status==Delivery::WaitingForModel {p.status=Delivery::WaitingForConnection;}}
+            self.store.save_chat(&self.identity,session,&local)?;
+            chat.local = local;
         }
+        if self.retry_after.is_some_and(|at| at > std::time::Instant::now()) {return Ok(());}
         let active=self.chats.values().flat_map(|c|&c.local.pending).filter(|p|matches!(p.status,Delivery::Sending|Delivery::Preparing)).take(4).count();
         let pending = self.chats.get(session).map(|chat| chat.local.pending.iter()
-            .filter(|p|matches!(p.status,Delivery::WaitingForChat|Delivery::WaitingForConnection)).take(4-active)
+            .skip_while(|p| matches!(p.status, Delivery::Accepted | Delivery::Rejected | Delivery::Unconfirmed))
+            .take(1).filter(|p|matches!(p.status,Delivery::WaitingForChat|Delivery::WaitingForConnection)).take(4-active)
             .cloned().collect::<Vec<_>>()).unwrap_or_default();
         for p in pending {
             let chat = self.chats.get_mut(session).unwrap();
-            if let Some(saved) = chat.local.pending.iter_mut().find(|saved| saved.request.id == p.request.id) {
+            let mut local = chat.local.clone();
+            if let Some(saved) = local.pending.iter_mut().find(|saved| saved.request.id == p.request.id) {
                 saved.status = if p.files.is_empty() {Delivery::Sending} else {Delivery::Preparing};
             }
-            self.save_chat(session)?;
+            self.store.save_chat(&self.identity, session, &local)?;
+            chat.local = local;
             let command = if p.files.is_empty() { Command::Request {epoch, request:p.request.clone()} }
                 else { Command::Upload {epoch, id:p.request.id.clone(), session:session.into(), text:p.text.clone(), files:p.files.clone()} };
-            if let Err(error) = self.network.as_ref().unwrap().send(command) { self.not_sent(&p.request.id, &error.to_string())?; }
+            if let Err(error) = self.network.as_ref().unwrap().send(command) { self.not_sent(&p.request.id, &error.to_string(), true)?; }
         }
         Ok(())
     }
@@ -855,8 +853,9 @@ impl Controller {
             .ok_or_else(|| anyhow::anyhow!("Not connected"))?
             .send(Command::CancelDownload(key.into()))
     }
-    fn not_sent(&mut self, id: &str, detail: &str) -> Result<()> {
+    fn not_sent(&mut self, id: &str, detail: &str, retryable: bool) -> Result<()> {
         self.project_deletions.remove(id);
+        let mut retrying = false;
         if self.receipt_inflight.as_ref().is_some_and(|(request,_,_,_)|request==id) {let (_,session,ids,_)=self.receipt_inflight.take().unwrap();self.receipt_queue.push_back((session,ids));}
         for (session, chat) in &mut self.chats {
             if chat
@@ -867,8 +866,13 @@ impl Controller {
                 chat.model_request = None;
             }
             if let Some(p) = chat.local.pending.iter_mut().find(|p| p.request.id == id) {
-                p.status = Delivery::Rejected;
-                p.detail = Some(detail.into());
+                if !matches!(p.status, Delivery::Sending | Delivery::Preparing | Delivery::Checking) { return Ok(()); }
+                p.status = if retryable && matches!(&p.request.command, ClientCommand::Prompt { text, .. } if !text.starts_with('/')) {
+                    retrying = true;
+                    self.retry_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                    Delivery::WaitingForConnection
+                } else { Delivery::Rejected };
+                p.detail = Some(if retrying { format!("Saved; retrying automatically: {detail}") } else { detail.into() });
                 self.store.save_chat(&self.identity, session, &chat.local)?;
             }
         }
@@ -878,7 +882,7 @@ impl Controller {
                 self.project_result = Some((id.into(), false));
             }
         }
-        self.notice = Some(detail.into());
+        if !retrying { self.notice = Some(detail.into()); }
         Ok(())
     }
     pub fn poll(&mut self) -> bool {
@@ -982,11 +986,13 @@ impl Controller {
                 ensure!(self.source_guard==Some((epoch,true)),"Source identity was not durably recorded; automatic submission is disabled. Repair local storage and reconnect.");
                 self.state_versions.clear();self.catalog=None;self.receipt_queue.clear();self.receipt_inflight=None;
                 self.epoch = Some(epoch);
+                self.retry_after = None;
                 self.create_failed_epoch = None;
                 self.control_check=None;
                 for saved in self.account.pending_controls.values_mut() {saved.blocked=false;}
                 self.connection = "Connected".into();
                 self.health.connected();
+                for id in self.store.work_chats(&self.identity, true)? { self.ensure_chat(&id)?; }
                 self.request(ClientCommand::ListSessions)?;
                 for id in self.chats.keys().cloned().collect::<Vec<_>>() {
                     if !self.is_creating(&id) {self.queue_receipts(&id);}
@@ -1012,7 +1018,9 @@ impl Controller {
                     chat.feed.opening = false;
                     for p in &mut chat.local.pending {
                         if matches!(p.status, Delivery::Sending | Delivery::Preparing) {
-                            p.status = Delivery::Unconfirmed;
+                            p.status = if matches!(&p.request.command, ClientCommand::Prompt { text, .. } if !text.starts_with('/')) {
+                                Delivery::Checking
+                            } else { Delivery::Unconfirmed };
                         } else if p.status == Delivery::WaitingForModel {
                             p.status = Delivery::Rejected;
                             p.detail = Some("Model selection unconfirmed; check the current model, then restore this draft".into());
@@ -1031,23 +1039,23 @@ impl Controller {
                 if self.is_creating(&id) {
                     self.requests.remove(&id);
                     self.notice = Some(format!("New chat saved locally, not yet confirmed: {detail}"));
-                } else { self.not_sent(&id, &detail)?; }
+                } else { self.not_sent(&id, &detail, true)?; }
             },
-            transport::Event::Prepared { epoch, id, result } => {
+            transport::Event::Prepared { epoch, id, result, retryable } => {
                 let session = self
                     .chats
                     .iter()
-                    .find(|(_, c)| c.local.pending.iter().any(|p| p.request.id == id))
+                    .find(|(_, c)| c.local.pending.iter().any(|p| p.request.id == id && matches!(p.status, Delivery::Preparing | Delivery::Checking)))
                     .map(|(s, _)| s.clone());
                 if let Some(session) = session {
                     if self.epoch != Some(epoch) {
                         self.not_sent(
                             &id,
-                            "Connection changed during upload; prompt was not sent",
+                            "Connection changed during upload; prompt was not sent", true,
                         )?;
                     } else {
                         match result {
-                            Err(detail) => self.not_sent(&id, &detail)?,
+                            Err(detail) => self.not_sent(&id, &detail, retryable)?,
                             Ok(text) => {
                                 let p = self
                                     .chats
@@ -1071,7 +1079,7 @@ impl Controller {
                                     .unwrap()
                                     .send(Command::Request { epoch, request })
                                 {
-                                    self.not_sent(&id, &error.to_string())?;
+                                    self.not_sent(&id, &error.to_string(), true)?;
                                 }
                             }
                         }
@@ -1134,6 +1142,10 @@ impl Controller {
                     if let Some(notice)=&report.notice {self.notice=Some(notice.clone());}
                     if let Some(pending) = chat.local.pending.iter_mut().find(|p|p.request.id == report.id) {
                         if let Some(error) = report.error { pending.status = Delivery::Rejected; pending.detail = Some(error); }
+                        else if !report.accepted && pending.status == Delivery::Checking {
+                            pending.status = Delivery::WaitingForConnection;
+                            pending.detail = None;
+                        }
                         else if report.accepted && !report.complete { pending.status = Delivery::Accepted; pending.detail = Some("Accepted; awaiting outcome".into()); }
                         else if report.accepted {
                             if matches!(pending.request.command,ClientCommand::QueueControl {operation:QueueOperation::Edit {..}|QueueOperation::Delete {..},..}) {
@@ -1190,7 +1202,7 @@ impl Controller {
                 });
                 let present=sessions.iter().map(|s|s.id.clone()).collect::<std::collections::HashSet<_>>();
                 self.account.missing_chats.clear();
-                for id in self.store.work_chats(&self.identity)? {
+                for id in self.store.work_chats(&self.identity, false)? {
                     if present.contains(&id) || pending.as_ref().is_some_and(|p|p.id==id) {continue;}
                     let mut summary=self.account.sessions.iter().find(|s|s.id==id).cloned().unwrap_or_else(||Self::creating_summary(&id,GENERAL_PROJECT_ID,0));
                     summary.title=format!("Local recovery: {}",summary.title.trim_start_matches("Local recovery: "));
@@ -1523,6 +1535,38 @@ use super::*;
 use std::sync::Arc;
 use crate::transport::Event as NetworkEvent;
 #[test]
+fn unsent_messages_back_off_and_keep_the_original_id_through_failure_and_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let mut c = Controller::new(Store::open(root.path().into()).unwrap(), Arc::new(|| {})).unwrap();
+    c.select("chat").unwrap(); c.draft("keep this intent".into()).unwrap(); c.send_prompt().unwrap();
+    let id = c.selected().unwrap().local.pending[0].request.id.clone();
+    c.chats.get_mut("chat").unwrap().local.pending[0].status = Delivery::Sending;
+    c.not_sent(&id, "writer full", true).unwrap();
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
+    assert!(c.notice.is_none(), "routine retry lives on the saved message, not in a scary banner");
+    c.epoch = Some(1);
+    c.send_waiting("chat", false).unwrap(); // Backoff prevents touching the absent network.
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
+    c.retry_after = None;
+    let db = rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_send BEFORE INSERT ON local WHEN NEW.key='chat:chat' BEGIN SELECT RAISE(ABORT,'disk full');END").unwrap();
+    assert!(c.send_waiting("chat", false).is_err());
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection, "a failed commit cannot wedge the message in Sending");
+    db.execute_batch("DROP TRIGGER fail_send").unwrap();
+    c.chats.get_mut("chat").unwrap().local.pending[0].status = Delivery::Preparing;
+    c.network_event(NetworkEvent::Prepared {epoch:1,id:id.clone(),result:Err("attachment changed".into()),retryable:false}).unwrap();
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::Rejected);
+    c.epoch = None;
+    c.retry_pending(&id).unwrap();
+    drop(c);
+    let c = Controller::new(Store::open(root.path().into()).unwrap(), Arc::new(|| {})).unwrap();
+    let pending = &c.selected().unwrap().local.pending[0];
+    assert_eq!(pending.request.id, id);
+    assert_eq!(pending.text, "keep this intent");
+    assert_eq!(pending.status, Delivery::WaitingForConnection);
+}
+
+#[test]
 fn lineage_fence_rolls_back_atomically_and_missing_source_work_stays_reachable() {
     use crate::store::{LocalChat,Pending};
     let root=tempfile::tempdir().unwrap();let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();c.select("missing").unwrap();
@@ -1535,6 +1579,11 @@ fn lineage_fence_rolls_back_atomically_and_missing_source_work_stays_reachable()
     assert_eq!(c.store.get::<crate::store::Account>(&c.identity,"account").unwrap().source_lineage.as_deref(),Some("before"));
     db.execute_batch("DROP TRIGGER fail_fence").unwrap();c.network_event(NetworkEvent::Source(1,"after".into())).unwrap();
     assert_eq!(c.selected().unwrap().local.pending[0].status,Delivery::Unconfirmed);
+    c.network_event(NetworkEvent::NotSent("original".into(), "late old-connection callback".into())).unwrap();
+    c.message(ServerMessage::Receipts {session_id:"missing".into(),reports:vec![OperationReceipt {
+        id:"original".into(),accepted:false,complete:false,error:None,notice:None,
+    }]}).unwrap();
+    assert_eq!(c.selected().unwrap().local.pending[0].status,Delivery::Unconfirmed, "late events cannot clear the source fence");
     c.message(ServerMessage::Sessions {sessions:vec![]}).unwrap();assert!(c.account.missing_chats.contains("missing"));assert_eq!(c.account.selected.as_deref(),Some("missing"));assert_eq!(c.selected().unwrap().local.draft,"keep me");
     assert!(c.send_prompt().is_err());c.copy_missing_draft("missing").unwrap();assert_eq!(c.selected().unwrap().local.draft,"keep me");assert!(c.selected().unwrap().local.pending.is_empty());assert_eq!(c.chats["missing"].local.pending[0].request.id,"original");
 }
