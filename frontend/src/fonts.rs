@@ -11,6 +11,7 @@ impl Files {
         text: &mut TextService,
         path: PathBuf,
         index: u32,
+        variations: &[([u8; 4], f32)],
     ) -> Result<FontHandle, String> {
         let data = if let Some(data) = self.0.get(&path) {
             data.clone()
@@ -20,7 +21,7 @@ impl Files {
             self.0.insert(path, data.clone());
             data
         };
-        text.map_font(data, index).map_err(|e| e.to_string())
+        text.map_font_with_variations(data, index, variations).map_err(|e| e.to_string())
     }
 }
 
@@ -29,8 +30,8 @@ pub fn load(text: &mut TextService) -> Result<Faces, String> {
     let mut fallback = vec![];
     #[cfg(target_os = "android")]
     for sample in ["漢", "한", "😀", "ع", "अ", "ก"] {
-        if let Ok((path, index)) = android::matched(c"sans-serif", 0, sample)
-            && let Ok(font) = files.map(text, path, index)
+        if let Ok((path, index, axes)) = android::matched(c"sans-serif", 0, sample)
+            && let Ok(font) = files.map(text, path, index, &axes)
             && !fallback.contains(&font)
         {
             fallback.push(font);
@@ -51,7 +52,7 @@ pub fn load(text: &mut TextService) -> Result<Faces, String> {
             PathBuf::from("/usr/share/fonts/noto/NotoColorEmoji.ttf"),
         ];
         for path in paths {
-            if let Ok(font) = files.map(text, path, 0) {
+            if let Ok(font) = files.map(text, path, 0, &[]) {
                 fallback.push(font);
             }
         }
@@ -71,34 +72,9 @@ pub fn load(text: &mut TextService) -> Result<Faces, String> {
 
 #[cfg(target_os = "android")]
 fn primary(text: &mut TextService, files: &mut Files, index: usize) -> Result<FontHandle, String> {
-    // Prefer the static Roboto faces where present. The current text engine has
-    // no variation-axis API, so these retain the explicit bold/italic outlines.
-    let name = if index < 4 {
-        [
-            "Roboto-Regular.ttf",
-            "Roboto-Bold.ttf",
-            "Roboto-Italic.ttf",
-            "Roboto-BoldItalic.ttf",
-        ][index]
-    } else {
-        [
-            "RobotoMono-Regular.ttf",
-            "RobotoMono-Bold.ttf",
-            "RobotoMono-Italic.ttf",
-            "RobotoMono-BoldItalic.ttf",
-        ][index - 4]
-    };
-    if let Ok(font) = files.map(text, PathBuf::from("/system/fonts").join(name), 0) {
-        return Ok(font);
-    }
-    // Don't depend on OEM file names or assume that a matched face is TTC index 0.
-    let family = if index < 4 {
-        c"sans-serif"
-    } else {
-        c"monospace"
-    };
-    let (path, face) = android::matched(family, index % 4, "A")?;
-    files.map(text, path, face)
+    let family = if index < 4 { c"sans-serif" } else { c"monospace" };
+    let (path, face, axes) = android::matched(family, index % 4, "A")?;
+    files.map(text, path, face, &axes)
 }
 
 #[cfg(windows)]
@@ -121,7 +97,7 @@ fn primary(text: &mut TextService, files: &mut Files, index: usize) -> Result<Fo
         "NotoSansMono-Italic.ttf",
         "NotoSansMono-BoldItalic.ttf",
     ][index];
-    if let Ok(font) = files.map(text, PathBuf::from("/usr/share/fonts/noto").join(name), 0) {
+    if let Ok(font) = files.map(text, PathBuf::from("/usr/share/fonts/noto").join(name), 0, &[]) {
         return Ok(font);
     }
     let bundled: [&'static [u8]; 8] = [
@@ -160,10 +136,13 @@ mod android {
         ) -> *mut c_void;
         fn AFont_getFontFilePath(font: *const c_void) -> *const c_char;
         fn AFont_getCollectionIndex(font: *const c_void) -> usize;
+        fn AFont_getAxisCount(font: *const c_void) -> usize;
+        fn AFont_getAxisTag(font: *const c_void, index: u32) -> u32;
+        fn AFont_getAxisValue(font: *const c_void, index: u32) -> f32;
         fn AFont_close(font: *mut c_void);
     }
 
-    pub fn matched(family: &CStr, style: usize, sample: &str) -> Result<(PathBuf, u32), String> {
+    pub fn matched(family: &CStr, style: usize, sample: &str) -> Result<(PathBuf, u32, Vec<([u8; 4], f32)>), String> {
         let sample: Vec<u16> = sample.encode_utf16().collect();
         if sample.is_empty() {
             return Err("Empty font sample".into());
@@ -200,10 +179,13 @@ mod android {
                 ))
             };
             let index = AFont_getCollectionIndex(font);
+            let axes = (0..AFont_getAxisCount(font) as u32)
+                .map(|i| (AFont_getAxisTag(font, i).to_be_bytes(), AFont_getAxisValue(font, i)))
+                .collect();
             AFont_close(font);
             let path = path.ok_or("Android system font has no readable file")?;
             let index = u32::try_from(index).map_err(|e| e.to_string())?;
-            Ok((path, index))
+            Ok((path, index, axes))
         }
     }
 }
