@@ -1,7 +1,7 @@
 package app.tau.rust;
 
 import android.app.NativeActivity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.*;
 import android.graphics.Color;
 import android.net.Uri;
@@ -13,6 +13,10 @@ import org.json.JSONObject;
 import android.text.*;
 import android.view.*;
 import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Button;
+import android.view.inputmethod.InputMethodManager;
 import java.io.*;
 
 /** OS bridges only: IME, clipboard, document grants, insets, task Back.
@@ -22,7 +26,7 @@ public final class MainActivity extends NativeActivity {
     private static native boolean nativeBack();
     private static native void nativeResult(int kind, String first, String second);
     private static native void nativeInsets(int left, int top, int right, int bottom);
-    private AlertDialog editor;
+    private Dialog editor;
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         View decor = getWindow().getDecorView();
@@ -42,20 +46,63 @@ public final class MainActivity extends NativeActivity {
     }
     public void background() { runOnUiThread(() -> moveTaskToBack(true)); }
     public void edit(String title, String value, boolean secret, boolean singleLine) { runOnUiThread(() -> {
-        if (editor != null) editor.dismiss();
+        if (editor != null) return;
+        Dialog dialog = new Dialog(this, android.R.style.Theme_Material_NoActionBar);
+        editor = dialog;
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setBackgroundColor(Color.rgb(9,13,18));
+        int padding = Math.round(16 * getResources().getDisplayMetrics().density);
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(padding,0,padding,0);
+        TextView label = new TextView(this);
+        label.setText(title); label.setTextSize(18); label.setTextColor(Color.WHITE);
+        header.addView(label,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1));
+        Button done = new Button(this);
+        done.setText("Done");
+        header.addView(done);
+        page.addView(header,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));
         EditText input = new EditText(this);
         input.setInputType(secret ? 129 : (singleLine ? android.text.InputType.TYPE_CLASS_TEXT : (android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)));
         input.setSingleLine(singleLine);
         input.setFilters(new InputFilter[] { new InputFilter.LengthFilter(262144) });
-        input.setMinLines(singleLine ? 1 : 3); input.setMaxLines(singleLine ? 1 : 10); input.setText(value); input.setSelection(input.length());
+        input.setGravity(singleLine ? Gravity.CENTER_VERTICAL : Gravity.TOP);
+        input.setTextColor(Color.WHITE); input.setTextSize(18);
+        input.setPadding(padding,padding,padding,padding);
+        input.setText(value); input.setSelection(input.length());
         input.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s,int st,int c,int a) {}
             public void onTextChanged(CharSequence s,int st,int before,int count) { nativeResult(0,s.toString(),""); }
             public void afterTextChanged(Editable e) {}
         });
-        editor = new AlertDialog.Builder(this).setTitle(title).setView(input).setPositiveButton("Done",(dialog,which) -> {}).create();
-        editor.setOnShowListener(dialog -> { input.requestFocus(); editor.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE); });
-        editor.show();
+        page.addView(input,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,0,1));
+        dialog.setContentView(page);
+        dialog.setCanceledOnTouchOutside(false);
+        Window window = dialog.getWindow();
+        window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.rgb(9,13,18)));
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+            page.setOnApplyWindowInsetsListener((view,insets) -> {
+                android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+                view.setPadding(safe.left,safe.top,safe.right,safe.bottom);
+                return insets;
+            });
+        } else page.setFitsSystemWindows(true);
+        done.setOnClickListener(view -> {
+            nativeResult(0,input.getText().toString(),"");
+            dialog.dismiss();
+        });
+        dialog.setOnDismissListener(closed -> {
+            ((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(input.getWindowToken(),0);
+            if (editor == dialog) editor = null;
+        });
+        dialog.show();
+        window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT);
+        page.requestApplyInsets();
+        input.requestFocus();
+        input.post(() -> ((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(input,InputMethodManager.SHOW_IMPLICIT));
     }); }
     public void copy(String text) { runOnUiThread(() -> ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Tau",text))); }
     public void paste() { runOnUiThread(() -> {
@@ -153,8 +200,11 @@ public final class MainActivity extends NativeActivity {
         while ((n = in.read(buffer)) != -1) { total += n; if (total > limit) throw new IOException("File exceeds 50 MB"); out.write(buffer,0,n); }
     }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (editor != null && editor.isShowing()) return super.dispatchKeyEvent(event);
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) { if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) nativeBack(); return true; }
         return super.dispatchKeyEvent(event);
     }
-    @Override @SuppressWarnings("deprecation") public void onBackPressed() { nativeBack(); }
+    @Override @SuppressWarnings("deprecation") public void onBackPressed() {
+        if (editor != null) editor.dismiss(); else nativeBack();
+    }
 }

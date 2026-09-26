@@ -99,6 +99,39 @@ impl Android {
             );
         }
     }
+    fn native_events(&mut self) {
+        let events = RUNTIME
+            .lock()
+            .ok()
+            .and_then(|mut g| g.as_mut().map(|r| std::mem::take(&mut r.events)))
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                NativeEvent::Back => self.app.back(),
+                NativeEvent::Edit(text) => self.app.native_edit(text),
+                NativeEvent::Paste(text) => self.app.input(&text),
+                NativeEvent::File(path, name) => {
+                    let result = if let Some((identity, session)) = self.import_scope.take() {
+                        self.app
+                            .controller
+                            .attach_to(&identity, &session, &path, Some(&name))
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "File picker context expired; choose the file again"
+                        ))
+                    };
+                    self.app.report(result);
+                    let _ = std::fs::remove_file(path);
+                }
+                NativeEvent::Saved(key,result) => self.app.complete_save(&key,result),
+                NativeEvent::Missing(identity,lineage,session,entry) => {
+                    let result=self.app.controller.forget_download_for(&identity,&lineage,&session,&entry);
+                    self.app.report(result.and_then(|_|Err(anyhow::anyhow!("The downloaded file no longer exists. Download it again."))));
+                }
+                NativeEvent::Error(error) => self.app.report(Err(anyhow::anyhow!(error))),
+            }
+        }
+    }
     fn actions(&mut self, ctx: &Ctx) {
         for action in self.app.actions() {
             let save_key=match &action {PlatformAction::SaveDownload {key,..}=>Some(key.clone()),_=>None};
@@ -228,6 +261,7 @@ impl chad::android::App for Android {
         Ok(android)
     }
     fn event(&mut self, ctx: &mut Ctx, event: &WindowEvent) {
+        self.native_events();
         self.layout(ctx);
         match event {
             WindowEvent::Touch(t) => {
@@ -265,43 +299,14 @@ impl chad::android::App for Android {
     }
     fn update(&mut self, ctx: &mut Ctx) {
         self.layout(ctx);
-        let events = RUNTIME
-            .lock()
-            .ok()
-            .and_then(|mut g| g.as_mut().map(|r| std::mem::take(&mut r.events)))
-            .unwrap_or_default();
-        for event in events {
-            match event {
-                NativeEvent::Back => self.app.back(),
-                NativeEvent::Edit(text) => self.app.native_edit(text),
-                NativeEvent::Paste(text) => self.app.input(&text),
-                NativeEvent::File(path, name) => {
-                    let result = if let Some((identity, session)) = self.import_scope.take() {
-                        self.app
-                            .controller
-                            .attach_to(&identity, &session, &path, Some(&name))
-                    } else {
-                        Err(anyhow::anyhow!(
-                            "File picker context expired; choose the file again"
-                        ))
-                    };
-                    self.app.report(result);
-                    let _ = std::fs::remove_file(path);
-                }
-                NativeEvent::Saved(key,result) => self.app.complete_save(&key,result),
-                NativeEvent::Missing(identity,lineage,session,entry) => {
-                    let result=self.app.controller.forget_download_for(&identity,&lineage,&session,&entry);
-                    self.app.report(result.and_then(|_|Err(anyhow::anyhow!("The downloaded file no longer exists. Download it again."))));
-                }
-                NativeEvent::Error(error) => self.app.report(Err(anyhow::anyhow!(error))),
-            }
-        }
+        self.native_events();
         if self.app.tick(ctx.dt) {
             ctx.window.request_redraw();
         }
         self.actions(ctx);
     }
     fn suspended(&mut self, _: &mut Ctx) {
+        self.native_events();
         self.app.set_connection_visible(false);
         self.app.cancel_pointer();
         let result = self.app.save();
