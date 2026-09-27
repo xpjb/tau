@@ -526,10 +526,12 @@ fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Re
                     // Opt-in local context for lifecycle races; keep IDs out of
                     // the popup and never log message bodies or credentials.
                     if log::log_enabled!(target:"tau::content",log::Level::Debug) {
-                        let head=if let Key::Block(scope,id,_)=&key {cache.db.lock().ok().and_then(|db|
-                            tau_blocks::header(&db,scope,id).ok().flatten().map(|h|(h.version,h.length,h.sealed)))
-                        } else {None};
-                        log::debug!(target:"tau::content","Content sync job {key:?}, current header {head:?}: {error:#}");
+                        let state=if let Key::Block(scope,id,_)=&key {cache.db.lock().ok().map(|db| {
+                            let head=tau_blocks::header(&db,scope,id).ok().flatten().map(|h|(h.version,h.length,h.sealed));
+                            let prefix=tau_blocks::cached_prefix(&db,scope,id).ok();
+                            (head,prefix)
+                        })} else {None};
+                        log::debug!(target:"tau::content","Content sync job {key:?}, current (header, cached prefix) {state:?}: {error:#}");
                     }
                     if notices.send(Notice {transfer:None,scope:scope.clone(),error:Some(error.context("Content sync"))}).await.is_err() { return; }
                     (wake)();

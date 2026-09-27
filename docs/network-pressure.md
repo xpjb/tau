@@ -52,10 +52,11 @@ processing; it is not a pure SQL CPU measurement. `taud::control_admission` reco
 wait duration and start/overflow/timeout/cancellation. These are opt-in local
 tracing events, without SQL text, paths, request bodies, credentials or new wire
 fields. Clock reads are omitted when the DB timing target is disabled.
-`tau::content` debug logs identify the failed local sync interest and current
-header version/length/sealing, without changing or suppressing the popup. The
-pressure observer captures these scoped failures in its report; message bodies
-and credentials are not logged.
+`tau::content` debug logs identify the failed local sync interest, current
+header version/length/sealing and cached prefix length, without changing or
+suppressing the popup. The pressure observer captures these scoped failures in
+its report, and queued-message action traces now include the request ID and
+authoring client for correlation. Message bodies and credentials are not logged.
 
 The test's bounded observer collects p50/p95/max samples separately for reader
 and writer connections and admission. Reports also include client-observed read
@@ -114,16 +115,27 @@ case is ignored or retried into a passing result. Findings:
 - **Default recovery seed 91, latest workspace run:** scoped diagnostics caught
   a request for `queued:<request-id>` while the local replica still advertised
   version 1, length 37, sealed. The server returned `Unknown block`; the authored
-  messages and file checks later completed. This identifies a queue-consumption /
-  delayed-metadata lifetime race, distinct from the previously fixed complete,
-  already-held-body plan. The new tests do not suppress that error. See
+  messages and file checks later completed. This identifies a request for a
+  retired queue ID before the local metadata caught up. That original report
+  did not retain request-to-author mapping or cached byte counts, so it does
+  **not** establish whether this particular fetch was for locally authored text
+  or newly arriving text from the other client. Both clients were already
+  connected and both submitted messages; queue headers do not include their
+  body bytes. The test releases the provider after one client sees three queue
+  entries, not after both clients have every body. The new tests do not suppress
+  the error. See
   [`network-pressure/recovery-default-91-content-failure.json`](network-pressure/recovery-default-91-content-failure.json).
   This needs an explicitly verified retirement/revalidation fix, not blind
   success for arbitrary missing blocks.
 
-Managed workspace all-target compilation and rustdoc for `tau-frontend`, `taud`
-and `tau-transfer` passed after adding scoped diagnostics. No deployment or service
-restart was performed. This test/diagnostic branch is not merged into `tau2`;
+At `bcc541b`, managed workspace all-target compilation and rustdoc for
+`tau-frontend`, `taud` and `tau-transfer` passed after adding scoped diagnostics.
+The subsequent request-to-author / cached-prefix diagnostic follow-up has not
+been runtime-validated: its targeted seed-173 nextest invocation timed out after
+20 s waiting for the managed build lock, before compilation or tests. The run was
+deferred, not bypassed; this adds no new reproduction or passing result.
+No deployment or service restart was performed.
+This test/diagnostic branch is not merged into `tau2`;
 the prior alert fixes were merged separately before this investigation.
 
 The additional seed runs were `9967207d-1c24-406e-b821-e90658e7f569` (73) and

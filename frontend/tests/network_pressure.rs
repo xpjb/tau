@@ -218,8 +218,10 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
     let mut authored=vec![f.prompt(0,&format!("Seed {seed}: inspect this upload and provide the files"))];
     until(&mut f,&mut o,"provider gate",|f|f.model.calls.load(Ordering::SeqCst)==1).await;
     for n in 0..3 {
-        let client=(draw(seed,n)&1) as usize;trace.push(format!("{}ms: queued message {n}, client {client}",started.elapsed().as_millis()));
-        authored.push(f.prompt(client,&format!("Queued seed {seed}, message {n}: café 😀")));
+        let client=(draw(seed,n)&1) as usize;
+        let request=f.prompt(client,&format!("Queued seed {seed}, message {n}: café 😀"));
+        trace.push(format!("{}ms: queued message {n}, client {client}, request {request}",started.elapsed().as_millis()));
+        authored.push(request);
     }
     until(&mut f,&mut o,"queued inputs",|f|f.clients[0].selected().unwrap().feed.queue.requests.len()>=3).await;
     f.model.gate.notify_one();
