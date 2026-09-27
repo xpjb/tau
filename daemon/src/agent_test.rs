@@ -1100,3 +1100,5 @@ async fn cold_acceptance_and_abort_do_not_wait_for_provider_context_preparation(
 
 #[path="agent_test_safety.rs"]
 mod safety;
+#[path="agent_test_activity.rs"]
+mod activity;

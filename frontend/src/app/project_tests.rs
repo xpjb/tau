@@ -170,3 +170,27 @@ fn topics_restore_the_last_open_chat_across_switches_restart_and_membership_chan
         assert!(h.app.show_chats);
     }
 }
+
+#[test]
+fn chat_activity_updates_the_visible_list_on_desktop_and_mobile() {
+    for (size, mobile) in [((1000, 800), false), ((360, 720), true)] {
+        let mut h = Harness::new(size, mobile);
+        h.frame();
+        assert_eq!(h.app.chat_areas[0].1, "demo");
+        h.click(|a| matches!(a, Action::Select(id) if id == "two"));
+        h.app.input("typing in the older chat");
+        if mobile { h.app.apply(Action::Back).unwrap(); }
+        h.frame();
+        assert_eq!(h.app.chat_areas[0].1, "two");
+        h.click(|a| matches!(a, Action::Select(id) if id == "demo"));
+        h.app.key("ArrowRight", false, false);
+        if mobile { h.app.apply(Action::Back).unwrap(); }
+        h.frame();
+        assert_eq!(h.app.chat_areas[0].1, "two", "selection and caret movement do not bump");
+        h.click(|a| matches!(a, Action::New));
+        let created = h.app.controller.account.selected.clone().unwrap();
+        if mobile { h.app.apply(Action::Back).unwrap(); }
+        h.frame();
+        assert_eq!(h.app.chat_areas[0].1, created, "new chat appears at the top immediately, even offline");
+    }
+}

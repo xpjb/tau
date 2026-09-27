@@ -211,12 +211,19 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
         c.selected().unwrap().feed.queue.requests.is_empty()
     })
     .await;
+    c.new_chat().unwrap();
+    let other = c.account.selected.clone().unwrap();
+    assert_eq!(c.account.sessions[0].id, other, "new chats bump before acknowledgement");
+    until(&mut c, |c| c.account.pending_create.is_none()
+        && c.account.sessions.iter().any(|s| s.id == other && s.model.is_some())).await;
+    c.select(&session).unwrap();
+    assert_eq!(c.account.sessions[0].id, other, "opening the running chat does not bump it");
     c.control(ClientCommand::Abort {
         session_id: session.clone(),
     })
     .unwrap();
     until(&mut c, |c| {
-        c.selected().unwrap().feed.queue.run_id.is_none()
+        c.selected().unwrap().feed.queue.run_id.is_none() && c.account.sessions[0].id == session
     })
     .await;
     gate.notify_one();
@@ -224,11 +231,18 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     std::fs::write(&file, "locally attached contents\n").unwrap();
     c.attach(&file, None).unwrap();
     c.draft("Read this file".into()).unwrap();
+    let before_send = c.account.sessions.iter().find(|s| s.id == session).unwrap().updated_at_ms;
     c.send_prompt().unwrap();
     until(&mut c, |c| {
         c.selected().unwrap().feed.queue.requests.len() == 1
+            && c.account.sessions.iter().any(|s| s.id == session && s.updated_at_ms > before_send)
     })
     .await;
+    // A later local draft in another chat is overtaken only when this run settles.
+    c.select(&other).unwrap();
+    c.draft("unsent draft in the other chat".into()).unwrap();
+    c.select(&session).unwrap();
+    assert_eq!(c.account.sessions[0].id, other);
     c.control(ClientCommand::QueueControl {
         session_id: session.clone(),
         generation,
@@ -242,6 +256,7 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
             .events
             .values()
             .any(|e| e.text == "Native reply café 😀" && e.phase == EventPhase::Saved)
+            && c.account.sessions[0].id == session
     })
     .await;
     assert_eq!(
