@@ -62,7 +62,6 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
 pub struct TranscriptChange {
     pub wire: tau_protocol::TranscriptChange,
     pub(crate) head: Option<String>,
-    pub bumps_chat: bool,
 }
 impl std::ops::Deref for TranscriptChange {
     type Target = tau_protocol::TranscriptChange;
@@ -232,11 +231,6 @@ impl Transcript {
         if change.events.windows(2).any(|pair| pair[0].order >= pair[1].order) {
             bail!("History content order changed; read its current snapshot");
         }
-        change.bumps_chat = change.events.iter().any(|event|
-            matches!(event.role, EventRole::User | EventRole::Assistant) && matches!(event.kind, EventKind::Text | EventKind::Image) &&
-            (event.phase == EventPhase::Saved || !event.text.is_empty() && self.event(&event.id).is_none_or(|old| old.text.is_empty()))) ||
-            change.delta.as_ref().is_some_and(|delta| !delta.text.is_empty() && self.event(&delta.event_id).is_some_and(|event|
-                event.role == EventRole::Assistant && event.kind == EventKind::Text && event.text.is_empty()));
         Ok(change)
     }
 

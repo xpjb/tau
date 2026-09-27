@@ -144,9 +144,18 @@ pub struct Position {
     pub offset: f32,
     pub follow: bool,
 }
+/// Local activity sorts just after the latest observed daemon activity. The
+/// per-device order breaks ties without comparing device and daemon clocks.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LocalActivity {
+    pub source_at_ms: u64,
+    pub order: u64,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LocalChat {
+    pub activity: LocalActivity,
     pub draft: String,
     pub files: Vec<LocalFile>,
     pub pending: Vec<Pending>,
@@ -158,6 +167,7 @@ pub struct LocalChat {
 impl Default for LocalChat {
     fn default() -> Self {
         Self {
+            activity: LocalActivity::default(),
             draft: String::new(),
             files: vec![],
             pending: vec![],
@@ -266,6 +276,12 @@ impl Store {
     pub fn work_chats(&self,account:&str,pending_only:bool)->Result<Vec<String>> {
         Ok(self.db.prepare("SELECT substr(key,6) FROM local WHERE account=?1 AND key LIKE 'chat:%' AND (json_array_length(value,'$.pending')>0 OR (NOT ?2 AND (length(json_extract(value,'$.draft'))>0 OR json_array_length(value,'$.files')>0)))")?
             .query_map(params![account,pending_only],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
+    /// Read only small ordering keys, not every chat's drafts/files/outbox.
+    pub fn chat_activity(&self, account: &str) -> Result<std::collections::HashMap<String, LocalActivity>> {
+        self.db.prepare("SELECT substr(key,6),json_extract(value,'$.activity') FROM local WHERE account=?1 AND key LIKE 'chat:%' AND json_extract(value,'$.activity.order')>0")?
+            .query_map([account], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .map(|row| { let (id, raw) = row?; Ok((id, serde_json::from_str(&raw)?)) }).collect()
     }
     pub fn discard_import(&self,account:&str,session:&str,file:&LocalFile)->Result<()> {
         let expected=self.root.join("files").join(hash(account)).join(hash(&self.resolve_chat(account,session)?)).join(&file.id);
@@ -412,6 +428,7 @@ impl Store {
                 target.pending.push(Pending {request:ClientRequest {id:uuid::Uuid::new_v4().to_string(),command:ClientCommand::Prompt {session_id:into.into(),text:source.draft.clone()}},started_at_ms:None,text:source.draft,files:source.files,status:Delivery::Rejected,detail:Some("Another local draft was present; restore this draft and its attachments explicitly".into())});
             }
         }
+        target.activity = target.activity.max(source.activity);
         let pending_ids: HashSet<_> = target.pending.iter().map(|p| p.request.id.clone()).collect();
         target.pending.extend(source.pending.into_iter().filter(|p| !pending_ids.contains(&p.request.id)));
         let tx=self.db.unchecked_transaction()?;
