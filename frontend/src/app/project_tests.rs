@@ -235,6 +235,52 @@ fn selected_topic_stays_visible_when_its_chat_bumps_from_the_far_right() {
 }
 
 #[test]
+fn new_chat_tiles_are_present_before_creation_and_remain_on_reconnect() {
+    for (size, mobile) in [((1000, 800), false), ((360, 720), true)] {
+        let mut h = Harness::new(size, mobile);
+        h.frame();
+        h.click(|action| matches!(action, Action::New));
+        let id = h.app.controller.account.selected.clone().unwrap();
+        assert!(h.app.controller.quick_start(&id));
+        assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ModelSettings)),
+            "the chooser must be present in the first new-chat frame (mobile={mobile})");
+        assert!(!h.app.hits.iter().any(|hit| matches!(hit.action, Action::ChooseModel(..))),
+            "unconfirmed offline chats must not expose a live model choice");
+
+        h.app.controller.message(ServerMessage::Sessions { sessions: vec![SessionSummary {
+            id: id.clone(), project_id: general_project_id(), title: "New chat".into(), starter: true,
+            status: SessionStatus::Sleeping, detail: None, context_usage: None,
+            model: Some(SessionModel { provider: "fixture".into(), model_id: "last-chosen".into() }),
+            parent_id: None, created_at_ms: 1, updated_at_ms: 1,
+        }] }).unwrap();
+        h.frame();
+        assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ModelSettings)),
+            "confirmation must not dismiss the chooser while the feed loads");
+        h.app.controller.message(ServerMessage::TranscriptSnapshot { session_id: id.clone(), snapshot: TranscriptSnapshot {
+            generation: "g".into(), sequence: 1, events: vec![], queue: QueueState::native(), before: None, delivered: vec![],
+        } }).unwrap();
+        h.app.controller.epoch = Some(1);
+        h.frame();
+        assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ChooseModel(..))),
+            "confirmed, synchronized tiles should become clickable");
+        h.app.controller.chats.get_mut(&id).unwrap().feed.synchronized = false;
+        h.frame();
+        assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ModelSettings)));
+        assert!(!h.app.hits.iter().any(|hit| matches!(hit.action, Action::ChooseModel(..))));
+        h.app.controller.epoch = None;
+        h.frame();
+        assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ModelSettings)),
+            "socket loss must not make the chooser vanish");
+        assert!(!h.app.hits.iter().any(|hit| matches!(hit.action, Action::ChooseModel(..))));
+        h.app.controller.draft("First message".into()).unwrap();
+        h.app.controller.send_prompt().unwrap();
+        h.frame();
+        assert!(!h.app.hits.iter().any(|hit| matches!(hit.action, Action::ModelSettings)),
+            "the first queued message ends the new-chat choice");
+    }
+}
+
+#[test]
 fn chat_activity_updates_the_visible_list_on_desktop_and_mobile() {
     for (size, mobile) in [((1000, 800), false), ((360, 720), true)] {
         let mut h = Harness::new(size, mobile);

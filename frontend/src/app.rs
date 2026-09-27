@@ -3383,18 +3383,16 @@ impl App {
             Rect::new(b.x, composer_top, b.width, composer_h),
             color(0x0e141b),
         );
+        let creating = self.controller.is_creating(&session);
+        let choosing = self.controller.chats[&session].model_request.is_some();
         let model = summary
             .as_ref()
             .and_then(|s| s.model.as_ref())
             .map(|m| format!("{}/{}", m.provider, m.model_id))
-            .unwrap_or_else(|| "Model loads when the worker starts".into());
-        let creating = self.controller.is_creating(&session);
-        let choosing = self.controller.chats[&session].model_request.is_some();
+            .unwrap_or_else(|| "Model not yet available".into());
         self.renderer.label(
             chrome,
-            if creating { "Creating chat… Sends are saved locally." }
-                else if choosing { "Selecting model… Sends are saved locally." }
-                else { &model },
+            if choosing { "Selecting model… Sends are saved locally." } else { &model },
             Rect::new(x, composer_top + 10. * s, (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s),
             12. * s,
             color(0x82909f),
@@ -3635,10 +3633,15 @@ impl App {
         let chat = &self.controller.chats[session];
         let connected = self.controller.epoch.is_some();
         let busy = chat.model_request.is_some();
+        let ready = self.controller.can_choose_model(session);
         let hint = if !connected {
             "Connect to choose a model"
         } else if busy {
             "Selecting model… your draft is kept"
+        } else if self.controller.is_creating(session) {
+            "Waiting for chat confirmation"
+        } else if !chat.feed.synchronized {
+            "Waiting for chat synchronization"
         } else {
             "Choose before your first message"
         };
@@ -3679,7 +3682,7 @@ impl App {
             );
             let valid = selector.parse::<tau_protocol::SessionModel>().is_ok();
             let selected = current.as_deref() == Some(selector.as_str());
-            let enabled = connected && !busy && valid;
+            let enabled = ready && valid;
             let base = color(if selected { 0x303a66 } else { 0x18212b });
             layer.clipped_rounded_rect(
                 r,
@@ -3704,18 +3707,20 @@ impl App {
                 false,
                 crate::render::intersect(r, clip),
             );
-            let status = if !connected {
-                "Offline"
-            } else if !valid {
-                "Invalid provider/model ID"
-            } else if chat
+            let status = if busy && chat
                 .model_request
                 .as_ref()
                 .is_some_and(|(_, slug)| slug == selector)
             {
                 "Selecting…"
+            } else if !connected {
+                "Offline"
+            } else if !valid {
+                "Invalid provider/model ID"
             } else if selected {
                 "Selected"
+            } else if !ready {
+                "Waiting for chat"
             } else {
                 "Select"
             };

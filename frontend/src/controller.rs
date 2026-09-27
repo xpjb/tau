@@ -645,18 +645,25 @@ impl Controller {
         for file in files {let chat=&self.chats[&session].local;if !chat.files.iter().chain(chat.pending.iter().flat_map(|p|&p.files)).any(|f|f.id==file.id) {self.store.discard_import(&self.identity,&session,&file)?;}}
         Ok(())
     }
+    /// Display eligibility is local: neither chat creation nor a fresh content
+    /// snapshot is required to show an untouched new chat's model choices.
+    /// Sending a choice still requires a confirmed, synchronized chat.
     pub fn quick_start(&self, id: &str) -> bool {
-        self.account
-            .sessions
-            .iter()
-            .any(|s| s.id == id && s.starter)
+        (self.is_creating(id) || self.account.sessions.iter().any(|s| s.id == id && s.starter))
+            && !self.account.missing_chats.contains(id)
             && self.chats.get(id).is_some_and(|c| {
-                c.feed.synchronized
-                    && c.feed.before.is_none()
+                c.feed.before.is_none()
                     && c.feed.events.values().all(|e| e.role == EventRole::System)
                     && c.feed.queue.requests.is_empty()
-                    && c.local.pending.is_empty()
+                    // A model choice is not a conversation turn. Keep the tiles
+                    // visible while its durable /model control is in flight.
+                    && c.local.pending.iter().all(|p| c.model_request.as_ref()
+                        .is_some_and(|(request, _)| request == &p.request.id))
             })
+    }
+    pub fn can_choose_model(&self, id: &str) -> bool {
+        self.epoch.is_some() && !self.is_creating(id) && self.quick_start(id)
+            && self.chats.get(id).is_some_and(|c| c.feed.synchronized && c.model_request.is_none())
     }
     pub fn save_model_preferences(
         &mut self,
@@ -669,8 +676,9 @@ impl Controller {
     }
     pub fn choose_model(&mut self, session: &str, selector: &str) -> Result<()> {
         ensure!(
-            self.epoch.is_some() && self.quick_start(session),
-            "Model tiles are for an untouched, connected new chat"
+            self.epoch.is_some() && !self.is_creating(session) && self.quick_start(session)
+                && self.chats.get(session).is_some_and(|c| c.feed.synchronized),
+            "Wait for the untouched new chat to be confirmed and synchronized before choosing a model"
         );
         let chat = &self.chats[session];
         ensure!(
