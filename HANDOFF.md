@@ -1,3 +1,26 @@
+# Current Tau2 status — 2026-09-27 — beta 0.7.6 / protocol 19
+
+This status supersedes the older prerelease notes below. The source release commit
+`760754b` is pushed to `origin/tau2`. Mobile QA was already integrated at
+`c491518`; Codex quota merged at `ef0de95`, followed by the protocol-19 bump
+`7c423ad`.
+
+- Beta is active at PID **1351456** and reports **0.7.6 / protocol 19**. Stable
+  Tau remains active at PID **474496** and the release script's stable-identity
+  check passed.
+- Before restart, the read-only check found 23 sessions, no running sessions,
+  no queued prompts, one idle session with persisted `needs_turn`, and 22 sleeping.
+- Seven focused Codex quota tests passed (128 unrelated tests skipped); no full
+  suite, live Codex quota request, or physical-device acceptance was run.
+- Windows x64 installer was verified and sent: `dist/Tau-Beta-0.7.6-windows-x64.exe`,
+  10,021,888 bytes, SHA-256 `9e8c0fc9caac3a2d68eca5e417dbe26f7e5291d2a48243ed2d4c035e7acd6be0`.
+- Android ARM64 was built and verified, but not sent. No database backup was taken;
+  the release script does not make one. Detailed release facts are in `INTEGRATION.md`.
+- The separate remove-pause work remains unmerged at WIP commit `d561c65` and was
+  not included in this release.
+
+---
+
 # Mobile QA source update — September 26, 2026
 
 Implemented on `fix/tau2-mobile-qa-20260926` in `/root/tau2-mobile-qa`, based on

@@ -296,3 +296,40 @@ Daemon SHA-256: `8420508b9de56829f486f836242930fb3396f6cf7ea31e3c5a9666e045a9977
 Windows SHA-256: `c9f77c687b11152103614b54096651e9f7c95eea5e98b054555d8c06c94f5374`.
 
 Android SHA-256: `5ea4e7f5a4b199bcf783048be303f186331b1daac98f1ec6285428d2e3ebcb9d`.
+
+
+## Beta 0.7.6 / protocol 19 — 2026-09-27
+
+Mobile QA was already merged on `origin/tau2` at `c491518`. The Codex account
+quota feature was merged from `fix/tau2-codex-plan-usage-20260926` as `ef0de95`;
+`7c423ad` raises the wire version from 18 to 19 because the feature adds a new
+client command and server response. Release commit `760754b` sets version 0.7.6
+and was pushed to `origin/tau2`.
+
+The seven focused quota tests passed after the protocol bump (run
+`3f4e5cfd-aad6-42ba-b568-cb5afff23802`; 128 unrelated tests skipped). The full
+suite was not rerun. Tests use local fixtures; no live Codex quota request or
+physical-device acceptance was performed.
+
+The managed release script built and verified the daemon, Windows x64 installer,
+and Android ARM64 APK sequentially. It then installed beta only. The beta reports
+**0.7.6 / protocol 19**, PID **1351456**, and runs the exact release daemon. Before
+restart, a read-only check found 23 sessions, no running sessions, no queued
+prompts, one idle session with persisted `needs_turn`, and 22 sleeping sessions.
+No backup was taken. Stable Tau remains active at PID **474496**; the script's
+stable identity check passed and stable was not restarted or changed.
+
+The Windows installer was sent through Tau:
+`dist/Tau-Beta-0.7.6-windows-x64.exe` (10,021,888 bytes).
+Android was built and verified but **not sent**. The protocol bump requires matched
+clients; older protocol-18 clients need the 0.7.6 client to reconnect.
+
+SHA-256:
+
+- Daemon: `13c2b572ceb95e3600dccb5fd5912c45e906c38a1adee36d67086e87ac49f643`
+- Windows installer: `9e8c0fc9caac3a2d68eca5e417dbe26f7e5291d2a48243ed2d4c035e7acd6be0`
+- Android APK: `8dd80130b5f7742d0f468112cc3c2bfc68782d2ca5eb5e3ceb314eacfd2d761a`
+
+Android package `app.tau.rust` is versionCode **11**, versionName **0.7.6-beta**,
+not debuggable; signing identity, embedded payload, APK checksums, alignment, and
+16 KiB ELF alignment passed release verification. No physical Android test was run.

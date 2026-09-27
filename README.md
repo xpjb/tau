@@ -4,10 +4,10 @@ Rust client, daemon, coding agent, shared protocol, Markdown and verified file t
 No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Python title
 helper. Android retains a small Java bridge for Android OS APIs.
 
-**0.7.4 beta · protocol 18 (native block sync).**
-Matched beta daemon, Windows x64 installer and Android ARM64 APK are required.
-See `INTEGRATION.md` for the actual deployment/delivery status.
-This is a separate installation, not a stable-Tau cutover.
+**0.7.6 beta · protocol 19 (Codex account quota + native block sync).**
+Use a matched beta daemon and client. The daemon is deployed; the Windows x64
+installer was sent. Android ARM64 was built but not sent. See `INTEGRATION.md`
+for the release record. This is a separate installation, not a stable-Tau cutover.
 The maintained frontend branch is `tau2-rust-frontend`; the integrated release
 branch is `tau2`. Frontend work lands on the frontend branch before integration.
 
@@ -56,7 +56,7 @@ controls and source-lineage changes remain available for deliberate recovery.
 **Retry saved message** reuses the original ID for an older “Not sent” item.
 New sends accepted into a paused queue clear a stale error indicator while still
 showing that work must be resumed. Offline draft support shipped in beta 0.7.3;
-the automatic recovery changes above await the next client release.
+the automatic saved-message recovery changes shipped in beta 0.7.6.
 
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
@@ -75,11 +75,13 @@ Codex catalog request with Tau's originator and Codex catalog client version
 0.156.1 reported 272,000 for GPT-6 Sol, Luna and Astra. Refresh when a provider
 changes its models or limits.
 
-The tooltip shows last provider-reported turn tokens even when capacity is unknown.
-The ring percentage and threshold-based auto-compaction need a known saved limit.
+The context tooltip shows last provider-reported turn tokens even when capacity is unknown.
+For Codex chats, its hover/pinned card also shows read-only account quota, separate
+from the context gauge. Other providers show an unavailable state. The ring
+percentage and threshold-based auto-compaction need a known saved limit.
 Sleeping chats retain the last saved token count, marked as last known. The
-current beta requires matching protocol-18 clients and daemon. The title model is separately
-configurable; unset uses the chat model. Cache rings are estimates from existing
+current beta requires matching protocol-19 clients and daemon. The title model
+is separately configurable; unset uses the chat model. Cache rings are estimates from existing
 reply timestamps, not native runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.
 
@@ -107,8 +109,9 @@ is orange; over 3 seconds, or a disconnected socket, is red. A probe still waiti
 within the normal range is not counted as a loss.
 
 See [mobile QA acceptance](docs/mobile-qa.md) for the source changes, validation and
-remaining device checks. These changes require a new client build; this source QA
-pass did not deploy or deliver packages.
+remaining device checks. These changes shipped in beta 0.7.6. Physical Android
+keyboard, font and touch acceptance remains open. The Android package was built
+but not sent.
 
 ## Topics
 
@@ -141,7 +144,7 @@ drafts, and read markers remain account-scoped client state. Existing `projectId
 wire fields and SQLite names remain unchanged so beta history stays compatible.
 Concurrent topic edits
 use revision checks and preserve the losing editor’s text. Both clients and daemon
-must use protocol 18 in beta 0.7.4. Stable Tau is unchanged.
+must use protocol 19 in beta 0.7.6. Stable Tau is unchanged.
 
 The native rewrite is merged into the beta release line. See [native block sync](docs/tau2-block-sync.md) for the protocol, bounds, recovery and restore contract.
 
@@ -153,8 +156,8 @@ sequential low-resource builds, package verification and an ordered delivery
 manifest. No tests or service changes run implicitly:
 
 ```sh
-scripts/release-beta.sh --plan --version 0.7.5 --push --deploy
-scripts/release-beta.sh --version 0.7.5 --push --deploy
+scripts/release-beta.sh --plan --version 0.7.7 --push --deploy
+scripts/release-beta.sh --version 0.7.7 --push --deploy
 ```
 
 Choose the next unused version. Add `--merge feat/name` when needed; `--check` and

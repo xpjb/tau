@@ -1,6 +1,7 @@
 # 010 — Account usage remaining in context hover
 
-Priority: context hover. Status: implemented on `fix/tau2-codex-plan-usage-20260926`; not yet deployed.
+Priority: context hover. Status: shipped in Tau2 beta 0.7.6 / protocol 19.
+Live provider and device acceptance remains pending.
 
 Tau 1 showed remaining usage percentages in the context hover; Tau 2 does not.
 Inspect Tau 1's Codex usage extension and tooltip contract. Keep account quota
