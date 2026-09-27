@@ -1,5 +1,11 @@
 # Tau2 native block sync
 
+**Unreleased source update:** [checkpoint-based watch scheduling](checkpoint-scheduling.md)
+uses control protocol **20** and native ALPN **`tau/blocks/2`**. It replaces client
+lease cancellation with server checkpoint yields. Client and daemon must be
+updated together; no database migration or deployment was performed. The rollout
+versions below describe the historical baseline, not this unreleased branch.
+
 **Implementation and automated local validation complete. Beta 0.7.4 / protocol 18 is deployed; matched Windows and Android packages were delivered. Device/WAN certification is not claimed.** [HANDOFF](../HANDOFF.md) records the branch, final checks and operational restrictions. The [original protocol audit](tau2-protocol-audit.md) is historical design/evidence, not the current wire contract.
 
 ## Wire and ownership

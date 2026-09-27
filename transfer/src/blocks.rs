@@ -11,10 +11,13 @@ use tau_blocks::*;
 use std::sync::atomic::{AtomicU64,Ordering};
 use tokio::{sync::{Semaphore, watch}, task::JoinSet};
 
-pub const ALPN: &[u8] = b"tau/blocks/1";
+pub const ALPN: &[u8] = b"tau/blocks/2";
 const MAX_WIRE_HEADER: usize = MAX_BLOCK_HEADER_BYTES + 1024;
 const LEASE: Duration = Duration::from_secs(3600);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+// A scheduling quantum, not a response deadline. Finish the current bounded
+// metadata round/content chunk before yielding, even on a slower link.
+const WATCH_QUANTUM: Duration = Duration::from_secs(5);
 const MAX_STREAMS: usize = 16;
 
 /// Mark only socket/DNS/connect failures at their boundary. A generic IO error
@@ -75,7 +78,7 @@ pub enum Codec { Raw, Zstd }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Header {
-    Watch { request: BlockWatch, credit: u32, #[serde(default)] priority:i32 },
+    Watch { request: BlockWatch, credit: u32, #[serde(default)] priority:i32, #[serde(default)] scheduled:bool },
     Upload { spec: UploadSpec },
     Uploaded { status: UploadStatus },
     Credit { bytes: u32 },
@@ -84,6 +87,9 @@ pub enum Header {
     Block { block: BlockHeader },
     Data { version: u64, offset: u64, hash: String, length: u32, codec: Codec },
     End,
+    /// A scheduled watch relinquishes its stream at a resumable checkpoint.
+    /// Unlike End, this does not mean its requested interest is complete.
+    Yield,
     Error { message: String },
 }
 
@@ -284,7 +290,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
     if let Header::Upload { spec } = frame.header {
         return serve_upload(send, recv, backend, grants, node, spec).await;
     }
-    let Header::Watch { mut request, mut credit, priority } = frame.header else { bail!("Expected block watch or upload"); };
+    let Header::Watch { mut request, mut credit, priority, scheduled } = frame.header else { bail!("Expected block watch or upload"); };
     ensure!(credit == BLOCK_WINDOW_BYTES,"Invalid initial block window");
     ensure!((-10..=10).contains(&priority),"Invalid stream priority");
     send.set_priority(priority)?;
@@ -292,9 +298,10 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
     let mut sent_revision = None;
     let mut initial = true;
     let mut finite_done = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + WATCH_QUANTUM;
     loop {
         ensure!(authorized(grants,&node),"Block authorization expired");
-        match &mut request {
+        let more = match &mut request {
             feeds @ (BlockWatch::Feed(_) | BlockWatch::Feeds {..}) => {
                 let requests=match feeds {BlockWatch::Feed(req)=>std::slice::from_mut(req),BlockWatch::Feeds {requests}=>requests.as_mut_slice(),_=>unreachable!()};
                 ensure!(!requests.is_empty() && requests.len()<=16,"Invalid feed batch");
@@ -311,7 +318,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
                 }
                 initial=false;
                 if finite_done.len()==requests.len() {break;}
-                if more {continue;}
+                more
             }
             BlockWatch::Block(req) => {
                 let range = tokio::select! {
@@ -327,14 +334,27 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
                     send_credited(send,recv,&mut credit,Frame::content(&range)?,None).await?;
                 }
                 req.version = range.header.version; req.offset = range.offset + range.bytes.len() as u64;
-                if req.offset < range.header.length { continue; }
-                if range.header.sealed || !req.follow { break; }
+                let more = req.offset < range.header.length;
+                if !more && (range.header.sealed || !req.follow) { break; }
+                more
             }
+        };
+        // Stream order places this marker after a whole round of feed pages or
+        // a complete content chunk. The client persists those frames before
+        // seeing Yield, then re-enters the existing fair class semaphore queue.
+        // Do not yield between feeds: a slow first page must not starve the
+        // later members of a batched interest on every renewal.
+        if scheduled && tokio::time::Instant::now() >= deadline {
+            return send_credited(send,recv,&mut credit,Frame::metadata(Header::Yield),None).await;
         }
+        if more { continue; }
         // Subscribe before reading. Notifications are only wakeups; loss or
         // coalescing never determines the next sequence or byte offset.
         tokio::select! {
             _ = send.stopped() => return Ok(()),
+            _ = tokio::time::sleep_until(deadline), if scheduled => {
+                return send_credited(send,recv,&mut credit,Frame::metadata(Header::Yield),None).await;
+            }
             result = changes.changed() => {
                 if result.is_err() { break; }
                 // Metadata does not get to monopolize a weak link with a full
@@ -474,10 +494,10 @@ impl Client {
     pub async fn watch(&self, request: BlockWatch) -> Result<Watcher> {
         let class = if matches!(request,BlockWatch::Feed(_) | BlockWatch::Feeds {..}) { &self.metadata } else { &self.foreground };
         let priority=if matches!(request,BlockWatch::Feed(_)|BlockWatch::Feeds {..}) {10} else {5};
-        self.open_watch(request,Some(class.clone().acquire_owned().await?),priority).await
+        self.open_watch(request,Some(class.clone().acquire_owned().await?),priority,false).await
     }
     pub async fn watch_descriptor(&self, request: BlockWatch) -> Result<Watcher> {
-        self.open_watch(request,Some(self.descriptors.clone().acquire_owned().await?),8).await
+        self.open_watch(request,Some(self.descriptors.clone().acquire_owned().await?),8,false).await
     }
     pub async fn uploader(&self, spec: UploadSpec) -> Result<Uploader> {
         tau_blocks::uploads::validate(&spec)?;
@@ -496,14 +516,23 @@ impl Client {
     }
     pub async fn watch_bulk(&self, request: BlockWatch) -> Result<Watcher> {
         let bulk=self.bulk.clone().acquire_owned().await?;
-        self.open_watch(request,Some(bulk),-10).await
+        self.open_watch(request,Some(bulk),-10,false).await
     }
-    async fn open_watch(&self, request: BlockWatch, bulk:Option<tokio::sync::OwnedSemaphorePermit>,priority:i32) -> Result<Watcher> {
+    /// Shared UI scheduling: server-terminated slices, never client-side
+    /// cancellation of partially received pages/chunks. Reopen from committed
+    /// cursors/prefixes after Yield; End still means the interest is complete.
+    pub async fn watch_scheduled(&self, request: BlockWatch, bulk:bool) -> Result<Watcher> {
+        let (class,priority) = if matches!(request,BlockWatch::Feed(_) | BlockWatch::Feeds {..}) {
+            (&self.metadata,10)
+        } else if bulk { (&self.bulk,-10) } else { (&self.foreground,5) };
+        self.open_watch(request,Some(class.clone().acquire_owned().await?),priority,true).await
+    }
+    async fn open_watch(&self, request: BlockWatch, bulk:Option<tokio::sync::OwnedSemaphorePermit>,priority:i32,scheduled:bool) -> Result<Watcher> {
         let permit = self.streams.clone().acquire_owned().await?;
         let connection = self.connection().await?;
         let (mut send,recv) = connection.open_bi().await?;
         let offset=if let BlockWatch::Block(block)=&request {block.offset} else {0};
-        let bytes=encode(&Frame::metadata(Header::Watch { request,credit:BLOCK_WINDOW_BYTES,priority }))?;
+        let bytes=encode(&Frame::metadata(Header::Watch { request,credit:BLOCK_WINDOW_BYTES,priority,scheduled }))?;
         send.write_all(&bytes).await?;self.stats.tx.fetch_add(bytes.len() as u64,Ordering::Relaxed);
         self.stats.opened();self.stats.resumed.fetch_add(offset,Ordering::Relaxed);
         Ok(Watcher { stats:self.stats.clone(),complete:false,send,recv,_permit:permit,_bulk:bulk })
@@ -526,7 +555,7 @@ impl Watcher {
             if let Err(error)=frame.decoded() {self.stats.integrity.fetch_add(1,Ordering::Relaxed);return Err(error);}
             self.stats.content_rx.fetch_add(length as u64,Ordering::Relaxed);
         }
-        if matches!(frame.header,Header::End) {self.complete=true;}Ok((frame,bytes))
+        if matches!(frame.header,Header::End | Header::Yield) {self.complete=true;}Ok((frame,bytes))
     }
     /// Return credit only after consuming/persisting the preceding bounded frame.
     pub async fn consumed(&mut self, bytes: u32) -> Result<()> {

@@ -5,8 +5,8 @@ pub mod blocks;
 mod transcript;
 pub use transcript::*;
 
-// Protocol 17 uses bounded control and one native data connection in both directions.
-pub const PROTOCOL_VERSION: u32 = 19;
+// Protocol 20 requires checkpoint-yielding native watches (tau/blocks/2).
+pub const PROTOCOL_VERSION: u32 = 20;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;

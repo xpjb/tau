@@ -244,3 +244,51 @@ async fn native_ipv6_direct_route_and_many_peer_live_fanout() {
     })).await;
     assert_eq!(results.len(),16);
 }
+
+#[tokio::test]
+async fn scheduled_idle_watches_yield_capacity_to_waiters_without_reconnecting() {
+    let (_backend,server,client) = fixture().await;
+    let mut first = client.watch_scheduled(feed_request(None),false).await.unwrap();
+    let mut second = client.watch_scheduled(feed_request(None),false).await.unwrap();
+    assert!(matches!(frame(&mut first).await.header,Header::Page {..}));
+    assert!(matches!(frame(&mut second).await.header,Header::Page {..}));
+
+    // Keep the waiting future alive across the timeout, so it retains its FIFO
+    // position. A renewing interest must go behind this earlier waiter.
+    let waiting = client.watch_scheduled(feed_request(None),false);
+    tokio::pin!(waiting);
+    assert!(tokio::time::timeout(Duration::from_millis(30),&mut waiting).await.is_err());
+    let (end,_) = tokio::time::timeout(WATCH_QUANTUM+Duration::from_secs(2),first.next()).await.unwrap().unwrap();
+    assert!(matches!(end.header,Header::Yield),"Idle is not complete, but must not hoard a class slot");
+    drop(first);
+    let mut next = tokio::time::timeout(Duration::from_secs(2),&mut waiting).await.unwrap().unwrap();
+    assert!(matches!(frame(&mut next).await.header,Header::Page {..}));
+    let renewing = client.watch_scheduled(feed_request(None),false);
+    tokio::pin!(renewing);
+    assert!(tokio::time::timeout(Duration::from_millis(30),&mut renewing).await.is_err(),
+        "The earlier queued interest and the second watch own both metadata slots");
+    let stats = client.stats();
+    assert_eq!(stats.connections,1);
+    assert_eq!(stats.cancelled_streams,0,"Yield is successful scheduling, not failed/cancelled IO");
+    drop(next); drop(second);
+    client.shutdown().await; server.shutdown().await;
+}
+
+#[tokio::test]
+async fn scheduled_finite_history_and_sealed_content_end_instead_of_rescheduling() {
+    let (backend,server,client) = fixture().await;
+    backend.put("answer",None,BlockKind::Text,b"complete",true);
+    let mut history = feed_request(None);
+    if let BlockWatch::Feed(request) = &mut history {
+        request.before = Some(FeedPosition {order:2,id:String::new()});
+    }
+    let mut history = client.watch_scheduled(history,false).await.unwrap();
+    assert!(matches!(frame(&mut history).await.header,Header::Record {..}));
+    assert!(matches!(frame(&mut history).await.header,Header::Page {..}));
+    assert!(matches!(frame(&mut history).await.header,Header::End));
+    assert_eq!(collect(client.watch_scheduled(block_request("answer",0,0,false),true).await.unwrap()).await.0,b"complete");
+    drop(history);
+    assert_eq!(client.stats().active_streams,0);
+    assert_eq!(client.stats().cancelled_streams,0);
+    client.shutdown().await; server.shutdown().await;
+}

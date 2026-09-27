@@ -542,16 +542,10 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
     };
     let feeds=match &request {BlockWatch::Feed(req)=>vec![req.clone()],BlockWatch::Feeds {requests}=>requests.clone(),BlockWatch::Block(_)=>vec![]};
     let bulk=matches!(key,Key::Block(_,_,false));
-    let mut watcher = if bulk {client.watch_bulk(request.clone()).await?} else {client.watch(request.clone()).await?};
+    let mut watcher = client.watch_scheduled(request.clone(),bulk).await?;
     let mut records = vec![vec![];feeds.len()]; let mut head = None;
-    // A live watch cannot own a class permit forever under fanout. Renewal uses
-    // committed cursors/verified prefixes; no received body prefix is replayed.
-    let lease=tokio::time::Instant::now()+Duration::from_secs(5);
     loop {
-        let (frame,wire_bytes) = tokio::select! {
-            result=watcher.next()=>result?,
-            _=tokio::time::sleep_until(lease)=>return Ok(false),
-        };
+        let (frame,wire_bytes) = watcher.next().await?;
         match &frame.header {
             Header::Record { watch,record } => {
                 let records=records.get_mut(*watch).context("Unrequested feed")?;
@@ -580,7 +574,10 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
                 tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope2,&range,epoch)).await??;
                 notices.send(Notice {transfer:None,scope:scope.clone(),error:None}).await?; (wake)();
             }
-            Header::End => return Ok(true),
+            Header::End | Header::Yield => {
+                ensure!(records.iter().all(Vec::is_empty),"Watch ended before its metadata checkpoint");
+                return Ok(matches!(frame.header,Header::End));
+            }
             Header::Error {message} => anyhow::bail!("{message}"),
             _ => anyhow::bail!("Unexpected block response"),
         }
@@ -593,3 +590,6 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod checkpoint_tests;
