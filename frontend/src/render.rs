@@ -238,6 +238,7 @@ pub struct Renderer {
     scenes: HashMap<String, (tau_markdown::Scene, Rect)>,
     pub selection: Option<Selection>,
     message_order: Vec<String>,
+    tooltip_labels: HashMap<&'static str, crate::tooltip::text::RichLabel>,
 }
 impl Renderer {
     pub fn new(ctx: &impl RenderContext) -> Result<Self, String> {
@@ -367,6 +368,7 @@ impl Renderer {
             scenes: HashMap::new(),
             selection: None,
             message_order: vec![],
+            tooltip_labels: HashMap::new(),
         })
     }
     pub fn label(
@@ -423,6 +425,19 @@ impl Renderer {
         } else {
             0.
         }
+    }
+    pub fn tooltip_height(&mut self, key: &'static str, content: &crate::tooltip::Content, width: f32, size: f32) -> f32 {
+        let label = self.tooltip_labels.entry(key).or_insert_with(|| {
+            let namespace = self.next_namespace;
+            self.next_namespace += 1;
+            crate::tooltip::text::RichLabel::new(namespace)
+        });
+        label.layout(&mut self.text, self.faces, content, width, size)
+    }
+    pub fn tooltip(&mut self, layer: &mut Layer, key: &'static str, rect: Rect, size: f32, clip: Rect) {
+        let Some(label) = self.tooltip_labels.get(key) else { return; };
+        layer.draws.push(Draw { block: label.block, at: Vec2::new(rect.x, rect.y), size,
+            color: color(crate::tooltip::INK), paint: label.paint, clip: Some(intersect(rect, clip)) });
     }
     pub fn message_height(&mut self, key: &str, source: &str, width: f32, size: f32) -> f32 {
         self.message_order.push(key.to_owned());

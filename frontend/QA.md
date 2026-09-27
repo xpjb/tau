@@ -1,3 +1,23 @@
+# Rich tooltips — September 27, 2026 (unreleased)
+
+- Quota, cache TTL and connection cards use native inline bold/colour, with muted
+  labels and darker, readable status accents. Text is literal, not parsed markup.
+- Quota has no refresh button. The visible selected Codex chat refreshes every five
+  minutes, even with the card closed; failures retry after 30 seconds. Reads stop
+  offline, on hidden surfaces and for other providers; no model prompt is sent.
+- Cards measure the actual wrapped rich text instead of counting newlines. Context
+  and account quota remain separate; stale quota is labelled and visually muted.
+- TTL stays one line: `TTL ~Nm remaining`, or `Working...` without a countdown.
+  Connection lifecycle/attempt timing and previous-socket RTT semantics are retained.
+- 18 focused nextest tests passed (67 unrelated tests skipped), covering automatic
+  reads with a local WebSocket, bounded retry,
+  hover/touch pinning, click-through protection and real GPU wrapping at 1000×700,
+  360×720 and 1080×2160 (2.5×). Inspected previews include long labels/errors.
+  Set `TAU_TOOLTIP_PREVIEW_DIR` when running `app::tooltip_tests` to save PNGs.
+  No packages, service restart or physical-device acceptance.
+
+---
+
 # Mobile QA source update — September 26, 2026
 
 See [the focused acceptance record](../docs/mobile-qa.md). Mobile input, notice

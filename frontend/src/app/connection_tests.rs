@@ -40,13 +40,13 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     let received = ctx.read_rgba8().unwrap();
     assert!(
         app.info_tip
-            .text
+            .content.text
             .contains("RTT · latest 123ms · min 123ms · max 420ms"),
         "{}",
-        app.info_tip.text
+        app.info_tip.content.text
     );
-    assert!(elapsed(&app.info_tip.text, "Last ping: ") >= 1357);
-    assert!(!app.info_tip.text.contains("tau.example.invalid"));
+    assert!(elapsed(&app.info_tip.content.text, "Last ping: ") >= 1357);
+    assert!(!app.info_tip.content.text.contains("tau.example.invalid"));
     assert_eq!(app.controller.health.color(Instant::now()), 0x4ade80);
 
     app.controller
@@ -56,10 +56,10 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.frame(&ctx, ctx.view());
     let waiting = ctx.read_rgba8().unwrap();
     assert_ne!(received, waiting, "waiting must change the GPU frame");
-    assert!(elapsed(&app.info_tip.text, "Last ping: ") >= 1350);
-    assert!(app.info_tip.text.contains("Waiting for pong · timeout in:") && app.info_tip.text.contains("RTT · latest 123ms"), "pending probes are not acknowledged RTTs");
+    assert!(elapsed(&app.info_tip.content.text, "Last ping: ") >= 1350);
+    assert!(app.info_tip.content.text.contains("Waiting for pong · timeout in:") && app.info_tip.content.text.contains("RTT · latest 123ms"), "pending probes are not acknowledged RTTs");
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
-    assert_eq!(app.info_tip.text.lines().count(), 4);
+    assert_eq!(app.info_tip.content.text.lines().count(), 4);
 
     // Pong completes this probe without changing when it was actually attempted.
     app.controller
@@ -70,14 +70,14 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.frame(&ctx, ctx.view());
     assert!(
         app.info_tip
-            .text
+            .content.text
             .contains("RTT · latest 1350ms · min 123ms · max 1350ms")
     );
-    let before = elapsed(&app.info_tip.text, "Last ping: ");
+    let before = elapsed(&app.info_tip.content.text, "Last ping: ");
     std::thread::sleep(Duration::from_millis(60));
     assert!(app.tick(0.), "attempt-age timer must continue while visible");
     app.frame(&ctx, ctx.view());
-    assert!(elapsed(&app.info_tip.text, "Last ping: ") > before);
+    assert!(elapsed(&app.info_tip.content.text, "Last ping: ") > before);
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
     app.controller
         .health
@@ -89,7 +89,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.frame(&ctx, ctx.view());
     assert!(
         app.info_tip
-            .text
+            .content.text
             .contains("RTT · latest 21ms · min 21ms · max 1350ms")
     );
     assert_eq!(app.controller.health.color(Instant::now()), 0xfbbf24, "recent jitter stays yellow");
@@ -109,10 +109,10 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.frame(&ctx, ctx.view());
     assert!(
         app.info_tip
-            .text
+            .content.text
             .starts_with("No WebSocket · acquiring\nAttempt #2 started:")
     );
-    assert!(app.info_tip.text.ends_with("\nLast failure: Ping timed out"));
+    assert!(app.info_tip.content.text.ends_with("\nLast failure: Ping timed out"));
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
     let disconnected = ctx.read_rgba8().unwrap();
     let pixel = |image: &[u8], x, y| {
@@ -124,26 +124,26 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert_ne!(pixel(&disconnected, 86, 39), pixel(&disconnected, 95, 39));
     assert_ne!(pixel(&received, 86, 39), pixel(&disconnected, 86, 39));
 
-    assert!(!app.info_tip.text.contains("RTT") && !app.info_tip.text.contains("received"));
+    assert!(!app.info_tip.content.text.contains("RTT") && !app.info_tip.content.text.contains("received"));
     let now = Instant::now();
     app.controller.health.attempt(3, now);
     app.controller.health.disconnected(false);
     app.controller.health.retry_scheduled(now + Duration::from_secs(1));
     app.tick(0.); app.frame(&ctx, ctx.view());
-    assert!(app.info_tip.text.contains("Next attempt in:"));
-    let before = elapsed(&app.info_tip.text, "Next attempt in: ");
+    assert!(app.info_tip.content.text.contains("Next attempt in:"));
+    let before = elapsed(&app.info_tip.content.text, "Next attempt in: ");
     std::thread::sleep(Duration::from_millis(60));
     assert!(app.tick(0.)); app.frame(&ctx, ctx.view());
-    assert!(elapsed(&app.info_tip.text, "Next attempt in: ") < before);
+    assert!(elapsed(&app.info_tip.content.text, "Next attempt in: ") < before);
     app.controller.health.attempt(4, Instant::now());
     app.tick(0.); app.frame(&ctx, ctx.view());
-    assert!(app.info_tip.text.contains("Attempt #4 started:"));
-    assert!(app.info_tip.text.contains("Waiting · timeout in:"));
-    assert!(!app.info_tip.text.contains("Next attempt"));
+    assert!(app.info_tip.content.text.contains("Attempt #4 started:"));
+    assert!(app.info_tip.content.text.contains("Waiting · timeout in:"));
+    assert!(!app.info_tip.content.text.contains("Next attempt"));
 
     app.preview_connection(ConnectionPreview::Unconfigured);
     app.frame(&ctx, ctx.view());
-    assert_eq!(app.info_tip.text, "No WebSocket · not configured");
+    assert_eq!(app.info_tip.content.text, "No WebSocket · not configured");
     assert_eq!(app.controller.health.color(Instant::now()), 0xff5a5f);
 }
 
@@ -155,8 +155,8 @@ fn context_hover_and_pinned_card_show_native_codex_account_quota_not_context_cap
     app.back();crate::demo::populate(&mut app.controller).unwrap();
     app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);
     app.frame(&ctx,ctx.view());
-    assert!(app.usage.text.contains("Estimated context usage: 9%"));
-    assert!(app.usage.text.contains("Account quota unavailable for this provider"));
+    assert!(app.usage.content.text.contains("Context · ~9% used"));
+    assert!(app.usage.content.text.contains("Account quota unavailable for this provider"));
     app.controller.account.sessions[0].model.as_mut().unwrap().provider="openai-codex".into();
     app.controller.codex_usage.report=Some(CodexUsage {provider:"openai-codex".into(),fetched_at_ms:1_800_000_000_000,age_ms:0,plan:Some("pro".into()),limit_reached:false,
         windows:vec![CodexUsageWindow {id:"primary_window".into(),label:"5-hour".into(),duration_seconds:Some(18000),remaining_percent:Some(74.),resets_at_ms:Some(1_800_000_120_000)}]});
@@ -166,18 +166,22 @@ fn context_hover_and_pinned_card_show_native_codex_account_quota_not_context_cap
     app.hover(Some(point));std::thread::sleep(Duration::from_millis(255));app.tick(0.);
     std::thread::sleep(Duration::from_millis(180));app.tick(0.);app.frame(&ctx,ctx.view());
     assert!(app.usage.progress>0.99,"Context hover opens the quota card");
-    assert!(app.usage.text.contains("Codex quota (pro) · last known\n5-hour: 74% remaining · resets in 2m"));
-    assert!(app.usage.text.contains("Estimated context usage: 9%"),"The context gauge is independent");
+    assert!(app.usage.content.text.contains("Codex quota · pro · last known\n5-hour · 74% remaining\nResets in 2m"));
+    assert!(app.usage.content.text.contains("Context · ~9% used"),"The context gauge is independent");
     app.apply(Action::Usage).unwrap();app.hover(None);app.tick(0.);app.frame(&ctx,ctx.view());
     assert!(app.usage.pinned && app.usage.progress>0.99,"Pinned cards retain the quota on desktop and touch");
     app.controller.epoch=Some(1);
     app.controller.codex_usage.in_flight=Some(("pending".into(),Instant::now()));
     app.controller.codex_usage.attempted=Some(Instant::now());
     app.frame(&ctx,ctx.view());
-    let refresh=app.hits.iter().find(|hit|matches!(hit.action,Action::RefreshUsage)).expect("Refresh is clickable in the pinned card").rect;
-    let point=Vec2::new(refresh.x+refresh.width/2.,refresh.y+refresh.height/2.);
+    let card = app.usage.card;
+    let point = Vec2::new(card.x + card.width / 2., card.y + card.height / 2.);
+    let selected = app.controller.account.selected.clone();
+    let pending = app.controller.selected().unwrap().local.pending.len();
     app.press(1,point,false);app.release(1,point);
-    assert!(app.usage.pinned,"Clicking Refresh must not dismiss the card or send a chat prompt");
+    assert!(app.usage.pinned, "The read-only card stays pinned");
+    assert_eq!(app.controller.account.selected, selected, "No click-through into the chat");
+    assert_eq!(app.controller.selected().unwrap().local.pending.len(), pending);
 }
 
 #[test]
@@ -194,8 +198,7 @@ fn touch_pins_the_quota_card_on_mobile_without_a_model_request() {
     app.tick(0.);std::thread::sleep(Duration::from_millis(180));app.tick(0.);
     app.frame(&ctx,ctx.view());
     assert!(app.usage.pinned && app.usage.progress>0.99);
-    assert!(app.usage.text.contains("Codex quota unavailable (offline)"));
-    assert!(!app.hits.iter().any(|hit|matches!(hit.action,Action::RefreshUsage)));
+    assert!(app.usage.content.text.contains("Codex quota\nUnavailable · offline"));
 }
 
 #[test]

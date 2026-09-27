@@ -145,43 +145,55 @@ impl Health {
         });
         pending
     }
-    /// Pure snapshot: `now` is injectable in tests and previews.
+    /// Plain diagnostics share the same values as the styled hover card.
     pub fn details(&self, reason: &str, now: Instant) -> String {
-        let mut lines = vec![match self.phase {
-            Phase::Offline => "No WebSocket · not configured",
-            Phase::Connecting => "No WebSocket · acquiring",
-            Phase::Connected => "WebSocket · connected",
-            Phase::Blocked => "No WebSocket · needs attention",
-        }.to_owned()];
+        self.tooltip(reason, now).text
+    }
+    /// Pure snapshot: `now` is injectable in tests and previews.
+    pub fn tooltip(&self, reason: &str, now: Instant) -> crate::tooltip::Content {
+        use crate::tooltip::{Content, INK, MUTED, WARNING, status_tint};
+        let mut content = Content::default();
+        let (title, state) = match self.phase {
+            Phase::Offline => ("No WebSocket", "not configured"),
+            Phase::Connecting => ("No WebSocket", "acquiring"),
+            Phase::Connected => ("WebSocket", "connected"),
+            Phase::Blocked => ("No WebSocket", "needs attention"),
+        };
+        let tint = status_tint(self.color(now));
+        content.strong(title, INK).dim(" · ").strong(state, tint);
         let remaining = |at: Instant| at.saturating_duration_since(now).as_millis();
         if self.phase == Phase::Connecting {
             if let Some(at) = self.attempt_at {
-                lines.push(format!("Attempt #{} started: {}ms ago", self.attempt, now.saturating_duration_since(at).as_millis()));
+                content.line().dim(format!("Attempt #{} started: ", self.attempt))
+                    .strong(format!("{}ms", now.saturating_duration_since(at).as_millis()), INK).dim(" ago");
             }
             if let Some(at) = self.retry_at {
-                lines.push(format!("Next attempt in: {}ms", remaining(at)));
+                content.line().dim("Next attempt in: ").strong(format!("{}ms", remaining(at)), INK);
             } else if let Some(at) = self.deadline {
-                lines.push(format!("Waiting · timeout in: {}ms", remaining(at)));
+                content.line().dim("Waiting · timeout in: ").strong(format!("{}ms", remaining(at)), INK);
             }
         }
         if self.phase == Phase::Connected {
             if let Some(at) = self.last_ping {
-                lines.push(format!("Last ping: {}ms ago", now.saturating_duration_since(at).as_millis()));
+                content.line().dim("Last ping: ").strong(format!("{}ms", now.saturating_duration_since(at).as_millis()), INK).dim(" ago");
             }
             if let Some(at) = self.pending_since {
-                lines.push(format!("Waiting for pong · timeout in: {}ms", remaining(at + HEARTBEAT_TIMEOUT)));
+                content.line().dim("Waiting for pong · timeout in: ")
+                    .strong(format!("{}ms", remaining(at + HEARTBEAT_TIMEOUT)), tint);
             } else if let Some(at) = self.next_ping {
-                lines.push(format!("Next ping in: {}ms", remaining(at)));
+                content.line().dim("Next ping in: ").strong(format!("{}ms", remaining(at)), INK);
             }
             if let Some((min, max)) = self.min_max() {
-                lines.push(format!("RTT · latest {}ms · min {}ms · max {}ms{}", self.latest().unwrap().as_millis(), min.as_millis(), max.as_millis(),
-                    if self.last_reply.is_none() { " (previous socket)" } else { "" }));
-            } else { lines.push("RTT: awaiting first pong".into()); }
+                content.line().dim("RTT · latest ").strong(format!("{}ms", self.latest().unwrap().as_millis()),
+                    if self.last_reply.is_none() { MUTED } else { tint })
+                    .dim(" · min ").strong(format!("{}ms", min.as_millis()), MUTED)
+                    .dim(" · max ").strong(format!("{}ms", max.as_millis()), MUTED);
+                if self.last_reply.is_none() { content.dim(" (previous socket)"); }
+            } else { content.line().dim("RTT: awaiting first pong"); }
         } else if !reason.is_empty() && !matches!(reason, "Connecting…" | "Not connected" | "Connected") {
-            lines.push(format!("Last failure: {}", reason.trim_end_matches('.')));
+            content.line().push(format!("Last failure: {}", reason.trim_end_matches('.')), false, WARNING);
         }
-
-        lines.join("\n")
+        content
     }
 }
 /// A single on-demand worker for the visible 50ms timer *or* the next hidden

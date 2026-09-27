@@ -1,9 +1,63 @@
 use sanscale::{Rect, Vec2};
-use std::time::Instant;
+use std::{ops::Range, time::Instant};
+
+pub(crate) mod text;
+
+// Dark accents stay readable on the light tooltip surface.
+pub const INK: u32 = 0x252b36;
+pub const MUTED: u32 = 0x596170;
+pub const ACCENT: u32 = 0x075b82;
+pub const GOOD: u32 = 0x17653b;
+pub const WARNING: u32 = 0x835000;
+pub const ORANGE: u32 = 0x944200;
+pub const DANGER: u32 = 0xa62432;
+
+pub fn status_tint(indicator: u32) -> u32 {
+    match indicator {
+        0x4ade80 => GOOD,
+        0xfbbf24 => WARNING,
+        0xfb923c => ORANGE,
+        0xff5a5f => DANGER,
+        0x67d4ff => ACCENT,
+        _ => MUTED,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    pub range: Range<usize>,
+    pub bold: bool,
+    pub tint: u32,
+}
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Content {
+    pub text: String,
+    pub spans: Vec<Span>,
+}
+impl Content {
+    pub fn push(&mut self, value: impl AsRef<str>, bold: bool, tint: u32) -> &mut Self {
+        let start = self.text.len();
+        self.text.push_str(value.as_ref());
+        if self.text.len() > start {
+            self.spans.push(Span { range: start..self.text.len(), bold, tint });
+        }
+        self
+    }
+    pub fn dim(&mut self, value: impl AsRef<str>) -> &mut Self { self.push(value, false, MUTED) }
+    pub fn strong(&mut self, value: impl AsRef<str>, tint: u32) -> &mut Self { self.push(value, true, tint) }
+    pub fn line(&mut self) -> &mut Self { self.text.push('\n'); self }
+    pub fn append(&mut self, other: Self) {
+        let offset = self.text.len();
+        self.text.push_str(&other.text);
+        self.spans.extend(other.spans.into_iter().map(|mut s| {
+            s.range = s.range.start + offset..s.range.end + offset; s
+        }));
+    }
+}
 
 pub struct Tooltip {
     pub region: Rect,
-    pub text: String,
+    pub content: Content,
     pub card: Rect,
     pub progress: f32,
     pub pinned: bool,
@@ -17,7 +71,7 @@ impl Default for Tooltip {
     fn default() -> Self {
         Self {
             region: Rect::new(0., 0., 0., 0.),
-            text: String::new(),
+            content: Content::default(),
             card: Rect::new(0., 0., 0., 0.),
             progress: 0.,
             pinned: false,
@@ -30,6 +84,30 @@ impl Default for Tooltip {
     }
 }
 impl Tooltip {
+    pub fn frame(&mut self, renderer: &mut crate::render::Renderer, layer: &mut crate::render::Layer,
+        key: &'static str, bounds: Rect, scale: f32, width: f32, above: bool) {
+        use crate::render::color;
+        let margin = 8. * scale;
+        let padding = 12. * scale;
+        let width = (width * scale).min((bounds.width - 2. * margin).max(1.));
+        let height = renderer.tooltip_height(key, &self.content, (width - 2. * padding).max(1.), 12. * scale)
+            + 2. * padding;
+        let anchor = self.region;
+        let x = (anchor.x + anchor.width / 2. - width / 2.).clamp(bounds.x + margin,
+            (bounds.x + bounds.width - margin - width).max(bounds.x + margin));
+        let y = if above { anchor.y - 8. * scale - height } else { anchor.y + anchor.height + 6. * scale };
+        let y = y.clamp(bounds.y + margin, (bounds.y + bounds.height - margin - height).max(bounds.y + margin));
+        let full = Rect::new(x, y, width, height);
+        self.card = full;
+        let t = self.progress;
+        let pivot = (anchor.x + anchor.width / 2.).clamp(full.x, full.x + full.width);
+        let animated = Rect::new(pivot + (x - pivot) * t, if above { y + height * (1. - t) } else { y }, width * t, height * t);
+        layer.rounded_rect(animated, 8. * scale, color(0xe5e1e6));
+        let clip = crate::render::intersect(bounds, Rect::new(animated.x + 6. * scale, animated.y + 6. * scale,
+            (animated.width - 12. * scale).max(0.), (animated.height - 12. * scale).max(0.)));
+        renderer.tooltip(layer, key, Rect::new(full.x + padding, full.y + padding,
+            (full.width - 2. * padding).max(1.), (full.height - 2. * padding).max(0.)), 12. * scale, clip);
+    }
     pub fn contains_card(&self, point: Vec2) -> bool {
         self.region.width > 0. && self.progress > 0. && crate::render::contains(self.card, point)
     }

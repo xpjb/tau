@@ -1,6 +1,6 @@
 //! A one-hour provider-cache *estimate*, not a daemon worker deadline.
 //! Use existing source timestamps; receiving history/heartbeats never renews it.
-use crate::{clock, feed::Feed};
+use crate::{clock, feed::Feed, tooltip::{Content, ACCENT, INK, WARNING}};
 use tau_protocol::{EventKind, EventRole, SessionStatus, SessionSummary};
 
 const ESTIMATED_TTL_MS: u64 = 60 * 60 * 1000;
@@ -75,15 +75,20 @@ impl Estimate {
             ),
         }
     }
-    pub fn details(&self) -> String {
+    pub fn details(&self) -> Content {
+        let mut content = Content::default();
         match self.remaining_ms {
-            Some(ms) => format!("TTL ~{}m remaining", ms.div_ceil(60_000)),
+            Some(ms) => {
+                content.dim("TTL ").strong(format!("~{}m", ms.div_ceil(60_000)),
+                    if ms <= 300_000 { WARNING } else { ACCENT }).dim(" remaining");
+            }
             None => match self.basis {
-                Basis::Working => "Working...".into(),
-                Basis::NoReply => "No reply yet".into(),
-                _ => "TTL unavailable".into(),
+                Basis::Working => { content.strong("Working...", ACCENT); }
+                Basis::NoReply => { content.push("No reply yet", false, INK); }
+                _ => { content.dim("TTL unavailable"); }
             },
         }
+        content
     }
 }
 
@@ -114,7 +119,7 @@ mod tests {
                 (0, 0), (1, 1), (60_000, 1), (60_001, 2), (480_000, 8), (ESTIMATED_TTL_MS, 60),
             ] {
                 let estimate = Estimate { basis, remaining_ms: Some(ms) };
-                assert_eq!(estimate.details(), format!("TTL ~{minutes}m remaining"));
+                assert_eq!(estimate.details().text, format!("TTL ~{minutes}m remaining"));
             }
         }
     }
@@ -130,7 +135,7 @@ mod tests {
                 session.starter = starter;
                 for feed in [None, Some(&feed)] {
                     let estimate = Estimate::from_session(&session, feed);
-                    assert_eq!(estimate.details(), "Working...");
+                    assert_eq!(estimate.details().text, "Working...");
                     assert_eq!(estimate.remaining_ms, None);
                     assert_eq!(estimate.meter(), (None, 0x67d4ff));
                 }
@@ -141,26 +146,26 @@ mod tests {
     #[test]
     fn countdown_returns_when_work_stops() {
         let mut session = session(SessionStatus::Running, clock::now_ms().unwrap() - 52 * 60_000);
-        assert_eq!(Estimate::from_session(&session, None).details(), "Working...");
+        assert_eq!(Estimate::from_session(&session, None).details().text, "Working...");
         for status in [SessionStatus::Idle, SessionStatus::Sleeping, SessionStatus::Error] {
             session.status = status;
-            assert_eq!(Estimate::from_session(&session, None).details(), "TTL ~8m remaining");
+            assert_eq!(Estimate::from_session(&session, None).details().text, "TTL ~8m remaining");
         }
         session.updated_at_ms -= ESTIMATED_TTL_MS;
-        assert_eq!(Estimate::from_session(&session, None).details(), "TTL ~0m remaining");
+        assert_eq!(Estimate::from_session(&session, None).details().text, "TTL ~0m remaining");
     }
 
     #[test]
     fn missing_timestamps_and_empty_chats_stay_compact() {
         let mut session = session(SessionStatus::Idle, 0);
-        assert_eq!(Estimate::from_session(&session, None).details(), "TTL unavailable");
+        assert_eq!(Estimate::from_session(&session, None).details().text, "TTL unavailable");
         session.updated_at_ms = clock::now_ms().unwrap() + ESTIMATED_TTL_MS;
-        assert_eq!(Estimate::from_session(&session, None).details(), "TTL unavailable");
+        assert_eq!(Estimate::from_session(&session, None).details().text, "TTL unavailable");
         session.starter = true;
-        assert_eq!(Estimate::from_session(&session, None).details(), "No reply yet");
+        assert_eq!(Estimate::from_session(&session, None).details().text, "No reply yet");
         session.starter = false;
         let mut feed = Feed::default();
         feed.synchronized = true;
-        assert_eq!(Estimate::from_session(&session, Some(&feed)).details(), "No reply yet");
+        assert_eq!(Estimate::from_session(&session, Some(&feed)).details().text, "No reply yet");
     }
 }

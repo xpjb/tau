@@ -475,15 +475,15 @@ impl Controller {
         Ok(request.id)
     }
     /// A short-lived account read. Never enters the prompt outbox or transcript.
-    pub fn refresh_codex_usage(&mut self, force: bool) -> Result<bool> {
+    pub fn refresh_codex_usage(&mut self) -> Result<bool> {
         if self.epoch.is_none() || !self.account.selected.as_ref().and_then(|id|self.account.sessions.iter().find(|s|&s.id==id))
             .and_then(|s|s.model.as_ref()).is_some_and(|model|model.provider=="openai-codex") {return Ok(false);}
-        if !self.codex_usage.needs_refresh(force) {return Ok(false);}
+        if !self.codex_usage.needs_refresh() {return Ok(false);}
         let now=std::time::Instant::now();
         self.codex_usage.attempted=Some(now);
-        match self.request(ClientCommand::GetCodexUsage {force}) {
+        match self.request(ClientCommand::GetCodexUsage {force: false}) {
             Ok(id) => {self.codex_usage.in_flight=Some((id,now));Ok(true)}
-            Err(_) => {self.codex_usage.error=Some("Codex quota request could not be sent; reconnect and try again.".into());Ok(false)}
+            Err(_) => {self.codex_usage.error=Some("Codex quota request could not be sent; retrying automatically.".into());Ok(false)}
         }
     }
     pub fn diagnostics(&self)->String {
