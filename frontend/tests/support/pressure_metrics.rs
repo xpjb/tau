@@ -23,7 +23,7 @@ impl Samples {
         "work":distribution(&self.work),"outcomes":self.outcomes,"sample_cap":20_000})}
 }
 #[derive(Default)]
-struct Data {pools:BTreeMap<String,Samples>,admission:Samples}
+struct Data {pools:BTreeMap<String,Samples>,admission:Samples,content_failures:Vec<String>}
 #[derive(Default)]
 struct Inner {data:Mutex<Data>,pause_ms:AtomicU64,pause_started:AtomicBool,pause_actual_us:AtomicU64}
 #[derive(Clone,Default)]
@@ -32,8 +32,11 @@ impl Recorder {
     pub fn install()->Self {
         let recorder=Self::default();
         let filter=tracing_subscriber::filter::Targets::new()
-            .with_target("taud::db",tracing::Level::DEBUG).with_target("taud::control_admission",tracing::Level::DEBUG);
+            .with_target("taud::db",tracing::Level::DEBUG).with_target("taud::control_admission",tracing::Level::DEBUG)
+            .with_target("tau::content",tracing::Level::DEBUG).with_target("log",tracing::Level::DEBUG);
         tracing_subscriber::registry().with(recorder.clone().with_filter(filter)).try_init().unwrap();
+        log::debug!(target:"tau::content","pressure observer self-check");
+        assert_eq!(recorder.take()["content_failures"][0],"pressure observer self-check","Content diagnostic bridge must be active");
         recorder
     }
     // Only this test subscriber sleeps: pause a real writer while it owns its
@@ -44,15 +47,15 @@ impl Recorder {
     pub fn take(&self)->Value {
         let data=std::mem::take(&mut *self.0.data.lock().unwrap());
         json!({"database":data.pools.iter().map(|(key,value)|(key.clone(),value.report())).collect::<BTreeMap<_,_>>(),
-            "admission":data.admission.report()})
+            "admission":data.admission.report(),"content_failures":data.content_failures})
     }
 }
 #[derive(Default)]
-struct Fields {pool:String,phase:String,outcome:String,wait:u64,dispatch:u64,work:u64}
+struct Fields {pool:String,phase:String,outcome:String,log_target:String,message:String,wait:u64,dispatch:u64,work:u64}
 impl Visit for Fields {
     fn record_u64(&mut self,field:&Field,value:u64) {match field.name() {"wait_us"=>self.wait=value,"dispatch_us"=>self.dispatch=value,"work_us"=>self.work=value,_=>{}}}
-    fn record_str(&mut self,field:&Field,value:&str) {match field.name() {"pool"=>self.pool=value.into(),"phase"=>self.phase=value.into(),"outcome"=>self.outcome=value.into(),_=>{}}}
-    fn record_debug(&mut self,_:&Field,_:&dyn std::fmt::Debug) {}
+    fn record_str(&mut self,field:&Field,value:&str) {match field.name() {"pool"=>self.pool=value.into(),"phase"=>self.phase=value.into(),"outcome"=>self.outcome=value.into(),"log.target"=>self.log_target=value.into(),_=>{}}}
+    fn record_debug(&mut self,field:&Field,value:&dyn std::fmt::Debug) {if field.name()=="message" {self.message=format!("{value:?}");}}
 }
 impl<S:Subscriber> Layer<S> for Recorder {
     fn on_event(&self,event:&Event<'_>,_:Context<'_,S>) {
@@ -69,6 +72,7 @@ impl<S:Subscriber> Layer<S> for Recorder {
             return;
         }
         let mut data=self.0.data.lock().unwrap();
+        if fields.log_target=="tau::content" && data.content_failures.len()<200 {data.content_failures.push(fields.message.clone());}
         match event.metadata().target() {
             "taud::db"=>data.pools.entry(fields.pool.clone()).or_default().add(&fields),
             "taud::control_admission"=>data.admission.add(&fields),

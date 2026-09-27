@@ -141,7 +141,8 @@ async fn recover_bulk(f:&mut Fixture,o:&mut Observed,recorder:&Recorder,restored
             let cause=if socket_stalled {"socket reacquisition"} else if stalled {"no progress"} else {"bulk throughput budget"};
             persist_report("recovery",seed,&json!({"failure":cause,
                 "progress":progress,"remaining_at_restore":remaining,"completion_budget_ms":budget_ms,
-                "link":f.link.report(),"server":recorder.take(),"alerts":o.notices}));
+                "socket_reacquisition_ms":socket_ms,"link":f.link.report(),"server":recorder.take(),"alerts":o.notices,
+                "native":[f.clients[0].native_metrics.clone(),f.clients[1].native_metrics.clone()]}));
             panic!("Recovery failed its {cause} guard; see report");
         }
         if done && socket_ms.is_some() {return json!({"progress":progress,"socket_reacquisition_ms":socket_ms,"reported_remaining_bytes_at_restore":remaining,
@@ -213,9 +214,13 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
     let baseline=await_probe(&mut f,&mut o,baseline).await;let baseline_db=recorder.take();
     let upload=f._locals[0].path().join("input.bin");std::fs::write(&upload,&f.bytes[..128*1024]).unwrap();
     f.clients[0].attach(&upload,None).unwrap();
+    let mut trace=vec![];
     let mut authored=vec![f.prompt(0,&format!("Seed {seed}: inspect this upload and provide the files"))];
     until(&mut f,&mut o,"provider gate",|f|f.model.calls.load(Ordering::SeqCst)==1).await;
-    for n in 0..3 {authored.push(f.prompt((draw(seed,n)&1) as usize,&format!("Queued seed {seed}, message {n}: café 😀")));}
+    for n in 0..3 {
+        let client=(draw(seed,n)&1) as usize;trace.push(format!("{}ms: queued message {n}, client {client}",started.elapsed().as_millis()));
+        authored.push(f.prompt(client,&format!("Queued seed {seed}, message {n}: café 😀")));
+    }
     until(&mut f,&mut o,"queued inputs",|f|f.clients[0].selected().unwrap().feed.queue.requests.len()>=3).await;
     f.model.gate.notify_one();
     until(&mut f,&mut o,"file metadata",|f|f.clients.iter().all(|c|c.selected().unwrap().feed.events.values().filter(|e|e.attachment.is_some()).count()>=3)).await;
@@ -234,12 +239,17 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
     for n in 0..24 {
         let index=(draw(seed^0x2424,n)&1) as usize;let at=Instant::now();
         let id=f.clients[index].request(ClientCommand::RenameSession {session_id:session.clone(),title:format!("Seed {seed}, rename {n}")}).unwrap();
+        trace.push(format!("{}ms: rename {n}, client {index}",started.elapsed().as_millis()));
         operation_ids.push(id.clone());pending.push((index,id,at));
     }
+    let simultaneous=f._locals[1].path().join("simultaneous.bin");
+    let mut upload=f.bytes[..128*1024].to_vec();upload[0]^=0x55; // Not a deduplicated copy of the setup upload.
+    std::fs::write(&simultaneous,upload).unwrap();f.clients[1].attach(&simultaneous,None).unwrap();
+    trace.push(format!("{}ms: concurrent upload, client 1",started.elapsed().as_millis()));
+    authored.push(f.prompt(1,&format!("Seed {seed}: upload concurrently with downloads and control")));
     let query_task=tokio::spawn(probe(f.proxies[1].address,session.clone(),48,15));
     let cancel_at=64*1024+(draw(seed,99)%4)*32*1024;
     let mut writes=vec![];let mut cancelled=false;let mut resumed=false;let mut toggles=0;let mut toggle_at=Instant::now();
-    let mut trace=vec![];
     let pressure_at=Instant::now();
     loop {
         o.poll(&mut f);
@@ -256,7 +266,7 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
             chat.local.details_default=true;
             chat.local.expansion.insert("tool:read-pressure".into(),toggles%2==0);
             chat.local.expansion.insert("tool:read-pressure:Output".into(),toggles%2==0);
-            c.save_chat(&session).unwrap();toggles+=1;toggle_at=Instant::now();
+            c.save_chat(&session).unwrap();trace.push(format!("{}ms: tool interest toggle {toggles}",started.elapsed().as_millis()));toggles+=1;toggle_at=Instant::now();
         }
         if pending.is_empty() && query_task.is_finished() && (resumed || f.clients[0].downloads[&key_a].status.done) {break;}
         assert!(pressure_at.elapsed()<Duration::from_secs(35),"Pressure stalled: {:?}, notices={:?}",pending,o.notices);
@@ -293,14 +303,16 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
     let db=recorder.take();
     let report=json!({"schema":1,"profile":profile.name,"seed":seed,"outage_case":outage,"elapsed_ms":started.elapsed().as_millis(),
         "link":f.link.report(),"baseline":{"control_reads":distribution(&baseline.latencies),"server":baseline_db},
-        "pressure":{"control_reads":distribution(&queries.latencies),"control_writes":distribution(&writes),"injected_writer_pause_ms":DB_HOLD_MS,"observed_pause_ms":recorder.pause_actual_us() as f64/1000.,
+        "pressure":{"control_reads":distribution(&queries.latencies),"control_writes":distribution(&writes),"concurrent_upload_bytes":128*1024,"injected_writer_pause_ms":DB_HOLD_MS,"observed_pause_ms":recorder.pause_actual_us() as f64/1000.,
             "server":db,"controller_poll":distribution(&o.poll_us),"bulk_bytes":(2+usize::from(outage))*FILE_BYTES,"bulk_elapsed_ms":bulk_ms,
             "bulk_goodput_kib_s":((2+usize::from(outage))*FILE_BYTES) as f64/1024./(bulk_ms as f64/1000.)},
         "recovery":recovery,"steady_disconnects":steady_disconnects,"all_disconnects":o.disconnects,
         "steady_transport_issues":steady_transport,"all_transport_issues":o.transport,"alerts":o.notices,
         "query_errors":queries.errors,"baseline_errors":baseline.errors,"original_prompt_copies":copies,
         "control_receipts":receipts.len(),"provider_calls":f.model.calls.load(Ordering::SeqCst),"unread_file_parts":unread_parts,
-        "native":[f.clients[0].native_metrics.clone(),f.clients[1].native_metrics.clone()],"trace":trace});
+        "native":[f.clients[0].native_metrics.clone(),f.clients[1].native_metrics.clone()],
+        "websocket_ping_rtt":f.clients.iter().map(|c|json!({"latest_ms":c.health.latest().map(|d|d.as_secs_f64()*1000.),
+            "recent_min_max_ms":c.health.min_max().map(|(a,b)|[a.as_secs_f64()*1000.,b.as_secs_f64()*1000.])})).collect::<Vec<_>>(),"trace":trace});
     persist_report(if outage {"recovery"} else {profile.name},seed,&report);
     assert!(o.notices.is_empty(),"Unexpected alerts; see pressure report: {:?}",o.notices);
     assert!(baseline.errors.is_empty()&&queries.errors.is_empty(),"Control query failure");
@@ -311,12 +323,12 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
     assert!(cancelled&&resumed,"The workload must actually exercise cancellation/resume");
     assert!(f.clients[0].downloads[&key_a].status.failure.is_none()&&f.clients[1].downloads[&key_b].status.failure.is_none());
     assert_eq!(std::fs::read(path_a).unwrap(),f.bytes);assert_eq!(std::fs::read(path_b).unwrap(),f.bytes);
-    assert!(f.clients.iter().all(|c|c.native_metrics.integrity_failures==0));
+    assert!(f.clients.iter().all(|c|c.native_metrics.integrity_failures==0&&c.native_metrics.content_tx_bytes>=128*1024),"Both real uploads must traverse the native connection");
     assert_eq!(db["admission"]["outcomes"]["timeout"].as_u64().unwrap_or(0),0,"Unexpected admission timeout");
     assert_eq!(db["admission"]["outcomes"]["overflow"].as_u64().unwrap_or(0),0,"Bounded workload must not overflow");
     assert!(db["database"]["writer"]["work"]["max_ms"].as_f64().unwrap()>100.,"The injected DB stall must be observed");
-    assert!(db["database"]["reader"]["wait"]["max_ms"].as_f64().unwrap()<200.,"Short reads regressed behind the writer");
     assert!(*queries.latencies.iter().max().unwrap()<if profile.name=="normal" {300_000} else {4_000_000},"Read latency budget exceeded");
+    assert!(db["database"]["reader"]["wait"]["max_ms"].as_f64().unwrap_or(f64::INFINITY)<200.,"No read-pool samples, or short reads regressed behind the writer");
     assert!(*writes.iter().max().unwrap()<5_000_000,"Control write starved");
     if outage {
         assert!(o.disconnects.iter().all(|n|*n==1),"One real outage should cause one replacement per socket");

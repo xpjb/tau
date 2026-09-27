@@ -27,9 +27,10 @@ segmentation mean they do not reproduce an identical packet trace.
 The workload includes:
 
 - Baseline read probes, then mixed status/catalogue/receipt reads under pressure.
-- Two 1 MiB downloads, a 128 KiB upload, a 24-operation two-client control burst,
-  queued inputs and queue-to-history handoff, tool-body interest changes, and a
-  seeded download cancellation/resume point. One advertised file remains unread.
+- Two 1 MiB downloads, a setup upload and a distinct 128 KiB upload concurrent
+  with bulk traffic, a 24-operation two-client control burst, queued inputs and
+  queue-to-history handoff, tool-body interest changes, and a seeded download
+  cancellation/resume point. One advertised file remains unread.
 - A **test-only 400 ms pause of one actual application writer**, using the local
   diagnostic observer while it owns its connection mutex. Read-only connections
   stay available. No sleep/fault is enabled in production, and this is not a
@@ -51,13 +52,21 @@ processing; it is not a pure SQL CPU measurement. `taud::control_admission` reco
 wait duration and start/overflow/timeout/cancellation. These are opt-in local
 tracing events, without SQL text, paths, request bodies, credentials or new wire
 fields. Clock reads are omitted when the DB timing target is disabled.
+`tau::content` debug logs identify the failed local sync interest and current
+header version/length/sealing, without changing or suppressing the popup. The
+pressure observer captures these scoped failures in its report; message bodies
+and credentials are not logged.
 
 The test's bounded observer collects p50/p95/max samples separately for reader
 and writer connections and admission. Reports also include client-observed read
 and durable-control latencies, controller poll duration, application bulk goodput,
 TCP/UDP bytes, loss/stalls, connection counts, resume offsets, integrity failures,
-and recovery time. Goodput includes preparation, the injected pause and
-cancellation/resume; it is not raw link capacity. Samples are small local runs,
+and recovery time. Recovery has separate guards: 5 s for socket reacquisition,
+15 s without per-file application progress, and a byte-scaled completion budget
+of 10 s plus remaining bytes at 32 KiB/s. These are explicit test acceptance
+budgets, not changes to application timeouts. Goodput includes preparation, the
+injected pause, cancellation/resume and any deliberate outage; it is not raw link
+capacity. Samples are small local runs,
 not production SLOs or a WAN/device certification.
 
 ## Run
@@ -78,15 +87,71 @@ are JSON named by profile/seed; preserve the failing seed, action trace, source
 revision and link configuration when investigating. Retained unit/native-scheduler
 regressions still cover the exact old busy and stale-known-text failures.
 
-## Validation in progress
+## Validation and findings
 
-Workspace all-target compilation passed. In nextest run
-`84ce8417-3a8f-440c-a032-aa6461682c63`, normal and dodgy pressure passed; the outage case exceeded
-its bulk-completion budget after control recovered. A second run sampled progress every second and showed continued advancement,
-not a hang. The fixed 40 s completion budget conflated liveness with throughput
-for three competing files. Recovery checks are being separated into first
-progress, no-progress gaps and a byte-scaled completion budget; application
-timeouts are unchanged. The revised case is **not yet claimed accepted**.
+The default pressure matrix, including concurrent upload, initially passed 3/3
+(`a59a6bb6-06f8-4ecf-bd9e-41d9ff23cdf5`), and an earlier workspace run passed
+233/233 (`119436a6-9049-445c-9e46-f895ee222517`). **The latest workspace run is
+232/233**, not green: default recovery seed 91 caught the content race after
+scoped diagnostics were added (`1e68635b-be14-4a5f-86dd-d32134c433d3`). No failing
+case is ignored or retried into a passing result. Findings:
+
+- **Recovery seed 73:** one client's two files made no progress for over 15 s
+  after the link returned. Control recovered; reader checkout max was 0.14 ms,
+  and the daemon DB timings did not account for the gap. The report is retained at
+  [`network-pressure/recovery-73-failure.json`](network-pressure/recovery-73-failure.json).
+  An instrumented rerun passed with the same seed. Temporary numeric QUIC
+  diagnostics showed small congestion windows and repeated loss, but that does
+  **not establish the cause of the failed run**. No QUIC parameters or application
+  deadlines were changed; this remains a scheduling-sensitive finding.
+- **Dodgy seed 173:** two unexpected `Content sync: Unknown block` alerts occurred
+  while transfers and receipts otherwise completed. See
+  [`network-pressure/dodgy-173-failure.json`](network-pressure/dodgy-173-failure.json).
+  A diagnostic rerun passed; the alert is not dismissed as noise. The original
+  sealed, already-held-body regression remains fixed, but this demonstrates that
+  not every content-interest lifetime race is covered. Scoped diagnostics now
+  identify the failed key and current local header on subsequent failures.
+- **Default recovery seed 91, latest workspace run:** scoped diagnostics caught
+  a request for `queued:<request-id>` while the local replica still advertised
+  version 1, length 37, sealed. The server returned `Unknown block`; the authored
+  messages and file checks later completed. This identifies a queue-consumption /
+  delayed-metadata lifetime race, distinct from the previously fixed complete,
+  already-held-body plan. The new tests do not suppress that error. See
+  [`network-pressure/recovery-default-91-content-failure.json`](network-pressure/recovery-default-91-content-failure.json).
+  This needs an explicitly verified retirement/revalidation fix, not blind
+  success for arbitrary missing blocks.
+
+Managed workspace all-target compilation and rustdoc for `tau-frontend`, `taud`
+and `tau-transfer` passed after adding scoped diagnostics. No deployment or service
+restart was performed. This test/diagnostic branch is not merged into `tau2`;
+the prior alert fixes were merged separately before this investigation.
+
+The additional seed runs were `9967207d-1c24-406e-b821-e90658e7f569` (73) and
+`0b1fea70-a535-4acf-b295-d132fe068ea7` (173). Each passed 2/3. Passing repeats do not
+replace those failed results or prove that the findings are resolved.
+
+### Negative control
+
+Temporarily routing reads through the writer connection again made the normal
+pressure case fail its read-latency guard: **p95 574.7 ms, max 619.2 ms**. The
+original read-pool implementation was then restored (negative-control run
+`e01f7513-bdd4-444f-a815-b656b254079c`). This confirms the harness
+can detect the lock-sharing regression, rather than merely produce green output.
+The mutation was never committed.
+
+### Correcting a test assumption
+
+The first recovery draft used one fixed 40 s completion timeout. Per-second
+progress sampling showed files continuing to advance, not hanging. That was an
+incorrect completion budget for three competing files on this lossy link. It was
+replaced with the separate liveness/throughput guards above, not a longer
+application timeout. This correction is distinct from seed 73's later genuine
+**no-progress** guard failure.
+
+In the passing default recovery sample, sockets were reacquired in **159 ms**,
+per-file application progress resumed in **3–9.1 s**, and all three files finished
+about **58 s after link restoration**. Slow content recovery despite responsive
+control is now visible in the report, not hidden behind eventual success.
 
 First passing local samples (seeds 7/29, with the deliberate writer pause):
 

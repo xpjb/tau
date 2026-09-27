@@ -1,0 +1,142 @@
+{
+  "alerts": [],
+  "completion_budget_ms": 105000,
+  "failure": "no progress",
+  "link": {
+    "base_latency_ms": 35,
+    "blackholed": 42,
+    "bytes_per_second": 196608,
+    "dropped": 103,
+    "jitter_ms": 45,
+    "loss_per_10k": 300,
+    "max_scheduled_delay_ms": 300.695,
+    "profile": "dodgy",
+    "queue_dropped": 0,
+    "queue_limit_ms": 650,
+    "seed": 73,
+    "stalls": 28,
+    "tcp_bytes": 86463,
+    "tcp_connections": 6,
+    "udp_bytes": 1006524,
+    "udp_datagrams": 1700
+  },
+  "progress": [
+    {
+      "bytes": 573440,
+      "client": 0,
+      "done": false,
+      "failure": null,
+      "first_application_progress_ms": 1187,
+      "max_no_progress_ms": 1187
+    },
+    {
+      "bytes": 0,
+      "client": 1,
+      "done": false,
+      "failure": null,
+      "first_application_progress_ms": null,
+      "max_no_progress_ms": 15006
+    },
+    {
+      "bytes": 32768,
+      "client": 1,
+      "done": false,
+      "failure": null,
+      "first_application_progress_ms": null,
+      "max_no_progress_ms": 15006
+    }
+  ],
+  "remaining_at_restore": 3112960,
+  "server": {
+    "admission": {
+      "dispatch": {
+        "count": 114,
+        "max_ms": 0.0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "total_ms": 0.0
+      },
+      "outcomes": {
+        "started": 114
+      },
+      "sample_cap": 20000,
+      "wait": {
+        "count": 114,
+        "max_ms": 356.825,
+        "p50_ms": 0.043,
+        "p95_ms": 329.57,
+        "total_ms": 2525.228
+      },
+      "work": {
+        "count": 114,
+        "max_ms": 0.0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "total_ms": 0.0
+      }
+    },
+    "database": {
+      "reader": {
+        "dispatch": {
+          "count": 453,
+          "max_ms": 0.416,
+          "p50_ms": 0.02,
+          "p95_ms": 0.07,
+          "total_ms": 13.436999999999996
+        },
+        "outcomes": {
+          "ok": 453
+        },
+        "sample_cap": 20000,
+        "wait": {
+          "count": 453,
+          "max_ms": 0.14,
+          "p50_ms": 0.001,
+          "p95_ms": 0.002,
+          "total_ms": 0.6880000000000003
+        },
+        "work": {
+          "count": 453,
+          "max_ms": 1.007,
+          "p50_ms": 0.133,
+          "p95_ms": 0.273,
+          "total_ms": 64.42899999999997
+        }
+      },
+      "writer": {
+        "dispatch": {
+          "count": 133,
+          "max_ms": 0.082,
+          "p50_ms": 0.016,
+          "p95_ms": 0.027,
+          "total_ms": 2.3329999999999966
+        },
+        "outcomes": {
+          "ok": 133
+        },
+        "sample_cap": 20000,
+        "wait": {
+          "count": 133,
+          "max_ms": 246.895,
+          "p50_ms": 2.779,
+          "p95_ms": 184.931,
+          "total_ms": 3981.167000000002
+        },
+        "work": {
+          "count": 133,
+          "max_ms": 438.5,
+          "p50_ms": 2.082,
+          "p95_ms": 32.41,
+          "total_ms": 1244.507
+        }
+      }
+    }
+  },
+  "evidence": {
+    "nextest_run_id": "9967207d-1c24-406e-b821-e90658e7f569",
+    "source_base": "2ab501b",
+    "working_tree_note": "Concurrent-upload and action-trace additions, retained in the follow-up commit. No transport parameter changes.",
+    "status": "Unresolved scheduling-sensitive no-progress finding; an instrumented rerun with the same seed passed.",
+    "application_timeouts_changed": false
+  }
+}
