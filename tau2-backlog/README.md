@@ -1,8 +1,8 @@
 # Tau 2 backlog
 
-User reports from September 23, 2026. Keep one issue per file. Record facts,
-acceptance checks, related work and remaining device checks; do not mark an item
-complete just because code compiles.
+User reports and QA findings since September 23, 2026. Keep one issue per file.
+Record facts, acceptance checks, related work and remaining device checks; do not
+mark an item complete just because code compiles.
 
 | Item | Priority | Status |
 | --- | --- | --- |
@@ -18,6 +18,8 @@ complete just because code compiles.
 | 010 Account usage remaining | Context hover | Open |
 | 011 Title generation model and prompt | With 001 | Beta daemon/Windows delivered |
 | 012 Chat scroll-position architecture and test removal | Later | Open; quick fix provisional, audit deferred |
+| [013 Queue-to-history content-reference lifetime](013-queued-message-content-lifetime.md) | Later | Open; deferred, proportionate fix to be scoped |
+| [014 Native data recovery after an outage](014-native-data-recovery-after-outage.md) | Later | Open; deferred, cause of per-file progress gap unresolved |
 
 Settings and the composer must reuse the existing shared editor. Do not create
 another text controller. See 004 for the pinned source and migration difficulties.
