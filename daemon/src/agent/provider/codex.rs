@@ -39,10 +39,8 @@ impl Decoder for Codex {
                     bail!("assembled Codex text had the wrong type");
                 };
                 if boundary && !assembled.is_empty() {
-                    // A lone LF is a Markdown soft break, so adjacent summary
-                    // headings would still display on the same line. Separate
-                    // parts (not SSE chunks) as paragraphs, preserving any LF
-                    // already supplied by the model on either side.
+                    // Separate summary parts (not SSE chunks) as paragraphs,
+                    // preserving any LF already supplied by the model on either side.
                     let breaks = assembled.bytes().rev().take_while(|&b| b == b'\n').count()
                         + text.bytes().take_while(|&b| b == b'\n').count();
                     for _ in breaks..2 { assembled.push('\n'); }

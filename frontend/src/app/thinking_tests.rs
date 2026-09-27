@@ -41,8 +41,8 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
         .collect::<Vec<_>>();
     let mut thinking = events[1].clone();
     thinking.phase = EventPhase::Live;
-    // The provider separates actual summary parts with a blank line. One
-    // newline *inside* a part still has normal Markdown soft-break semantics.
+    // The provider separates actual summary parts with a blank line. A single
+    // newline inside a part renders as a line break within the same block.
     thinking.text = "**First step**\nnotes\n\n**Sec".into();
     events[1] = thinking.clone();
     let mut next = thinking.clone();
@@ -82,7 +82,7 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
             .unwrap()
             .rich
             .text,
-        "First step notes"
+        "First step\nnotes"
     );
     assert_eq!(
         fragment.doc.blocks()[1]
