@@ -229,7 +229,7 @@ impl StateStore {
     }
     // Commit before publishing any saved transcript/queue change. The revision is
     // a database CAS, not another transcript event sequence.
-    pub async fn commit(&self, id: &str, revision: u64, entries: Vec<Value>, events: Vec<Event>, queue: Option<QueueState>, receipt: Option<Receipt>) -> Result<StoredSession> {
+    pub async fn commit(&self, id: &str, revision: u64, entries: Vec<Value>, events: Vec<Event>, queue: Option<QueueState>, receipt: Option<Receipt>, bump: bool) -> Result<StoredSession> {
         let id = id.to_owned();
         self.access(move |db| {
             let tx = db.transaction()?;
@@ -268,7 +268,7 @@ impl StateStore {
                     params![id,event.order,event.id,event.entry_id,serde_json::to_string(&event)?])?;
             }
             session.revision += 1;
-            session.updated_at_ms = activity(&tx)?;
+            if bump { session.updated_at_ms = activity(&tx)?; }
             tx.execute("UPDATE sessions SET starter=?2,activity=?3,data=?4 WHERE id=?1",params![id,session.starter,session.updated_at_ms,serde_json::to_string(&session)?])?;
             tx.commit()?; Ok(session)
         }).await
@@ -289,7 +289,9 @@ impl StateStore {
             let data: String = tx.query_row("SELECT data FROM sessions WHERE id=?1",[&id],|row| row.get(0)).context("Unknown session")?;
             let mut session: StoredSession = serde_json::from_str(&data)?;
             if !only_untitled || session.title == "New chat" {
-                session.title = title; session.starter = false; session.updated_at_ms = activity(&tx)?;
+                session.title = title; session.starter = false;
+                // Background title generation must not move an active chat.
+                if !only_untitled { session.updated_at_ms = activity(&tx)?; }
                 tx.execute("UPDATE sessions SET starter=0,activity=?2,data=?3 WHERE id=?1",params![id,session.updated_at_ms,serde_json::to_string(&session)?])?;
             }
             tx.commit()?; Ok(())

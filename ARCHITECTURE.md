@@ -85,6 +85,16 @@ only missing sends retry automatically, in order within each chat. Source lineag
 changes, uncertain controls and explicit rejections still require review. Context actions retain their target session rather than silently
 acting on whichever chat is selected later.
 
+Chat lists are sorted by activity, not the ID order of catalogue pages. Creation
+and accepted sends advance durable daemon activity, as does an agent run settling
+(including error/abort), once after any queued continuations. Intermediate replies,
+tool results, automatic titles and queue bookkeeping do not bump chats. Local new
+chats, changed drafts, attachments and sends bump immediately, even offline. Their
+ordering keys are saved with local work and sort after the latest observed daemon
+activity, so device clock skew cannot pin a draft above future replies. Refreshes,
+restarts and provisional-chat aliases preserve those keys without altering unread
+or provider-cache timestamps. Merely opening a chat does not bump it.
+
 Client settings include server/token and quick favorites; daemon settings are fetched
 and saved as one typed, revisioned document. Cache TTL gauges are explicitly estimated
 provider cache age from existing timestamps. Runtime idle eviction is independent: idle runtimes can be released with paused

@@ -61,6 +61,7 @@ pub struct Controller {
     pub account: Account,
     pub model_preferences: crate::models::Preferences,
     pub chats: HashMap<String, Chat>,
+    local_activity: HashMap<String, LocalActivity>,
     pub downloads: HashMap<String, Download>,
     saved_downloads: HashMap<String, Option<SavedDownload>>,
     pub viewing_chat: bool,
@@ -106,6 +107,7 @@ impl Controller {
             account,
             model_preferences,
             chats: HashMap::new(),
+            local_activity: HashMap::new(),
             downloads: HashMap::new(),
             saved_downloads: HashMap::new(),
             viewing_chat: true,
@@ -129,6 +131,8 @@ impl Controller {
             receipt_queue:Default::default(),receipt_inflight:None,control_check:None,control_cursor:0,catalog:None,state_versions:HashMap::new(),source_guard:None,restore_reviews:Default::default(),
             wake,
         };
+        c.local_activity = c.store.chat_activity(&c.identity)?;
+        c.sort_sessions();
         if let Some(id) = c.account.selected.clone() {
             c.ensure_chat(&id)?;
         }
@@ -163,6 +167,8 @@ impl Controller {
         self.viewport=None;
         self.copy=None;self.copied=None;
         self.account = self.store.get(&self.identity, "account")?;
+        self.local_activity = self.store.chat_activity(&self.identity)?;
+        self.sort_sessions();
         self.model_preferences = self.store.get(&self.identity, "quick-models")?;
         self.chats.clear();
         self.downloads.clear();
@@ -245,12 +251,41 @@ impl Controller {
         }
         Ok(())
     }
+    fn activity_key(&self, session: &SessionSummary) -> LocalActivity {
+        LocalActivity { source_at_ms: session.updated_at_ms, order: 0 }
+            .max(self.local_activity.get(&session.id).copied().unwrap_or_default())
+    }
+    fn sort_sessions(&mut self) {
+        let local = &self.local_activity;
+        self.account.sessions.sort_by_cached_key(|session| {
+            let activity = LocalActivity { source_at_ms: session.updated_at_ms, order: 0 }
+                .max(local.get(&session.id).copied().unwrap_or_default());
+            (std::cmp::Reverse(activity), session.id.clone())
+        });
+    }
+    fn next_local_activity(&self) -> LocalActivity {
+        LocalActivity {
+            source_at_ms: self.account.sessions.iter().map(|s| self.activity_key(s).source_at_ms).max().unwrap_or(0),
+            order: self.local_activity.values().map(|a| a.order).max().unwrap_or(0).saturating_add(1),
+        }
+    }
+    fn bumped_locally(&mut self, id: &str, activity: LocalActivity) {
+        // Called only after the authored change and its ordering key are durable.
+        // Don't alter source timestamps: drafts are neither unread replies nor
+        // evidence of a refreshed provider cache.
+        self.local_activity.insert(id.into(), activity);
+        if let Some(index) = self.account.sessions.iter().position(|s| s.id == id).filter(|index| *index > 0) {
+            let session = self.account.sessions.remove(index);
+            self.account.sessions.insert(0, session);
+        }
+        self.plan_dirty.set(true);
+    }
     fn last_chat_in_project(&self, project: &str) -> Option<String> {
         self.account.last_chat_by_project.get(project)
             .filter(|id| self.account.sessions.iter().any(|s| s.project_id == project && s.id == id.as_str()))
             .cloned()
             .or_else(|| self.account.sessions.iter().filter(|s| s.project_id == project)
-                .max_by_key(|s| (s.updated_at_ms, &s.id)).map(|s| s.id.clone()))
+                .max_by_key(|s| (self.activity_key(s), std::cmp::Reverse(&s.id))).map(|s| s.id.clone()))
     }
     pub fn select_project(&mut self, id: &str, resume: bool) -> Result<()> {
         self.plan_dirty.set(true);
@@ -288,8 +323,20 @@ impl Controller {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Select a chat"))?;
         ensure!(value.len() <= MAX_REQUEST_BYTES, "Draft is too large");
-        self.chats.get_mut(&id).unwrap().local.draft = value;
-        self.save_chat(&id)
+        if self.chats[&id].local.draft == value { return Ok(()); }
+        let activity = self.next_local_activity();
+        let local = &mut self.chats.get_mut(&id).unwrap().local;
+        // Roll back a failed write without cloning a potentially large outbox
+        // for every keystroke.
+        let previous_draft = std::mem::replace(&mut local.draft, value);
+        let previous_activity = std::mem::replace(&mut local.activity, activity);
+        if let Err(error) = self.store.save_chat(&self.identity, &id, local) {
+            local.draft = previous_draft;
+            local.activity = previous_activity;
+            return Err(error);
+        }
+        self.bumped_locally(&id, activity);
+        Ok(())
     }
     pub fn attach(&mut self, source: &Path, name: Option<&str>) -> Result<()> {
         let id = self
@@ -335,8 +382,10 @@ impl Controller {
             anyhow::bail!("Attachments exceed 50 MB total");
         }
         let mut replacement=chat.local.clone();replacement.files.push(file.clone());
+        replacement.activity = self.next_local_activity();
         if let Err(error)=self.store.save_chat(&self.identity,&id,&replacement) {let _=self.store.discard_import(&self.identity,&id,&file);return Err(error);}
-        self.chats.get_mut(&id).unwrap().local=replacement;self.plan_dirty.set(true);Ok(())
+        self.bumped_locally(&id, replacement.activity);
+        self.chats.get_mut(&id).unwrap().local=replacement;Ok(())
     }
     pub fn remove_file(&mut self, file: &str) -> Result<()> {
         let id = self
@@ -356,6 +405,7 @@ impl Controller {
         let session = self.account.selected.clone().ok_or_else(|| anyhow::anyhow!("Select a chat"))?;
         ensure!(!self.account.missing_chats.contains(&session),"This source chat is missing. Copy the draft to a new chat; old intents are not resent");
         let provisional = self.is_creating(&session);
+        let activity = self.next_local_activity();
         let chat = self.chats.get_mut(&session).unwrap();
         let choosing = chat.model_request.is_some();
         ensure!(
@@ -390,11 +440,13 @@ impl Controller {
         replacement.draft.clear();
         replacement.files.clear();
         replacement.position.follow = true;
+        replacement.activity = activity;
         // Commit local work before attempting any network effect. A disk failure
         // leaves both the composer and server untouched.
         self.store
             .save_chat(&self.identity, &session, &replacement)?;
         chat.local = replacement;
+        self.bumped_locally(&session, activity);
         self.send_waiting(&session, false)?;
         Ok(())
     }
@@ -423,15 +475,15 @@ impl Controller {
         Ok(request.id)
     }
     /// A short-lived account read. Never enters the prompt outbox or transcript.
-    pub fn refresh_codex_usage(&mut self, force: bool) -> Result<bool> {
+    pub fn refresh_codex_usage(&mut self) -> Result<bool> {
         if self.epoch.is_none() || !self.account.selected.as_ref().and_then(|id|self.account.sessions.iter().find(|s|&s.id==id))
             .and_then(|s|s.model.as_ref()).is_some_and(|model|model.provider=="openai-codex") {return Ok(false);}
-        if !self.codex_usage.needs_refresh(force) {return Ok(false);}
+        if !self.codex_usage.needs_refresh() {return Ok(false);}
         let now=std::time::Instant::now();
         self.codex_usage.attempted=Some(now);
-        match self.request(ClientCommand::GetCodexUsage {force}) {
+        match self.request(ClientCommand::GetCodexUsage {force: false}) {
             Ok(id) => {self.codex_usage.in_flight=Some((id,now));Ok(true)}
-            Err(_) => {self.codex_usage.error=Some("Codex quota request could not be sent; reconnect and try again.".into());Ok(false)}
+            Err(_) => {self.codex_usage.error=Some("Codex quota request could not be sent; retrying automatically.".into());Ok(false)}
         }
     }
     pub fn diagnostics(&self)->String {
@@ -631,8 +683,11 @@ impl Controller {
         account.selected = Some(request.id.clone());
         account.sessions.insert(0, Self::creating_summary(&request.id, &account.selected_project, now));
         account.last_chat_by_project.insert(account.selected_project.clone(), request.id.clone());
+        let local = LocalChat { activity: self.next_local_activity(), ..Default::default() };
+        self.store.save_chat(&self.identity, &request.id, &local)?;
         self.store.put(&self.identity, "account", &account)?;
         self.account = account;
+        self.bumped_locally(&request.id, local.activity);
         self.ensure_chat(&request.id)?;
         self.retry_create()?;
         Ok(())
@@ -640,7 +695,8 @@ impl Controller {
     fn creating_summary(id: &str, project: &str, at: u64) -> SessionSummary {
         SessionSummary { id:id.into(), project_id:project.into(), title:"Creating chat…".into(), starter:false, status:SessionStatus::Sleeping,
             detail:Some("Waiting for daemon confirmation".into()), context_usage:None, model:None,
-            parent_id:None, created_at_ms:at, updated_at_ms:at }
+            // There is no daemon activity stamp until creation is confirmed.
+            parent_id:None, created_at_ms:at, updated_at_ms:0 }
     }
     pub fn copy_missing_draft(&mut self,id:&str)->Result<()> {
         ensure!(self.account.missing_chats.contains(id),"Chat is not a local recovery");self.ensure_chat(id)?;
@@ -659,7 +715,7 @@ impl Controller {
     }
     pub fn forget_missing_chat(&mut self,id:&str)->Result<()> {
         ensure!(self.account.missing_chats.contains(id),"Refusing to forget a live source chat locally");
-        self.store.delete_chat(&self.identity,id)?;self.chats.remove(id);self.account.missing_chats.remove(id);self.account.sessions.retain(|s|s.id!=id);
+        self.store.delete_chat(&self.identity,id)?;self.chats.remove(id);self.local_activity.remove(id);self.account.missing_chats.remove(id);self.account.sessions.retain(|s|s.id!=id);
         if self.account.selected.as_deref()==Some(id) {self.account.selected=None;}
         self.store.put(&self.identity,"account",&self.account)?;self.plan_dirty.set(true);Ok(())
     }
@@ -690,6 +746,8 @@ impl Controller {
             let source = &self.chats.get(provisional).ok_or_else(|| anyhow::anyhow!("Local new chat is missing"))?.local;
             let target = self.chats.get(confirmed).map(|chat| &chat.local);
             let merged = self.store.merge_chat(&self.identity, provisional, confirmed, source, target)?;
+            self.local_activity.remove(provisional);
+            self.local_activity.insert(confirmed.into(), merged.activity);
             if let Some(chat) = self.chats.get_mut(confirmed) { chat.local = merged; }
             else {
                 let mut chat = self.chats.remove(provisional).unwrap();
@@ -712,6 +770,7 @@ impl Controller {
             }
         }
         self.account.pending_create = None;
+        self.sort_sessions();
         self.create_failed_epoch = None;
         self.requests.remove(provisional);
         self.store.put(&self.identity, "account", &self.account)?;
@@ -1009,6 +1068,7 @@ impl Controller {
                 if self.store.bind_source(&self.identity,&lineage)? {
                     self.saved_downloads.clear();
                     self.account=self.store.get(&self.identity,"account")?;
+                    self.sort_sessions();
                     for (id,chat) in &mut self.chats {chat.local=self.store.load_chat(&self.identity,id)?;chat.feed=Feed::default();}
                     self.notice=Some("Source lineage changed. Saved work was preserved, but old intents will not be automatically executed. Review any effects after the restored snapshot before retrying.".into());
                 } else {self.account.source_lineage=Some(lineage);}
@@ -1232,6 +1292,7 @@ impl Controller {
                 // Preserve a provisional local chat across server list refreshes.
                 // Remote deletion still clears a genuinely missing selection.
                 let pending = self.account.pending_create.clone();
+                let provisional = pending.as_ref().and_then(|request| self.account.sessions.iter().find(|s| s.id == request.id)).cloned();
                 let confirmed = pending.as_ref().and_then(|request| {
                     sessions.iter().any(|s| s.id == request.id).then(|| request.id.clone())
                 });
@@ -1261,10 +1322,11 @@ impl Controller {
                             ClientCommand::CreateSession { project_id, .. } => project_id.as_str(),
                             _ => unreachable!("pending create must be a create request"),
                         };
-                        self.account.sessions.insert(0, Self::creating_summary(&request.id, project, crate::clock::now_ms().unwrap_or(0)));
+                        self.account.sessions.push(provisional.unwrap_or_else(|| Self::creating_summary(&request.id, project, 0)));
                         self.retry_create()?;
                     }
                 }
+                self.sort_sessions();
                 self.account.last_chat_by_project.retain(|project, chat| self.account.sessions.iter()
                     .any(|s| s.project_id == *project && s.id == *chat));
                 if let Some(id) = &self.account.selected
@@ -1453,6 +1515,7 @@ impl Controller {
                     for id in deleted {
                         self.store.delete_chat(&self.identity, &id)?;
                         self.chats.remove(&id);
+                        self.local_activity.remove(&id);
                         self.account.read_at.remove(&id);
                         self.account.sessions.retain(|s| s.id != id);
                         if self.account.selected.as_ref() == Some(&id) { self.account.selected = None; }
@@ -1546,6 +1609,7 @@ impl Controller {
                         Some(ClientCommand::DeleteSession { session_id }) => {
                             self.store.delete_chat(&self.identity, &session_id)?;
                             self.chats.remove(&session_id);
+                            self.local_activity.remove(&session_id);
                             if self.account.selected.as_ref() == Some(&session_id) {
                                 self.account.selected = None;
                             }

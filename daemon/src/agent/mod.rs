@@ -33,6 +33,11 @@ pub fn now_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::
 impl SessionContent {
     pub async fn append(&mut self, id: &str, value: Value) -> Result<()> { self.commit(id, vec![value], None, None).await }
     pub async fn commit(&mut self, id: &str, values: Vec<Value>, queue: Option<QueueState>, receipt: Option<Receipt>) -> Result<()> {
+        // Acceptance bumps once, not again when a queued user entry is consumed.
+        let bump = receipt.as_ref().is_some_and(|r| r.command.as_deref().is_none_or(|kind| kind == "builtin"));
+        self.commit_with_activity(id, values, queue, receipt, bump).await
+    }
+    async fn commit_with_activity(&mut self, id: &str, values: Vec<Value>, queue: Option<QueueState>, receipt: Option<Receipt>, bump: bool) -> Result<()> {
         let agent = self.agent.as_mut().context("Session is not loaded")?;
         let mut projected = self.transcript.as_ref().unwrap().clone();
         let mut change = TranscriptChange::default(); let mut entries = Vec::new();
@@ -41,14 +46,14 @@ impl SessionContent {
             entry["timestamp"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true));
             let next = projected.project(&entry,false)?; projected.apply(&next)?;
             change.events.extend(next.wire.events); change.removed.extend(next.wire.removed); change.delivered.extend(next.wire.delivered);
-            change.head = next.head; change.bumps_chat |= next.bumps_chat; entries.push(entry);
+            change.head = next.head; entries.push(entry);
         }
         change.queue = queue.clone();
         // A receipt and queue become durable in the same SQLite commit. Publish
         // confirmation immediately; neither a model turn nor the WebSocket
         // response frame is needed to settle a pending edit/send on the client.
         let receipt_id = receipt.as_ref().filter(|r| r.finished).map(|r| r.id.clone());
-        let saved = agent.store.commit(id,agent.revision,entries,change.events.clone(),queue,receipt).await?;
+        let saved = agent.store.commit(id,agent.revision,entries,change.events.clone(),queue,receipt,bump).await?;
         if let Some(receipt_id) = receipt_id && !change.delivered.contains(&receipt_id) {
             change.delivered.push(receipt_id);
         }
@@ -133,7 +138,9 @@ impl AgentManager {
             let mut queue = content.transcript.as_ref().unwrap().queue.clone();
             queue.run_id = None;
             if cancelled || result.is_err() { queue.paused = true; }
-            if let Err(error) = content.save_queue(&id, queue, None).await {
+            // A run gets one completion bump, including an error/abort that
+            // needs attention. Streaming, tools and queued continuations do not.
+            if let Err(error) = content.commit_with_activity(&id, Vec::new(), Some(queue), None, true).await {
                 tracing::error!(session=%id, %error, "Could not save settled queue");
                 result = Err(error.context("Could not save settled queue"));
             }
@@ -392,7 +399,7 @@ impl AgentManager {
 
     pub(crate) async fn title_after_prompt(&self, id: &str, text: &str) {
         let Ok(Some(stored)) = self.inner.state.get(id).await else { return; };
-        if stored.title != "New chat" { self.broadcast_sessions().await; return; }
+        if stored.title != "New chat" { return; }
         let settings=self.inner.settings.get();
         let permit=self.inner.title_requests.try_acquire();
         let generated=if settings.daemon.generate_titles && permit.is_ok() {

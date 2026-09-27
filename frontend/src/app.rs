@@ -8,7 +8,7 @@ use crate::{
     render::{Interaction, Layer, Renderer, color, contains, contains_rounded},
     scroll::{Autoscroll, Drag, Lane, Scrollbar, Wheel},
     store::{Settings, Store},
-    tooltip::Tooltip,
+    tooltip::{Content, Tooltip},
     transport::Wake,
 };
 use anyhow::Result;
@@ -47,7 +47,6 @@ enum Action {
     ToggleQuickModel(String),
     ChooseModel(String, String),
     Usage,
-    RefreshUsage,
     Info(Info),
     Back,
     Send,
@@ -564,8 +563,7 @@ impl App {
             && self.context_menu.is_none()
             && (self.info_tip.contains_card(point) || self.usage.contains_card(point))
         {
-            return if self.hits.iter().rev().find(|hit|contains(hit.rect,point))
-                .is_some_and(|hit|matches!(hit.action,Action::RefreshUsage)) {CursorIcon::Pointer} else {CursorIcon::Default};
+            return CursorIcon::Default;
         }
         if self.modal.is_none()
             && self.viewer.is_none()
@@ -656,16 +654,26 @@ impl App {
             self.composer = Editor::composer(chat.local.draft.clone());
             self.dirty = true;
         }
-        if visible && self.usage.region.width > 0. && (self.usage.progress > 0. || self.usage.pinned) {
-            match self.controller.refresh_codex_usage(false) {
+        // Refresh the selected Codex account periodically, even with its card closed.
+        // The account view bounds requests to five minutes (30s after failure).
+        if visible && self.connection_visible {
+            match self.controller.refresh_codex_usage() {
                 Ok(sent) => self.dirty |= sent,
                 Err(error) => self.controller.notice = Some(error.to_string()),
             }
-            let quota = self.controller.codex_usage.text(self.controller.epoch.is_some());
+        }
+        if visible && self.usage.region.width > 0. && (self.usage.progress > 0. || self.usage.pinned) {
+            let quota = self.controller.codex_usage.content(self.controller.epoch.is_some());
             if self.controller.account.selected.as_ref().and_then(|id|self.controller.account.sessions.iter().find(|s|&s.id==id))
-                .and_then(|s|s.model.as_ref()).is_some_and(|m|m.provider=="openai-codex") && !self.usage.text.ends_with(&quota) {
+                .and_then(|s|s.model.as_ref()).is_some_and(|m|m.provider=="openai-codex") && !self.usage.content.text.ends_with(&quota.text) {
                 self.dirty=true;
             }
+        }
+        if self.connection_visible && self.info_tip.progress > 0. && self.info_tip.region.width > 0.
+            && let Info::CacheTtl(id) = &self.info_target
+            && let Some(session) = self.controller.account.sessions.iter().find(|s| &s.id == id)
+        {
+            self.dirty |= self.info_tip.content != self.controller.cache_ttl(session).details();
         }
         if self.waiting_settings
             && let Some(document) = self.controller.daemon_settings.clone()
@@ -741,6 +749,14 @@ impl App {
         self.progress_bucket=progress_bucket;
         let next_wake=if indeterminate {Some(next_wake.map_or(std::time::Duration::from_millis(80),
             |duration|duration.min(std::time::Duration::from_millis(80))))} else {next_wake};
+        // Quota reset / TTL text stays current when pinned, even while offline.
+        // Share the existing timer; closed cards do not acquire a redraw loop.
+        let timed_tooltip = self.connection_visible && self.modal.is_none() && self.viewer.is_none()
+            && self.context_menu.is_none()
+            && (self.usage.progress > 0. && self.usage.region.width > 0.
+                || self.info_tip.progress > 0. && self.info_tip.region.width > 0. && matches!(self.info_target, Info::CacheTtl(_)));
+        let next_wake = if timed_tooltip { Some(next_wake.map_or(std::time::Duration::from_secs(1),
+            |duration| duration.min(std::time::Duration::from_secs(1)))) } else { next_wake };
         self.connection_counter.sync(next_wake);
         // Redraw only when the visible counter or dot actually changes.
         self.dirty |= self.counter_bucket != counter_bucket;
@@ -1067,9 +1083,8 @@ impl App {
             && self.viewer.is_none()
             && self.context_menu.is_none()
             && (self.info_tip.contains_card(point) || self.usage.contains_card(point))
-            && !self.hits.iter().rev().find(|h|contains(h.rect,point)).is_some_and(|h|matches!(h.action,Action::RefreshUsage))
         {
-            // Cards must not activate the list/message behind them; refresh is interactive.
+            // Read-only cards must not activate the list/message behind them.
             self.dirty = true;
             return;
         }
@@ -1596,7 +1611,6 @@ impl App {
                 self.usage.pinned = !self.usage.pinned;
                 self.usage.suppressed = !self.usage.pinned;
             }
-            Action::RefreshUsage => {self.controller.refresh_codex_usage(true)?;}
             Action::New => {
                 self.controller.new_chat()?;
                 self.show_chats = false;
@@ -3434,7 +3448,7 @@ impl App {
             true,
         );
         self.usage.region = usage_rect;
-        self.usage.text = usage_text;
+        self.usage.content = usage_text;
         if usage.is_some()
             && (!connected
                 || !self.controller.chats[&session].feed.synchronized
@@ -3442,15 +3456,15 @@ impl App {
                     !matches!(s.status, SessionStatus::Idle | SessionStatus::Running)
                 }))
         {
-            self.usage.text.push_str("\nLast known value");
+            self.usage.content.line().dim("Last known value");
         }
         match summary.as_ref().and_then(|s|s.model.as_ref()).map(|m|m.provider.as_str()) {
             Some("openai-codex") => {
-                self.usage.text.push_str("\n");
-                self.usage.text.push_str(&self.controller.codex_usage.text(connected));
+                self.usage.content.line().line();
+                self.usage.content.append(self.controller.codex_usage.content(connected));
             }
-            Some(_) => self.usage.text.push_str("\nAccount quota unavailable for this provider"),
-            None => self.usage.text.push_str("\nAccount quota unavailable (model unknown)"),
+            Some(_) => { self.usage.content.line().line().dim("Account quota unavailable for this provider"); }
+            None => { self.usage.content.line().line().dim("Account quota unavailable (model unknown)"); }
         }
         let can_send = !self.composer.value.trim().is_empty() || !files.is_empty();
         self.icon_button(
@@ -3898,42 +3912,7 @@ impl App {
         {
             return;
         }
-        let s = self.scale;
-        let w = (300. * s).min(bounds.width - 16. * s);
-        let refresh = self.controller.epoch.is_some() && self.controller.account.selected.as_ref()
-            .and_then(|id|self.controller.account.sessions.iter().find(|session|&session.id==id))
-            .and_then(|session|session.model.as_ref()).is_some_and(|model|model.provider=="openai-codex");
-        let footer = if refresh {32. * s} else {0.};
-        let h = (self.usage.text.lines().count() as f32 * 17. + 20.) * s + footer;
-        let anchor = self.usage.region;
-        let x = (anchor.x + anchor.width / 2. - w / 2.)
-            .clamp(bounds.x + 8. * s, bounds.x + bounds.width - w - 8. * s);
-        let bottom = anchor.y - 8. * s;
-        let full = Rect::new(x, bottom - h, w, h);
-        self.usage.card = full;
-        let t = self.usage.progress;
-        let animated = Rect::new(x + w * (1. - t) / 2., bottom - h * t, w * t, h * t);
-        // Opaque X/Y expansion from the indicator. No opacity fade.
-        layer.rounded_rect(animated, 6. * s, color(0xe5e1e6));
-        self.renderer.clipped_label(
-            layer,
-            &self.usage.text,
-            Rect::new(
-                full.x + 10. * s,
-                full.y + 10. * s,
-                full.width - 20. * s,
-                full.height - 20. * s - footer,
-            ),
-            12. * s,
-            color(0x303038),
-            false,
-            animated,
-        );
-        if refresh && t >= 0.99 {
-            button(&mut self.renderer, layer, &mut self.hits,
-                Rect::new(full.x + 10. * s, full.y + full.height - 30. * s, full.width - 20. * s, 24. * s),
-                "Refresh quota", Action::RefreshUsage, s, false);
-        }
+        self.usage.frame(&mut self.renderer, layer, "usage", bounds, self.scale, 320., true);
     }
     fn info_frame(&mut self, layer: &mut Layer, bounds: Rect) {
         if self.info_tip.progress <= 0.
@@ -3944,8 +3923,8 @@ impl App {
         {
             return;
         }
-        self.info_tip.text = match &self.info_target {
-            Info::Connection => self.controller.health.details(&self.controller.connection,Instant::now()),
+        self.info_tip.content = match &self.info_target {
+            Info::Connection => self.controller.health.tooltip(&self.controller.connection,Instant::now()),
             Info::CacheTtl(id) => {
                 let Some(session) = self
                     .controller
@@ -3956,60 +3935,14 @@ impl App {
                 else {
                     return;
                 };
-                self.controller
-                    .cache_ttl(session)
-                    .details(self.controller.epoch.is_some())
+                self.controller.cache_ttl(session).details()
             }
         };
-        let s = self.scale;
-        let margin = 8. * s;
-        // Cover the New chat button below, rather than leave its bright edge
-        // peeking out from behind a narrow connection card.
-        let width = if self.info_target == Info::Connection { 300. } else { 360. };
-        let w = (width * s).min((bounds.width - margin * 2.).max(1.));
-        let h = (self.renderer.label_height(
-            &self.info_tip.text,
-            (w - 20. * s).max(1.),
-            12. * s,
-            false,
-        ) + 20. * s)
-            .min((bounds.height - margin * 2.).max(1.));
-        let anchor = self.info_tip.region;
-        let x = (anchor.x + anchor.width / 2. - w / 2.).clamp(
-            bounds.x + margin,
-            (bounds.x + bounds.width - margin - w).max(bounds.x + margin),
-        );
-        let y = (anchor.y + anchor.height + 6. * s).clamp(
-            bounds.y + margin,
-            (bounds.y + bounds.height - margin - h).max(bounds.y + margin),
-        );
-        let full = Rect::new(x, y, w, h);
-        self.info_tip.card = full;
-        let t = self.info_tip.progress;
-        let pivot = (anchor.x + anchor.width / 2.).clamp(full.x, full.x + full.width);
-        let animated = Rect::new(pivot + (x - pivot) * t, y, w * t, h * t);
-        layer.rounded_rect(animated, 6. * s, color(0xe5e1e6));
-        // Keep revealed text inside the rounded mask as the opaque card expands.
-        let clip = Rect::new(
-            animated.x + 6. * s,
-            animated.y + 6. * s,
-            (animated.width - 12. * s).max(0.),
-            (animated.height - 12. * s).max(0.),
-        );
-        self.renderer.clipped_label(
-            layer,
-            &self.info_tip.text,
-            Rect::new(
-                full.x + 10. * s,
-                full.y + 10. * s,
-                (full.width - 20. * s).max(1.),
-                (full.height - 20. * s).max(0.),
-            ),
-            12. * s,
-            color(0x303038),
-            false,
-            clip,
-        );
+        // Cover the New chat button beneath the connection card, including on phones.
+        let width = if self.info_target == Info::Connection {
+            if bounds.width / self.scale < 760. { bounds.width / self.scale - 16. } else { 300. }
+        } else { 180. };
+        self.info_tip.frame(&mut self.renderer, layer, "info", bounds, self.scale, width, false);
     }
     fn settings_frame(&mut self, layer: &mut Layer, b: Rect) {
         let s = self.scale;
@@ -4777,19 +4710,30 @@ pub(crate) fn code(text: &str) -> String {
     format!("{fence}\n{text}\n{fence}")
 }
 
-fn context_usage_display(usage: Option<ContextUsage>) -> (Option<f32>, String) {
+fn context_usage_display(usage: Option<ContextUsage>) -> (Option<f32>, Content) {
+    use crate::tooltip::{INK, ACCENT, WARNING, DANGER};
+    let mut content = Content::default();
+    content.strong("Context", INK);
+    let mut ratio = None;
     match usage {
         Some(ContextUsage { tokens: Some(used), context_window: Some(capacity), .. }) if capacity > 0 => {
-            let ratio = used as f32 / capacity as f32;
-            (Some(ratio), format!("Estimated context usage: {:.0}%\n{} of {} tokens", ratio * 100., count(used), count(capacity)))
+            let used_ratio = used as f32 / capacity as f32;
+            ratio = Some(used_ratio);
+            let tint = if used_ratio >= 0.95 { DANGER } else if used_ratio >= 0.8 { WARNING } else { ACCENT };
+            content.dim(" · ").strong(format!("~{:.0}%", used_ratio * 100.), tint).dim(" used")
+                .line().dim(format!("{} of {} tokens", count(used), count(capacity)));
         }
-        Some(ContextUsage { tokens: Some(used), .. }) =>
-            (None, format!("Estimated context used: {} tokens\nCapacity unknown", count(used))),
-        Some(ContextUsage { context_window: Some(capacity), .. }) if capacity > 0 =>
-            (None, format!("Context usage unknown\nCapacity: {} tokens", count(capacity))),
-        Some(_) => (None, "Context usage unknown\nCapacity unknown".into()),
-        None => (None, "Context usage unavailable".into()),
+        Some(ContextUsage { tokens: Some(used), .. }) => {
+            content.dim(" · ").strong(format!("~{}", count(used)), ACCENT).dim(" tokens used")
+                .line().dim("Capacity unknown");
+        }
+        Some(ContextUsage { context_window: Some(capacity), .. }) if capacity > 0 => {
+            content.dim(" · usage unknown").line().dim(format!("Capacity: {} tokens", count(capacity)));
+        }
+        Some(_) => { content.dim(" · usage unknown").line().dim("Capacity unknown"); }
+        None => { content.dim(" · usage unavailable"); }
     }
+    (ratio, content)
 }
 
 fn count(n: u64) -> String {
@@ -4808,6 +4752,8 @@ fn count(n: u64) -> String {
 mod editor_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod connection_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod tooltip_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod project_tests;
 #[cfg(all(test, not(target_os = "android")))]
@@ -4832,15 +4778,15 @@ mod usage_tests {
         let unknown_capacity = Some(ContextUsage { tokens: Some(1_024), context_window: None });
         let (ring, text) = context_usage_display(unknown_capacity);
         assert_eq!(ring, None);
-        assert_eq!(text, "Estimated context used: 1,024 tokens\nCapacity unknown");
-        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: None })).1,
-            "Context usage unknown\nCapacity unknown");
-        assert_eq!(context_usage_display(None).1, "Context usage unavailable");
+        assert_eq!(text.text, "Context · ~1,024 tokens used\nCapacity unknown");
+        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: None })).1.text,
+            "Context · usage unknown\nCapacity unknown");
+        assert_eq!(context_usage_display(None).1.text, "Context · usage unavailable");
 
         let (ring, text) = context_usage_display(Some(ContextUsage { tokens: Some(1_024), context_window: Some(4_096) }));
         assert_eq!(ring, Some(0.25));
-        assert_eq!(text, "Estimated context usage: 25%\n1,024 of 4,096 tokens");
-        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: Some(4_096) })).1,
-            "Context usage unknown\nCapacity: 4,096 tokens");
+        assert_eq!(text.text, "Context · ~25% used\n1,024 of 4,096 tokens");
+        assert_eq!(context_usage_display(Some(ContextUsage { tokens: None, context_window: Some(4_096) })).1.text,
+            "Context · usage unknown\nCapacity: 4,096 tokens");
     }
 }
