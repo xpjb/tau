@@ -18,6 +18,7 @@ pub fn populate(c: &mut Controller) -> Result<()> {
             provider: "anthropic".into(),
             model_id: "claude-sonnet-4".into(),
         }),
+        thinking_level: Some("high".into()),
         parent_id: None,
         created_at_ms: 1,
         updated_at_ms: 4,

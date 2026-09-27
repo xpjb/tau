@@ -388,6 +388,10 @@ pub struct SessionSummary {
     pub context_usage: Option<ContextUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<SessionModel>,
+    /// Saved per-chat selection, not the current default for new chats.
+    /// Older local account caches may not have received it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     pub parent_id: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,

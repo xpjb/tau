@@ -1,3 +1,30 @@
+# Current rollout hold — composer thinking level / beta 0.7.8 preparation
+
+**Do not restart or deploy the daemon until the user explicitly confirms both
+Windows and Android packages have been downloaded.** The user corrected the
+merge destination to `tau2-integration`, not master. Local `tau2-integration`
+tracks/publishes to `origin/tau2`. Stable/master must remain untouched.
+
+Feature branch/worktree: `fix/tau2-composer-thinking` /
+`/root/tau2-composer-thinking`. Start from the already-integrated checkpoint-watch
+change `2517e9c` (protocol 20). The thinking field is additive, with old-cache
+compatibility; it does not require another protocol or storage-schema bump.
+The running beta remains **0.7.7 / protocol 19**, so the new client packages need
+the matching daemon after the download acknowledgement. Do not mistake package
+build completion or attachment delivery for that acknowledgement.
+
+Preparation command, in `/root/tau2-integration`, **without `--deploy`**:
+`scripts/release-beta.sh --merge fix/tau2-composer-thinking --version 0.7.8 --push`.
+Send the two paths in `dist/releases/0.7.8/delivery.json`, Windows then Android.
+Only after the user's confirmation, the same release can reuse its receipts via
+`scripts/release-beta.sh --version 0.7.8 --push --deploy` (beta only).
+
+Three focused and fourteen related nextest tests passed; see `frontend/QA.md`. No production service
+changes or device acceptance are claimed by source validation. The release
+record below will be updated with actual package and delivery results.
+
+---
+
 # Current Tau2 status — 2026-09-27 — beta 0.7.7 / protocol 19
 
 This status supersedes the older prerelease notes below. Release commit `4b92d28`

@@ -66,6 +66,13 @@ body hashes let the client reuse its own content rather than download it again.
 See [connection and local-content design](docs/connection-and-local-content.md)
 for the behavior, compatibility and validation.
 
+Above the text box, the model slug is followed by **Thinking: LEVEL**. This is
+that chat's saved selection (including `off`), not the current default for new
+chats. Long model slugs shorten before the thinking label on narrow screens.
+The value follows confirmed model/thinking changes and remains available from
+the local account cache offline; older caches show **Thinking: unknown** until
+metadata arrives. The chat thinking editor is prefilled with the same selection.
+
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
 context capacity comes from the **selected provider's own catalog** when available:

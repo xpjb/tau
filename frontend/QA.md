@@ -1,3 +1,25 @@
+# Composer thinking-level indicator
+
+The shared Windows/Android composer status row now reports the saved per-chat
+`thinkingLevel` beside the provider/model slug, including `off`. It reserves the
+thinking label's measured width and ellipsizes the model first. Unknown old-cache
+metadata is explicit, never guessed from daemon defaults. The thinking dialog
+starts with the saved level. Creating/selecting-model notices retain their existing
+send-safety behavior until metadata is confirmed.
+
+Three focused nextest tests passed (`3cd6851d-64af-44b2-bd0c-028953d6289e`):
+real native command/metadata replication, model defaults and overrides, catalogue
+revision fencing, sleep/clone/reload; old-cache compatibility and offline local
+persistence; actual GPU desktop, 320dp phone and 2.5x phone shaping of all seven
+levels plus unknown, and the prefilled editor. Desktop/phone screenshots were
+inspected at `/tmp/tau2-thinking-previews/`. This is not physical-device acceptance.
+Fourteen related chat-activity, catalogue and offline-create regression tests also
+passed (`d429613e-e308-4e61-93d8-f3541eecd2ec`). No full suite was repeated.
+Managed Cargo only; no Clippy or built-in test runner. Release/deployment status
+is recorded at the top of `HANDOFF.md` and in `INTEGRATION.md`.
+
+---
+
 # Alerts and content/control errors — September 27, 2026 (released in beta 0.7.7)
 
 - Four-second popups, measured 16dp text, compact wrapping and a centered vector

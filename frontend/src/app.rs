@@ -26,6 +26,7 @@ use tau_protocol::*;
 mod projects;
 mod attachments;
 mod notices;
+mod composer_status;
 
 #[derive(Clone)]
 enum Action {
@@ -1970,7 +1971,8 @@ impl App {
                     ),
                     "thinking" => (
                         "off / minimal / low / medium / high / xhigh / max",
-                        String::new(),
+                        self.controller.account.sessions.iter().find(|s| s.id == session)
+                            .and_then(|s| s.thinking_level.clone()).unwrap_or_default(),
                     ),
                     "fast" => ("on / off / status", String::new()),
                     _ => ("Optional compaction instructions", String::new()),
@@ -3383,23 +3385,18 @@ impl App {
             Rect::new(b.x, composer_top, b.width, composer_h),
             color(0x0e141b),
         );
-        let model = summary
-            .as_ref()
-            .and_then(|s| s.model.as_ref())
-            .map(|m| format!("{}/{}", m.provider, m.model_id))
-            .unwrap_or_else(|| "Model loads when the worker starts".into());
         let creating = self.controller.is_creating(&session);
         let choosing = self.controller.chats[&session].model_request.is_some();
-        self.renderer.label(
-            chrome,
-            if creating { "Creating chat… Sends are saved locally." }
-                else if choosing { "Selecting model… Sends are saved locally." }
-                else { &model },
-            Rect::new(x, composer_top + 10. * s, (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s),
-            12. * s,
-            color(0x82909f),
-            false,
-        );
+        let status_rect = Rect::new(x, composer_top + 10. * s,
+            (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s);
+        if creating || choosing {
+            self.renderer.label(chrome,
+                if creating { "Creating chat… Sends are saved locally." }
+                    else { "Selecting model… Sends are saved locally." },
+                status_rect, 12. * s, color(0x82909f), false);
+        } else {
+            self.composer_model_status(chrome, summary.as_ref(), status_rect);
+        }
         if creating && self.controller.epoch.is_some() {
             button(&mut self.renderer, chrome, &mut self.hits,
                 Rect::new(x + width - 88. * s, composer_top + 6. * s, 88. * s, 24. * s),
@@ -4838,3 +4835,6 @@ mod download_render_tests;
 
 #[cfg(all(test, not(target_os = "android")))]
 mod download_interaction_tests;
+
+#[cfg(all(test, not(target_os = "android")))]
+mod composer_status_tests;

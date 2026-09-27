@@ -722,7 +722,7 @@ impl Controller {
     }
     fn creating_summary(id: &str, project: &str, at: u64) -> SessionSummary {
         SessionSummary { id:id.into(), project_id:project.into(), title:"Creating chat…".into(), starter:false, status:SessionStatus::Sleeping,
-            detail:Some("Waiting for daemon confirmation".into()), context_usage:None, model:None,
+            detail:Some("Waiting for daemon confirmation".into()), context_usage:None, model:None, thinking_level:None,
             // There is no daemon activity stamp until creation is confirmed.
             parent_id:None, created_at_ms:at, updated_at_ms:0 }
     }

@@ -244,6 +244,7 @@ impl StateStore {
             let raw: String = tx.query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| row.get(0)).context("Unknown session")?;
             let mut session: StoredSession = serde_json::from_str(&raw)?;
             if session.revision != revision { bail!("Session changed in another writer; close and reopen it"); }
+            let previous_thinking = session.thinking.clone();
             if let Some(receipt) = receipt {
                 anyhow::ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1)",[&receipt.id],|r|r.get::<_,bool>(0))?,"Operation ID belongs to another control mutation");
                 tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,receipt.id,serde_json::to_string(&receipt)?])?;
@@ -274,6 +275,11 @@ impl StateStore {
                 session.next_order = session.next_order.max(event.order + 1);
                 tx.execute("INSERT INTO events(session_id,position,id,entry_id,data) VALUES(?1,?2,?3,?4,?5)",
                     params![id,event.order,event.id,event.entry_id,serde_json::to_string(&event)?])?;
+            }
+            // Thinking is catalogue metadata too. Fence in-flight page walks in
+            // the same commit, without changing schema or bumping chat activity.
+            if session.thinking != previous_thinking {
+                tx.execute("UPDATE catalogue_clock SET revision=revision+1", [])?;
             }
             session.revision += 1;
             if bump { session.updated_at_ms = activity(&tx)?; }
