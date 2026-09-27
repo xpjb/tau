@@ -333,3 +333,31 @@ SHA-256:
 Android package `app.tau.rust` is versionCode **11**, versionName **0.7.6-beta**,
 not debuggable; signing identity, embedded payload, APK checksums, alignment, and
 16 KiB ELF alignment passed release verification. No physical Android test was run.
+
+
+## Beta 0.7.7 / protocol 19 — 2026-09-27
+
+Downloads merge `70b0444` restores Tau1-style text actions. Release commit
+`4b92d28` updates the packages to **0.7.7** and is pushed to `origin/tau2`.
+Protocol 19 is unchanged. The release also includes the merged alert/content and
+connection-tooltip fixes.
+
+The managed release workflow built and verified the daemon, Windows x64 installer
+and Android ARM64 APK, then deployed beta only. Beta reports **0.7.7 / protocol 19**,
+PID **1429355**, and runs the release daemon (SHA-256
+`8e74861fbf46084156b00fabece5d1f6f3461c7231b405244052f4f5b0e2ede7`). Before
+restart, a read-only check found 26 sessions, no running sessions, no queued
+prompts, one idle session and 25 sleeping sessions. No backup was taken. Stable Tau
+remains active at PID **474496** and was not restarted or changed.
+
+Windows x64 was verified and sent:
+`dist/Tau-Beta-0.7.7-windows-x64.exe` (SHA-256
+`b4872c942783a128653264cdd7999a7da384689da4ab71ee5e584504a281c0e4`). Android
+ARM64 was verified and sent: `dist/Tau-Beta-0.7.7-android-arm64-v8a.apk`, package
+`app.tau.rust`, versionCode **12**, versionName **0.7.7-beta** (SHA-256
+`2fa3befe4f8cc96b212a84a61556a686853d9c30a580d0d60cbe7f3aa4a2a494`). Both
+package verifiers passed. No physical Windows or Android acceptance was run.
+
+The five focused downloads tests passed on the feature branch. A merged-tree nextest
+retry timed out waiting for the shared Cargo lock before the tests started; it was
+not a test failure. No full suite was rerun for this release.

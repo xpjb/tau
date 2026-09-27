@@ -1,4 +1,4 @@
-# Alerts and content/control errors — September 27, 2026 (unreleased)
+# Alerts and content/control errors — September 27, 2026 (released in beta 0.7.7)
 
 - Four-second popups, measured 16dp text, compact wrapping and a centered vector
   close icon. Repeated identical updates do not keep an alert alive; idle expiry
@@ -14,14 +14,14 @@
 - Workspace nextest: **230/230 passed**, including real-daemon/controller,
   impaired-link, crash-recovery and new concurrency/alert regressions. Inspected
   headless desktop/phone/2.5× phone previews; physical-device acceptance remains
-  open. No package, service restart, schema or wire-format change.
+  open. No schema or protocol change; these fixes shipped in beta 0.7.7.
 
 See [the causes, scope and validation record](../docs/alerts-and-contention.md).
 The contention timing used a synthetic local write, not a live-user measurement.
 
 ---
 
-# Inline downloads — Tau1 text actions, September 27, 2026 (unreleased)
+# Inline downloads — Tau1 text actions, September 27, 2026 (released in beta 0.7.7)
 
 - Restored Tau1's **Download / Save / Cancel / Retry / Open / Show / Extract** text
   actions. Tau2's existing View action is text as well. Removed the custom action
@@ -45,15 +45,16 @@ The contention timing used a synthetic local write, not a live-user measurement.
   timeout (exit 75); no bypass or fresh Android-pass claim.
 - The previous save-limit, retry, image-placeholder and download-lifecycle fixes
   remain. No change to network, OS actions, scoped records or ZIP extraction safety.
-- No Clippy, production data, paid provider, OS viewer, packaging/version bump or
-  deployment. Physical Windows/Android acceptance remains unclaimed.
+- Feature-branch QA used no Clippy, production data, paid provider or OS viewer.
+  The changes shipped in beta 0.7.7; physical Windows/Android acceptance remains
+  unclaimed.
 
 ![Desktop text actions in chat and sidebar](gallery/downloads-desktop.png)
 ![Phone text actions](gallery/downloads-phone.png)
 
 ---
 
-# Rich tooltips — September 27, 2026 (unreleased)
+# Rich tooltips — September 27, 2026 (released in beta 0.7.7)
 
 - Quota, cache TTL and connection cards use native inline bold/colour, with muted
   labels and darker, readable status accents. Text is literal, not parsed markup.
@@ -69,7 +70,7 @@ The contention timing used a synthetic local write, not a live-user measurement.
   hover/touch pinning, click-through protection and real GPU wrapping at 1000×700,
   360×720 and 1080×2160 (2.5×). Inspected previews include long labels/errors.
   Set `TAU_TOOLTIP_PREVIEW_DIR` when running `app::tooltip_tests` to save PNGs.
-  No packages, service restart or physical-device acceptance.
+  These changes shipped in beta 0.7.7; physical-device acceptance remains open.
 
 ---
 

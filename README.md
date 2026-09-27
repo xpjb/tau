@@ -4,10 +4,10 @@ Rust client, daemon, coding agent, shared protocol, Markdown and verified file t
 No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Python title
 helper. Android retains a small Java bridge for Android OS APIs.
 
-**0.7.6 beta · protocol 19 (Codex account quota + native block sync).**
-Use a matched beta daemon and client. The daemon is deployed; the Windows x64
-installer was sent. Android ARM64 was built but not sent. See `INTEGRATION.md`
-for the release record. This is a separate installation, not a stable-Tau cutover.
+**0.7.7 beta · protocol 19 (Tau1-style download text actions + alert/content fixes).**
+The daemon is deployed; Windows x64 and Android ARM64 packages were verified and
+sent. Protocol 19 is unchanged. See `INTEGRATION.md` for the release record. This
+is a separate installation, not a stable-Tau cutover.
 The maintained frontend branch is `tau2-rust-frontend`; the integrated release
 branch is `tau2`. Frontend work lands on the frontend branch before integration.
 
@@ -64,7 +64,7 @@ and a one-second minimum between attempt starts, not a growing post-failure wait
 Sent text stays visible through acknowledgement and replication; authenticated
 body hashes let the client reuse its own content rather than download it again.
 See [connection and local-content design](docs/connection-and-local-content.md)
-for the unreleased changes, compatibility and validation.
+for the behavior, compatibility and validation.
 
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
@@ -152,7 +152,7 @@ drafts, and read markers remain account-scoped client state. Existing `projectId
 wire fields and SQLite names remain unchanged so beta history stays compatible.
 Concurrent topic edits
 use revision checks and preserve the losing editor’s text. Both clients and daemon
-must use protocol 19 in beta 0.7.6. Stable Tau is unchanged.
+must use protocol 19 in beta 0.7.7. Stable Tau is unchanged.
 
 The native rewrite is merged into the beta release line. See [native block sync](docs/tau2-block-sync.md) for the protocol, bounds, recovery and restore contract.
 
@@ -164,8 +164,8 @@ sequential low-resource builds, package verification and an ordered delivery
 manifest. No tests or service changes run implicitly:
 
 ```sh
-scripts/release-beta.sh --plan --version 0.7.7 --push --deploy
-scripts/release-beta.sh --version 0.7.7 --push --deploy
+scripts/release-beta.sh --plan --version 0.7.8 --push --deploy
+scripts/release-beta.sh --version 0.7.8 --push --deploy
 ```
 
 Choose the next unused version. Add `--merge feat/name` when needed; `--check` and

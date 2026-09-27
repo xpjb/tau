@@ -1,21 +1,23 @@
-# Current Tau2 status — 2026-09-27 — beta 0.7.6 / protocol 19
+# Current Tau2 status — 2026-09-27 — beta 0.7.7 / protocol 19
 
-This status supersedes the older prerelease notes below. The source release commit
-`760754b` is pushed to `origin/tau2`. Mobile QA was already integrated at
-`c491518`; Codex quota merged at `ef0de95`, followed by the protocol-19 bump
-`7c423ad`.
+This status supersedes the older prerelease notes below. Release commit `4b92d28`
+and downloads merge `70b0444` are pushed to `origin/tau2`. The downloads change
+restores Tau1-style text actions. Protocol 19 is unchanged.
 
-- Beta is active at PID **1351456** and reports **0.7.6 / protocol 19**. Stable
-  Tau remains active at PID **474496** and the release script's stable-identity
-  check passed.
-- Before restart, the read-only check found 23 sessions, no running sessions,
-  no queued prompts, one idle session with persisted `needs_turn`, and 22 sleeping.
-- Seven focused Codex quota tests passed (128 unrelated tests skipped); no full
-  suite, live Codex quota request, or physical-device acceptance was run.
-- Windows x64 installer was verified and sent: `dist/Tau-Beta-0.7.6-windows-x64.exe`,
-  10,021,888 bytes, SHA-256 `9e8c0fc9caac3a2d68eca5e417dbe26f7e5291d2a48243ed2d4c035e7acd6be0`.
-- Android ARM64 was built and verified, but not sent. No database backup was taken;
-  the release script does not make one. Detailed release facts are in `INTEGRATION.md`.
+- Beta is active at PID **1429355** and reports **0.7.7 / protocol 19**. Stable
+  Tau remains active at PID **474496**; it was not restarted or changed.
+- Before restart, the read-only check found 26 sessions, no running sessions,
+  no queued prompts, one idle session and 25 sleeping sessions.
+- The release workflow built the daemon, Windows x64 installer and Android ARM64
+  APK; package checks passed. The five focused downloads tests passed on the
+  feature branch. The merged-tree rerun timed out waiting for Cargo's shared lock;
+  it did not reach the tests. No full suite or physical-device test was run.
+- Windows x64 was verified and sent: `dist/Tau-Beta-0.7.7-windows-x64.exe`,
+  SHA-256 `b4872c942783a128653264cdd7999a7da384689da4ab71ee5e584504a281c0e4`.
+- Android ARM64 was verified and sent: `dist/Tau-Beta-0.7.7-android-arm64-v8a.apk`,
+  versionCode **12**, SHA-256 `2fa3befe4f8cc96b212a84a61556a686853d9c30a580d0d60cbe7f3aa4a2a494`.
+  No database backup was taken; the release script does not make one. Detailed
+  release facts are in `INTEGRATION.md`. Physical Windows/Android acceptance remains open.
 - The separate remove-pause work remains unmerged at WIP commit `d561c65` and was
   not included in this release.
 

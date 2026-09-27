@@ -3,8 +3,8 @@
 Run from the **`tau2-integration` worktree**, not stable/master:
 
 ```sh
-scripts/release-beta.sh --plan --version 0.7.7 --push --deploy
-scripts/release-beta.sh --version 0.7.7 --push --deploy
+scripts/release-beta.sh --plan --version 0.7.8 --push --deploy
+scripts/release-beta.sh --version 0.7.8 --push --deploy
 ```
 
 Add `--merge feat/name` to merge and push a local feature first. Choose the next
@@ -60,7 +60,7 @@ The current host has no standalone Tau attachment CLI, so manifest generation is
 If a real delivery adapter exists, pass:
 
 ```sh
-scripts/release-beta.sh --version 0.7.7 --push --deploy \
+scripts/release-beta.sh --version 0.7.8 --push --deploy \
   --send-command /absolute/path/to/send-file-adapter
 ```
 
@@ -81,7 +81,7 @@ unchanged. Android retains its unstripped library for symbolication.
 
 The change was checked with a targeted managed Windows launcher build (0.39 s,
 no warning), not another app-suite run or redeployment. At the time, the 0.7.4
-packages and running services remained unchanged. The later 0.7.6 release is
+packages and running services remained unchanged. The later 0.7.7 release is
 recorded in `INTEGRATION.md`.
 
 ## Lightweight maintenance checks
