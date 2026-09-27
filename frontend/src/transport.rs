@@ -1,7 +1,7 @@
 //! Bounded authenticated WebSocket control + one shared native data connection. Requests carry a
 //! connection epoch: commands queued for a dead socket can never run on its successor.
 use crate::{
-    connection::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
+    connection::{CONNECT_TIMEOUT, MIN_CONNECT_INTERVAL, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
     store::{LocalFile, Settings},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -43,7 +43,9 @@ pub enum Command {
     CancelDownload(String),
 }
 pub enum Event {
-    Ready(u64),
+    Connecting { attempt: u64, at: Instant },
+    RetryScheduled { at: Instant },
+    Ready { epoch: u64, at: Instant },
     Source(u64,String),
     HeartbeatSent { epoch: u64, at: Instant },
     HeartbeatReply { epoch: u64, at: Instant, rtt: Duration },
@@ -151,7 +153,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         }
     };
     let mut epoch = 0u64;
-    let mut delay = 1;
+    let mut attempt = 0;
     let mut jobs = tokio::task::JoinSet::new();
     let (prepared_tx,mut prepared_rx) = mpsc::channel::<(u64,Result<ClientRequest,(String,String)>)>(8);
     let (resolved_tx,mut resolved_rx)=mpsc::channel::<(u64,String,u64,Result<ServerMessage>,tokio::sync::OwnedSemaphorePermit,usize)>(8);
@@ -159,8 +161,20 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
     let mut generations=HashMap::<String,u64>::new();let mut generation=0u64;
     let mut downloads = HashMap::<String, tokio::sync::watch::Sender<bool>>::new();
     loop {
-        let connection =
-            tokio::time::timeout(Duration::from_secs(20), connect_async_with_config(request.clone(),Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_CONTROL_BYTES)).max_frame_size(Some(MAX_CONTROL_BYTES))),false));
+        attempt += 1;
+        let attempt_at = Instant::now();
+        if !events.send(Event::Connecting { attempt, at: attempt_at }).await { break; }
+        // One acquisition deadline includes DNS/TCP/TLS/upgrade AND Tau hello.
+        // No hidden second timeout after the WebSocket upgrade.
+        let connection = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            let (mut socket, _) = connect_async_with_config(request.clone(),Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                .max_message_size(Some(MAX_CONTROL_BYTES)).max_frame_size(Some(MAX_CONTROL_BYTES))),false).await.context("Cannot reach Tau")?;
+            let hello = socket.next().await.context("No hello")??;
+            let Message::Text(hello) = hello else { bail!("Expected Tau hello"); };
+            ensure!(hello.len() <= MAX_CONTROL_BYTES,"Tau hello exceeds the control limit");
+            let ServerMessage::Hello { protocol_version, lineage, .. } = serde_json::from_str(&hello)? else { bail!("Expected Tau hello"); };
+            Ok::<_,anyhow::Error>((socket,protocol_version,lineage))
+        });
         tokio::pin!(connection);
         let socket = loop {
             tokio::select! {
@@ -178,11 +192,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             }
         };
         let outcome: Result<()> = async {
-            let (mut socket, _) = socket.context("Connection timed out")?.context("Cannot reach Tau")?;
-            let hello = tokio::time::timeout(Duration::from_secs(15), socket.next()).await?.context("No hello")??;
-            let Message::Text(hello) = hello else { bail!("Expected Tau hello"); };
-            ensure!(hello.len() <= MAX_CONTROL_BYTES,"Tau hello exceeds the control limit");
-            let ServerMessage::Hello { protocol_version, lineage, .. } = serde_json::from_str(&hello)? else { bail!("Expected Tau hello"); };
+            let (socket, protocol_version, lineage) = socket.context("Connection timed out")??;
             if protocol_version != PROTOCOL_VERSION {
                 events.send(Event::Fatal(format!("Protocol {protocol_version} requires a matching client (this client uses {PROTOCOL_VERSION})"))).await;
                 commands.close();
@@ -205,12 +215,10 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             }
             epoch += 1;
             generations.clear();
-            let connected_at=Instant::now();let mut good_probes=0u32;
+            let connected_at=Instant::now();
             if !events.send(Event::Source(epoch,lineage.context("Missing source lineage")?)).await {return Ok(());}
-            if !events.send(Event::Ready(epoch)).await { return Ok(()); }
-            let mut heartbeat = tokio::time::interval_at(
-                tokio::time::Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
-            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            if !events.send(Event::Ready { epoch, at: connected_at }).await { return Ok(()); }
+            let mut next_ping = connected_at + HEARTBEAT_INTERVAL;
             let mut waiting: Option<(Vec<u8>, Instant)> = None;
             let mut metrics=tokio::time::interval_at(tokio::time::Instant::now()+Duration::from_secs(5),Duration::from_secs(5));
             let mut renew_blocks=Instant::now()+Duration::from_secs(1800);
@@ -332,8 +340,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             Message::Pong(payload) => {
                                 if waiting.as_ref().is_some_and(|(bytes, _)| bytes.as_slice() == payload.as_ref()) {
                                     let (_, sent) = waiting.take().unwrap();
-                                    let at = Instant::now();good_probes+=1;
-                                    if healthy_for_backoff(good_probes,connected_at.elapsed()) {delay=1;}
+                                    let at = Instant::now();
                                     if !events.send(Event::HeartbeatReply { epoch, at, rtt: at.duration_since(sent) }).await { return Ok(()); }
                                 }
                             }
@@ -341,11 +348,11 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             _ => {},
                         }
                     },
-                    _ = heartbeat.tick() => {
-                        if waiting.is_some() { continue; } // Timeout is independent of the probe cadence.
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_ping)), if waiting.is_none() => {
                         let payload = uuid::Uuid::new_v4().as_bytes().to_vec();
                         health.try_send(Message::Ping(payload.clone().into())).context("Control health writer is full")?;
                         let sent = Instant::now();
+                        next_ping = sent + HEARTBEAT_INTERVAL;
                         waiting = Some((payload, sent));
                         if !events.send(Event::HeartbeatSent { epoch, at: sent }).await { return Ok(()); }
                         if sent>=renew_blocks {
@@ -366,7 +373,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         // Classify without printing headers, request bodies, or token-bearing URLs.
         let error = outcome.unwrap_err();
         let detail = if error.is::<HeartbeatTimeout>() {
-            "Ping timed out. Reconnecting…"
+            "Ping timed out"
         } else if let Some(error) = error.downcast_ref::<tokio_tungstenite::tungstenite::Error>() {
             use tokio_tungstenite::tungstenite::Error;
             match error {
@@ -381,27 +388,28 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                     "TLS connection failed. Check the server certificate and HTTPS URL."
                 }
                 Error::Io(_) => {
-                    "Cannot reach the daemon. Check the URL, port, and Tailscale connection. Retrying…"
+                    "Cannot reach the daemon. Check the URL, port, and Tailscale connection."
                 }
                 _ => {
-                    "Connection to the daemon was lost or it returned an invalid response. Retrying…"
+                    "Connection to the daemon was lost or it returned an invalid response."
                 }
             }
         } else if error
             .downcast_ref::<tokio::time::error::Elapsed>()
             .is_some()
         {
-            "Connection timed out. Check the daemon URL and Tailscale connection. Retrying…"
+            "Connection timed out. Check the daemon URL and Tailscale connection."
         } else {
-            "The server did not return a valid Tau response. Check the URL and server version. Retrying…"
+            "The server did not return a valid Tau response. Check the URL and server version."
         };
         if !events.send(Event::Disconnected(detail.into())).await {
             break;
         }
-        let jitter=u64::from(uuid::Uuid::new_v4().as_bytes()[0]);
-        let wait = tokio::time::sleep(Duration::from_millis(delay*1000+jitter));
+        let retry_at = next_attempt(attempt_at, Instant::now());
+        if retry_at <= Instant::now() { continue; }
+        if !events.send(Event::RetryScheduled { at: retry_at }).await { break; }
+        let wait = tokio::time::sleep_until(tokio::time::Instant::from_std(retry_at));
         tokio::pin!(wait);
-        delay = (delay * 2).min(15);
         loop {
             tokio::select! {
                 _ = &mut wait => break,
@@ -469,14 +477,20 @@ async fn reject_offline(command: Command, events: &Events) {
     }
 }
 
-fn healthy_for_backoff(probes:u32,elapsed:Duration)->bool {probes>=2 && elapsed>=Duration::from_secs(30)}
+/// Limit immediate-refusal loops, not recovery after a slow failure. In
+/// particular a five-second acquisition timeout incurs no additional delay.
+fn next_attempt(started: Instant, failed: Instant) -> Instant {
+    (started + MIN_CONNECT_INTERVAL).max(failed)
+}
 #[cfg(test)]
-mod backoff_tests {
+mod acquisition_tests {
     use super::*;
-    #[test] fn flapping_hello_or_one_probe_does_not_reset_retry_backoff() {
-        assert!(!healthy_for_backoff(0,Duration::from_secs(60)));
-        assert!(!healthy_for_backoff(1,Duration::from_secs(60)));
-        assert!(!healthy_for_backoff(20,Duration::from_secs(29)));
-        assert!(healthy_for_backoff(2,Duration::from_secs(30)));
+    #[test]
+    fn minimum_start_spacing_is_not_a_post_failure_wait_or_growing_backoff() {
+        let now = Instant::now();
+        for elapsed in [10, 999, 1000, 2000, 5000, 43000] {
+            let failed = now + Duration::from_millis(elapsed);
+            assert_eq!(next_attempt(now, failed), now + Duration::from_millis(elapsed.max(1000)));
+        }
     }
 }

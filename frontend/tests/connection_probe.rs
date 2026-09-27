@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tau_frontend::{
-    connection::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
+    connection::{CONNECT_TIMEOUT, MIN_CONNECT_INTERVAL, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
     store::Settings,
     transport::{Event, Network},
 };
@@ -70,8 +70,9 @@ async fn event(network: &mut Network) -> Event {
 async fn probe_uses_ping_pong_not_session_list_and_reports_measured_rtt() {
     let (settings, server) = fixture(true).await;
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 1, .. }));
     assert!(matches!(event(&mut network).await,Event::Source(1,_)));
-    assert!(matches!(event(&mut network).await, Event::Ready(1)));
+    assert!(matches!(event(&mut network).await, Event::Ready { epoch: 1, .. }));
     let started = Instant::now();
     let sent = match event(&mut network).await {
         Event::HeartbeatSent { epoch: 1, at } => at,
@@ -97,8 +98,9 @@ async fn probe_uses_ping_pong_not_session_list_and_reports_measured_rtt() {
 async fn unanswered_ping_reconnects_on_deadline_not_on_next_probe() {
     let (settings, server) = fixture(false).await;
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 1, .. }));
     assert!(matches!(event(&mut network).await,Event::Source(1,_)));
-    assert!(matches!(event(&mut network).await, Event::Ready(1)));
+    assert!(matches!(event(&mut network).await, Event::Ready { epoch: 1, .. }));
     let sent = match event(&mut network).await {
         Event::HeartbeatSent { epoch: 1, at } => at,
         _ => panic!("expected ping"),
@@ -112,6 +114,9 @@ async fn unanswered_ping_reconnects_on_deadline_not_on_next_probe() {
         elapsed >= HEARTBEAT_TIMEOUT && elapsed < HEARTBEAT_TIMEOUT + Duration::from_secs(2),
         "{elapsed:?}"
     );
+    let failed = Instant::now();
+    assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 2, .. }));
+    assert!(failed.elapsed() < Duration::from_millis(500), "ping failure must not incur backoff");
     drop(network);
     server.abort();
 }
@@ -173,8 +178,9 @@ async fn oversized_legacy_frame_is_rejected_before_reading_its_body() {
     });
     let settings = Settings { server_url:format!("http://{address}"), token:"audit-fixture".into() };
     let mut network = Network::start(settings, Arc::new(|| {}));
+    assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 1, .. }));
     assert!(matches!(event(&mut network).await,Event::Source(1,_)));
-    assert!(matches!(event(&mut network).await, Event::Ready(1)));
+    assert!(matches!(event(&mut network).await, Event::Ready { epoch: 1, .. }));
     let started=Instant::now();
     match event(&mut network).await {
         Event::Disconnected(reason)=>assert!(!reason.contains("Ping timed out"),"{reason}"),
@@ -212,4 +218,55 @@ async fn paused_ui_coalesces_state_without_blocking_heartbeats_or_losing_receipt
         Event::Disconnected(reason)=>panic!("{reason}"),_=>{},
     }}
     assert_eq!(receipts.len(),200);assert_eq!(detail.as_deref(),Some("1499"));drop(network);server.abort();
+}
+
+#[tokio::test]
+async fn immediate_refusals_use_fixed_start_spacing_not_exponential_backoff() {
+    // Keep the port reserved, but reject HTTP upgrades immediately.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/ws", get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }))).await.unwrap();
+    });
+    let mut network = Network::start(Settings { server_url: format!("http://{address}"), token: "fixture".into() }, Arc::new(|| {}));
+    let mut last = None;
+    for expected in 1..=4 {
+        let at = match event(&mut network).await {
+            Event::Connecting { attempt, at } => { assert_eq!(attempt, expected); at }
+            _ => panic!("expected actual acquisition attempt"),
+        };
+        if let Some(last) = last {
+            let spacing = at.duration_since(last);
+            assert!(spacing >= MIN_CONNECT_INTERVAL && spacing < MIN_CONNECT_INTERVAL + Duration::from_millis(500), "{spacing:?}");
+        }
+        assert!(matches!(event(&mut network).await, Event::Disconnected(_)));
+        match event(&mut network).await {
+            Event::RetryScheduled { at: retry } => assert_eq!(retry, at + MIN_CONNECT_INTERVAL),
+            _ => panic!("fast failure needs the remaining minimum spacing"),
+        }
+        last = Some(at);
+    }
+    drop(network); server.abort();
+}
+
+#[tokio::test]
+async fn upgrade_and_hello_share_one_deadline_and_slow_failure_retries_immediately() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await; // Slow HTTP upgrade.
+        let _ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(10)).await; // Never send Tau hello.
+    });
+    let mut network = Network::start(Settings { server_url: format!("http://{address}"), token: "fixture".into() }, Arc::new(|| {}));
+    let started = match event(&mut network).await {
+        Event::Connecting { at, .. } => at, _ => panic!("expected acquisition"),
+    };
+    assert!(matches!(event(&mut network).await, Event::Disconnected(reason) if reason.contains("timed out")));
+    assert!(started.elapsed() >= CONNECT_TIMEOUT && started.elapsed() < CONNECT_TIMEOUT + Duration::from_millis(500));
+    let failed = Instant::now();
+    assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 2, .. }));
+    assert!(failed.elapsed() < Duration::from_millis(500));
+    drop(network); server.abort();
 }

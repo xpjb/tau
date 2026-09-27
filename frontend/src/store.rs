@@ -189,7 +189,7 @@ impl LocalChat {
                 }
                 ClientCommand::QueueControl {operation:QueueOperation::Delete {request_id,..},..} if p.status==Delivery::Accepted =>
                     !queue.available || queue.requests.iter().any(|q|&q.request_id==request_id),
-                _ => !delivered.contains(&p.request.id) && !queue.requests.iter().any(|q|q.request_id==p.request.id)
+                _ => !delivered.contains(&p.request.id) && !queue.requests.iter().any(|q|q.request_id==p.request.id && queue.available && !incomplete.contains(&format!("queued:{}",q.request_id)))
                     && !queue.control.as_ref().is_some_and(|c|c.command_id==p.request.id),
             }
         });
