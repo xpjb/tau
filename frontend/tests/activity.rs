@@ -9,7 +9,7 @@ fn controller(root: &std::path::Path) -> Controller {
 fn session(id: &str, at: u64) -> SessionSummary {
     SessionSummary {
         id: id.into(), project_id: general_project_id(), title: id.into(), starter: false,
-        status: SessionStatus::Sleeping, detail: None, context_usage: None, model: None,
+        status: SessionStatus::Sleeping, detail: None, context_usage: None, model: None, thinking_level: None,
         parent_id: None, created_at_ms: at, updated_at_ms: at,
     }
 }

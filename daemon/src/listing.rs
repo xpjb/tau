@@ -1,4 +1,4 @@
-//! Keyset-paged metadata. Membership/name/model/topic changes fence a traversal;
+//! Keyset-paged metadata. Membership/name/model/thinking/topic changes fence a traversal;
 //! live activity does not restart it. Runtime status has its own monotonic stamp.
 use anyhow::Result;
 use rusqlite::params;
@@ -35,7 +35,7 @@ impl AgentManager {
                 if providers.len()<8 && providers.insert(stored.model.provider.clone()) {self.schedule_catalog(&stored.model.provider);}
                 let state=runtimes.get(&id).map(|runtime|runtime.snapshot());
                 states.insert(id.clone(),state.as_ref().map_or(cold_revision,|s|s.revision));
-                sessions.push(SessionSummary {id,title:stored.title,project_id:stored.project_id,starter:stored.starter,parent_id:stored.parent_id,model:Some(stored.model.clone()),
+                sessions.push(SessionSummary {id,title:stored.title,project_id:stored.project_id,starter:stored.starter,parent_id:stored.parent_id,model:Some(stored.model.clone()),thinking_level:Some(stored.thinking),
                     status:state.as_ref().map(|s|s.status).unwrap_or(SessionStatus::Sleeping),detail:state.as_ref().and_then(|s|s.detail.clone()),
                     context_usage:state.as_ref().and_then(|s|s.context_usage.clone()).or_else(||self.context_usage(&settings,&stored.model,stored.tokens)),created_at_ms:stored.created_at_ms,updated_at_ms:stored.updated_at_ms});
             }

@@ -1105,3 +1105,6 @@ mod activity;
 
 #[path="agent_test_control.rs"]
 mod control;
+
+#[path="agent_test_thinking.rs"]
+mod thinking;

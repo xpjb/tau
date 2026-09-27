@@ -109,7 +109,7 @@ fn offline_new_chat_and_send_are_durable_before_any_server_ack() {
     assert_eq!(c.selected().unwrap().local.pending[0].request.id, prompt);
     assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForChat);
     let summary = tau_protocol::SessionSummary { id:id.clone(), project_id:general_project_id(), title:"New chat".into(), starter:true,
-        status:SessionStatus::Idle, detail:None, context_usage:None, model:None,
+        status:SessionStatus::Idle, detail:None, context_usage:None, model:None, thinking_level:None,
         parent_id:None, created_at_ms:1, updated_at_ms:1 };
     c.message(ServerMessage::Sessions { sessions:vec![summary] }).unwrap();
     assert!(c.account.pending_create.is_none());
@@ -138,7 +138,7 @@ fn offline_create_keeps_its_topic_across_reuse_and_late_ack_without_changing_sel
     assert_eq!(c.account.selected_project,topic);
     c.select_project(GENERAL_PROJECT_ID, true).unwrap();
     c.message(ServerMessage::Sessions { sessions:vec![SessionSummary { id:"existing-work".into(), project_id:topic.clone(),
-        title:"New chat".into(),starter:true,status:SessionStatus::Idle,detail:None,context_usage:None,model:None,
+        title:"New chat".into(),starter:true,status:SessionStatus::Idle,detail:None,context_usage:None,model:None, thinking_level:None,
         parent_id:None,created_at_ms:1,updated_at_ms:1 }] }).unwrap();
     assert_eq!(c.account.sessions.iter().find(|s| s.id == provisional).unwrap().project_id,topic);
     c.message(ServerMessage::success(provisional,Some("existing-work".into()),None)).unwrap();
@@ -169,7 +169,7 @@ fn existing_starter_coalesces_pending_create_without_losing_draft_or_files() {
     c.draft("Unsent second draft".into()).unwrap();
     c.attach(&source,None).unwrap();
     c.message(ServerMessage::Sessions { sessions:vec![SessionSummary { id:"existing".into(), project_id:general_project_id(), title:"New chat".into(),starter:true,
-        status:SessionStatus::Idle,detail:None,context_usage:None,model:None,parent_id:None,created_at_ms:1,updated_at_ms:1 }] }).unwrap();
+        status:SessionStatus::Idle,detail:None,context_usage:None,model:None, thinking_level:None,parent_id:None,created_at_ms:1,updated_at_ms:1 }] }).unwrap();
     assert_eq!(c.account.selected.as_deref(),Some(provisional.as_str()), "A remote starter is not proof that our create was accepted");
     c.message(serde_json::from_value(json!({"type":"response","requestId":provisional,"ok":true,
         "sessionId":"existing","uncertain":false})).unwrap()).unwrap();

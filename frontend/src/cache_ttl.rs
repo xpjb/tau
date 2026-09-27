@@ -105,7 +105,7 @@ mod tests {
             status,
             detail: None,
             context_usage: None,
-            model: None,
+            model: None, thinking_level: None,
             parent_id: None,
             created_at_ms: 0,
             updated_at_ms,
