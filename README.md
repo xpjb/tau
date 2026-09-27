@@ -140,10 +140,12 @@ the replacement. No history rewrite, appended context messages, or apply-latest
 control. Moves may invalidate the provider’s prefix cache.
 
 Tabs accept vertical mouse-wheel input, horizontal trackpad scrolling, and touch or
-mouse dragging. The selected tab is bold and underlined; unread dots aggregate the
-chat list’s unread state. On desktop, a newly finished unread chat requests window
-attention while Tau is unfocused. Focusing Tau clears the window alert; the unread
-dot stays until its chat is viewed. Desktop topic switches resume that topic’s
+mouse dragging. General stays first; other topics follow the latest activity of
+any contained chat (including local drafts and new chats). Ties and empty topics
+keep catalogue order. The selected tab is bold and underlined; unread dots
+aggregate the chat list’s unread state. On desktop, a newly finished unread chat
+requests window attention while Tau is unfocused. Focusing Tau clears the window
+alert; the unread dot stays until its chat is viewed. Desktop topic switches resume that topic’s
 last-open chat (or its newest available chat). Mobile topic switches stay on the
 chat list until a chat is tapped. Only a chat actually shown is marked read. Empty
 topics show the chat list without inventing a selection. Topics and membership
