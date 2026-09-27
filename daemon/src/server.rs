@@ -33,6 +33,7 @@ struct AppState {
     telemetry_gate: Arc<Mutex<()>>,
     transfers: Arc<tau_transfer::blocks::Server>,
     requests: Arc<tokio::sync::Semaphore>,
+    admissions: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::TcpListener) -> Result<()> {
@@ -43,6 +44,7 @@ pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::
         telemetry_gate: Arc::new(Mutex::new(())),
         transfers: transfers.clone(),
         requests: Arc::new(tokio::sync::Semaphore::new(32)),
+        admissions: Arc::new(tokio::sync::Semaphore::new(128)),
     };
     let app = Router::new()
         .route("/v1/health", get(|| async { Json(json!({
@@ -150,6 +152,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
     });
 
     let socket_requests = Arc::new(tokio::sync::Semaphore::new(8));
+    // Bound waiting + running requests separately from execution concurrency.
+    // A normal reconnect/UI burst waits here rather than failing at request #9.
+    let socket_admissions = Arc::new(tokio::sync::Semaphore::new(32));
+    let socket_closed = tokio_util::sync::CancellationToken::new();
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + WS_PING_INTERVAL, WS_PING_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut pending_ping = None;
@@ -193,13 +199,37 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 let manager = state.manager.clone();
                 let transfers = state.transfers.clone();
                 let response_outbound = outbound_tx.clone();
-                let permits = state.requests.clone().try_acquire_owned().and_then(|global|socket_requests.clone().try_acquire_owned().map(|local|(global,local)));
-                let Ok(permits) = permits else {
-                    queue_server(&outbound_tx,&ServerMessage::failure(request.id,"Control is busy; retry the same operation ID")).await;
+                let admission = state.admissions.clone().try_acquire_owned().and_then(|global|
+                    socket_admissions.clone().try_acquire_owned().map(|local|(global,local)));
+                let Ok(admission) = admission else {
+                    // Real overload remains a failure, but does not block pings
+                    // behind a full response queue or create unbounded tasks.
+                    let response = ServerMessage::failure(request.id, "Too many requests are waiting. Try again shortly.");
+                    let Ok(encoded) = serde_json::to_string(&response) else { break; };
+                    if outbound_tx.tx.try_send(Message::Text(encoded.into())).is_err() { break; }
                     continue;
                 };
+                let global = state.requests.clone();
+                let local = socket_requests.clone();
+                let disconnected = socket_closed.clone();
                 tokio::spawn(async move {
-                    let _permits = permits;
+                    let _admission = admission;
+                    // Waiting never stalls the socket reader. A dead socket
+                    // cancels only requests that have not started; admitted
+                    // effects still finish and record their durable receipts.
+                    let _permits = tokio::select! { biased;
+                        _ = disconnected.cancelled() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                            queue_server(&response_outbound, &ServerMessage::failure(request.id,
+                                "The server could not start this request in time. Please try again.")).await;
+                            return;
+                        }
+                        permits = async {
+                            let local = local.acquire_owned().await?;
+                            let global = global.acquire_owned().await?;
+                            Ok::<_, tokio::sync::AcquireError>((local,global))
+                        } => match permits { Ok(permits) => permits, Err(_) => return },
+                    };
                     let request_id = request.id.clone();
                     let request = match manager.inner.state.resolve_input(request).await {
                         Ok(request) => request,
@@ -438,6 +468,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
         }
     }
 
+    socket_closed.cancel();
     event_forwarder.abort();
     writer.abort();
     drop(outbound_tx);
@@ -596,7 +627,7 @@ mod tests {
             attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
         let manager=AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
         let transfers=Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap());
-        let state=AppState {config,manager,telemetry_gate:Arc::new(Mutex::new(())),transfers,requests:Arc::new(tokio::sync::Semaphore::new(32))};
+        let state=AppState {config,manager,telemetry_gate:Arc::new(Mutex::new(())),transfers,requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128))};
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url=format!("ws://{}/v1/ws",listener.local_addr().unwrap());
         let server=tokio::spawn(async move {axum::serve(listener,Router::new().route("/v1/ws",get(websocket)).with_state(state)).await.unwrap();});
@@ -647,7 +678,7 @@ mod tests {
         let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
         let app = Router::new().route("/v1/telemetry/crash", post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)))
             .with_state(AppState { config, manager:manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
-            transfers: Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)) });
+            transfers: Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128)) });
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let frame = json!({"className":"example.Frame", "methodName":"draw", "fileName":"File.kt", "lineNumber":5});
         let legacy = json!({"schema":1, "reportId":"legacy", "platform":"windows", "appVersion":"0.5.12",
@@ -727,7 +758,7 @@ mod tests {
         let id = manager.create_session(None, "general").await.unwrap();
         let other = manager.create_session(Some(&id), "general").await.unwrap();
         let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
-            transfers: Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)) };
+            transfers: Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128)) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
         let app = Router::new().route("/", get(move |upgrade: WebSocketUpgrade| {
             let state = state.clone();

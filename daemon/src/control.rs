@@ -8,7 +8,7 @@ use crate::state::StateStore;
 impl StateStore {
     pub(crate) async fn resolve_input(&self, request: ClientRequest) -> Result<ClientRequest> {
         let ClientCommand::Input {content} = request.command else {return Ok(request);};
-        let bytes = self.access(move |db|tau_blocks::uploads::input(db,&content)).await?;
+        let bytes = self.read(move |db|tau_blocks::uploads::input(db,&content)).await?;
         let decoded: ClientRequest = serde_json::from_slice(&bytes)?;
         ensure!(decoded.id == request.id,"Input request ID does not match its control descriptor");
         ensure!(!matches!(decoded.command,ClientCommand::Input {..} | ClientCommand::ConnectBlocks {..}),"Invalid nested input");

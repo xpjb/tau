@@ -199,7 +199,7 @@ impl StateStore {
     pub(crate) async fn recover_blocks(&self) -> Result<()> {
         self.access(|db| {let tx=db.transaction()?; recover(&tx)?; tx.commit()?; Ok(())}).await
     }
-    pub async fn block_cursor(&self) -> Result<tau_blocks::FeedCursor> { self.access(|db|tau_blocks::cursor(db)).await }
+    pub async fn block_cursor(&self) -> Result<tau_blocks::FeedCursor> { self.read(|db|tau_blocks::cursor(db)).await }
     pub async fn project_live(&self, session: &str, values: Vec<(Event,Option<usize>)>, removed: Vec<String>) -> Result<()> {
         let session = session.to_owned();
         self.access(move |db| {
@@ -227,7 +227,7 @@ impl Drop for StagedFile {
 impl AgentManager {
     async fn materialize_file(&self, scope: &str, id: &str) -> Result<()> {
         let scope=scope.to_owned(); let id=id.to_owned();
-        let read_header = || {let scope=scope.clone(); let id=id.clone(); self.inner.state.access(move |db|tau_blocks::header(db,&scope,&id))};
+        let read_header = || {let scope=scope.clone(); let id=id.clone(); self.inner.state.read(move |db|tau_blocks::header(db,&scope,&id))};
         let Some(h)=read_header().await? else {return Ok(());};
         if h.meta.get("materialized") != Some(&json!(false)) {return Ok(());}
         let _permit=self.inner.block_imports.acquire().await?;
@@ -270,7 +270,7 @@ impl tau_transfer::blocks::Backend for AgentManager {
     fn feed(&self, request: tau_blocks::FeedRequest) -> futures_util::future::BoxFuture<'static,Result<tau_blocks::FeedPage>> {
         let state = self.inner.state.clone();
         async move {
-            state.access(move |db| {
+            state.read(move |db| {
                 ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&request.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
                 tau_blocks::feed(db,&request)
             }).await
@@ -280,14 +280,14 @@ impl tau_transfer::blocks::Backend for AgentManager {
         let manager = self.clone();
         async move {
             let req=request.clone();
-            let ready=manager.inner.state.access(move |db| {
+            let ready=manager.inner.state.read(move |db| {
                 ensure!(req.scope == tau_blocks::CONTROL_SCOPE || db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
                 let h=tau_blocks::header(db,&req.scope,&req.id)?.context("Unknown block")?;
                 if h.meta.get("materialized")==Some(&json!(false)) {Ok(None)} else {tau_blocks::read(db,&req).map(Some)}
             }).await?;
             if let Some(range)=ready {return Ok(range);}
             manager.materialize_file(&request.scope,&request.id).await?;
-            manager.inner.state.access(move |db| tau_blocks::read(db,&request)).await
+            manager.inner.state.read(move |db| tau_blocks::read(db,&request)).await
         }.boxed()
     }
     fn changes(&self) -> tokio::sync::watch::Receiver<u64> { self.inner.state.block_changes.subscribe() }

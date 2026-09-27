@@ -83,7 +83,7 @@ impl AgentManager {
         let mut offset = 0;
         while offset < spec.length {
             let id = spec.id.clone();
-            let range = self.inner.state.access(move |db|tau_blocks::read(db,&BlockRequest {scope:UPLOAD_SCOPE.into(),id,version:1,offset,follow:false})).await?;
+            let range = self.inner.state.read(move |db|tau_blocks::read(db,&BlockRequest {scope:UPLOAD_SCOPE.into(),id,version:1,offset,follow:false})).await?;
             ensure!(range.offset == offset && !range.bytes.is_empty(),"Upload has a missing range");
             hash.update(&range.bytes);
             if let Some((_,file,..)) = &mut export {file.write_all(&range.bytes).await?;}

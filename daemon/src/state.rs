@@ -9,6 +9,8 @@ use crate::protocol::PromptDisposition;
 use crate::transcript::{EventProjection, Event, QueueState};
 #[cfg(test)] use crate::transcript::{HistoryPage,PAGE_EVENTS,PAGE_BYTES};
 
+#[path = "state_reads.rs"]
+mod reads;
 pub(crate) use tau_protocol::settings::DEFAULT_TITLE_PROMPT;
 pub(crate) const MAX_FLAG_CHARS: usize = 4096;
 
@@ -48,7 +50,7 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 #[derive(Clone)]
-pub struct StateStore { connection: Arc<Mutex<Connection>>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>>, pub(crate) block_changes: tokio::sync::watch::Sender<u64>, #[cfg(test)] pub(crate) context_gate:Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>> }
+pub struct StateStore { connection: Arc<Mutex<Connection>>, readers: Arc<reads::Readers>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>>, pub(crate) block_changes: tokio::sync::watch::Sender<u64>, #[cfg(test)] pub(crate) context_gate:Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>> }
 
 impl StateStore {
     pub async fn load(path: PathBuf) -> Result<Self> {
@@ -128,7 +130,13 @@ impl StateStore {
             if let Some(parent) = location.parent() { std::fs::File::open(parent)?.sync_all()?; }
             Ok(db)
         }).await??;
-        Ok(Self { connection:Arc::new(Mutex::new(connection)), path, flag_gate:Arc::new(tokio::sync::Mutex::new(())), block_changes:tokio::sync::watch::channel(0).0, #[cfg(test)] context_gate:Arc::new(std::sync::Mutex::new(None)) })
+        let reader_path = path.clone();
+        let readers = tokio::task::spawn_blocking(move || reads::Readers::open(&reader_path)).await??;
+        Ok(Self { connection:Arc::new(Mutex::new(connection)), readers:Arc::new(readers), path, flag_gate:Arc::new(tokio::sync::Mutex::new(())), block_changes:tokio::sync::watch::channel(0).0, #[cfg(test)] context_gate:Arc::new(std::sync::Mutex::new(None)) })
+    }
+    /// Read one committed snapshot without taking the writer's mutex.
+    pub(crate) async fn read<T: Send + 'static>(&self, action: impl FnOnce(&Connection) -> Result<T> + Send + 'static) -> Result<T> {
+        self.readers.read(action).await
     }
     pub(crate) async fn access<T: Send + 'static>(&self, action: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static) -> Result<T> {
         // Wait asynchronously; don't fill the blocking pool with database lock waiters.
@@ -144,12 +152,12 @@ impl StateStore {
     }
     pub async fn get(&self, id: &str) -> Result<Option<StoredSession>> {
         let id = id.to_owned();
-        self.access(move |db| db.query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| row.get::<_,String>(0)).optional()?
+        self.read(move |db| db.query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| row.get::<_,String>(0)).optional()?
             .map(|data| serde_json::from_str(&data).map_err(Into::into)).transpose()).await
     }
     #[cfg(test)]
     pub async fn list(&self) -> Result<Vec<(String, StoredSession)>> {
-        self.access(|db| {
+        self.read(|db| {
             let mut query = db.prepare("SELECT id,data FROM sessions ORDER BY activity DESC,id")?;
             query.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?
                 .map(|row| { let (id,data) = row?; Ok((id,serde_json::from_str(&data)?)) }).collect()
@@ -162,7 +170,7 @@ impl StateStore {
     pub async fn created_session(&self, request: &str, keep: Option<&str>, project: &str) -> Result<Option<String>> {
         let request = request.to_owned();
         let payload = json!({"keepSessionId":keep,"projectId":project}).to_string();
-        self.access(move |db| find_created_session(db, &request, &payload)).await
+        self.read(move |db| find_created_session(db, &request, &payload)).await
     }
     pub async fn create_requested(&self, model: SessionModel, thinking: String, keep: Option<String>, project_id: String, requested_id: Option<String>) -> Result<String> {
         self.access(move |db| {
@@ -214,7 +222,7 @@ impl StateStore {
     }
     pub async fn queue(&self, id: &str) -> Result<QueueState> {
         let id = id.to_owned();
-        self.access(move |db| {
+        self.read(move |db| {
             let raw: String = db.query_row("SELECT queue FROM sessions WHERE id=?1", [&id], |row| row.get(0))?;
             let mut queue: QueueState = serde_json::from_str(&raw)?;
             let mut query = db.prepare("SELECT data FROM queue WHERE session_id=?1 ORDER BY position")?;
@@ -224,7 +232,7 @@ impl StateStore {
     }
     pub async fn receipt(&self, id: &str, request: &str) -> Result<Option<Receipt>> {
         let id = id.to_owned(); let request = request.to_owned();
-        self.access(move |db| db.query_row("SELECT data FROM receipts WHERE session_id=?1 AND request_id=?2", params![id,request], |row| row.get::<_,String>(0)).optional()?
+        self.read(move |db| db.query_row("SELECT data FROM receipts WHERE session_id=?1 AND request_id=?2", params![id,request], |row| row.get::<_,String>(0)).optional()?
             .map(|data| serde_json::from_str(&data).map_err(Into::into)).transpose()).await
     }
     // Commit before publishing any saved transcript/queue change. The revision is
@@ -299,7 +307,7 @@ impl StateStore {
     }
     pub async fn entry(&self, id: &str, entry_id: &str) -> Result<Value> {
         let id = id.to_owned(); let entry_id = entry_id.to_owned();
-        self.access(move |db| {
+        self.read(move |db| {
             let data: String = db.query_row("SELECT data FROM entries WHERE session_id=?1 AND id=?2",params![id,entry_id],|row| row.get(0)).context("History entry does not exist")?;
             Ok(serde_json::from_str(&data)?)
         }).await
@@ -307,7 +315,7 @@ impl StateStore {
     #[cfg(test)]
     pub async fn page(&self, id: &str, before: Option<u64>) -> Result<HistoryPage> {
         let id = id.to_owned();
-        self.access(move |db| {
+        self.read(move |db| {
             let mut query = db.prepare("SELECT data FROM events WHERE session_id=?1 AND position<?2 ORDER BY position DESC LIMIT ?3")?;
             let mut rows = query.query(params![id,before.unwrap_or(i64::MAX as u64),PAGE_EVENTS+1])?;
             let mut events = Vec::<Event>::new(); let mut bytes = 0; let mut more = false;
@@ -322,7 +330,7 @@ impl StateStore {
     // Only the latest applicable checkpoint and its retained suffix enter memory.
     // Display paging and attachment lookup never load provider history.
     pub(crate) async fn restore_review(&self,id:&str)->Result<bool> {
-        let id=id.to_owned();self.access(move |db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM restore_guards WHERE session_id=?1)",[id],|r|r.get(0))?)).await
+        let id=id.to_owned();self.read(move |db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM restore_guards WHERE session_id=?1)",[id],|r|r.get(0))?)).await
     }
     pub(crate) async fn review_restore(&self,id:&str)->Result<()> {
         let id=id.to_owned();self.access(move |db| {db.execute("DELETE FROM restore_guards WHERE session_id=?1",[id])?;Ok(())}).await
@@ -333,7 +341,7 @@ impl StateStore {
     pub async fn context(&self, id:&str, selected:&SessionModel)->Result<Vec<Value>> {
         #[cfg(test)] {let gate=self.context_gate.lock().unwrap().clone();if let Some(gate)=gate {gate.notified().await;}}
         let id=id.to_owned();let selected=selected.clone();let scope=id.clone();
-        let (mut after,end)=self.access(move |db| {
+        let (mut after,end)=self.read(move |db| {
             let checkpoint: Option<String> = db.query_row("SELECT data FROM entries WHERE session_id=?1 AND kind='compaction'
                 AND (coalesce(json_extract(data,'$.details.kind'),'')!='codex-native-compaction'
                     OR (json_extract(data,'$.details.model')=?2 AND json_extract(data,'$.details.provider')=?3)) ORDER BY position DESC LIMIT 1",
@@ -348,7 +356,7 @@ impl StateStore {
         let mut result=vec![];let mut total=0usize;
         while after<end {
             let scope=id.clone();
-            let (next,bytes)=self.access(move |db| {
+            let (next,bytes)=self.read(move |db| {
                 let mut q=db.prepare("SELECT position,length(CAST(data AS BLOB)),data FROM entries WHERE session_id=?1 AND position>?2 AND position<=?3 ORDER BY position LIMIT 64")?;
                 let mut rows=q.query(params![scope,after,end])?;let mut next=after;let mut bytes=vec![];let mut size=0usize;
                 while let Some(row)=rows.next()? {

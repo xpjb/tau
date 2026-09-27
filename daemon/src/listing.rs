@@ -6,7 +6,7 @@ use tau_protocol::{Project,ServerMessage,SessionSummary,SessionStatus};
 use crate::{manager::AgentManager,state::StoredSession};
 impl AgentManager {
     pub(crate) async fn list_page(&self,catalog_id:String,projects:bool,after:Option<String>,revision:u64)->Result<ServerMessage> {
-        let (revision,after,rows)=self.inner.state.access(move |db| {
+        let (revision,after,rows)=self.inner.state.read(move |db| {
             let current:u64=db.query_row("SELECT revision FROM catalogue_clock",[],|r|r.get(0))?;
             let after=if current==revision {after} else {None};
             let rows=if projects {
