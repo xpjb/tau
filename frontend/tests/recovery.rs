@@ -272,7 +272,9 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     assert_eq!(peer.prompts.load(Ordering::SeqCst), 1);
     peer.deliver.store(true, Ordering::SeqCst);
     c.open("chat").unwrap();
-    wait(&mut c, |c| c.selected().unwrap().local.pending.is_empty()).await;
+    wait(&mut c, |c| c.selected().unwrap().local.pending[0].status == Delivery::Accepted).await;
+    assert_eq!(c.selected().unwrap().local.pending[0].text, "send exactly once, even if the ack is lost",
+        "a receipt without a replicated body must retain the authored display copy");
     assert_eq!(peer.prompts.load(Ordering::SeqCst), 1);
     drop(c);
     task.abort();
@@ -360,13 +362,14 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         },
         Arc::new(|| {}),
     );
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(3),n.events.recv()).await.unwrap(),Some(NetworkEvent::Connecting { attempt: 1, .. })));
     assert!(matches!(tokio::time::timeout(Duration::from_secs(3),n.events.recv()).await.unwrap(),Some(NetworkEvent::Source(1,_))));
     let epoch = match tokio::time::timeout(Duration::from_secs(3), n.events.recv())
         .await
         .unwrap()
         .unwrap()
     {
-        NetworkEvent::Ready(epoch) => epoch,
+        NetworkEvent::Ready { epoch, .. } => epoch,
         _ => panic!("Expected hello"),
     };
     for (epoch, id, command) in [
@@ -545,7 +548,7 @@ async fn missing_receipt_retries_original_intent_in_order_after_restart_in_anoth
     drop(c);
     let mut c = Controller::new(Store::open(root.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     assert_eq!(c.account.selected.as_deref(), Some("elsewhere"));
-    wait(&mut c, |c| c.chats.get("chat").is_some_and(|chat| chat.local.pending.is_empty())).await;
+    wait(&mut c, |c| c.chats.get("chat").is_some_and(|chat| chat.local.pending.iter().all(|p| p.status == Delivery::Accepted))).await;
     let seen = attempts.lock().unwrap();
     assert_eq!(seen.len(), 3);
     assert_eq!(seen[0].id, original); assert_eq!(seen[1].id, original);

@@ -139,6 +139,7 @@ struct Hit {
 }
 #[derive(Clone)]
 struct Row {
+    block: Option<String>, // Native interest, independent of the stable display identity.
     details: Vec<DetailLine>,
     header: bool,
     key: String,
@@ -450,8 +451,9 @@ impl App {
             }
             ConnectionPreview::Disconnected => {
                 self.controller.epoch = None;
-                self.controller.connection = "Ping timed out. Reconnecting…".into();
+                self.controller.connection = "Ping timed out".into();
                 self.controller.health.disconnected(false);
+                self.controller.health.attempt(2, now - Duration::from_millis(1234));
             }
             ConnectionPreview::Unconfigured => {
                 self.controller.epoch = None;
@@ -2631,6 +2633,11 @@ impl App {
                 !empty && !(e.attachment.is_none() && tools.paired_result(e))
             })
             .collect::<Vec<_>>();
+        let user_requests = events.iter().filter(|e| e.role == EventRole::User && e.kind == EventKind::Text && e.attachment.is_none())
+            .filter_map(|e| e.origin.request_id.as_deref()).collect::<std::collections::HashSet<_>>();
+        let local_prompts = chat.local.pending.iter().filter(|p| matches!(p.request.command,ClientCommand::Prompt { .. }) && p.status != crate::store::Delivery::Rejected)
+            .map(|p| (p.request.id.as_str(),p)).collect::<std::collections::HashMap<_,_>>();
+        let mut shown_requests = std::collections::HashSet::new();
         let mut rows = vec![];
         let mut i = 0;
         while i < events.len() {
@@ -2649,6 +2656,7 @@ impl App {
                 let group = &events[start..i];
                 let details = tools.lines(group, &chat.local);
                 rows.push(Row {
+                    block: None,
                     key: format!("{session}/{}", details[0].key),
                     details,
                     header: false,
@@ -2670,8 +2678,14 @@ impl App {
                 continue;
             }
             let user = e.role == EventRole::User;
+            // The server owns ordering/identity; until its body is complete the
+            // authored copy still owns the displayed text. Never turn it into
+            // a Loading row or duplicate it at the end of the conversation.
+            let local_text = (user && e.kind == EventKind::Text && e.attachment.is_none() && chat.feed.incomplete.contains(&e.id))
+                .then(|| e.origin.request_id.as_deref().and_then(|id| local_prompts.get(id)))
+                .flatten().map(|p| p.text.as_str());
             let title = if user {
-                "You".into()
+                if local_text.is_some() { "You · synchronizing" } else { "You" }.into()
             } else if let Some(error) = &e.error_message {
                 format!("Assistant · {error}")
             } else {
@@ -2691,14 +2705,18 @@ impl App {
                     }
                 )
             };
-            let mut actions = if chat.feed.incomplete.contains(&e.id) {vec![("Fetch complete message to copy".into(),Action::CopyDetails(session.into(),vec![e.id.clone()]))]} else {vec![("Copy message".into(), Action::Copy(e.text.clone()))]};
+            let mut actions = if let Some(text) = local_text {vec![("Copy text".into(), Action::Copy(text.into()))]}
+                else if chat.feed.incomplete.contains(&e.id) {vec![("Fetch complete message to copy".into(),Action::CopyDetails(session.into(),vec![e.id.clone()]))]} else {vec![("Copy message".into(), Action::Copy(e.text.clone()))]};
             if e.phase == EventPhase::Saved {
                 actions.push(("Fork here".into(), Action::Fork(e.entry_id.clone())));
             }
+            let request = e.origin.request_id.as_deref().filter(|id| user && e.kind == EventKind::Text && e.attachment.is_none()
+                && shown_requests.insert(*id));
             rows.push(Row {
+                block: Some(e.id.clone()),
                 details: vec![],
                 header: e.role == EventRole::System || e.is_error || e.error_message.is_some(),
-                key: format!("{session}/{}", e.id),
+                key: request.map_or_else(|| format!("{session}/{}", e.id), |id| format!("message:{session}:{id}")),
                 title,
                 timestamp: clock::label(clock::event_ms(e)),
                 sender: if e.role == EventRole::Tool {
@@ -2709,7 +2727,7 @@ impl App {
                 source: if e.attachment.is_some() && chat.feed.incomplete.contains(&e.id) && e.text == "Loading…" {
                     String::new()
                 } else if user {
-                    literal(&e.text)
+                    literal(local_text.unwrap_or(&e.text))
                 } else {
                     e.text.clone()
                 },
@@ -2721,6 +2739,8 @@ impl App {
             i += 1;
         }
         for p in &chat.local.pending {
+            let represented = user_requests.contains(p.request.id.as_str()) || chat.feed.queue.requests.iter().any(|q| q.request_id == p.request.id);
+            if matches!(p.request.command, ClientCommand::Prompt { .. }) && p.status != crate::store::Delivery::Rejected && represented { continue; }
             let edit = matches!(&p.request.command, ClientCommand::QueueControl { operation: QueueOperation::Edit { .. }, .. });
             let delete = matches!(&p.request.command, ClientCommand::QueueControl { operation: QueueOperation::Delete { .. }, .. });
             let control = matches!(&p.request.command, ClientCommand::QueueControl { .. } | ClientCommand::Abort { .. });
@@ -2743,7 +2763,10 @@ impl App {
             }
             actions.push(("Dismiss".into(), Action::Dismiss(p.request.id.clone())));
             rows.push(Row {
-                details: vec![], header: true, key: format!("pending:{}", p.request.id),
+                block: None,
+                details: vec![], header: true, key: if matches!(p.request.command, ClientCommand::Prompt { .. }) && !represented {
+                    format!("message:{session}:{}", p.request.id)
+                } else { format!("pending:{}", p.request.id) },
                 title: if edit { format!("Queue edit · {}", p.status.label()) }
                     else if delete { format!("Queue delete · {}", p.status.label()) }
                     else if control { format!("Queue action · {}", p.status.label()) }
@@ -2757,16 +2780,22 @@ impl App {
             });
         }
         for (i, q) in chat.feed.queue.requests.iter().enumerate() {
+            // Root and queue directories can arrive in either order during a
+            // queue -> history move. The canonical user row wins that overlap.
+            if user_requests.contains(q.request_id.as_str()) { continue; }
             let state = &chat.feed.queue;
+            let moving = chat.feed.queue_transitions.contains_key(&q.request_id);
             let complete=!chat.feed.incomplete.contains(&format!("queued:{}",q.request_id));
+            let local_text = (!complete).then(|| local_prompts.get(q.request_id.as_str()))
+                .flatten().map(|p| p.text.as_str());
             let mut actions = if complete {vec![("Copy message".into(), Action::Copy(q.text.clone()))]} else {vec![]};
-            if complete && state.capabilities.iter().any(|c| c == "queue_edit") {
+            if !moving && complete && state.capabilities.iter().any(|c| c == "queue_edit") {
                 actions.push((
                     "Edit".into(),
                     Action::EditQueue(q.request_id.clone(), q.revision, q.text.clone()),
                 ));
             }
-            if state.capabilities.iter().any(|c| c == "queue_delete") {
+            if !moving && state.capabilities.iter().any(|c| c == "queue_delete") {
                 actions.push((
                     "Delete".into(),
                     Action::Queue(QueueOperation::Delete {
@@ -2775,7 +2804,7 @@ impl App {
                     }),
                 ));
             }
-            if state.available && state.capabilities.iter().any(|c| c == "queue_run_prefix")
+            if state.available && chat.feed.queue_transitions.is_empty() && state.capabilities.iter().any(|c| c == "queue_run_prefix")
                 && let Some(boundary) = state
                     .boundaries
                     .iter()
@@ -2810,22 +2839,24 @@ impl App {
                 ClientCommand::QueueControl { operation: QueueOperation::Edit { text, .. }, .. } => Some(text.as_str()),
                 _ => None,
             });
+            if let Some(text) = local_text { actions = vec![("Copy text".into(), Action::Copy(text.into()))]; }
             if pending.is_some() {
                 // A second edit/delete using the old revision would race this
                 // one. Wait for the durable receipt before offering actions.
                 actions = vec![("Copy message".into(), Action::Copy(editing.unwrap_or(&q.text).into()))];
             }
             rows.push(Row {
+                block: None,
                 details: vec![],
                 header: true,
-                key: format!("queue:{}", q.request_id),
-                title: if let Some(p) = pending {
+                key: format!("message:{session}:{}", q.request_id),
+                title: if moving { "Synchronizing message".into() } else if let Some(p) = pending {
                     format!("{} · {}", if editing.is_some() { "Queue edit" } else { "Queue delete" },
                         if p.status == crate::store::Delivery::Unconfirmed { "unconfirmed · not resent" } else if p.status==crate::store::Delivery::Accepted {"accepted · synchronizing…"} else { "saving…" })
                 } else { format!("Queued{}", if state.paused { " · held" } else { "" }) },
                 timestamp: clock::label(q.timestamp_ms),
                 sender: EventRole::User,
-                source: literal(editing.unwrap_or(&q.text)),
+                source: literal(editing.or(local_text).unwrap_or(&q.text)),
                 user: true,
                 error: false,
                 actions,
@@ -3108,7 +3139,7 @@ impl App {
         let top=self.scroll-viewport.height;let bottom=self.scroll+2.*viewport.height;
         for (row,p) in rows.iter().zip(&placements).filter(|(_,p)|p.top+p.height>=top && p.top<=bottom) {
             if row.details.is_empty() {
-                if let Some(id)=row.key.strip_prefix(&format!("{session}/")) {interests.insert(id.to_owned());}
+                if let Some(id) = &row.block { interests.insert(id.clone()); }
             } else if let Some(layout)=detail_layouts.get(&row.key) {
                 for (line,(offset,height)) in row.details.iter().zip(layout) {
                     if p.top+offset+height<top || p.top+offset>bottom {continue;}

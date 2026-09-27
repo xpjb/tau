@@ -16,6 +16,9 @@ pub(super) fn channel(wake:Wake)->(Events,EventReceiver) {
 }
 fn key(event:&Event)->Option<String> {
     match event {
+        Event::Connecting { .. }=>Some("acquiring".into()),
+        Event::RetryScheduled { .. }=>Some("acquisition-retry".into()),
+        Event::Disconnected(_)=>Some("acquisition-failure".into()),
         Event::HeartbeatSent {epoch,..}=>Some(format!("sent:{epoch}")),
         Event::HeartbeatReply {epoch,..}=>Some(format!("reply:{epoch}")),
         Event::Metrics(_)=>Some("native-metrics".into()),
@@ -37,7 +40,15 @@ impl Events {
         let bytes=match &event {Event::SizedMessage(_,_,bytes)=>*bytes,Event::Prepared {result,..}=>match result {Ok(text)=>text.len(),Err(error)=>error.len()},Event::Message(_,message)=>serde_json::to_vec(message).map_or(4096,|v|v.len()),_=>1024};
         let mut queue=self.shared.queue.lock().unwrap();
         if queue.closed {return false;}
-        if let Some(key)=key(&event) && let Some(at)=queue.events.iter().position(|(old,_)|self::key(old).as_ref()==Some(&key)) {
+        // Fast refusal retries must not fill the mailbox while a phone's UI
+        // sleeps. Coalesce acquisition progress only within one no-socket
+        // episode: retaining the disconnect before each new Ready is essential
+        // to fencing in-flight intents and checking their receipts on recovery.
+        let after = if matches!(event, Event::Connecting { .. } | Event::RetryScheduled { .. } | Event::Disconnected(_)) {
+            queue.events.iter().rposition(|(event,_)| matches!(event, Event::Ready { .. } | Event::Source(..) | Event::Fatal(_))).map_or(0,|at|at+1)
+        } else {0};
+        if let Some(key)=key(&event) && let Some(at)=queue.events.iter().enumerate().skip(after)
+            .find_map(|(at,(old,_))|(self::key(old).as_ref()==Some(&key)).then_some(at)) {
             let revision=|event:&Event|match event {Event::Message(_,message)|Event::SizedMessage(_,message,_)=>match message.as_ref() {ServerMessage::SessionState {revision,..}=>*revision,_=>0},_=>0};
             if revision(&queue.events[at].0)>revision(&event) {return true;}
             let (_,bytes)=queue.events.remove(at).unwrap();queue.bytes-=bytes;
@@ -65,3 +76,31 @@ impl Drop for EventReceiver {fn drop(&mut self) {self.shared.queue.lock().unwrap
 
 impl Clone for Events {fn clone(&self)->Self {self.shared.senders.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Self {shared:self.shared.clone(),wake:self.wake.clone()}}}
 impl Drop for Events {fn drop(&mut self) {if self.shared.senders.fetch_sub(1,std::sync::atomic::Ordering::AcqRel)==1 {self.shared.queue.lock().unwrap().closed=true;self.shared.notify.notify_waiters();}}}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration,Instant};
+    #[test]
+    fn sleeping_ui_coalesces_failed_acquisitions_without_erasing_disconnect_boundaries() {
+        let (events,mut receiver)=channel(Arc::new(||{}));let now=Instant::now();
+        assert!(events.send_now(Event::Ready {epoch:1,at:now}));
+        assert!(events.send_now(Event::NotSent("intent".into(),"socket lost".into())));
+        for attempt in 1..=1000 {
+            assert!(events.send_now(Event::Connecting {attempt,at:now}));
+            assert!(events.send_now(Event::Disconnected(format!("failure {attempt}"))));
+            assert!(events.send_now(Event::RetryScheduled {at:now+Duration::from_secs(1)}));
+        }
+        assert!(events.send_now(Event::Ready {epoch:2,at:now}));
+        assert!(events.send_now(Event::Disconnected("second socket lost".into())));
+        assert!(matches!(receiver.try_recv().unwrap(),Event::Ready {epoch:1,..}));
+        assert!(matches!(receiver.try_recv().unwrap(),Event::NotSent(id,_) if id=="intent"));
+        assert!(matches!(receiver.try_recv().unwrap(),Event::Connecting {attempt:1000,..}));
+        assert!(matches!(receiver.try_recv().unwrap(),Event::Disconnected(detail) if detail=="failure 1000"));
+        assert!(matches!(receiver.try_recv().unwrap(),Event::RetryScheduled {..}));
+        assert!(matches!(receiver.try_recv().unwrap(),Event::Ready {epoch:2,..}));
+        assert!(matches!(receiver.try_recv().unwrap(),Event::Disconnected(detail) if detail=="second socket lost"));
+        assert!(receiver.try_recv().is_err());
+    }
+}

@@ -250,3 +250,251 @@ fn attachment_history_paging_clears_loading_without_fetching_closed_tools_or_fil
         assert!(tau_blocks::header(&db, "chat", &format!("file:{id}")).unwrap().is_none());
     }
 }
+
+fn local_prompt(id: &str, text: &str) -> LocalChat {
+    use crate::store::{Delivery, Pending};
+    LocalChat { pending: vec![Pending { request: tau_protocol::ClientRequest { id: id.into(),
+        command: tau_protocol::ClientCommand::Prompt { session_id: "chat".into(), text: text.into() } },
+        text: text.into(), files: vec![], status: Delivery::Accepted, started_at_ms: None, detail: None }], ..Default::default() }
+}
+fn user_body(id: &str, request: &str, text: &str) -> serde_json::Value {
+    let mut meta = event(id, 1, "text");
+    meta["event"]["role"] = json!("user");
+    meta["event"]["origin"] = json!({"requestId":request});
+    meta["bodyHash"] = json!(blake3::hash(text.as_bytes()).to_hex().to_string());
+    meta
+}
+
+#[test]
+fn local_body_reuse_survives_queue_to_history_and_restart_without_downloading_input() {
+    let mut f = Fixture::new();
+    let text = "my own input café 😀\n".repeat(20000); // More than the render preview budget.
+    let mut local = local_prompt("request", &text);
+    f.cache.remember_local("chat", &local, &f.lineage).unwrap();
+    f.put(QUEUE, None, 100, BlockKind::Queue, json!({}), &serde_json::to_vec(&QueueState::native()).unwrap());
+    f.put("queued:request", Some(QUEUE), 0, BlockKind::Text,
+        json!({"request":{"requestId":"request","revision":0,"kind":"steer","text":"","images":0},
+            "bodyHash":blake3::hash(text.as_bytes()).to_hex().to_string()}), text.as_bytes());
+    f.page(None,None); f.body(QUEUE); f.page(Some(QUEUE),None);
+    let view = f.cache.snapshot("chat").unwrap().unwrap();
+    assert_eq!(view.snapshot.queue.requests[0].text, text);
+    assert!(!view.incomplete.contains("queued:request"));
+    local.reconcile_complete(&view.snapshot.queue, &view.snapshot.delivered, &view.incomplete);
+    assert!(local.pending.is_empty(), "the queue has a complete confirmed copy now");
+
+    // The queue can disappear before the history directory arrives. This must
+    // not lose the only reusable bytes or require downloading our own input.
+    let tx = f.source.transaction().unwrap();
+    tau_blocks::remove(&tx,"chat","queued:request").unwrap(); tx.commit().unwrap();
+    f.page(Some(QUEUE),None);
+    f.cache = Cache::open(&f._root.path().join("cache.db")).unwrap();
+    f.cache.configure(&f.lineage).unwrap();
+    f.put("saved",None,1,BlockKind::Text,user_body("saved","request",&text),text.as_bytes());
+    f.page(None,None); // Headers only, deliberately no f.body("saved").
+    assert_eq!(f.cache.block_request("chat","saved").unwrap().offset, text.len() as u64);
+    assert_eq!(f.cache.copy_ready("chat", &["saved".into()]).unwrap().unwrap(), text);
+    let plan = f.cache.plan("chat", &local, &[]).unwrap();
+    assert!(plan.blocks.iter().all(|(id,head)| id != "saved" || head.is_some_and(|(_,length,sealed,stored)| sealed && length == stored)),
+        "a complete sealed body must not start a content stream");
+    let view = f.cache.preview("chat",None).unwrap().unwrap();
+    assert!(view.incomplete.contains("saved"), "the large message uses a bounded display preview");
+    assert_eq!(view.snapshot.delivered, ["request"], "preview truncation is not missing canonical bytes");
+    assert!(!view.snapshot.events[0].text.starts_with("Loading"));
+}
+
+#[test]
+fn header_first_reuse_requires_matching_scope_request_digest_and_source() {
+    let mut f = Fixture::new();
+    let local = local_prompt("request", "same sized text");
+    f.put("saved",None,1,BlockKind::Text,user_body("saved","request","same sized text"),b"same sized text");
+    f.page(None,None);
+    assert!(f.cache.snapshot("chat").unwrap().unwrap().snapshot.delivered.is_empty());
+    f.cache.remember_local("other-chat", &local, &f.lineage).unwrap();
+    f.cache.remember_local("chat", &local, "other-source").unwrap();
+    f.cache.remember_local("chat", &local_prompt("other-request", "same sized text"), &f.lineage).unwrap();
+    f.cache.remember_local("chat", &local_prompt("request", "evil sized text"), &f.lineage).unwrap();
+    assert_eq!(f.cache.block_request("chat","saved").unwrap().offset, 0);
+    f.cache.remember_local("chat", &local, &f.lineage).unwrap();
+    assert_eq!(f.cache.block_request("chat","saved").unwrap().offset, 15);
+    assert_eq!(f.cache.snapshot("chat").unwrap().unwrap().snapshot.delivered, ["request"]);
+    f.cache.configure("restored-source").unwrap();
+    assert_eq!(f.cache.db.lock().unwrap().query_row("SELECT count(*) FROM local_echoes",[],|r|r.get::<_,u64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn changed_or_legacy_body_keeps_authored_copy_until_complete_canonical_replacement() {
+    let mut f = Fixture::new();
+    let mut local = local_prompt("request", "authored text");
+    f.cache.remember_local("chat", &local, &f.lineage).unwrap();
+    // Same identity, different canonical text: a digest mismatch is not a hit.
+    f.put("saved",None,1,BlockKind::Text,user_body("saved","request","server changed text"),b"server changed text");
+    f.page(None,None);
+    let view = f.cache.snapshot("chat").unwrap().unwrap();
+    assert!(view.snapshot.delivered.is_empty());
+    local.reconcile_complete(&view.snapshot.queue,&view.snapshot.delivered,&view.incomplete);
+    assert_eq!(local.pending[0].text,"authored text");
+    f.body("saved");
+    let view = f.cache.snapshot("chat").unwrap().unwrap();
+    assert_eq!(view.snapshot.events[0].text,"server changed text");
+    local.reconcile_complete(&view.snapshot.queue,&view.snapshot.delivered,&view.incomplete);
+    assert!(local.pending.is_empty());
+
+    let mut meta = user_body("legacy","legacy-request","authored text");
+    meta.as_object_mut().unwrap().remove("bodyHash");
+    f.put("legacy",None,2,BlockKind::Text,meta,b"authored text");
+    f.cache.remember_local("chat",&local_prompt("legacy-request","authored text"),&f.lineage).unwrap();
+    f.page(None,None);
+    assert_eq!(f.cache.block_request("chat","legacy").unwrap().offset,0, "IDs alone are not byte verification");
+    f.body("legacy");
+    assert_eq!(f.cache.block_request("chat","legacy").unwrap().offset,13);
+}
+
+#[test]
+fn accepted_queue_header_does_not_retire_local_input_before_its_body_arrives() {
+    let mut f = Fixture::new();
+    let mut local = local_prompt("request","authored text");
+    f.put(QUEUE,None,100,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
+    f.put("queued:request",Some(QUEUE),0,BlockKind::Text,
+        json!({"request":{"requestId":"request","revision":0,"kind":"steer","text":"","images":0}}),b"authored text");
+    f.page(None,None); f.body(QUEUE); f.page(Some(QUEUE),None);
+    let view = f.cache.snapshot("chat").unwrap().unwrap();
+    local.reconcile_complete(&view.snapshot.queue,&view.snapshot.delivered,&view.incomplete);
+    assert_eq!(local.pending.len(),1);
+    f.body("queued:request");
+    let view = f.cache.snapshot("chat").unwrap().unwrap();
+    local.reconcile_complete(&view.snapshot.queue,&view.snapshot.delivered,&view.incomplete);
+    assert!(local.pending.is_empty());
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn native_watch_fetches_unknown_body_but_never_downloads_locally_known_input() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tau_transfer::blocks::Backend;
+    struct Source {
+        db: Arc<Mutex<Connection>>,
+        known_reads: Arc<AtomicUsize>,
+        unknown_reads: Arc<AtomicUsize>,
+        changes: watch::Receiver<u64>,
+    }
+    impl Backend for Source {
+        fn feed(&self, req: FeedRequest) -> futures_util::future::BoxFuture<'static, Result<FeedPage>> {
+            let db=self.db.clone(); Box::pin(async move { tau_blocks::feed(&db.lock().unwrap(),&req) })
+        }
+        fn read(&self, req: BlockRequest) -> futures_util::future::BoxFuture<'static, Result<ContentRange>> {
+            let db=self.db.clone();let known=self.known_reads.clone();let unknown=self.unknown_reads.clone();
+            Box::pin(async move {
+                if req.id=="saved" {known.fetch_add(1,Ordering::SeqCst);}
+                if req.id=="unknown" {unknown.fetch_add(1,Ordering::SeqCst);}
+                tau_blocks::read(&db.lock().unwrap(),&req)
+            })
+        }
+        fn changes(&self) -> watch::Receiver<u64> {self.changes.clone()}
+    }
+    let mut f=Fixture::new();
+    let text="authored café 😀".repeat(4096);
+    let local=local_prompt("request",&text);
+    f.cache.remember_local("chat",&local,&f.lineage).unwrap();
+    f.put(QUEUE,None,100,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
+    f.put("saved",None,1,BlockKind::Text,user_body("saved","request",&text),text.as_bytes());
+    f.put("unknown",None,2,BlockKind::Text,user_body("unknown","another-client","remote text"),b"remote text");
+    let known=Arc::new(AtomicUsize::new(0));let unknown=Arc::new(AtomicUsize::new(0));
+    let (_changes,changed)=watch::channel(0);
+    let server=tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
+        db:Arc::new(Mutex::new(f.source)),known_reads:known.clone(),unknown_reads:unknown.clone(),changes:changed,
+    })).await.unwrap();
+    let (notices,mut received)=mpsc::channel(32);
+    let service=Service::start(f.cache.clone(),Arc::new(||{}),notices);
+    let mut identity=service.node.clone();
+    tokio::time::timeout(Duration::from_secs(5),async {
+        while identity.borrow().is_none() {identity.changed().await.unwrap();}
+    }).await.unwrap();
+    let offer=server.authorize(identity.borrow().as_ref().unwrap(),f.lineage.clone()).unwrap();
+    service.send(Command::Configure(offer,"127.0.0.1".into()));
+    service.send(Command::Plan(Some(f.cache.plan("chat",&local,&[]).unwrap())));
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let notice=received.recv().await.unwrap();assert!(notice.error.is_none(),"{:?}",notice.error);
+            service.send(Command::Plan(Some(f.cache.plan("chat",&local,&[]).unwrap())));
+            let db=f.cache.db.lock().unwrap();
+            if tau_blocks::cached_content(&db,"chat","unknown").unwrap()==b"remote text" {
+                assert_eq!(tau_blocks::cached_content(&db,"chat","saved").unwrap(),text.as_bytes());
+                break;
+            }
+        }
+    }).await.unwrap();
+    assert!(unknown.load(Ordering::SeqCst)>0,"the test must actually run the production body scheduler");
+    assert_eq!(known.load(Ordering::SeqCst),0,"no read request at all for our already-known input");
+    drop(service);server.shutdown().await;
+}
+
+#[test]
+fn queue_removal_before_history_header_keeps_a_display_copy_until_root_catches_up() {
+    for (consumed, complete) in [(true,true),(true,false),(false,true)] {
+        let mut f=Fixture::new();let text="I should never disappear during the queue handoff";
+        let mut local=local_prompt("request",text);
+        f.cache.remember_local("chat",&local,&f.lineage).unwrap();
+        f.put(QUEUE,None,100,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
+        let mut meta=json!({"request":{"requestId":"request","revision":0,"kind":"steer","text":"","images":0}});
+        if complete {meta["bodyHash"]=json!(blake3::hash(text.as_bytes()).to_hex().to_string());}
+        f.put("queued:request",Some(QUEUE),0,BlockKind::Text,meta,text.as_bytes());
+        f.page(None,None);f.body(QUEUE);f.page(Some(QUEUE),None);
+        let mut feed=crate::feed::Feed::default();
+        let delivered=feed.native_view(f.cache.changes("chat",None,true).unwrap().unwrap()).unwrap();
+        local.reconcile_complete(&feed.queue,&delivered,&feed.incomplete);
+        assert_eq!(local.pending.is_empty(),complete);
+        // Source commits a move/deletion, but deliver the queue directory first.
+        let tx=f.source.transaction().unwrap();tau_blocks::remove(&tx,"chat","queued:request").unwrap();tx.commit().unwrap();
+        if consumed {f.put("saved",None,1,BlockKind::Text,user_body("saved","request",text),text.as_bytes());}
+        else {f.put(QUEUE,None,100,BlockKind::Queue,json!({"membershipHash":"changed"}),&serde_json::to_vec(&QueueState::native()).unwrap());}
+        f.page(Some(QUEUE),None);
+        feed.native_view(f.cache.changes("chat",None,false).unwrap().unwrap()).unwrap();
+        assert!(feed.events.is_empty());assert_eq!(feed.queue.requests.len(),1);
+        assert!(feed.queue_transitions.contains_key("request"));
+        assert_eq!(feed.incomplete.contains("queued:request"),!complete);
+        local.reconcile_complete(&feed.queue,&[],&feed.incomplete);
+        assert_eq!(local.pending.is_empty(),complete,"a retained incomplete row cannot retire authored work");
+        // A late, empty queue page must not erase the retained row either.
+        f.page(Some(QUEUE),None);
+        feed.native_view(f.cache.changes("chat",None,false).unwrap().unwrap()).unwrap();
+        assert_eq!(feed.queue.requests.len(),1);
+        f.page(None,None);
+        let delivered=feed.native_view(f.cache.changes("chat",None,false).unwrap().unwrap()).unwrap();
+        local.reconcile_complete(&feed.queue,&delivered,&feed.incomplete);
+        assert!(feed.queue.requests.is_empty());assert!(feed.queue_transitions.is_empty());
+        if consumed {assert_eq!(feed.event("saved").unwrap().text,text);assert!(local.pending.is_empty());}
+        else {assert!(feed.events.is_empty(),"explicit deletion must not leave a ghost message");}
+    }
+}
+
+#[test]
+fn known_input_is_not_retired_before_the_viewport_can_display_its_cached_body() {
+    let mut f=Fixture::new();let local=local_prompt("request","own input");
+    f.cache.remember_local("chat",&local,&f.lineage).unwrap();
+    f.put("saved",None,1,BlockKind::Text,user_body("saved","request","own input"),b"own input");
+    f.page(None,None);
+    let stale_viewport=BTreeSet::new(); // The last frame still displayed the pending row.
+    let view=f.cache.preview("chat",Some(&stale_viewport)).unwrap().unwrap();
+    assert!(view.snapshot.delivered.is_empty(),"keep the authored overlay until its replacement is displayable");
+    assert!(view.incomplete.contains("saved"));
+    let current_viewport=BTreeSet::from(["saved".into()]);
+    let view=f.cache.preview("chat",Some(&current_viewport)).unwrap().unwrap();
+    assert_eq!(view.snapshot.events[0].text,"own input");assert_eq!(view.snapshot.delivered,["request"]);
+}
+
+#[test]
+fn body_reuse_is_bounded_disposable_and_does_not_accept_corrupt_cached_candidates() {
+    let mut f=Fixture::new();
+    for n in 0..257 { f.cache.remember_local("chat",&local_prompt(&format!("request-{n}"),"small input"),&f.lineage).unwrap(); }
+    {
+        let db=f.cache.db.lock().unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM local_echoes",[],|r|r.get::<_,u64>(0)).unwrap(),256);
+        assert_eq!(db.query_row("SELECT count(*) FROM local_echoes WHERE request='request-0'",[],|r|r.get::<_,u64>(0)).unwrap(),0);
+        db.execute("UPDATE local_echoes SET body=?1 WHERE request='request-256'",[b"WRONG input".as_slice()]).unwrap();
+    }
+    f.put("saved",None,1,BlockKind::Text,user_body("saved","request-256","small input"),b"small input");
+    f.page(None,None);
+    assert_eq!(f.cache.block_request("chat","saved").unwrap().offset,0);
+    f.body("saved");assert_eq!(f.cache.block_request("chat","saved").unwrap().offset,11);
+    f.cache.clear().unwrap();
+    assert_eq!(f.cache.db.lock().unwrap().query_row("SELECT count(*) FROM local_echoes",[],|r|r.get::<_,u64>(0)).unwrap(),0);
+}
