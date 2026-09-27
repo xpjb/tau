@@ -105,7 +105,17 @@ enum Action {
 enum Info {
     Connection,
     CacheTtl(String),
+    Attachment(String, String, String), // stable key, accessible action/title, unabridged detail
 }
+impl Info {
+    fn same_anchor(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Attachment(a, ..), Self::Attachment(b, ..)) => a == b,
+            _ => self == other,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum ModalKind {
     Settings,
@@ -497,10 +507,8 @@ impl App {
             && let Some((rect, target)) =
                 point.and_then(|p| self.info_areas.iter().find(|(r, _)| contains(*r, p)))
         {
-            if self.info_target != *target {
-                self.info_tip = Tooltip::default();
-                self.info_target = target.clone();
-            }
+            if !self.info_target.same_anchor(target) { self.info_tip = Tooltip::default(); }
+            self.info_target = target.clone();
             self.info_tip.region = *rect;
         }
         self.usage
@@ -835,6 +843,15 @@ impl App {
             && self.modal.is_none() && self.context_menu.is_none() && self.viewer.is_none()
             && (self.project_areas.iter().any(|(r,_)| contains(*r, point)) || self.chat_areas.iter().any(|(r,_)| contains(*r, point))) {
             self.context_at(point);
+        }
+        if let Some(point) = self.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
+            && self.modal.is_none() && self.context_menu.is_none() && self.viewer.is_none()
+            && let Some((_, info)) = self.info_areas.iter().find(|(r, info)| matches!(info, Info::Attachment(..)) && contains(*r, point)) {
+            let info = info.clone();
+            self.pointer = None;
+            self.ripple = None;
+            self.selecting = false;
+            self.activate(Action::Info(info));
         }
         let waiting_hold = self.pointer.as_ref().is_some_and(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() < 450)
             && self.modal.is_none() && self.context_menu.is_none() && self.viewer.is_none();
@@ -1307,6 +1324,12 @@ impl App {
                     self.viewer = None;
                     self.viewer_image = None;
                 }
+            } else if p.touch && p.started.elapsed().as_millis() > 450
+                && self.info_areas.iter().any(|(r, info)| matches!(info, Info::Attachment(..))
+                    && contains(*r, point) && contains(*r, p.start)) {
+                let info = self.info_areas.iter().find(|(r, info)| matches!(info, Info::Attachment(..))
+                    && contains(*r, point) && contains(*r, p.start)).unwrap().1.clone();
+                self.activate(Action::Info(info));
             } else if p.touch
                 && p.started.elapsed().as_millis() > 450
                 && self.context_menu.is_none()
@@ -1592,10 +1615,8 @@ impl App {
             }
             Action::Info(target) => {
                 self.usage.dismiss();
-                if self.info_target != target {
-                    self.info_tip = Tooltip::default();
-                    self.info_target = target;
-                }
+                if !self.info_target.same_anchor(&target) { self.info_tip = Tooltip::default(); }
+                self.info_target = target;
                 if let Some((rect, _)) = self
                     .info_areas
                     .iter()
@@ -2132,7 +2153,9 @@ impl App {
             }
             Action::SaveAttachment(session,entry,name) => {
                 let key=Controller::download_key(&session,&entry);
-                let path=match self.controller.download(&session,&entry,10_000_000) {
+                let file = self.controller.chats.get(&session).is_some_and(|chat| chat.feed.events.values()
+                    .any(|e| e.entry_id == entry && e.attachment.as_ref().is_some_and(|a| a.kind == AttachmentKind::File)));
+                let path=match self.controller.download(&session,&entry,if file {50_000_000} else {10_000_000}) {
                     Ok(path)=>path,
                     Err(error)=>{let text=error.to_string();self.export_errors.insert(key.clone(),text.clone());
                         self.controller.notice=Some(text);return Ok(());}
@@ -2141,6 +2164,7 @@ impl App {
                     self.begin_save(&session,&entry,path,name);
                 } else {
                     self.export_targets.insert(key.clone(),self.export_target(&session,&entry));
+                    self.export_errors.remove(&key);
                     self.pending_exports.insert(key,(path,name));
                 }
             }
@@ -2280,7 +2304,7 @@ impl App {
             let viewport = Rect::new(b.x + s, b.y + 57. * s, b.width - s, (b.height - 57. * s).max(0.));
             self.attachments_rect = viewport;
             let heights = files.iter().map(|(_, _, file)|
-                (104. + if file.kind == AttachmentKind::Image { 240. } else { 0. }) * s).collect::<Vec<_>>();
+                attachments::card_height(file) * s).collect::<Vec<_>>();
             let content_height = 12. * s + heights.iter().map(|h| h + 12. * s).sum::<f32>();
             self.max_attachment_scroll = (content_height + if older { 52. * s } else { 0. } - viewport.height).max(0.);
             self.attachment_scroll = self.attachment_scroll.clamp(0., self.max_attachment_scroll);
@@ -2328,12 +2352,9 @@ impl App {
         {
             self.controller.viewport(&session, interests);
         }
-        if let Some((rect, _)) = self
-            .info_areas
-            .iter()
-            .find(|(_, target)| *target == self.info_target)
-        {
+        if let Some((rect, target)) = self.info_areas.iter().find(|(_, target)| self.info_target.same_anchor(target)) {
             self.info_tip.region = *rect;
+            self.info_target = target.clone();
         }
         if self.info_tip.region.width <= 0. {
             self.info_tip.hover(false);
@@ -3086,19 +3107,14 @@ impl App {
                 self.max_horizontal = self.max_horizontal.max(message.view.width - text_width);
             }
             let attachment = if let Some((_, a)) = &row.attachment {
-                (72. + if a.kind == AttachmentKind::Image { 240. } else { 0. }) * s
+                attachments::card_height(a) * s
             } else {
                 0.
             };
             let height = (if row.header { 50. } else { 28. }) * s
                 + text_height
                 + 12. * s
-                + attachment
-                + if row.attachment.is_some() {
-                    30. * s
-                } else {
-                    0.
-                };
+                + attachment;
             placements.push(Placed {
                 key: row.key.clone(),
                 top: y,
@@ -3765,6 +3781,11 @@ impl App {
         {
             return;
         }
+        if let Some((_, info)) = self.info_areas.iter().find(|(r, info)| matches!(info, Info::Attachment(..)) && contains(*r, point)) {
+            let info = info.clone();
+            self.activate(Action::Info(info));
+            return;
+        }
         if let Some(id) = self.project_areas.iter().find(|(r,_)| contains(*r, point)).map(|(_,id)| id.clone()) {
             self.project_context(&id, point);
             return;
@@ -3924,6 +3945,11 @@ impl App {
             return;
         }
         self.info_tip.content = match &self.info_target {
+            Info::Attachment(_, title, detail) => {
+                let mut content = Content::default();
+                content.strong(title, crate::tooltip::INK).line().dim(detail);
+                content
+            }
             Info::Connection => self.controller.health.tooltip(&self.controller.connection,Instant::now()),
             Info::CacheTtl(id) => {
                 let Some(session) = self
@@ -3941,7 +3967,7 @@ impl App {
         // Cover the New chat button beneath the connection card, including on phones.
         let width = if self.info_target == Info::Connection {
             if bounds.width / self.scale < 760. { bounds.width / self.scale - 16. } else { 300. }
-        } else { 180. };
+        } else if matches!(self.info_target, Info::Attachment(..)) { 300. } else { 180. };
         self.info_tip.frame(&mut self.renderer, layer, "info", bounds, self.scale, width, false);
     }
     fn settings_frame(&mut self, layer: &mut Layer, b: Rect) {
@@ -4790,3 +4816,6 @@ mod usage_tests {
             "Context · usage unknown\nCapacity: 4,096 tokens");
     }
 }
+
+#[cfg(all(test, not(target_os = "android")))]
+mod download_render_tests;
