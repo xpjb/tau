@@ -172,6 +172,69 @@ fn topics_restore_the_last_open_chat_across_switches_restart_and_membership_chan
 }
 
 #[test]
+fn topic_tabs_follow_contained_chat_activity_on_desktop_and_mobile() {
+    for (size, mobile) in [((1000, 800), false), ((360, 720), true)] {
+        let mut h = Harness::new(size, mobile);
+        h.app.controller.message(ServerMessage::Projects { projects: vec![
+            Project::general(), Project { id:"p1".into(), name:"First".into(), prompt:String::new(), revision:0 },
+            Project { id:"p2".into(), name:"Second".into(), prompt:String::new(), revision:0 },
+        ] }).unwrap();
+        let mut sessions = h.app.controller.account.sessions.clone();
+        for chat in &mut sessions {
+            match chat.id.as_str() {
+                "demo" => chat.updated_at_ms = 100,
+                "two" => { chat.project_id = "p1".into(); chat.updated_at_ms = 10; }
+                "three" => { chat.project_id = "p2".into(); chat.updated_at_ms = 20; }
+                _ => unreachable!(),
+            }
+        }
+        h.app.controller.message(ServerMessage::Sessions { sessions }).unwrap();
+        h.frame();
+        fn tabs(h: &Harness) -> Vec<&str> {
+            h.app.project_areas.iter().map(|(_, id)| id.as_str()).collect()
+        }
+        assert_eq!(tabs(&h), ["general", "p2", "p1"]);
+        h.app.controller.select("two").unwrap();
+        h.app.tick(0.);
+        if mobile { h.app.back(); }
+        h.frame();
+        assert_eq!(tabs(&h), ["general", "p2", "p1"], "selection does not move the topic tab");
+        h.app.controller.draft("bump first topic".into()).unwrap();
+        h.frame();
+        assert_eq!(tabs(&h), ["general", "p1", "p2"], "tab hit regions and paint use the new order");
+    }
+}
+
+#[test]
+fn selected_topic_stays_visible_when_its_chat_bumps_from_the_far_right() {
+    for (size, mobile) in [((1000, 800), false), ((360, 720), true)] {
+        let mut h = Harness::new(size, mobile);
+        let mut sessions = h.app.controller.account.sessions.clone();
+        sessions[2].updated_at_ms = 1;
+        for i in 1..24 {
+            let mut chat = sessions[2].clone();
+            chat.id = format!("topic-{i}-chat");
+            chat.project_id = format!("p{i}");
+            chat.updated_at_ms = 2 + i;
+            sessions.push(chat);
+        }
+        h.app.controller.message(ServerMessage::Sessions { sessions }).unwrap();
+        h.app.apply(Action::SelectProject("p24".into())).unwrap();
+        h.frame();
+        assert!(h.app.project_scroll > 0.);
+        assert!(h.app.project_areas.iter().any(|(_, id)| id == "p24"));
+        h.app.apply(Action::Select("three".into())).unwrap();
+        h.app.tick(0.);
+        if mobile { h.app.apply(Action::Back).unwrap(); }
+        h.frame();
+        h.app.controller.draft("bump this topic".into()).unwrap();
+        h.frame();
+        assert_eq!(h.app.controller.account.projects[1].id, "p24");
+        assert!(h.app.project_areas.iter().any(|(_, id)| id == "p24"), "the selected tab remains visible after moving left (mobile={mobile}, scroll={}, tabs={:?})", h.app.project_scroll, h.app.project_areas.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn chat_activity_updates_the_visible_list_on_desktop_and_mobile() {
     for (size, mobile) in [((1000, 800), false), ((360, 720), true)] {
         let mut h = Harness::new(size, mobile);

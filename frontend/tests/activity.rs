@@ -19,6 +19,82 @@ fn catalog(c: &mut Controller, sessions: &[SessionSummary]) {
 fn order(c: &Controller) -> Vec<&str> {
     c.account.sessions.iter().map(|s| s.id.as_str()).collect()
 }
+fn topics(c: &Controller) -> Vec<&str> {
+    c.account.projects.iter().map(|p| p.id.as_str()).collect()
+}
+fn project(id: &str) -> Project {
+    Project { id: id.into(), name: id.into(), prompt: String::new(), revision: 0 }
+}
+fn in_topic(id: &str, topic: &str, at: u64) -> SessionSummary {
+    SessionSummary { project_id: topic.into(), ..session(id, at) }
+}
+
+#[test]
+fn topic_activity_tracks_contained_chat_bumps_without_unpinning_general() {
+    let root = tempfile::tempdir().unwrap();
+    let mut c = controller(root.path());
+    let projects = vec![Project::general(), project("alpha"), project("beta"), project("empty")];
+    c.message(ServerMessage::Projects { projects: projects.clone() }).unwrap();
+    let mut sessions = vec![in_topic("alpha-old", "alpha", 10), in_topic("alpha-new", "alpha", 20),
+        in_topic("beta-chat", "beta", 30), session("general-chat", 100)];
+    catalog(&mut c, &sessions);
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"]);
+    c.select("alpha-old").unwrap();
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "opening a chat is not activity");
+    c.message(ServerMessage::SessionState { session_id: "alpha-old".into(), revision: 1,
+        restore_review: None, status: SessionStatus::Running, context_usage: None, detail: None }).unwrap();
+    c.message(ServerMessage::TranscriptSnapshot { session_id: "alpha-old".into(),
+        snapshot: TranscriptSnapshot { generation: "history".into(), sequence: 1, events: vec![],
+            queue: QueueState::default(), before: None, delivered: vec![] } }).unwrap();
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "status and streaming do not bump");
+    c.draft("alpha draft".into()).unwrap();
+    assert_eq!(topics(&c), ["general", "alpha", "beta", "empty"], "an older chat bumps its entire topic");
+    c.select("beta-chat").unwrap();
+    c.draft("beta draft".into()).unwrap();
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"]);
+    c.message(ServerMessage::Projects { projects: projects.clone() }).unwrap();
+    catalog(&mut c, &sessions);
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "catalogue refresh cannot undo local activity");
+    drop(c);
+    let mut c = controller(root.path());
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "saved chat activity reorders topics after restart");
+    c.message(ServerMessage::Projects { projects: projects.clone() }).unwrap();
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "project pages can arrive before session pages");
+    sessions[0].updated_at_ms = 101; // A completed remote turn in alpha, not a transient status change.
+    catalog(&mut c, &sessions);
+    assert_eq!(topics(&c), ["general", "alpha", "beta", "empty"]);
+    c.select("beta-chat").unwrap();
+    c.send_prompt().unwrap();
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "sending bumps even a previously saved draft");
+    catalog(&mut c, &sessions);
+    assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "same remote completion cannot replay as a new bump");
+    sessions[2].project_id = "alpha".into();
+    catalog(&mut c, &sessions);
+    assert_eq!(topics(&c), ["general", "alpha", "beta", "empty"], "membership changes use the current containing topic");
+}
+
+#[test]
+fn topic_activity_tracks_late_attachments_and_new_chats_without_failed_write_bumps() {
+    let root = tempfile::tempdir().unwrap();
+    let mut c = controller(root.path());
+    c.message(ServerMessage::Projects { projects: vec![Project::general(), project("one"), project("two")] }).unwrap();
+    catalog(&mut c, &[in_topic("one-chat", "one", 10), in_topic("two-chat", "two", 20)]);
+    assert_eq!(topics(&c), ["general", "two", "one"]);
+    let file = root.path().join("picked.txt");
+    std::fs::write(&file, "attachment").unwrap();
+    let identity = c.identity.clone();
+    c.attach_to(&identity, "one-chat", &file, None).unwrap();
+    assert_eq!(topics(&c), ["general", "one", "two"], "a late picker bumps its original chat's topic");
+    c.select_project("two", false).unwrap();
+    assert_eq!(topics(&c), ["general", "one", "two"], "switching topics is not activity");
+    c.new_chat().unwrap();
+    assert_eq!(topics(&c), ["general", "two", "one"], "a provisional new chat bumps its topic immediately");
+    let db = rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_chat_write BEFORE UPDATE ON local WHEN NEW.key LIKE 'chat:%' BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END;").unwrap();
+    c.select("one-chat").unwrap();
+    assert!(c.attach_to(&identity, "one-chat", &file, None).is_err());
+    assert_eq!(topics(&c), ["general", "two", "one"], "a failed chat write cannot bump its topic");
+}
 
 #[test]
 fn chat_activity_sorts_catalog_and_persists_typing_attachments_and_sends() {

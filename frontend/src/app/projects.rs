@@ -100,9 +100,13 @@ impl App {
             (text + 24. * s).clamp(56. * s, 220. * s)
         }).collect::<Vec<_>>();
         self.max_project_scroll = (widths.iter().sum::<f32>() + 40. * s - b.width).max(0.);
-        if self.revealed_project != self.controller.account.selected_project {
+        let selected_position = projects.iter().position(|p| p.id == self.controller.account.selected_project);
+        if self.revealed_project != self.controller.account.selected_project || self.revealed_project_position != selected_position {
+            // A selected topic may jump left when a chat inside it is bumped.
+            // Keep it in view without undoing intentional scrolling on every frame.
             self.revealed_project = self.controller.account.selected_project.clone();
-            if let Some(i) = projects.iter().position(|p| p.id == self.revealed_project) {
+            self.revealed_project_position = selected_position;
+            if let Some(i) = selected_position {
                 let left = widths[..i].iter().sum::<f32>();
                 let right = left + widths[i];
                 if left < self.project_scroll { self.project_scroll = left; }

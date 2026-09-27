@@ -265,6 +265,20 @@ impl Controller {
                 .max(local.get(&session.id).copied().unwrap_or_default());
             (std::cmp::Reverse(activity), session.id.clone())
         });
+        self.sort_projects();
+    }
+    fn sort_projects(&mut self) {
+        // A topic's position follows its most recently bumped chat, using the
+        // same source/local activity key as the chat list. Empty topics retain
+        // their catalogue order, and General stays pinned ahead of all of them.
+        let mut latest = HashMap::<&str, LocalActivity>::new();
+        for session in &self.account.sessions {
+            let activity = self.activity_key(session);
+            latest.entry(&session.project_id).and_modify(|old| *old = (*old).max(activity)).or_insert(activity);
+        }
+        self.account.projects.sort_by_cached_key(|project| {
+            (project.id != GENERAL_PROJECT_ID, std::cmp::Reverse(latest.get(project.id.as_str()).copied().unwrap_or_default()))
+        });
     }
     fn next_local_activity(&self) -> LocalActivity {
         LocalActivity {
@@ -281,6 +295,7 @@ impl Controller {
             let session = self.account.sessions.remove(index);
             self.account.sessions.insert(0, session);
         }
+        self.sort_projects();
         self.plan_dirty.set(true);
     }
     fn last_chat_in_project(&self, project: &str) -> Option<String> {
@@ -729,6 +744,7 @@ impl Controller {
     pub fn forget_missing_chat(&mut self,id:&str)->Result<()> {
         ensure!(self.account.missing_chats.contains(id),"Refusing to forget a live source chat locally");
         self.store.delete_chat(&self.identity,id)?;self.chats.remove(id);self.local_activity.remove(id);self.account.missing_chats.remove(id);self.account.sessions.retain(|s|s.id!=id);
+        self.sort_projects();
         if self.account.selected.as_deref()==Some(id) {self.account.selected=None;}
         self.store.put(&self.identity,"account",&self.account)?;self.plan_dirty.set(true);Ok(())
     }
@@ -1297,6 +1313,7 @@ impl Controller {
             }
             ServerMessage::Projects { projects } => {
                 self.account.projects = projects;
+                self.sort_projects();
                 if !self.account.projects.iter().any(|p| p.id == self.account.selected_project) {
                     self.account.selected_project = general_project_id();
                 }
@@ -1535,6 +1552,7 @@ impl Controller {
                         self.account.sessions.retain(|s| s.id != id);
                         if self.account.selected.as_ref() == Some(&id) { self.account.selected = None; }
                     }
+                    self.sort_projects();
                     self.store.put(&self.identity, "account", &self.account)?;
                 }
                 if matches!(command, Some(ClientCommand::CreateProject { .. } | ClientCommand::UpdateProject { .. } | ClientCommand::DeleteProject { .. })) {
@@ -1585,6 +1603,7 @@ impl Controller {
                             if let Some(session) = self.account.sessions.iter_mut().find(|s| s.id == session_id) {
                                 session.project_id = project_id;
                             }
+                            self.sort_projects();
                             self.store.put(&self.identity, "account", &self.account)?;
                         }
                         Some(ClientCommand::DeleteProject { project_id, mode, .. }) => {
@@ -1596,6 +1615,7 @@ impl Controller {
                                     if s.project_id == project_id { s.project_id = general_project_id(); }
                                 }
                             }
+                            self.sort_projects();
                             self.store.put(&self.identity, "account", &self.account)?;
                         }
                         Some(ClientCommand::CreateSession { .. }) => {
