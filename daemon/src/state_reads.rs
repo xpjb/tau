@@ -23,16 +23,22 @@ impl Readers {
         Ok(Self { idle: Mutex::new(idle), permits: Arc::new(Semaphore::new(READERS)) })
     }
     pub async fn read<T: Send + 'static>(self: &Arc<Self>, action: impl FnOnce(&Connection) -> Result<T> + Send + 'static) -> Result<T> {
+        let mut timing=super::timing::Timing::new("reader");
         let permit = self.permits.clone().acquire_owned().await?;
+        timing.acquired();
         let db = self.idle.lock().unwrap().pop().expect("reader permit owns a connection");
         let mut lease = Lease { db: Some(db), pool: self.clone(), _permit: permit };
         tokio::task::spawn_blocking(move || {
             // Every multi-query read sees one committed version. A writer can
             // commit alongside this snapshot; the next read sees that commit.
-            let tx = lease.db.as_mut().unwrap().transaction()?;
-            let value = action(&tx)?;
-            tx.commit()?;
-            Ok(value)
+            timing.working();
+            let result=(|| {
+                let tx = lease.db.as_mut().unwrap().transaction()?;
+                let value = action(&tx)?;
+                tx.commit()?;
+                Ok(value)
+            })();
+            timing.finished(result.is_ok());result
         }).await?
     }
 }

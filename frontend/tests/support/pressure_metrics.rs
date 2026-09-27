@@ -1,0 +1,78 @@
+//! Bounded local samples of opt-in daemon timing events, without a wire change.
+use std::{collections::BTreeMap,sync::{Arc,Mutex,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,Instant}};
+use serde_json::{Value,json};
+use tracing::{Event,Subscriber,field::{Field,Visit}};
+use tracing_subscriber::{Layer,layer::Context,prelude::*};
+
+pub fn distribution(values:&[u64])->Value {
+    if values.is_empty() {return json!({"count":0});}
+    let mut sorted=values.to_vec();sorted.sort_unstable();
+    let ms=|v:u64|v as f64/1000.;
+    json!({"count":sorted.len(),"p50_ms":ms(sorted[(sorted.len()-1)/2]),
+        "p95_ms":ms(sorted[(sorted.len()*95).div_ceil(100)-1]),"max_ms":ms(*sorted.last().unwrap()),
+        "total_ms":values.iter().map(|&v|ms(v)).sum::<f64>()})
+}
+#[derive(Default)]
+struct Samples {wait:Vec<u64>,dispatch:Vec<u64>,work:Vec<u64>,outcomes:BTreeMap<String,u64>}
+impl Samples {
+    fn add(&mut self,event:&Fields) {
+        *self.outcomes.entry(event.outcome.clone()).or_default()+=1;
+        if self.wait.len()<20_000 {self.wait.push(event.wait);self.dispatch.push(event.dispatch);self.work.push(event.work);}
+    }
+    fn report(&self)->Value {json!({"wait":distribution(&self.wait),"dispatch":distribution(&self.dispatch),
+        "work":distribution(&self.work),"outcomes":self.outcomes,"sample_cap":20_000})}
+}
+#[derive(Default)]
+struct Data {pools:BTreeMap<String,Samples>,admission:Samples}
+#[derive(Default)]
+struct Inner {data:Mutex<Data>,pause_ms:AtomicU64,pause_started:AtomicBool,pause_actual_us:AtomicU64}
+#[derive(Clone,Default)]
+pub struct Recorder(Arc<Inner>);
+impl Recorder {
+    pub fn install()->Self {
+        let recorder=Self::default();
+        let filter=tracing_subscriber::filter::Targets::new()
+            .with_target("taud::db",tracing::Level::DEBUG).with_target("taud::control_admission",tracing::Level::DEBUG);
+        tracing_subscriber::registry().with(recorder.clone().with_filter(filter)).try_init().unwrap();
+        recorder
+    }
+    // Only this test subscriber sleeps: pause a real writer while it owns its
+    // application lock, not a competing SQLite writer with different BUSY rules.
+    pub fn pause_next_writer(&self,milliseconds:u64) {self.0.pause_ms.store(milliseconds,Ordering::SeqCst);}
+    pub fn pause_started(&self)->bool {self.0.pause_started.load(Ordering::SeqCst)}
+    pub fn pause_actual_us(&self)->u64 {self.0.pause_actual_us.load(Ordering::SeqCst)}
+    pub fn take(&self)->Value {
+        let data=std::mem::take(&mut *self.0.data.lock().unwrap());
+        json!({"database":data.pools.iter().map(|(key,value)|(key.clone(),value.report())).collect::<BTreeMap<_,_>>(),
+            "admission":data.admission.report()})
+    }
+}
+#[derive(Default)]
+struct Fields {pool:String,phase:String,outcome:String,wait:u64,dispatch:u64,work:u64}
+impl Visit for Fields {
+    fn record_u64(&mut self,field:&Field,value:u64) {match field.name() {"wait_us"=>self.wait=value,"dispatch_us"=>self.dispatch=value,"work_us"=>self.work=value,_=>{}}}
+    fn record_str(&mut self,field:&Field,value:&str) {match field.name() {"pool"=>self.pool=value.into(),"phase"=>self.phase=value.into(),"outcome"=>self.outcome=value.into(),_=>{}}}
+    fn record_debug(&mut self,_:&Field,_:&dyn std::fmt::Debug) {}
+}
+impl<S:Subscriber> Layer<S> for Recorder {
+    fn on_event(&self,event:&Event<'_>,_:Context<'_,S>) {
+        let mut fields=Fields::default();event.record(&mut fields);
+        if fields.phase=="start" {
+            if fields.pool=="writer" {
+                let milliseconds=self.0.pause_ms.swap(0,Ordering::SeqCst);
+                if milliseconds>0 {
+                    self.0.pause_started.store(true,Ordering::SeqCst);let at=Instant::now();
+                    std::thread::sleep(Duration::from_millis(milliseconds));
+                    self.0.pause_actual_us.store(at.elapsed().as_micros() as u64,Ordering::SeqCst);
+                }
+            }
+            return;
+        }
+        let mut data=self.0.data.lock().unwrap();
+        match event.metadata().target() {
+            "taud::db"=>data.pools.entry(fields.pool.clone()).or_default().add(&fields),
+            "taud::control_admission"=>data.admission.add(&fields),
+            _=>{}
+        }
+    }
+}
