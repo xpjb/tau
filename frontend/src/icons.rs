@@ -114,10 +114,14 @@ impl Icon {
                         p.move_to(4., 16.); p.line_to(4., 20.); p.line_to(20., 20.); p.line_to(20., 16.);
                     }
                     Self::OpenFile => {
-                        p.move_to(14., 3.); p.line_to(21., 3.); p.line_to(21., 10.);
-                        p.move_to(21., 3.); p.line_to(10., 14.);
-                        p.move_to(10., 5.); p.line_to(4., 5.); p.line_to(4., 20.);
-                        p.line_to(19., 20.); p.line_to(19., 14.);
+                        // A folded document opening to the right, not an external-link
+                        // square (which suggests a website or a new browser window).
+                        p.move_to(17., 9.); p.line_to(17., 7.); p.line_to(12., 2.);
+                        p.line_to(4., 2.); p.line_to(4., 22.); p.line_to(17., 22.);
+                        p.line_to(17., 19.);
+                        p.move_to(12., 2.); p.line_to(12., 7.); p.line_to(17., 7.);
+                        p.move_to(10., 14.); p.line_to(22., 14.);
+                        p.move_to(18., 10.); p.line_to(22., 14.); p.line_to(18., 18.);
                     }
                     Self::View => {
                         p.move_to(2., 12.); p.cubic_to(7., 3., 17., 3., 22., 12.);
@@ -131,12 +135,16 @@ impl Icon {
                         p.line_to(22., 11.); p.line_to(7., 11.); p.line_to(3., 19.);
                     }
                     Self::Extract => {
-                        p.move_to(12., 2.); p.line_to(12., 12.);
-                        p.move_to(8., 8.); p.line_to(12., 12.); p.line_to(16., 8.);
-                        p.move_to(6., 9.); p.line_to(3., 14.); p.line_to(3., 21.);
-                        p.line_to(21., 21.); p.line_to(21., 14.); p.line_to(18., 9.);
-                        p.move_to(3., 14.); p.line_to(8., 14.); p.line_to(9., 17.);
-                        p.line_to(15., 17.); p.line_to(16., 14.); p.line_to(21., 14.);
+                        // Unpack: contents move OUT of an open carton with raised
+                        // flaps. A downward arrow into a tray reads as Download.
+                        p.move_to(12., 11.); p.line_to(12., 2.);
+                        p.move_to(8.5, 5.5); p.line_to(12., 2.); p.line_to(15.5, 5.5);
+                        p.move_to(3., 11.); p.line_to(3., 18.); p.line_to(12., 22.);
+                        p.line_to(21., 18.); p.line_to(21., 11.);
+                        p.move_to(3., 11.); p.line_to(12., 15.); p.line_to(21., 11.);
+                        p.move_to(12., 15.); p.line_to(12., 22.);
+                        p.move_to(3., 11.); p.line_to(1.5, 7.); p.line_to(8., 9.5);
+                        p.move_to(21., 11.); p.line_to(22.5, 7.); p.line_to(16., 9.5);
                     }
                     Self::Cancel => {
                         p.move_to(6., 6.); p.line_to(18., 18.);

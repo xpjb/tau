@@ -1,5 +1,12 @@
 # Inline download icon audit — September 27, 2026 (unreleased)
 
+Icon-readability follow-up: Open is now a folded document with an outward arrow;
+Extract is an open carton with an upward/outward arrow, rather than an inbox-like
+tray. Re-rendered all 32 cases at four sizes/scales, including interactions, and
+refreshed the contact sheets and real-app captures. All five focused render/lifecycle
+tests passed (run `9c6063fa-8d05-4d79-89c5-af40e57a6a3c`; 85 unrelated tests skipped).
+No behavior, hit-target or tooltip-label changes; no packaging/deployment.
+
 - Replaced every inline download/save/view/open/cancel/retry/folder/extract control
   with a native vector icon. The shared chat/Attachments control is 68dp high like
   Tau1, with 40dp desktop / 44dp touch targets; no empty caption row or text collision.

@@ -10,6 +10,13 @@ secondary actions have 40dp desktop / 44dp touch hit targets. Saved files get a 
 green status; failures retain the error and retry action; saving is visibly busy and
 cannot enqueue a duplicate export.
 
+Following icon-readability feedback, **Open** uses a folded document opening to the
+right instead of an external-link square. **Extract** uses an open carton with
+contents coming out, not a download-like arrow into a tray. Folder remains unchanged,
+so the three saved-ZIP actions have different silhouettes. Hover/hold labels remain.
+
+![Open and Extract refinement at actual button size](../../gallery/downloads-open-extract.png)
+
 Names and status are shaped as **single lines** with real ellipsis, never clipped
 wrapped text. Long filenames retain their extension. The full name/status/caption
 is available by hovering or tapping the text; icons have descriptive hover labels
