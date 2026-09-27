@@ -205,6 +205,7 @@ impl AgentManager {
                 if name=="compact" && content.agent.as_ref().unwrap().running {bail!("Stop the current run before compacting");}
                 let receipt = Receipt { id:request_id.into(),command:Some("builtin".into()),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
                 content.commit(id,Vec::new(),None,Some(receipt.clone())).await?;
+                self.broadcast_sessions().await;
                 if name=="compact" {
                     let agent=content.agent.as_mut().unwrap();agent.running=true;agent.cancel=tokio_util::sync::CancellationToken::new();
                     let manager=self.clone();let session=id.to_owned();let rt=runtime.clone();let arguments=args.trim().to_owned();
@@ -247,6 +248,8 @@ impl AgentManager {
                 Some("Pending work is paused; resume when ready".into()), None);
         }
         drop(content);
+        // Publish accepted-send activity without waiting for optional title generation.
+        self.broadcast_sessions().await;
         let manager = self.clone(); let session = id.to_owned(); let text = text.to_owned();
         tokio::spawn(async move { manager.title_after_prompt(&session, &text).await; });
         Ok(PromptOutcome { disposition, notice:None })
