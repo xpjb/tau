@@ -1180,6 +1180,32 @@ mod tests {
     }
 
     #[test]
+    fn soft_breaks_stream_and_copy_as_real_lines() {
+        let (mut text, faces) = setup();
+        for source in ["first\nsecond", "- first\n  second", "> first\n> second"] {
+            let mut doc = Document::default();
+            let mut view = Preview::new(901);
+            for chunk in source.split_inclusive('\n') {
+                doc.append(chunk).unwrap();
+                view.sync(&doc, &mut text, faces, Theme::default(), 500., 17.);
+            }
+            assert_eq!(doc.source().to_string(), source);
+            assert_eq!(doc.blocks().len(), 1);
+            let c = &view.texts[&doc.blocks()[0].id];
+            assert_eq!(c.rich.text, "first\nsecond");
+            assert_eq!(text.measure(c.handle).line_count(), 2);
+            assert_eq!(
+                view.copy_selection(&doc, 0..doc.source().len_bytes()),
+                "first\nsecond"
+            );
+            doc.append("\n\nthird").unwrap();
+            view.sync(&doc, &mut text, faces, Theme::default(), 500., 17.);
+            assert_eq!(doc.blocks().len(), 2, "blank lines still split paragraphs");
+            view.release(&mut text);
+        }
+    }
+
+    #[test]
     fn heights_append_update_splice_and_search() {
         let mut h = Heights::from(vec![10., 20., 30.]);
         assert_eq!(h.total(), 60.);

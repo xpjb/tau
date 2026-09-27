@@ -401,9 +401,9 @@ fn parse_inner(s: &str, table: bool) -> RichText {
                     continue;
                 }
             }
-            // Hard breaks consume their source markers; soft breaks project to
-            // spaces. Kept newlines are split into real sanscale paragraphs by
-            // the adapter, never shaped as a fictitious newline glyph.
+            // Hard breaks consume their source markers; soft breaks stay as
+            // newlines too. The adapter splits them into real sanscale paragraphs,
+            // never shaping them as fictitious newline glyphs.
             if b[i] == b'\\' && b.get(i + 1) == Some(&b'\n') {
                 out.push("\n", flags, i..i + 2, false);
                 i += 2;
@@ -423,7 +423,7 @@ fn parse_inner(s: &str, table: bool) -> RichText {
         }
         let c = s[i..].chars().next().unwrap();
         let end = i + c.len_utf8();
-        if c == '\n' {
+        if c == '\n' && flags & CODE != 0 {
             out.push(" ", flags, i..end, false);
         } else {
             out.push(&s[i..end], flags, i..end, true);
@@ -473,8 +473,9 @@ mod tests {
         );
         assert_eq!(
             parse("one\ntwo  \nthree\\\nfour").text,
-            "one two\nthree\nfour"
+            "one\ntwo\nthree\nfour"
         );
+        assert_eq!(parse("`one\ntwo`\nthree").text, "one two\nthree");
         assert_eq!(parse("`` `x` &amp; ``").text, "`x` &amp;");
         assert_eq!(parse(r"`a\`b`").text, r"a\b`");
         assert_eq!(parse("![alt](remote.png)").text, "alt");
@@ -482,6 +483,24 @@ mod tests {
             parse("<script>alert(1)</script>").text,
             "<script>alert(1)</script>"
         );
+    }
+    #[test]
+    fn soft_breaks_preserve_formatting_and_source_mapping() {
+        let source = "**café\n世界**\n[one\ntwo](https://example.org)";
+        let rich = parse(source);
+        assert_eq!(rich.text, "café\n世界\none\ntwo");
+        for (byte, ch) in rich.text.char_indices() {
+            let source_byte = rich.source_byte(byte);
+            assert!(source[source_byte..].starts_with(ch));
+        }
+        let bold_break = rich.text.find('\n').unwrap();
+        assert!(rich.runs.iter().any(|run| {
+            run.range.contains(&bold_break) && run.flags & STRONG != 0
+        }));
+        let link_break = rich.text.rfind('\n').unwrap();
+        assert!(rich.runs.iter().any(|run| {
+            run.range.contains(&link_break) && run.flags & LINK != 0
+        }));
     }
     #[test]
     fn adversarial_unmatched_markers_are_bounded_and_utf8_safe() {

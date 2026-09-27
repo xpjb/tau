@@ -59,7 +59,9 @@ through `Document` so revisions cannot silently diverge from parsed contents.
 
 Implemented:
 
-- Paragraphs and soft breaks; two trailing spaces or backslash-newline hard breaks.
+- Paragraphs with visible line breaks for every prose newline; blank lines separate
+  paragraphs. Two trailing spaces or backslash-newline also produce line breaks.
+  Inline code still normalizes embedded newlines to spaces.
 - ATX headings and single-physical-line setext headings (`=` / at least three `-`).
 - Fenced code (backticks/tildes, matching marker and sufficient closing length),
   including unfinished streaming fences. Code is rendered per physical line.
@@ -160,8 +162,8 @@ expects usable fonts and service capacity; fallible capacity-aware view APIs are
 still part of stabilization, not a claim of unbounded resource support.
 
 Font spans are resolved on projected **grapheme** boundaries, including after
-entities/removed delimiters bring combining characters together. Hard breaks are
-split into real sanscale paragraphs; LF is not shaped as a pretend glyph. Inline
+entities/removed delimiters bring combining characters together. Soft and hard breaks
+are split into real sanscale paragraphs; LF is not shaped as a pretend glyph. Inline
 paint uses projected block-local bytes. Bold+italic chooses an actual combined
 face, and base-style line metrics retain sanscale's existing policy.
 
