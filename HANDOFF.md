@@ -1,27 +1,31 @@
-# Current rollout hold — composer thinking level / beta 0.7.8 preparation
+# Current rollout hold — beta 0.7.8 packages attached, awaiting download confirmation
 
 **Do not restart or deploy the daemon until the user explicitly confirms both
 Windows and Android packages have been downloaded.** The user corrected the
 merge destination to `tau2-integration`, not master. Local `tau2-integration`
 tracks/publishes to `origin/tau2`. Stable/master must remain untouched.
 
-Feature branch/worktree: `fix/tau2-composer-thinking` /
-`/root/tau2-composer-thinking`. Start from the already-integrated checkpoint-watch
-change `2517e9c` (protocol 20). The thinking field is additive, with old-cache
-compatibility; it does not require another protocol or storage-schema bump.
-The running beta remains **0.7.7 / protocol 19**, so the new client packages need
-the matching daemon after the download acknowledgement. Do not mistake package
-build completion or attachment delivery for that acknowledgement.
+- Feature `cdc33ca` (`fix/tau2-composer-thinking`, `/root/tau2-composer-thinking`)
+  is merged as `af0e5e0`; release `b74af7e` is published to `origin/tau2`.
+- `scripts/release-beta.sh --merge fix/tau2-composer-thinking --version 0.7.8 --push`
+  completed successfully, **without `--deploy`**. All three binaries built
+  sequentially; Windows and Android package verification passed. Protocol 20
+  includes the previously integrated checkpoint-watch change `2517e9c`.
+- Both packages were attached via Tau's `send_file`, Windows first, Android second:
+  `/root/tau2-integration/dist/Tau-Beta-0.7.8-windows-x64.exe` and
+  `/root/tau2-integration/dist/Tau-Beta-0.7.8-android-arm64-v8a.apk`.
+  Attachment queuing is not confirmation of a completed user download.
+- Beta remains **0.7.7 / protocol 19**, PID **1467375**. Stable PID **474496** is
+  unchanged. Both services' active states, PIDs and monotonic start times matched
+  before/after packaging. No production service was stopped, restarted or installed.
+- New protocol-20 clients need the pending daemon update. Only after the user's
+  explicit confirmation, run in `/root/tau2-integration`:
+  `scripts/release-beta.sh --version 0.7.8 --push --deploy`.
+  This reuses the completed package receipts; do not rebuild or rerun the suite.
+- Three focused and fourteen related nextest tests passed; actual desktop/phone
+  GPU screenshots were inspected. No physical-device acceptance is claimed.
+  See `frontend/QA.md`; hashes and package facts are in `INTEGRATION.md`.
 
-Preparation command, in `/root/tau2-integration`, **without `--deploy`**:
-`scripts/release-beta.sh --merge fix/tau2-composer-thinking --version 0.7.8 --push`.
-Send the two paths in `dist/releases/0.7.8/delivery.json`, Windows then Android.
-Only after the user's confirmation, the same release can reuse its receipts via
-`scripts/release-beta.sh --version 0.7.8 --push --deploy` (beta only).
-
-Three focused and fourteen related nextest tests passed; see `frontend/QA.md`. No production service
-changes or device acceptance are claimed by source validation. The release
-record below will be updated with actual package and delivery results.
 
 ---
 

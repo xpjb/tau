@@ -361,3 +361,48 @@ package verifiers passed. No physical Windows or Android acceptance was run.
 The five focused downloads tests passed on the feature branch. A merged-tree nextest
 retry timed out waiting for the shared Cargo lock before the tests started; it was
 not a test failure. No full suite was rerun for this release.
+
+
+## Beta 0.7.8 / protocol 20 — packages attached, daemon held for download acknowledgement
+
+The user prioritized the thinking-level indicator above the text box, corrected
+the merge destination from master to `tau2-integration`, and explicitly required
+Windows/Android downloads to complete before any daemon restart. Feature
+`cdc33ca` was committed/pushed on `fix/tau2-composer-thinking`, merged as `af0e5e0`,
+and versioned at release `b74af7e`, published to `origin/tau2`. Master is unchanged.
+The release includes the already-integrated checkpoint-watch fix `2517e9c` and its
+protocol-20 requirement. The optional `thinkingLevel` summary field adds no further
+protocol or storage-schema version change.
+
+The composer uses the saved per-chat level, including `off`, and reserves its
+label before shortening a long model slug. The same value prefills the thinking
+editor and persists offline. Catalogue revision fencing covers thinking changes;
+legacy account caches read missing metadata as unknown, not a guessed default.
+Three feature nextest tests and fourteen related activity/catalogue/offline-create
+regressions passed on the feature source. Desktop, narrow-phone and scaled-phone
+GPU shaping/rendering were exercised and screenshots inspected. No full suite,
+physical Windows/Android acceptance or paid provider completion was performed.
+
+The release automation ran **without `--deploy`**, with managed Cargo, one build
+job/Rayon thread and sequential daemon/Windows/Android builds. Windows embedded
+native app/launcher verification and Android package identity, signature, payload,
+ZIP CRC/alignment and 16 KiB ELF alignment checks passed. Android remains
+`app.tau.rust`, versionCode **13**, versionName **0.7.8-beta**, not debuggable, signed
+with the existing beta identity. Receipts/logs and the ordered delivery manifest
+are in `/root/tau2-integration/dist/releases/0.7.8/`.
+
+Both `send_file` calls succeeded (queued attachments), Windows followed by Android:
+
+- `Tau-Beta-0.7.8-windows-x64.exe` — SHA-256
+  `a993066047e49611bdd154827983e6b43160fb14eaa857e69c81f181a40e9e72`.
+- `Tau-Beta-0.7.8-android-arm64-v8a.apk` — SHA-256
+  `cf6e895beb63969c0e7fd8656391382b595b6391cdd00a55e33e76470b7b63a7`.
+
+**Download acknowledgement is still pending. Do not restart yet.** Read-only
+before/after service checks matched: beta PID **1467375**, stable PID **474496**,
+both active with unchanged monotonic start times. Beta health still reports
+**0.7.7 / protocol 19**. No service install/stop/restart, backup, production data
+change or stable deployment was done. The new clients need the pending matching
+protocol-20 daemon; after explicit download confirmation only, resume with
+`scripts/release-beta.sh --version 0.7.8 --push --deploy` from the integration
+worktree. Documentation-only commits do not invalidate the verified build receipts.

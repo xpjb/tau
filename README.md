@@ -4,10 +4,13 @@ Rust client, daemon, coding agent, shared protocol, Markdown and verified file t
 No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Python title
 helper. Android retains a small Java bridge for Android OS APIs.
 
-**0.7.7 beta · protocol 19 (Tau1-style download text actions + alert/content fixes).**
-The daemon is deployed; Windows x64 and Android ARM64 packages were verified and
-sent. Protocol 19 is unchanged. See `INTEGRATION.md` for the release record. This
-is a separate installation, not a stable-Tau cutover.
+**0.7.8 beta · protocol 20 (composer thinking level + checkpoint-yielding sync).**
+Windows x64 and Android ARM64 packages were verified and attached through Tau.
+The matching daemon is built but **not deployed**: wait for the user's explicit
+confirmation that both packages have been downloaded before restarting beta.
+The running daemon remains **0.7.7 / protocol 19**; the new clients need the pending
+protocol-20 daemon update. See `HANDOFF.md` and `INTEGRATION.md` for the release
+record. This is a separate installation, not a stable-Tau cutover.
 The maintained frontend branch is `tau2-rust-frontend`; the integrated release
 branch is `tau2`. Frontend work lands on the frontend branch before integration.
 
@@ -95,7 +98,7 @@ For Codex chats, its hover/pinned card also shows read-only account quota, separ
 from the context gauge. Other providers show an unavailable state. The ring
 percentage and threshold-based auto-compaction need a known saved limit.
 Sleeping chats retain the last saved token count, marked as last known. The
-current beta requires matching protocol-19 clients and daemon. The title model
+new beta packages require matching protocol-20 clients and daemon. The title model
 is separately configurable; unset uses the chat model. Cache rings are estimates from existing
 reply timestamps, not native runtime idle timeouts. Chat context menus target the clicked chat and expose model,
 thinking, compaction, priority service, rename, clone, release and delete actions.
