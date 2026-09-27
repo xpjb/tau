@@ -17,6 +17,10 @@ Production uses one authenticated control WebSocket and one shared Iroh/QUIC end
 
 The source owns canonical history, queues, receipts, operation reservations and retained files. Replicas are disposable. Client drafts, imported files and pending intents are **not** replica data.
 
+The unreleased follow-up [connection and local-content design](connection-and-local-content.md)
+describes attempt timers, authenticated reuse of authored bodies and uninterrupted
+queue-to-history display. It is not part of the historical deployment cited above.
+
 ## Durable operations, recovery and local work
 
 Prompt/queue receipts commit before execution; cold acceptance loads queue/head metadata, not display/provider history. Owned runs prepare bounded provider context outside the queue mutex and database gate. Abort durably pauses before cancellation, including while waiting for execution capacity. Compaction returns acceptance independently of its provider result.
@@ -39,7 +43,7 @@ Sessions use 64-row keyset pages; projects use eight-row pages. Structural/name/
 
 Metadata watches batch within request-count and byte budgets. Hard stream classes reserve capacity; live watches yield after five seconds and reopen from committed cursors/prefixes. Metadata, descriptor and foreground priorities are distinct from bulk priority. Grants renew without replacing a healthy same-peer connection.
 
-The WebSocket reader never waits on an outbound socket write. A bounded writer has a separate health lane and write deadline; RTT includes time waiting for that writer. Retry backoff has jitter and only resets after two good probes and 30 healthy seconds, not merely Hello. UI event enqueue is bounded and independent of UI consumption; overflow fails closed once, rather than accumulating fatal events.
+The WebSocket reader never waits on an outbound socket write. A bounded writer has a separate health lane and write deadline; RTT includes time waiting for that writer. Acquisition has one five-second deadline including Hello, with a one-second minimum between attempt starts and no post-timeout backoff. The main indicator measures only WebSocket lifecycle and ping/pong; native counters remain separate diagnostics. UI event enqueue is bounded and independent of UI consumption; overflow fails closed once, rather than accumulating fatal events.
 
 Cache projection is sparse for dirty roots/parents, with separate queue convergence. Viewport planning uses point lookups; idle plans are not rebuilt continuously. Retained previews are bounded across sparse updates. Large ordinary bodies stop prefetching after their preview prefix; explicit Copy resumes the rest. Closed tool children do not fetch merely because their headers exist. Delivered attachment cards remain visible independently of collapsed tools, without fetching binary payloads.
 
@@ -74,6 +78,7 @@ Replica reset epochs are stored in SQLite and checked inside page/header/range t
 | Physical upload / outbox admission scans | 4 GiB each; 100,000 entries |
 | Authored client SQLite / individual chat | 512 MiB / 32 MiB; 256 per-chat intents |
 | Imported client files | 2 GiB / 8,192 files; never automatic authored-file eviction |
+| Reusable authored body candidates | 32 MiB / 256 per account replica; disposable, lineage-fenced |
 | Verified CAS / replica SQLite | 512 MiB logical bytes / 1 GiB pages per database |
 | Account replica databases | four; inactive LRU/expired replicas can be collected, live handles are leased |
 | Disposable download exports | 1 GiB / 4,096 files, seven-day TTL |

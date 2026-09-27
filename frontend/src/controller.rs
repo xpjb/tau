@@ -504,6 +504,7 @@ impl Controller {
         });
         self.store.save_chat(&self.identity, &session, &local)?;
         chat.local = local;
+        self.remember_local_body(&session);
         self.requests.insert(request.id.clone(),request.command.clone());
         if let Err(error) = self.network.as_ref().unwrap().send(Command::Request {
             epoch,
@@ -740,6 +741,7 @@ impl Controller {
             }
             self.store.save_chat(&self.identity, session, &local)?;
             chat.local = local;
+            self.remember_local_body(session);
             let command = if p.files.is_empty() { Command::Request {epoch, request:p.request.clone()} }
                 else { Command::Upload {epoch, id:p.request.id.clone(), session:session.into(), text:p.text.clone(), files:p.files.clone()} };
             if let Err(error) = self.network.as_ref().unwrap().send(command) { self.not_sent(&p.request.id, &error.to_string(), true)?; }
@@ -933,8 +935,18 @@ impl Controller {
         for id in waiting {if let Err(e)=self.send_waiting(&id,false) {self.notice=Some(e.to_string());}}
         changed
     }
+    fn remember_local_body(&mut self, scope: &str) {
+        // An optimization in the disposable replica must never wedge a saved
+        // intent in Sending or prevent ordinary canonical body fetching.
+        if let (Some(chat), Some(lineage)) = (self.chats.get(scope), self.account.source_lineage.as_deref()) {
+            if let Err(error) = self.remote.remember_local(scope, &chat.local, lineage) {
+                self.notice = Some(format!("Local content reuse unavailable: {error}"));
+            }
+        }
+    }
     fn refresh_blocks(&mut self, scope: &str) -> Result<()> {
         self.plan_dirty.set(true);
+        self.remember_local_body(scope);
         let full=self.chats.get(scope).is_none_or(|chat|chat.feed.generation.is_empty());
         if let Some(view) = self.remote.changes(scope,self.viewport.as_ref().filter(|(id,_)|id==scope).map(|(_,ids)|ids),full)? {
             let chat = self.chats.get_mut(scope).context("Unknown cached chat")?;
@@ -990,6 +1002,8 @@ impl Controller {
     fn network_event(&mut self, event: transport::Event) -> Result<()> {
         let fatal = matches!(&event, transport::Event::Fatal(_));
         match event {
+            transport::Event::Connecting { attempt, at } => self.health.attempt(attempt, at),
+            transport::Event::RetryScheduled { at } => self.health.retry_scheduled(at),
             transport::Event::Source(epoch,lineage)=>{
                 self.source_guard=Some((epoch,false));
                 if self.store.bind_source(&self.identity,&lineage)? {
@@ -1000,7 +1014,7 @@ impl Controller {
                 } else {self.account.source_lineage=Some(lineage);}
                 self.source_guard=Some((epoch,true));
             }
-            transport::Event::Ready(epoch) => {
+            transport::Event::Ready { epoch, at } => {
                 ensure!(self.source_guard==Some((epoch,true)),"Source identity was not durably recorded; automatic submission is disabled. Repair local storage and reconnect.");
                 self.state_versions.clear();self.catalog=None;self.receipt_queue.clear();self.receipt_inflight=None;
                 self.epoch = Some(epoch);
@@ -1009,7 +1023,7 @@ impl Controller {
                 self.control_check=None;
                 for saved in self.account.pending_controls.values_mut() {saved.blocked=false;}
                 self.connection = "Connected".into();
-                self.health.connected();
+                self.health.connected_at(at);
                 for id in self.store.work_chats(&self.identity, true)? { self.ensure_chat(&id)?; }
                 self.request(ClientCommand::ListSessions)?;
                 for id in self.chats.keys().cloned().collect::<Vec<_>>() {
@@ -1092,6 +1106,7 @@ impl Controller {
                                 p.status = Delivery::Sending;
                                 let request = p.request.clone();
                                 self.save_chat(&session)?;
+                                self.remember_local_body(&session);
                                 if let Err(error) = self
                                     .network
                                     .as_ref()
@@ -1113,7 +1128,6 @@ impl Controller {
                 }
             }
             transport::Event::Metrics(stats)=>{
-                self.health.packets(stats.connections, stats.quic_lost_packets, std::time::Instant::now());
                 self.native_metrics=stats;
             },
             transport::Event::Message(epoch, message)|transport::Event::SizedMessage(epoch,message,_) if self.epoch == Some(epoch) => {
@@ -1167,7 +1181,9 @@ impl Controller {
                         }
                         else if report.accepted && !report.complete { pending.status = Delivery::Accepted; pending.detail = Some("Accepted; awaiting outcome".into()); }
                         else if report.accepted {
-                            if matches!(pending.request.command,ClientCommand::QueueControl {operation:QueueOperation::Edit {..}|QueueOperation::Delete {..},..}) {
+                            if matches!(&pending.request.command, ClientCommand::Prompt { text, .. } if !text.starts_with('/')) {
+                                pending.status=Delivery::Accepted;pending.detail=Some("Accepted; synchronizing message".into());
+                            } else if matches!(pending.request.command,ClientCommand::QueueControl {operation:QueueOperation::Edit {..}|QueueOperation::Delete {..},..}) {
                                 pending.status=Delivery::Accepted;pending.detail=Some("Accepted; synchronizing queue".into());
                             } else {chat.local.pending.retain(|p|p.request.id!=report.id);}
                         }
@@ -1597,7 +1613,7 @@ fn lineage_fence_rolls_back_atomically_and_missing_source_work_stays_reachable()
     let local=LocalChat {draft:"keep me".into(),pending:vec![Pending {request:ClientRequest {id:"original".into(),command:ClientCommand::Prompt {session_id:"missing".into(),text:"possibly paid".into()}},text:"possibly paid".into(),files:vec![],status:Delivery::WaitingForConnection,started_at_ms:None,detail:None}],..Default::default()};
     c.store.save_chat(&c.identity,"missing",&local).unwrap();
     let db=rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();db.execute_batch("CREATE TRIGGER fail_fence BEFORE UPDATE ON local WHEN NEW.key='account' BEGIN SELECT RAISE(ABORT,'fence full');END").unwrap();
-    assert!(c.network_event(NetworkEvent::Source(1,"after".into())).is_err());assert!(c.network_event(NetworkEvent::Ready(1)).is_err());assert!(c.epoch.is_none());
+    assert!(c.network_event(NetworkEvent::Source(1,"after".into())).is_err());assert!(c.network_event(NetworkEvent::Ready { epoch: 1, at: std::time::Instant::now() }).is_err());assert!(c.epoch.is_none());
     assert_eq!(c.store.load_chat(&c.identity,"missing").unwrap().pending[0].status,Delivery::WaitingForConnection);
     assert_eq!(c.store.get::<crate::store::Account>(&c.identity,"account").unwrap().source_lineage.as_deref(),Some("before"));
     db.execute_batch("DROP TRIGGER fail_fence").unwrap();c.network_event(NetworkEvent::Source(1,"after".into())).unwrap();

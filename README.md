@@ -58,6 +58,14 @@ New sends accepted into a paused queue clear a stale error indicator while still
 showing that work must be resumed. Offline draft support shipped in beta 0.7.3;
 the automatic saved-message recovery changes shipped in beta 0.7.6.
 
+The connection hover distinguishes an existing WebSocket from acquiring one,
+using real attempt ages and deadlines. Acquisition has one five-second timeout
+and a one-second minimum between attempt starts, not a growing post-failure wait.
+Sent text stays visible through acknowledgement and replication; authenticated
+body hashes let the client reuse its own content rather than download it again.
+See [connection and local-content design](docs/connection-and-local-content.md)
+for the unreleased changes, compatibility and validation.
+
 New chats use the last explicitly chosen model. Quick-select favorites do not change
 that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
 context capacity comes from the **selected provider's own catalog** when available:

@@ -12,6 +12,7 @@ pub struct Feed {
     by_id: HashMap<String, u64>,
     previews:std::collections::VecDeque<(String,Vec<String>,usize)>,
     pub queue: QueueState,
+    pub queue_transitions: HashMap<String,u64>, // Display-only rows awaiting the root cursor.
     pub block_lengths: HashMap<String,u64>,
     pub incomplete: HashSet<String>,
     pub block_states: HashMap<String,String>,
@@ -38,8 +39,24 @@ impl Feed {
             }
         }
     }
-    pub(crate) fn native_view(&mut self,view:crate::blocks::View)->Result<Vec<String>> {
-        let delivered=view.snapshot.events.iter().filter(|e|e.phase==EventPhase::Saved).filter_map(|e|e.origin.request_id.clone()).collect();
+    pub(crate) fn native_view(&mut self,mut view:crate::blocks::View)->Result<Vec<String>> {
+        if self.generation == view.snapshot.generation {
+            if view.queue_changed {
+                for (i,q) in self.queue.requests.iter().enumerate() {
+                    if !view.snapshot.queue.requests.iter().any(|next|next.request_id==q.request_id)
+                        && let Some(revision) = view.queue_removals.get(&q.request_id) {
+                        view.snapshot.queue.requests.insert(i.min(view.snapshot.queue.requests.len()),q.clone());
+                        self.queue_transitions.insert(q.request_id.clone(),*revision);
+                        let id=format!("queued:{}",q.request_id);
+                        if self.incomplete.contains(&id) { view.incomplete.insert(id); }
+                    }
+                }
+            } else {
+                self.queue.requests.retain(|q| self.queue_transitions.get(&q.request_id).is_none_or(|revision| *revision > view.snapshot.sequence));
+            }
+            self.queue_transitions.retain(|_,revision| *revision > view.snapshot.sequence);
+        } else { self.queue_transitions.clear(); }
+        let delivered=view.snapshot.delivered.clone();
         if !view.partial {while let Some((_,ids,_))=self.previews.pop_front() {self.drop_preview(&ids);}}
         for (root,_,_) in &view.previews {
             if let Some(i)=self.previews.iter().position(|(old,_,_)|old==root) {let (_,ids,_)=self.previews.remove(i).unwrap();self.drop_preview(&ids);}

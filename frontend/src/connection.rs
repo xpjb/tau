@@ -1,4 +1,4 @@
-//! WebSocket heartbeat measurements. Times are monotonic; no saved settings are displayed.
+//! Live control lifecycle and heartbeat measurements. All clocks are monotonic.
 use std::{
     collections::VecDeque,
     sync::{
@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MIN_CONNECT_INTERVAL: Duration = Duration::from_secs(1);
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const COUNTER_REFRESH: Duration = Duration::from_millis(50);
@@ -24,19 +26,22 @@ pub enum Phase {
     Offline,
     Connecting,
     Connected,
-    Reconnecting,
     Blocked,
 }
 #[derive(Default)]
 pub struct Health {
     pub phase: Phase,
+    attempt: u64,
+    attempt_at: Option<Instant>,
+    deadline: Option<Instant>,
+    retry_at: Option<Instant>,
+    next_ping: Option<Instant>,
+    last_ping: Option<Instant>,
     // None represents an unanswered attempt. It still uses one of the ten
     // slots, but must never be presented as an RTT sample.
     recent: VecDeque<Option<Duration>>,
     pending_since: Option<Instant>,
     last_reply: Option<Instant>,
-    packet_counter: Option<(u64, u64)>,
-    last_packet_loss: Option<Instant>,
 }
 impl Health {
     pub fn connecting() -> Self {
@@ -45,21 +50,43 @@ impl Health {
             ..Self::default()
         }
     }
-    pub fn connected(&mut self) {
-        self.phase = Phase::Connected;
+    pub fn attempt(&mut self, number: u64, at: Instant) {
+        self.phase = Phase::Connecting;
+        self.attempt = number;
+        self.attempt_at = Some(at);
+        self.deadline = Some(at + CONNECT_TIMEOUT);
+        self.retry_at = None;
         self.pending_since = None;
-        // Retain the ten recent attempts and last received time for the same
-        // configured server across automatic reconnects; configure() resets us.
+    }
+    pub fn retry_scheduled(&mut self, at: Instant) {
+        self.phase = Phase::Connecting;
+        self.retry_at = Some(at);
+    }
+    pub fn connected(&mut self) { self.connected_at(Instant::now()); }
+    pub fn connected_at(&mut self, at: Instant) {
+        self.phase = Phase::Connected;
+        self.next_ping = Some(at + HEARTBEAT_INTERVAL);
+        self.last_ping = None;
+        self.last_reply = None;
+        self.deadline = None;
+        self.retry_at = None;
+        self.pending_since = None;
+        // RTT history survives automatic reacquisition, but a previous socket's
+        // pong is never presented as evidence that this socket is responding.
     }
     pub fn disconnected(&mut self, fatal: bool) {
         self.phase = if fatal {
             Phase::Blocked
         } else {
-            Phase::Reconnecting
+            Phase::Connecting
         };
         self.pending_since = None;
+        self.deadline = None;
+        self.retry_at = None;
     }
     pub fn sent(&mut self, at: Instant) {
+        self.last_ping = Some(at);
+        self.next_ping = Some(at + HEARTBEAT_INTERVAL);
         self.pending_since = Some(at);
         if self.recent.len() == RECENT_ATTEMPTS {
             self.recent.pop_front();
@@ -73,17 +100,13 @@ impl Health {
         }
     }
     pub fn counter(&self, now: Instant) -> Option<(&'static str, u128)> {
-        if self.phase == Phase::Connected
-            && let Some(sent) = self.pending_since
-        {
-            return Some(("waiting", now.saturating_duration_since(sent).as_millis()));
+        let age = |at| now.saturating_duration_since(at).as_millis();
+        match self.phase {
+            Phase::Connecting => self.attempt_at.map(|at| ("Last attempt", age(at))),
+            Phase::Connected => self.last_ping.map(|at| ("Last ping", age(at)))
+                .or_else(|| self.next_ping.map(|at| ("Next ping in", at.saturating_duration_since(now).as_millis()))),
+            _ => None,
         }
-        self.last_reply.map(|received| {
-            (
-                "received",
-                now.saturating_duration_since(received).as_millis(),
-            )
-        })
     }
     pub fn min_max(&self) -> Option<(Duration, Duration)> {
         let mut samples = self.recent.iter().filter_map(|sample| *sample);
@@ -95,26 +118,20 @@ impl Health {
     pub fn latest(&self) -> Option<Duration> {
         self.recent.iter().rev().find_map(|sample| *sample)
     }
-    pub fn packets(&mut self, connection: u64, lost: u64, now: Instant) {
-        if connection == 0 { return; }
-        let previous = self.packet_counter.filter(|(id, _)| *id == connection).map_or(0, |(_, n)| n);
-        if lost > previous { self.last_packet_loss = Some(now); }
-        self.packet_counter = Some((connection, lost.max(previous)));
-    }
     pub fn color(&self, now: Instant) -> u32 {
         match self.phase {
-            Phase::Offline | Phase::Blocked | Phase::Reconnecting => RED,
+            Phase::Offline | Phase::Blocked => RED,
             Phase::Connecting => ORANGE,
             Phase::Connected => {
                 let pending = self.pending_since.map(|sent| now.saturating_duration_since(sent));
-                let latency = self.latest().unwrap_or_default().max(pending.unwrap_or_default());
+                let latest = self.last_reply.and_then(|_| self.latest()).unwrap_or_default();
+                let latency = latest.max(pending.unwrap_or_default());
                 if latency > Duration::from_millis(3000) { return RED; }
                 if latency > Duration::from_millis(1000) { return ORANGE; }
                 let missed = self.recent.iter().take(self.recent.len().saturating_sub(usize::from(self.pending_since.is_some())))
                     .any(Option::is_none);
                 let jitter = self.min_max().is_some_and(|(min, max)| max - min > Duration::from_millis(400));
-                let loss = self.last_packet_loss.is_some_and(|at| now.saturating_duration_since(at) < HEARTBEAT_INTERVAL * RECENT_ATTEMPTS as u32);
-                if self.latest().is_none() || latency > Duration::from_millis(800) || missed || jitter || loss {
+                if self.last_reply.is_none() || latency > Duration::from_millis(800) || missed || jitter {
                     YELLOW
                 } else { GREEN }
             }
@@ -126,44 +143,44 @@ impl Health {
             [801, 1001, 3001].into_iter().map(|ms| sent + Duration::from_millis(ms))
                 .find(|at| *at > now).map(|at| at.duration_since(now))
         });
-        let loss = self.last_packet_loss.map(|at| at + HEARTBEAT_INTERVAL * RECENT_ATTEMPTS as u32)
-            .filter(|at| *at > now).map(|at| at.duration_since(now));
-        pending.into_iter().chain(loss).min()
+        pending
     }
     /// Pure snapshot: `now` is injectable in tests and previews.
     pub fn details(&self, reason: &str, now: Instant) -> String {
-        let title = match self.phase {
-            Phase::Offline => Some("Offline"),
-            Phase::Connecting => Some("Connecting…"),
-            Phase::Connected => None, // The live reply/wait timer says more than "Connected".
-            Phase::Reconnecting => Some("Reconnecting…"),
-            Phase::Blocked => Some("Connection blocked"),
-        };
-        let (min, max) = match self.min_max() {
-            Some((min, max)) => (
-                format!("{}ms", min.as_millis()),
-                format!("{}ms", max.as_millis()),
-            ),
-            None => ("—".into(), "—".into()),
-        };
-        let mut lines = Vec::new();
-        if let Some(title) = title {
-            lines.push(title.into());
+        let mut lines = vec![match self.phase {
+            Phase::Offline => "No WebSocket · not configured",
+            Phase::Connecting => "No WebSocket · acquiring",
+            Phase::Connected => "WebSocket · connected",
+            Phase::Blocked => "No WebSocket · needs attention",
+        }.to_owned()];
+        let remaining = |at: Instant| at.saturating_duration_since(now).as_millis();
+        if self.phase == Phase::Connecting {
+            if let Some(at) = self.attempt_at {
+                lines.push(format!("Attempt #{} started: {}ms ago", self.attempt, now.saturating_duration_since(at).as_millis()));
+            }
+            if let Some(at) = self.retry_at {
+                lines.push(format!("Next attempt in: {}ms", remaining(at)));
+            } else if let Some(at) = self.deadline {
+                lines.push(format!("Waiting · timeout in: {}ms", remaining(at)));
+            }
         }
-        let latest = self.latest().map_or_else(|| "—".into(), |rtt| format!("{}ms", rtt.as_millis()));
-        lines.extend([format!("min: {min}"), format!("max: {max}"), format!("latest: {latest}")]);
-        lines.push(match self.counter(now) {
-            Some((label, ms)) => format!("{label}: {ms}ms"),
-            None => "received: —".into(),
-        });
-        if matches!(self.phase, Phase::Blocked | Phase::Reconnecting) && !reason.is_empty() {
-            lines.push(
-                reason
-                    .trim_end_matches(" Reconnecting…")
-                    .trim_end_matches('.')
-                    .into(),
-            );
+        if self.phase == Phase::Connected {
+            if let Some(at) = self.last_ping {
+                lines.push(format!("Last ping: {}ms ago", now.saturating_duration_since(at).as_millis()));
+            }
+            if let Some(at) = self.pending_since {
+                lines.push(format!("Waiting for pong · timeout in: {}ms", remaining(at + HEARTBEAT_TIMEOUT)));
+            } else if let Some(at) = self.next_ping {
+                lines.push(format!("Next ping in: {}ms", remaining(at)));
+            }
+            if let Some((min, max)) = self.min_max() {
+                lines.push(format!("RTT · latest {}ms · min {}ms · max {}ms{}", self.latest().unwrap().as_millis(), min.as_millis(), max.as_millis(),
+                    if self.last_reply.is_none() { " (previous socket)" } else { "" }));
+            } else { lines.push("RTT: awaiting first pong".into()); }
+        } else if !reason.is_empty() && !matches!(reason, "Connecting…" | "Not connected" | "Connected") {
+            lines.push(format!("Last failure: {}", reason.trim_end_matches('.')));
         }
+
         lines.join("\n")
     }
 }
@@ -226,99 +243,37 @@ mod tests {
     }
 
     #[test]
-    fn last_ten_attempts_exclude_unanswered_rtts_and_keep_last_ack_clock() {
+    fn acquiring_and_pinging_share_attempt_age_and_deadline_semantics() {
         let now = Instant::now();
-        let mut health = Health::connecting();
-        health.connected();
-        assert_eq!(health.details("", now), "min: —\nmax: —\nlatest: —\nreceived: —");
-        for ms in 100..110 {
-            ack(&mut health, now, ms);
-        }
-        assert_eq!(
-            health.min_max(),
-            Some((Duration::from_millis(100), Duration::from_millis(109)))
-        );
-        health.sent(now);
-        assert_eq!(
-            health.min_max(),
-            Some((Duration::from_millis(101), Duration::from_millis(109)))
-        );
-        assert_eq!(
-            health.details("", now + Duration::from_millis(347)),
-            "min: 101ms\nmax: 109ms\nlatest: 109ms\nwaiting: 347ms"
-        );
-        health.disconnected(false); // The unanswered attempt is not a fabricated 5s RTT.
-        assert_eq!(
-            health.details(
-                "Ping timed out. Reconnecting…",
-                now + Duration::from_secs(5)
-            ),
-            "Reconnecting…\nmin: 101ms\nmax: 109ms\nlatest: 109ms\nreceived: 5000ms\nPing timed out"
-        );
-        health.connected();
-        assert_eq!(
-            health.counter(now + Duration::from_secs(6)),
-            Some(("received", 6000))
-        );
-        for _ in 0..10 {
-            health.sent(now);
-            health.disconnected(false);
-            health.connected();
-        }
-        assert_eq!(health.min_max(), None, "only the last ten attempts count");
-        assert_eq!(health.latest(), None, "expired acknowledgements cannot masquerade as latest");
-        assert_eq!(
-            health.counter(now + Duration::from_secs(6)),
-            Some(("received", 6000))
-        );
-    }
-
-    #[test]
-    fn latest_is_the_last_acknowledged_rtt_not_an_extreme_or_pending_wait() {
-        let now = Instant::now();
-        let mut health = Health::connecting();
-        health.connected();
-        for ms in [120, 400, 210] {
-            ack(&mut health, now, ms);
-        }
-        assert_eq!(health.min_max(), Some((Duration::from_millis(120), Duration::from_millis(400))));
-        assert_eq!(health.latest(), Some(Duration::from_millis(210)));
-        health.sent(now);
-        assert_eq!(health.latest(), Some(Duration::from_millis(210)));
-        assert_eq!(health.details("", now + Duration::from_millis(50)),
-            "min: 120ms\nmax: 400ms\nlatest: 210ms\nwaiting: 50ms");
+        let mut health = Health::default();
+        health.attempt(1, now);
+        let detail = health.details("", now + Duration::from_secs(1));
+        assert!(detail.contains("Attempt #1 started: 1000ms ago"));
+        assert!(detail.contains("Waiting · timeout in: 4000ms"));
         health.disconnected(false);
-        health.connected();
-        assert_eq!(health.latest(), Some(Duration::from_millis(210)));
-    }
-
-    #[test]
-    fn waiting_and_ack_counters_use_monotonic_send_and_receive_instants() {
-        let now = Instant::now();
-        let mut health = Health::connecting();
-        health.connected();
+        health.retry_scheduled(now + Duration::from_secs(1));
+        let detail = health.details("Connection refused", now + Duration::from_millis(100));
+        assert!(detail.contains("Next attempt in: 900ms"));
+        assert!(detail.contains("started: 100ms ago"));
+        assert!(!detail.contains("pong") && !detail.contains("received"));
+        health.attempt(2, now + Duration::from_secs(1));
+        assert_eq!(health.counter(now + Duration::from_millis(1200)), Some(("Last attempt", 200)));
+        health.connected_at(now);
+        assert!(health.details("", now).contains("Next ping in: 2000ms"));
+        for ms in 100..110 { ack(&mut health, now, ms); }
         health.sent(now);
-        assert_eq!(
-            health.counter(now + Duration::from_millis(4321)),
-            Some(("waiting", 4321))
-        );
-        health.reply(
-            Duration::from_millis(4321),
-            now + Duration::from_millis(4321),
-        );
-        assert_eq!(
-            health.counter(now + Duration::from_millis(5555)),
-            Some(("received", 1234))
-        );
-        assert_eq!(
-            health.details("", now + Duration::from_millis(5555)),
-            "min: 4321ms\nmax: 4321ms\nlatest: 4321ms\nreceived: 1234ms"
-        );
-        health.sent(now + Duration::from_millis(5555));
-        assert_eq!(
-            health.counter(now + Duration::from_millis(5555)),
-            Some(("waiting", 0))
-        );
+        assert!(health.details("", now + Duration::from_secs(1)).contains("Waiting for pong · timeout in: 4000ms"));
+        assert_eq!(health.min_max(), Some((Duration::from_millis(101), Duration::from_millis(109))));
+        health.reply(Duration::from_secs(1), now + Duration::from_secs(1));
+        let detail = health.details("", now + Duration::from_millis(1200));
+        assert!(detail.contains("Last ping: 1200ms ago"));
+        assert!(detail.contains("Next ping in: 800ms"));
+        health.disconnected(false);
+        health.connected_at(now + Duration::from_secs(2));
+        assert!(!health.details("", now + Duration::from_secs(2)).contains("Last ping"));
+        assert!(health.details("", now + Duration::from_secs(2)).contains("previous socket"));
+        for _ in 0..10 { health.sent(now); health.disconnected(false); }
+        assert_eq!(health.latest(), None, "unanswered pings never become RTT samples");
     }
 
     #[test]
@@ -378,10 +333,10 @@ mod tests {
         ack(&mut health, now, 3100);
         assert_eq!(health.color(now), RED);
         health.disconnected(false);
-        assert_eq!(health.color(now), RED);
+        assert_eq!(health.color(now), ORANGE);
     }
     #[test]
-    fn stable_latency_loss_and_jitter_use_recent_windows() {
+    fn stable_latency_missed_pings_and_jitter_use_recent_windows() {
         let now = Instant::now();
         let mut health = Health::default();
         health.connected();
@@ -399,13 +354,7 @@ mod tests {
         assert_eq!(health.color(now), YELLOW, "large jitter below the latency limit");
         for _ in 0..10 { ack(&mut health, now, 799); }
         assert_eq!(health.color(now), GREEN);
-        health.packets(1, 0, now);
-        health.packets(1, 1, now);
-        assert_eq!(health.color(now), YELLOW);
-        health.packets(1, 1, now + Duration::from_secs(15));
-        assert_eq!(health.color(now + Duration::from_secs(20)), GREEN, "old cumulative loss is not new loss");
-        health.packets(2, 0, now + Duration::from_secs(21));
-        assert_eq!(health.color(now + Duration::from_secs(21)), GREEN, "connection counters can reset");
+
     }
 
 }

@@ -7,6 +7,7 @@ fn elapsed(text: &str, label: &str) -> u128 {
     text.lines()
         .find_map(|line| line.strip_prefix(label))
         .unwrap_or_else(|| panic!("missing {label} in {text}"))
+        .trim_end_matches(" ago")
         .strip_suffix("ms")
         .unwrap()
         .parse()
@@ -40,11 +41,11 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert!(
         app.info_tip
             .text
-            .starts_with("min: 123ms\nmax: 420ms\nlatest: 123ms\nreceived: "),
+            .contains("RTT · latest 123ms · min 123ms · max 420ms"),
         "{}",
         app.info_tip.text
     );
-    assert!(elapsed(&app.info_tip.text, "received: ") >= 1234);
+    assert!(elapsed(&app.info_tip.text, "Last ping: ") >= 1357);
     assert!(!app.info_tip.text.contains("tau.example.invalid"));
     assert_eq!(app.controller.health.color(Instant::now()), 0x4ade80);
 
@@ -55,27 +56,28 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.frame(&ctx, ctx.view());
     let waiting = ctx.read_rgba8().unwrap();
     assert_ne!(received, waiting, "waiting must change the GPU frame");
-    assert!(elapsed(&app.info_tip.text, "waiting: ") >= 1350);
-    assert!(app.info_tip.text.contains("latest: 123ms\nwaiting: "), "pending probes are not acknowledged RTTs");
+    assert!(elapsed(&app.info_tip.text, "Last ping: ") >= 1350);
+    assert!(app.info_tip.text.contains("Waiting for pong · timeout in:") && app.info_tip.text.contains("RTT · latest 123ms"), "pending probes are not acknowledged RTTs");
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
     assert_eq!(app.info_tip.text.lines().count(), 4);
 
-    // Pong: the live timer switches to age since receipt, not the previous send.
+    // Pong completes this probe without changing when it was actually attempted.
     app.controller
         .health
         .reply(Duration::from_millis(1350), Instant::now());
+    app.dirty = true; // A real transport event also marks the controller changed.
     assert!(app.tick(0.));
     app.frame(&ctx, ctx.view());
     assert!(
         app.info_tip
             .text
-            .starts_with("min: 123ms\nmax: 1350ms\nlatest: 1350ms\nreceived: ")
+            .contains("RTT · latest 1350ms · min 123ms · max 1350ms")
     );
-    let before = elapsed(&app.info_tip.text, "received: ");
+    let before = elapsed(&app.info_tip.text, "Last ping: ");
     std::thread::sleep(Duration::from_millis(60));
-    assert!(app.tick(0.), "received timer must continue while visible");
+    assert!(app.tick(0.), "attempt-age timer must continue while visible");
     app.frame(&ctx, ctx.view());
-    assert!(elapsed(&app.info_tip.text, "received: ") > before);
+    assert!(elapsed(&app.info_tip.text, "Last ping: ") > before);
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
     app.controller
         .health
@@ -88,7 +90,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert!(
         app.info_tip
             .text
-            .starts_with("min: 21ms\nmax: 1350ms\nlatest: 21ms\nreceived: ")
+            .contains("RTT · latest 21ms · min 21ms · max 1350ms")
     );
     assert_eq!(app.controller.health.color(Instant::now()), 0xfbbf24, "recent jitter stays yellow");
 
@@ -108,10 +110,10 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert!(
         app.info_tip
             .text
-            .starts_with("Reconnecting…\nmin: 123ms\nmax: 420ms\nlatest: 123ms\nreceived: ")
+            .starts_with("No WebSocket · acquiring\nAttempt #2 started:")
     );
-    assert!(app.info_tip.text.ends_with("\nPing timed out"));
-    assert_eq!(app.controller.health.color(Instant::now()), 0xff5a5f);
+    assert!(app.info_tip.text.ends_with("\nLast failure: Ping timed out"));
+    assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
     let disconnected = ctx.read_rgba8().unwrap();
     let pixel = |image: &[u8], x, y| {
         let offset = ((y * ctx.size().0 + x) * 4) as usize;
@@ -122,9 +124,26 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert_ne!(pixel(&disconnected, 86, 39), pixel(&disconnected, 95, 39));
     assert_ne!(pixel(&received, 86, 39), pixel(&disconnected, 86, 39));
 
+    assert!(!app.info_tip.text.contains("RTT") && !app.info_tip.text.contains("received"));
+    let now = Instant::now();
+    app.controller.health.attempt(3, now);
+    app.controller.health.disconnected(false);
+    app.controller.health.retry_scheduled(now + Duration::from_secs(1));
+    app.tick(0.); app.frame(&ctx, ctx.view());
+    assert!(app.info_tip.text.contains("Next attempt in:"));
+    let before = elapsed(&app.info_tip.text, "Next attempt in: ");
+    std::thread::sleep(Duration::from_millis(60));
+    assert!(app.tick(0.)); app.frame(&ctx, ctx.view());
+    assert!(elapsed(&app.info_tip.text, "Next attempt in: ") < before);
+    app.controller.health.attempt(4, Instant::now());
+    app.tick(0.); app.frame(&ctx, ctx.view());
+    assert!(app.info_tip.text.contains("Attempt #4 started:"));
+    assert!(app.info_tip.text.contains("Waiting · timeout in:"));
+    assert!(!app.info_tip.text.contains("Next attempt"));
+
     app.preview_connection(ConnectionPreview::Unconfigured);
     app.frame(&ctx, ctx.view());
-    assert_eq!(app.info_tip.text, "Offline\nmin: —\nmax: —\nlatest: —\nreceived: —");
+    assert_eq!(app.info_tip.text, "No WebSocket · not configured");
     assert_eq!(app.controller.health.color(Instant::now()), 0xff5a5f);
 }
 

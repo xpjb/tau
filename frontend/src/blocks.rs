@@ -1,6 +1,7 @@
 //! Persistent block cache and explicit watch ownership, independent of the UI and
 //! the control socket. A collapsed tool never causes a content watch.
 mod files;
+mod echoes;
 mod uploads;
 pub(crate) use uploads::InvalidAttachment;
 use anyhow::{Context, Result, ensure};
@@ -13,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 use crate::store::LocalChat;
 
 pub const QUEUE: &str = "@queue";
-pub struct View { pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub lengths:HashMap<String,u64>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,String> }
+pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub lengths:HashMap<String,u64>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,String> }
 #[derive(Default)]
 struct Dirty {full:bool,ids:BTreeSet<String>}
 #[derive(Clone)]
@@ -34,6 +35,7 @@ impl Cache {
         let version:u32=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         ensure!(version<=2,"Replica cache requires a newer client");
         tau_blocks::initialize(&db)?;
+        echoes::initialize(&db)?;
         db.execute_batch("UPDATE block_limits SET headers=100000,bytes=134217728; CREATE TABLE IF NOT EXISTS replica_epoch(singleton INTEGER PRIMARY KEY,epoch INTEGER NOT NULL); INSERT OR IGNORE INTO replica_epoch VALUES(1,0); PRAGMA user_version=2")?;
         let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;
         db.pragma_update(None,"max_page_count",1024u64*1024*1024/page_size)?;
@@ -60,7 +62,7 @@ impl Cache {
     fn epoch(&self)->u64 {replica_epoch(&self.db.lock().unwrap()).unwrap_or(u64::MAX)}
     pub fn clear(&self)->Result<()> {
         let mut db=self.db.lock().unwrap();let tx=db.transaction()?;
-        tx.execute_batch("DELETE FROM blocks; DELETE FROM block_cache_feeds; DELETE FROM block_cache_tombstones; UPDATE replica_epoch SET epoch=epoch+1;")?;tx.commit()?;Ok(())
+        tx.execute_batch("DELETE FROM local_echoes; DELETE FROM blocks; DELETE FROM block_cache_feeds; DELETE FROM block_cache_tombstones; UPDATE replica_epoch SET epoch=epoch+1;")?;tx.commit()?;Ok(())
     }
     pub(crate) fn previous_source(&self)->Result<Option<String>> {
         let db=self.db.lock().unwrap();let known:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM blocks) OR EXISTS(SELECT 1 FROM block_cache_feeds)",[],|r|r.get(0))?;
@@ -85,6 +87,7 @@ impl Cache {
     }
     fn configure(&self, lineage: &str) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
+        if tau_blocks::cursor(&tx)?.lineage != lineage { tx.execute("DELETE FROM local_echoes", [])?; }
         tau_blocks::cache_lineage(&tx,lineage)?; tx.commit()?;
         self.bound.store(true,std::sync::atomic::Ordering::Release); Ok(())
     }
@@ -97,8 +100,15 @@ impl Cache {
         let reset=page.reset && request.cursor.is_some() && request.before.is_none()
             && tau_blocks::cached_feed(&tx,&request.scope,request.parent.as_deref())?.is_none_or(|old|old.cursor.sequence<=page.cursor.sequence);
         tau_blocks::cache_page(&tx,request,page)?;
+        for record in &page.records {
+            if let BlockRecord::Put { block } = record
+                && let Some(current) = tau_blocks::header(&tx, &request.scope, &block.id)? {
+                echoes::adopt(&tx, &request.scope, &current)?;
+            }
+        }
         if reset {tx.execute("UPDATE replica_epoch SET epoch=epoch+1",[])?;}
         tx.commit()?;
+        if request.parent.is_none() && request.before.is_none() { self.changed(&request.scope,QUEUE,false); }
         if page.reset {self.changed(&request.scope,QUEUE,true);}
         if let Some(parent)=&request.parent {self.changed(&request.scope,parent,false);}
         for record in &page.records {match record {BlockRecord::Put {block}=>self.changed(&request.scope,&block.id,false),BlockRecord::Remove {id,..}=>self.changed(&request.scope,id,true)}}Ok(())
@@ -119,7 +129,9 @@ impl Cache {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
         ensure!(tau_blocks::cursor(&tx)?.lineage == lineage,"Stale data connection");
-        tau_blocks::cache_header(&tx,scope,header)?; tx.commit()?;self.changed(scope,&header.id,false); Ok(())
+        tau_blocks::cache_header(&tx,scope,header)?;
+        if let Some(current) = tau_blocks::header(&tx,scope,&header.id)? { echoes::adopt(&tx,scope,&current)?; }
+        tx.commit()?;self.changed(scope,&header.id,false); Ok(())
     }
     #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,false,None,true)}
     pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,true,None,true)}
@@ -134,6 +146,7 @@ impl Cache {
         let wanted=|h:&BlockHeader|!preview || visible.contains(&h.id) || h.parent.as_ref().is_some_and(|id|visible.contains(id));
         let mut all = roots.clone();
         for root in &roots {if wanted(root) || only.is_some() {all.extend(tau_blocks::children(&db,scope,Some(&root.id))?);}}
+        let mut delivered = Vec::new();
         let mut events = vec![]; let mut sizes = HashMap::new(); let mut queue = QueueState::default();
         let mut incomplete=std::collections::HashSet::new(); let mut states=HashMap::new();
         for h in &all {
@@ -162,6 +175,16 @@ impl Cache {
                 if preview {body_budget=body_budget.saturating_sub(bytes.len());*allowance=allowance.saturating_sub(bytes.len());}
                 event.text = text_prefix(&bytes)?;
                 let length = tau_blocks::header(&db,scope,&body)?.map_or(0,|b|b.length);
+                // Acceptance/header arrival is not display convergence. Only
+                // retire the local message after the canonical body is resident.
+                // A bounded preview can still be incomplete while its full body
+                // is safely cached, so do not confuse truncation with absence.
+                if event.role == tau_protocol::EventRole::User && event.phase == tau_protocol::EventPhase::Saved
+                    && event.kind == EventKind::Text && wanted(h) && (length == 0 || !bytes.is_empty()) && !incomplete.contains(&event.id)
+                    && tau_blocks::cache_budget::stored_bytes(&db,scope,&body)? == length
+                    && let Some(request) = &event.origin.request_id {
+                    delivered.push(request.clone());
+                }
                 sizes.insert(event.id.clone(),length);
                 if bytes.len() as u64 != length {incomplete.insert(event.id.clone());}
                 if preview && wanted(h) && (length>256*1024 || body_budget==0 || *allowance==0) && (bytes.len() as u64)<length {event.text.push_str("\n\n[Preview limited. Fetch the complete message with Copy.]");}
@@ -188,9 +211,16 @@ impl Cache {
             }
         }
         queue.available &= tau_blocks::cached_feed(&db,scope,Some(QUEUE))?.is_some_and(|page|page.before.is_none());
+        // A tombstone can beat the root page containing its replacement user
+        // entry. Keep the old display row until that root cursor catches up.
+        let queue_removals = if include_queue {
+            db.prepare("SELECT substr(id,8),revision FROM block_cache_tombstones WHERE scope=?1 AND id LIKE 'queued:%' AND revision>?2")?
+                .query_map(rusqlite::params![scope,page.cursor.sequence], |r| Ok((r.get(0)?,r.get(1)?)))?
+                .collect::<rusqlite::Result<HashMap<String,u64>>>()?
+        } else { HashMap::new() };
         events.sort_by_key(|e|e.order);
-        Ok(Some(View { previews:preview_ids.into_iter().map(|(root,ids)| {let used=256*1024-group_budgets[root.as_str()];(root,ids,used)}).collect(),partial:only.is_some(),queue_changed:include_queue,snapshot:TranscriptSnapshot { generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
-            events,queue,before:page.before.as_ref().map(|p|p.order),delivered:vec![] },lengths:sizes,incomplete,states }))
+        Ok(Some(View { queue_removals,previews:preview_ids.into_iter().map(|(root,ids)| {let used=256*1024-group_budgets[root.as_str()];(root,ids,used)}).collect(),partial:only.is_some(),queue_changed:include_queue,snapshot:TranscriptSnapshot { generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
+            events,queue,before:page.before.as_ref().map(|p|p.order),delivered },lengths:sizes,incomplete,states }))
     }
     pub fn copy_ready(&self, scope:&str, ids:&[String]) -> Result<Option<String>> {
         ensure!(ids.len()<=4096,"Copy fewer than 4097 sections at a time");

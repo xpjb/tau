@@ -61,6 +61,11 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
         Ok(())
     };
     let mut attributes=json!({"event":meta});
+    // Authenticated metadata certifies an exact body without echoing that body
+    // back to its author. Additive metadata: older replicas may still fetch it.
+    if value.role == EventRole::User && value.kind == EventKind::Text && sealed {
+        attributes["bodyHash"] = json!(blake3::hash(value.text.as_bytes()).to_hex().to_string());
+    }
     if overflow {attributes["fullEvent"]=json!({"id":format!("{}/meta",value.id),"hash":blake3::hash(&full_meta).to_hex().to_string(),"length":full_meta.len()});}
     let h = header(value.id.clone(),parent.clone(),value.order*2,kind,attributes,sealed);
     if value.kind == EventKind::Tool {
@@ -100,7 +105,12 @@ use rusqlite::OptionalExtension;
 
 pub fn queue(db: &Connection, session: &str, value: &QueueState) -> Result<()> {
     let mut state = value.clone(); state.requests.clear();
-    let root = header(QUEUE.into(),None,i64::MAX as u64-1,BlockKind::Queue,json!({"queue":true}),true);
+    // A queue membership change must also advance its root directory. This
+    // lets replicas order a queue removal against the corresponding history
+    // insertion, even when those two directory pages arrive out of order.
+    let members = value.requests.iter().map(|r| (&r.request_id, r.revision)).collect::<Vec<_>>();
+    let membership = blake3::hash(&serde_json::to_vec(&members)?).to_hex().to_string();
+    let root = header(QUEUE.into(),None,i64::MAX as u64-1,BlockKind::Queue,json!({"queue":true,"membershipHash":membership}),true);
     tau_blocks::put(db,session,root,&serde_json::to_vec(&state)?)?;
     let ids = value.requests.iter().map(|r|format!("queued:{}",r.request_id)).collect::<Vec<_>>();
     for old in tau_blocks::children(db,session,Some(QUEUE))? {
@@ -108,7 +118,7 @@ pub fn queue(db: &Connection, session: &str, value: &QueueState) -> Result<()> {
     }
     for (i,request) in value.requests.iter().enumerate() {
         let mut meta = request.clone(); meta.text.clear();
-        let h = header(ids[i].clone(),Some(QUEUE.into()),i as u64,BlockKind::Text,json!({"request":meta}),true);
+        let h = header(ids[i].clone(),Some(QUEUE.into()),i as u64,BlockKind::Text,json!({"request":meta,"bodyHash":blake3::hash(request.text.as_bytes()).to_hex().to_string()}),true);
         tau_blocks::put(db,session,h,request.text.as_bytes())?;
     }
     Ok(())
@@ -296,6 +306,31 @@ impl tau_transfer::blocks::Backend for AgentManager {
 mod tests {
     use super::*;
     use crate::transcript::EventProjection;
+    #[test]
+    fn user_and_queue_headers_certify_exact_text_without_embedding_it() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap(); tau_blocks::initialize(&db).unwrap();
+        let text = "authored café 😀\n".repeat(3000);
+        let raw=json!({"type":"message","id":"entry","origin":{"requestId":"request"},"message":{"role":"user","content":[{"type":"text","text":text}]}});
+        let value=Event::from_entry(&raw,false).unwrap().remove(0);
+        let tx=db.transaction().unwrap(); event(&tx,"chat",&value).unwrap();
+        let mut state=QueueState::native();state.requests.push(tau_protocol::QueuedRequest {request_id:"request".into(),revision:0,kind:"steer".into(),text:text.clone(),images:0,timestamp_ms:None});
+        queue(&tx,"chat",&state).unwrap();tx.commit().unwrap();
+        for id in [&value.id,"queued:request"] {
+            let h=tau_blocks::header(&db,"chat",id).unwrap().unwrap();
+            assert_eq!(h.meta["bodyHash"],blake3::hash(text.as_bytes()).to_hex().as_str());
+            assert_eq!(h.length,text.len() as u64);assert!(h.sealed);
+            assert!(serde_json::to_vec(&h).unwrap().len()<tau_blocks::MAX_BLOCK_HEADER_BYTES);
+            assert!(!h.meta.to_string().contains("authored café"));
+        }
+        let before=tau_blocks::header(&db,"chat",QUEUE).unwrap().unwrap();
+        state.requests.clear();
+        let tx=db.transaction().unwrap();queue(&tx,"chat",&state).unwrap();tx.commit().unwrap();
+        let after=tau_blocks::header(&db,"chat",QUEUE).unwrap().unwrap();
+        assert!(after.revision>before.revision,"even deletion-only changes advance the root directory");
+        assert_eq!(after.version,before.version,"unchanged queue-state bytes are not downloaded again");
+    }
+
     #[test]
     fn oversized_metadata_is_preserved_as_a_referenced_body() {
         let mut db=Connection::open_in_memory().unwrap();db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&db).unwrap();
