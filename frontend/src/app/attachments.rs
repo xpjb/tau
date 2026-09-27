@@ -41,25 +41,26 @@ impl Control {
     fn label(self) -> &'static str {
         match self {
             Self::Download => "Download",
+            Self::Save => "Save",
+            Self::View => "View",
+            Self::Open => "Open",
+            Self::Cancel => "Cancel",
+            Self::Retry => "Retry",
+            Self::Busy => "Saving…",
+        }
+    }
+    fn description(self) -> &'static str {
+        match self {
             Self::Save => "Save to Downloads",
             Self::View => "View image",
             Self::Open => "Open file",
             Self::Cancel => "Cancel download",
-            Self::Retry => "Retry",
             Self::Busy => "Saving to Downloads…",
+            _ => self.label(),
         }
     }
-    fn icon(self) -> Icon {
-        match self {
-            Self::Download | Self::Save | Self::Busy => Icon::Download,
-            Self::View => Icon::View,
-            Self::Open => Icon::OpenFile,
-            Self::Cancel => Icon::Cancel,
-            Self::Retry => Icon::Retry,
-        }
-    }
-
 }
+
 struct AttachmentDisplay {
     status: String,
     control: Control,
@@ -412,28 +413,33 @@ impl App {
             Control::Cancel => Some(Action::CancelDownload(key.clone())),
             Control::Busy => None,
         };
-        let mut actions = vec![(control.icon(), control.label(), action)];
+        let mut actions = vec![(control.label(), control.description(), action)];
         if exported.is_some() {
             if image && preview_available {
-                actions.push((Icon::View, "View image", Some(Action::Attachment(session.into(), entry.into(),
+                actions.push(("View", "View image", Some(Action::Attachment(session.into(), entry.into(),
                     attachment.file_name.clone(), true))));
             }
             #[cfg(not(target_os = "android"))]
             if !self.mobile {
-                actions.push((Icon::Folder, "Show in folder", Some(Action::UseSaved(session.into(), entry.into(), SavedAction::Show))));
+                actions.push(("Show", "Show in folder", Some(Action::UseSaved(session.into(), entry.into(), SavedAction::Show))));
                 if attachment.file_name.to_ascii_lowercase().ends_with(".zip") {
-                    actions.push((Icon::Extract, "Extract ZIP and open folder", Some(Action::UseSaved(session.into(), entry.into(), SavedAction::Extract))));
+                    actions.push(("Extract", "Extract ZIP and open folder", Some(Action::UseSaved(session.into(), entry.into(), SavedAction::Extract))));
                 }
             }
         } else if image && preview_available && control == Control::View {
-            actions.push((Icon::Download, "Save to Downloads", Some(Action::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone()))));
+            actions.push(("Save", "Save to Downloads", Some(Action::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone()))));
         } else if image && preview_available && control == Control::Retry {
             // Retrying an OS save must not hide or discard a perfectly good preview.
-            actions.push((Icon::View, "View image", Some(Action::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true))));
+            actions.push(("View", "View image", Some(Action::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true))));
         }
         layer.clipped_rounded_rect(panel, 10. * s, color(0x101820), viewport);
         let target = if self.mobile { 44. } else { 40. } * s;
-        let actions_width = actions.len() as f32 * target;
+        // Tau1 uses text for these actions. Measure each complete label instead
+        // of reserving icon-sized slots or guessing widths from character counts.
+        let widths = actions.iter().map(|(label, _, _)|
+            (self.renderer.label_width(label, 14. * s, false).ceil() + 16. * s).max(target))
+            .collect::<Vec<_>>();
+        let actions_width = widths.iter().sum::<f32>();
         let text = Rect::new(panel.x + 12. * s, panel.y + 12. * s,
             (panel.width - actions_width - 20. * s).max(1.), 20. * s);
         self.renderer.ellipsized_label(layer, &attachment.file_name, text, 13. * s, color(0xe5eaf0), true, true, viewport);
@@ -460,22 +466,23 @@ impl App {
             };
             layer.clipped_rounded_rect(fill, 1.5 * s, color(0x67d4ff), viewport);
         }
-        for (index, (icon, label, action)) in actions.into_iter().enumerate() {
-            let r = Rect::new(panel.x + panel.width - actions_width - 4. * s + index as f32 * target,
-                panel.y + (60. * s - target) / 2., target, target);
+        let mut left = panel.x + panel.width - actions_width - 4. * s;
+        for (index, ((label, description, action), width)) in actions.into_iter().zip(widths).enumerate() {
+            let r = Rect::new(left, panel.y + (60. * s - target) / 2., width, target);
+            left += width;
             let clip = crate::render::intersect(r, viewport);
             if clip.width <= 0. || clip.height <= 0. { continue; }
             let enabled = action.is_some();
-            let circle = Rect::new(r.x + (target - 34. * s) / 2., r.y + (target - 34. * s) / 2., 34. * s, 34. * s);
-            if index == 0 || layer.interaction.hover.is_some_and(|p| contains(clip, p)) {
-                let base = color(if !enabled { 0x1b2630 } else if index == 0 { 0x173747 } else { 0x24303b });
-                layer.clipped_rounded_rect(circle, 17. * s,
-                    if enabled { layer.control_color(r, base) } else { base }, viewport);
+            if enabled && layer.interaction.hover.is_some_and(|p| contains(clip, p)) {
+                layer.clipped_rounded_rect(r, target / 2., layer.control_color(r, color(0x18212b)), viewport);
             }
-            self.renderer.clipped_icon(ctx, layer, icon,
-                Rect::new(r.x + (target - 20. * s) / 2., r.y + (target - 20. * s) / 2., 20. * s, 20. * s),
-                if !enabled { 0x687e8f } else { 0x67d4ff }, viewport);
-            self.attachment_info(r, viewport, format!("{info_key}:action:{index}"), label, &attachment.file_name, false);
+            let label_width = self.renderer.label_width(label, 14. * s, false);
+            let label_height = self.renderer.label_height(label, width, 14. * s, false);
+            self.renderer.ellipsized_label(layer, label,
+                Rect::new(r.x + (width - label_width) / 2., r.y + (target - label_height) / 2.,
+                    label_width.ceil() + 1., label_height),
+                14. * s, color(if enabled { 0x67d4ff } else { 0x687e8f }), false, false, viewport);
+            self.attachment_info(r, viewport, format!("{info_key}:action:{index}"), description, &attachment.file_name, false);
             self.hits.push(Hit { rect: clip, action: action.unwrap_or(Action::Noop) });
         }
     }

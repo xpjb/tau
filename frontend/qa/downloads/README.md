@@ -4,22 +4,18 @@
 
 The transcript and Attachments pane use **one renderer and one height calculation**.
 The control itself is 68dp high (Tau1's height), with no reserved empty caption row.
-Download/save, view, open, cancel, retry, folder and ZIP extraction are native vector
-paths, not Unicode stand-ins or text buttons. A tonal primary action and quieter
-secondary actions have 40dp desktop / 44dp touch hit targets. Saved files get a quiet
-green status; failures retain the error and retry action; saving is visibly busy and
-cannot enqueue a duplicate export.
+**Download, Save, Cancel, Retry, Open, Show and Extract use Tau1's text actions.**
+Tau2's existing View action is also text, so the group is consistent. The temporary
+custom action icons have been removed; no other part of the app is restyled.
 
-Following icon-readability feedback, **Open** uses a folded document opening to the
-right instead of an external-link square. **Extract** uses an open carton with
-contents coming out, not a download-like arrow into a tray. Folder remains unchanged,
-so the three saved-ZIP actions have different silhouettes. Hover/hold labels remain.
-
-![Open and Extract refinement at actual button size](../../gallery/downloads-open-extract.png)
+Buttons have plain accent-coloured labels, with a subtle background only on hover or
+press. Their widths are measured from the actual text, with at least 40dp desktop /
+44dp touch targets. Saved files get a quiet green status; failures retain the error
+and Retry; saving shows disabled **Saving…** and cannot enqueue a duplicate export.
 
 Names and status are shaped as **single lines** with real ellipsis, never clipped
 wrapped text. Long filenames retain their extension. The full name/status/caption
-is available by hovering or tapping the text; icons have descriptive hover labels
+is available by hovering or tapping the text; buttons retain descriptive hover details
 and touch-and-hold labels without performing the action. Chat and sidebar instances
 of the same file have distinct tooltip anchors, including during progress updates.
 
@@ -60,12 +56,12 @@ Each case is rendered at four physical/logical profiles:
 | Phone | 360px | 1× | Touch/Android |
 | Scaled phone | 900px (360dp) | 2.5× | Touch/Android |
 
-Every applicable Tau2 icon additionally renders **hover, pressed, tooltip, and
+Every applicable Tau2 action additionally renders **hover, pressed, tooltip, and
 partially scrolled-out/clipped** states. Saving includes the disabled/no-op control.
 Tests assert single-line measured text, no text/action overlap, correct action
-counts, full target dimensions, clipping and tooltip containment. Actual desktop
-chat + sidebar and phone chat + attachments are also captured, not just isolated
-controls.
+counts, visible text-only labels, minimum target dimensions, clipping and tooltip
+containment. Actual desktop chat + sidebar and phone chat + attachments are also
+captured, not just isolated controls.
 
 ### Tau1 reference provenance
 
@@ -76,7 +72,7 @@ stubbed. Its ambient text color matches Tau1's enclosing surface. Stable sources
 services and user data are not modified or launched.
 
 Tau1 lacks a separate OS-save-in-progress UI: that case uses its final downloading
-frame. It has no View icon (the image itself is clickable), no download tooltip, and
+frame. It has no separate View button (the image itself is clickable), no download tooltip, and
 no separate decoded-preview status in the control. Image reference captures show the
 **original download strip**, not a reconstructed image preview. Tau1 hover/pressed
 captures use actual Compose pointer events. These differences are not invented as

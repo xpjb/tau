@@ -4,13 +4,6 @@ use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform
 pub enum Icon {
     Attach,
     Attachments,
-    Download,
-    OpenFile,
-    View,
-    Folder,
-    Extract,
-    Cancel,
-    Retry,
     Image,
     Send,
     Stop,
@@ -27,13 +20,6 @@ impl Icon {
         match self {
             Self::Attach => "attach",
             Self::Attachments => "attachments",
-            Self::Download => "download",
-            Self::OpenFile => "open-file",
-            Self::View => "view",
-            Self::Folder => "folder",
-            Self::Extract => "extract",
-            Self::Cancel => "cancel",
-            Self::Retry => "retry",
             Self::Image => "image",
             Self::Send => "send",
             Self::Stop => "stop",
@@ -104,66 +90,11 @@ impl Icon {
                 );
                 return straight_alpha(pixmap);
             }
-            Self::Download | Self::OpenFile | Self::View | Self::Folder | Self::Extract
-                | Self::Cancel | Self::Retry | Self::Image => {
-                // Real vector paths, never font glyphs. One stroke weight at every DPI.
-                match self {
-                    Self::Download => {
-                        p.move_to(12., 3.); p.line_to(12., 15.);
-                        p.move_to(7., 10.); p.line_to(12., 15.); p.line_to(17., 10.);
-                        p.move_to(4., 16.); p.line_to(4., 20.); p.line_to(20., 20.); p.line_to(20., 16.);
-                    }
-                    Self::OpenFile => {
-                        // A folded document opening to the right, not an external-link
-                        // square (which suggests a website or a new browser window).
-                        p.move_to(17., 9.); p.line_to(17., 7.); p.line_to(12., 2.);
-                        p.line_to(4., 2.); p.line_to(4., 22.); p.line_to(17., 22.);
-                        p.line_to(17., 19.);
-                        p.move_to(12., 2.); p.line_to(12., 7.); p.line_to(17., 7.);
-                        p.move_to(10., 14.); p.line_to(22., 14.);
-                        p.move_to(18., 10.); p.line_to(22., 14.); p.line_to(18., 18.);
-                    }
-                    Self::View => {
-                        p.move_to(2., 12.); p.cubic_to(7., 3., 17., 3., 22., 12.);
-                        p.cubic_to(17., 21., 7., 21., 2., 12.); p.close();
-                        p.push_circle(12., 12., 3.);
-                    }
-                    Self::Folder => {
-                        p.move_to(3., 7.); p.line_to(3., 5.); p.line_to(9., 5.);
-                        p.line_to(11., 7.); p.line_to(20., 7.); p.line_to(20., 10.);
-                        p.move_to(3., 7.); p.line_to(3., 19.); p.line_to(19., 19.);
-                        p.line_to(22., 11.); p.line_to(7., 11.); p.line_to(3., 19.);
-                    }
-                    Self::Extract => {
-                        // Unpack: contents move OUT of an open carton with raised
-                        // flaps. A downward arrow into a tray reads as Download.
-                        p.move_to(12., 11.); p.line_to(12., 2.);
-                        p.move_to(8.5, 5.5); p.line_to(12., 2.); p.line_to(15.5, 5.5);
-                        p.move_to(3., 11.); p.line_to(3., 18.); p.line_to(12., 22.);
-                        p.line_to(21., 18.); p.line_to(21., 11.);
-                        p.move_to(3., 11.); p.line_to(12., 15.); p.line_to(21., 11.);
-                        p.move_to(12., 15.); p.line_to(12., 22.);
-                        p.move_to(3., 11.); p.line_to(1.5, 7.); p.line_to(8., 9.5);
-                        p.move_to(21., 11.); p.line_to(22.5, 7.); p.line_to(16., 9.5);
-                    }
-                    Self::Cancel => {
-                        p.move_to(6., 6.); p.line_to(18., 18.);
-                        p.move_to(18., 6.); p.line_to(6., 18.);
-                    }
-                    Self::Retry => {
-                        p.move_to(20., 10.); p.cubic_to(19., 5., 14., 2., 9., 4.);
-                        p.cubic_to(4., 6., 2., 11., 4., 16.);
-                        p.cubic_to(7., 22., 16., 23., 20., 16.);
-                        p.move_to(20., 4.); p.line_to(20., 10.); p.line_to(14., 10.);
-                    }
-                    Self::Image => {
-                        p.move_to(3., 3.); p.line_to(21., 3.); p.line_to(21., 21.);
-                        p.line_to(3., 21.); p.close();
-                        p.move_to(3., 17.); p.line_to(9., 11.); p.line_to(13., 15.);
-                        p.line_to(16., 12.); p.line_to(21., 17.); p.push_circle(16., 8., 1.5);
-                    }
-                    _ => unreachable!(),
-                }
+            Self::Image => {
+                p.move_to(3., 3.); p.line_to(21., 3.); p.line_to(21., 21.);
+                p.line_to(3., 21.); p.close();
+                p.move_to(3., 17.); p.line_to(9., 11.); p.line_to(13., 15.);
+                p.line_to(16., 12.); p.line_to(21., 17.); p.push_circle(16., 8., 1.5);
                 pixmap.stroke_path(&p.finish().unwrap(), &paint,
                     &Stroke { width: 1.8, line_cap: LineCap::Round,
                         line_join: tiny_skia::LineJoin::Round, ..Default::default() }, transform, None);

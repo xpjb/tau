@@ -101,7 +101,7 @@ fn image_view_save_and_touch_labels_do_not_confuse_actions_or_trigger_on_long_pr
     app.tick(0.); app.release(1,point);
     assert!(app.info_tip.pinned);
     assert!(matches!(&app.info_target,Info::Attachment(_,title,_) if title=="View image"));
-    assert!(app.viewer.is_none() && app.platform.is_empty(),"a held icon shows its label, never acts");
+    assert!(app.viewer.is_none() && app.platform.is_empty(),"a held control shows its details, never acts");
     app.info_tip=Tooltip::default(); paint(&mut app,&ctx,&case,&file);
     tap(&mut app,0,true); assert!(app.viewer.is_some()); assert!(app.platform.is_empty());
     app.back(); paint(&mut app,&ctx,&case,&file);
@@ -152,7 +152,7 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
 }
 
 #[test]
-fn saved_zip_actions_dispatch_open_show_extract_to_the_correct_file() {
+fn saved_zip_text_actions_dispatch_open_show_extract_to_the_correct_file() {
     let (mut app,ctx,_root)=fixture((320,420),false);
     let mut case=cases().into_iter().find(|c|c.id=="18-saved-zip").unwrap();
     case.name=Some("source-code.ZIP".into());

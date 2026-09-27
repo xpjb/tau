@@ -1,40 +1,32 @@
-# Inline download icon audit — September 27, 2026 (unreleased)
+# Inline downloads — Tau1 text actions, September 27, 2026 (unreleased)
 
-Icon-readability follow-up: Open is now a folded document with an outward arrow;
-Extract is an open carton with an upward/outward arrow, rather than an inbox-like
-tray. Re-rendered all 32 cases at four sizes/scales, including interactions, and
-refreshed the contact sheets and real-app captures. All five focused render/lifecycle
-tests passed (run `9c6063fa-8d05-4d79-89c5-af40e57a6a3c`; 85 unrelated tests skipped).
-No behavior, hit-target or tooltip-label changes; no packaging/deployment.
+- Restored Tau1's **Download / Save / Cancel / Retry / Open / Show / Extract** text
+  actions. Tau2's existing View action is text as well. Removed the custom action
+  glyphs and their always-on circles; other parts of the app are unchanged.
+- Kept the shared 68dp control, optional captions, extension-preserving filename
+  ellipsis, progress/speed, saved/error states and tooltips. Button widths come from
+  measured text rather than icon slots; hit targets are at least 40dp desktop / 44dp
+  touch. Saving stays visibly disabled, with duplicate-export protection.
+- Re-rendered **32 cases × four sizes/scales**, including all hover/pressed/tooltip/
+  clipped states and actual desktop/phone surfaces against Tau1's original Compose
+  renderer. Tests require a visible text label and no icon in every action region,
+  full label containment, minimum target sizes and no filename/status collisions.
+  Refreshed screenshots and reproducible fixtures: [download QA](qa/downloads/README.md).
+- All **five focused render/lifecycle nextest tests passed** (run
+  `30415ac9-5c07-48ac-a67b-db6223dc32a4`; 85 unrelated tests skipped). They cover a
+  verified 12 MiB cache save, busy/failure/retry/completion, restart, missing user
+  copy/cache, view vs save, uppercase ZIP actions, touch hold and independent live
+  tooltip anchors. Earlier 90-test validation belongs to the preceding icon version.
+- Managed native frontend all-target and Windows x64 library compiler checks passed.
+  The Android recheck was deferred after the managed wrapper's shared-build-lock
+  timeout (exit 75); no bypass or fresh Android-pass claim.
+- The previous save-limit, retry, image-placeholder and download-lifecycle fixes
+  remain. No change to network, OS actions, scoped records or ZIP extraction safety.
+- No Clippy, production data, paid provider, OS viewer, packaging/version bump or
+  deployment. Physical Windows/Android acceptance remains unclaimed.
 
-- Replaced every inline download/save/view/open/cancel/retry/folder/extract control
-  with a native vector icon. The shared chat/Attachments control is 68dp high like
-  Tau1, with 40dp desktop / 44dp touch targets; no empty caption row or text collision.
-- Single-line, extension-preserving filename ellipsis; readable progress/speed,
-  subtle saved/error states, disabled saving, full labels/details on hover/touch.
-  Image failures no longer leave a blank or falsely ready preview. Hover, hold and
-  tooltip clipping cannot activate a download or a control underneath the card.
-- Fixed cached files above 10 MB incorrectly using the image-save limit. Save retries
-  clear stale transfer errors, preserve valid previews and cannot create duplicate
-  OS saves. Saved Open/folder/ZIP actions retain their account/chat/file target.
-- **32 cases × four sizes/scales**, rendered with actual Tau1 Compose and Tau2 GPU
-  renderers. All icon hover/pressed/tooltip/clipped variants and real desktop/phone
-  surfaces are included. Inspected all four control contact sheets plus image,
-  high-DPI, interaction and actual-app captures. Reproducible fixtures, reference
-  provenance, limitations and all contact sheets: [download QA](qa/downloads/README.md).
-- Managed frontend all-target check passed; **90/90 frontend library nextest tests
-  passed**, zero skipped (run `42559314-5dee-463f-a86a-4a66a95bc4be`). Windows x64 and
-  Android ARM64 library compiler checks passed. Android emits target-specific
-  dead-code warnings, including desktop-only folder/extract icons; no lint gate.
-- Actual hit dispatch covers a verified 12 MiB cached file, busy/no-duplicate export,
-  failure/retry, OS-save completion, restart, deleted user copy/cache, view vs save,
-  uppercase ZIP actions and touch-hold labels. Duplicate chat/sidebar instances keep
-  independent tooltip anchors; pinned transfer details update with byte counts.
-- No Clippy, production account, paid model, OS viewer, package/version bump, service
-  restart or deployment. Physical Windows/Android acceptance remains unclaimed.
-
-![Desktop download controls in chat and sidebar](gallery/downloads-desktop.png)
-![Phone download controls](gallery/downloads-phone.png)
+![Desktop text actions in chat and sidebar](gallery/downloads-desktop.png)
+![Phone text actions](gallery/downloads-phone.png)
 
 ---
 

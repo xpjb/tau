@@ -16,7 +16,7 @@ parts = ['''<!doctype html><meta charset="utf-8"><title>Tau inline downloads: na
 <style>body{background:#090d12;color:#e5eaf0;font:14px system-ui;margin:24px;max-width:1900px}a{color:#67d4ff}h2{margin-top:50px}h3{margin-top:30px}.row{display:flex;gap:16px;align-items:flex-start}.cell{flex:1;min-width:0;background:#0e141b;padding:10px;border-radius:12px}img{max-width:100%;height:auto;display:block}summary{cursor:pointer;color:#67d4ff;padding:12px}small,p{color:#b7c2ce}nav a{margin-right:16px}</style>
 <h1>Inline file downloads</h1><p>Original Tau1 Compose controls · previous Tau2 · revised Tau2, rendered natively from the same fixture data. No HTML mock UI.</p>
 <p>Tau1: 3818579. Its original 68dp control is extracted unchanged except no-op callbacks, platform simulation and layout probes. Tau1 has no separate OS-saving state (shown at its final downloading frame), no View button (preview click), and no download tooltips. Image preview comparisons show the Tau1 <em>control</em>, not its full image viewer. The previous-Tau2 column is optional historical evidence.</p>
-<p>32 lifecycle/content cases × desktop, sidebar, phone, 2.5× phone. Revised Tau2 also renders every applicable icon hovered, pressed, with its tooltip, and partially scrolled out. These headless Linux renders are not physical Windows/Android acceptance.</p><nav>''']
+<p>32 lifecycle/content cases × desktop, sidebar, phone, 2.5× phone. Revised Tau2 also renders every applicable action hovered, pressed, with its tooltip, and partially scrolled out. These headless Linux renders are not physical Windows/Android acceptance.</p><nav>''']
 parts += [f'<a href="#{p}">{p}</a>' for p in profiles]
 parts.append('</nav>')
 for profile in profiles:
