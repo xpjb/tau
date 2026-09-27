@@ -398,7 +398,7 @@ fn text_prefix(bytes: &[u8]) -> Result<String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan { pub scope: String, pub parents: BTreeSet<Option<String>>, pub blocks: Vec<(String,Option<(u64,u64,bool,u64)>)>, pub older:Vec<(String,FeedPosition)>, pub foreground:BTreeSet<String> }
 pub enum Command { Reset, Configure(BulkOffer,String), Plan(Option<Plan>), History { scope:String,before:FeedPosition } }
-pub struct Notice { pub scope: String, pub error: Option<String>, pub transfer:Option<(String,std::path::PathBuf,tau_transfer::TransferStatus)> }
+pub struct Notice { pub scope: String, pub error: Option<anyhow::Error>, pub transfer:Option<(String,std::path::PathBuf,tau_transfer::TransferStatus)> }
 pub struct Service { tx: mpsc::Sender<Command>, plans:watch::Sender<Option<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
 impl Service {
     pub fn start(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>) -> Self {
@@ -420,7 +420,7 @@ impl Service {
             Command::Configure(offer,host)=>{self.configuration.send_replace(Some((offer,host)));}
             history@(Command::History {..}|Command::Reset)=>{
                 if let Err(error)=self.tx.try_send(history) && let Command::History {scope,..}=error.into_inner() {
-                    let _=self.downloads.notices.try_send(Notice {scope,error:Some("History queue is busy; try again".into()),transfer:None});(self.downloads.wake)();
+                    let _=self.downloads.notices.try_send(Notice {scope,error:Some(anyhow::anyhow!("History queue is busy; try again")),transfer:None});(self.downloads.wake)();
                 }
             }
         }
@@ -436,7 +436,7 @@ impl std::ops::DerefMut for Watches { fn deref_mut(&mut self) -> &mut Self::Targ
 impl Drop for Watches { fn drop(&mut self) { for task in self.0.values() { task.abort(); } } }
 async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Receiver<Command>, mut plans:watch::Receiver<Option<Plan>>, mut configuration:watch::Receiver<Option<(BulkOffer,String)>>, notices:mpsc::Sender<Notice>, identity:watch::Sender<Option<String>>, endpoint:watch::Sender<Option<Arc<Client>>>, ready:watch::Sender<Option<String>>) {
     let client = match Client::bind().await { Ok(client) => Arc::new(client), Err(error) => {
-        let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error.to_string())}).await; (wake)(); return;
+        let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)(); return;
     }};
     endpoint.send_replace(Some(client.clone()));
     identity.send_replace(Some(client.node_id())); (wake)();
@@ -452,9 +452,9 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
             Command::Reset=>{for job in jobs.values() {job.abort();}jobs.clear();}
             Command::Configure(offer,host) => {
                 if let Err(error) = client.configure(&offer,&host).await {
-                    let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error.to_string())}).await; (wake)();
+                    let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)();
                 } else if let Err(error) = cache.configure(&offer.lineage) {
-                    let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error.to_string())}).await; (wake)();
+                    let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)();
                 } else {
                     if ready.borrow().as_ref().is_some_and(|old|old != &offer.lineage) { for task in jobs.values() {task.abort();} jobs.clear(); }
                     ready.send_replace(Some(offer.lineage));
@@ -481,7 +481,14 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
                 parents.push(parent.clone());requests.push(request);
             }
             if !parents.is_empty() {desired.insert(Key::Feeds(p.scope.clone(),parents));}
-            for (id,_) in &p.blocks {desired.insert(Key::Block(p.scope.clone(),id.clone(),p.foreground.contains(id)));}
+            for (id,head) in &p.blocks {
+                // A complete body is not a download interest. In particular, a
+                // delayed plan must not turn already-held text into a fetch of
+                // its former queue ID after consumption. A changed/evicted
+                // body gets a fresh plan from its metadata/cache update.
+                if head.is_some_and(|(_,length,sealed,stored)|sealed && length==stored) {continue;}
+                desired.insert(Key::Block(p.scope.clone(),id.clone(),p.foreground.contains(id)));
+            }
             for (parent,before) in &p.older {desired.insert(Key::History(p.scope.clone(),Some(parent.clone()),before.clone()));}
         }
         jobs.retain(|key,task| {
@@ -516,7 +523,7 @@ fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Re
                 Ok(true) => return,
                 Ok(false) => continue, // Yield the class permit to queued interests.
                 Err(error) => {
-                    if notices.send(Notice {transfer:None,scope:scope.clone(),error:Some(format!("Content sync: {error}"))}).await.is_err() { return; }
+                    if notices.send(Notice {transfer:None,scope:scope.clone(),error:Some(error.context("Content sync"))}).await.is_err() { return; }
                     (wake)();
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     delay = (delay*2).min(5000);

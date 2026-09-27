@@ -73,6 +73,7 @@ pub struct Controller {
     pub native_metrics:tau_transfer::blocks::Stats,
     pub epoch: Option<u64>,
     pub notice: Option<String>,
+    pub transport_error: Option<String>,
     pub codex_usage: UsageView,
     remote: crate::blocks::Cache,
     block_plan: Option<crate::blocks::Plan>,
@@ -118,6 +119,7 @@ impl Controller {
             health: crate::connection::Health::default(),native_metrics:Default::default(),
             epoch: None,
             notice: None,
+            transport_error: None,
             codex_usage: UsageView::default(),
             remote,
             block_plan: None,plan_dirty:std::cell::Cell::new(true),
@@ -146,6 +148,7 @@ impl Controller {
         Ok(c)
     }
     pub fn connect(&mut self) {
+        self.transport_error = None;
         self.epoch = None;
         self.connection = "Connecting…".into();
         self.health = crate::connection::Health::connecting();
@@ -451,7 +454,7 @@ impl Controller {
         Ok(())
     }
     pub fn request(&mut self, command: ClientCommand) -> Result<String> {
-        let epoch=self.epoch.ok_or_else(||anyhow::anyhow!("Not connected"))?;
+        let epoch=self.epoch.ok_or_else(||anyhow::Error::from(transport::ConnectionUnavailable))?;
         if matches!(command,ClientCommand::ListSessions) && let Some(catalog)=&mut self.catalog && !(catalog.sessions_done && catalog.projects_done) {catalog.refresh=true;return Ok(catalog.id.clone());}
         let durable=command.journalled_control();
         let encoded=serde_json::to_vec(&command)?;
@@ -486,9 +489,19 @@ impl Controller {
             Err(_) => {self.codex_usage.error=Some("Codex quota request could not be sent; retrying automatically.".into());Ok(false)}
         }
     }
+    pub fn report_error(&mut self, error: anyhow::Error) {
+        if error.is::<transport::ConnectionUnavailable>() { self.transport_error = Some(error.to_string()); }
+        else { self.notice = Some(error.to_string()); }
+    }
+    fn report_sync_error(&mut self, error: anyhow::Error) {
+        // Connection loss is status, not a failed content read. Preserve typed
+        // errors so corruption/storage/unknown-block failures stay actionable.
+        if tau_transfer::blocks::is_connection_error(&error) { self.transport_error = Some(format!("{error:#}")); }
+        else { self.notice = Some(format!("{error:#}")); }
+    }
     pub fn diagnostics(&self)->String {
         let n=&self.native_metrics;
-        format!("{}\n\nNative: {} connects / {} attempts; {} streams ({} active).\nSlots: metadata {}, foreground {}, bulk {}, descriptors {}.\nContent bytes ↑{} ↓{}; Tau frame bytes ↑{} ↓{}.\nResume offsets requested: {}; stream cancels: {}; integrity failures: {}.\nCurrent QUIC: UDP bytes ↑{} ↓{}; lost sent packets {}; RTT {} ms.\nControl RTT includes writer queue time; QUIC counters include retransmissions. Native samples update every five seconds.",self.health.details(&self.connection,std::time::Instant::now()),n.connections,n.connection_attempts,n.streams,n.active_streams,n.metadata_slots,n.foreground_slots,n.bulk_slots,n.descriptor_slots,n.content_tx_bytes,n.content_rx_bytes,n.frame_tx_bytes,n.frame_rx_bytes,n.resumed_bytes,n.cancelled_streams,n.integrity_failures,n.quic_tx_bytes,n.quic_rx_bytes,n.quic_lost_packets,n.quic_rtt_ms)
+        format!("{}\nLast transport issue: {}\n\nNative: {} connects / {} attempts; {} streams ({} active).\nSlots: metadata {}, foreground {}, bulk {}, descriptors {}.\nContent bytes ↑{} ↓{}; Tau frame bytes ↑{} ↓{}.\nResume offsets requested: {}; stream cancels: {}; integrity failures: {}.\nCurrent QUIC: UDP bytes ↑{} ↓{}; lost sent packets {}; RTT {} ms.\nControl RTT includes writer queue time; QUIC counters include retransmissions. Native samples update every five seconds.",self.health.details(&self.connection,std::time::Instant::now()),self.transport_error.as_deref().unwrap_or("No pending transport error"),n.connections,n.connection_attempts,n.streams,n.active_streams,n.metadata_slots,n.foreground_slots,n.bulk_slots,n.descriptor_slots,n.content_tx_bytes,n.content_rx_bytes,n.frame_tx_bytes,n.frame_rx_bytes,n.resumed_bytes,n.cancelled_streams,n.integrity_failures,n.quic_tx_bytes,n.quic_rx_bytes,n.quic_lost_packets,n.quic_rtt_ms)
     }
     pub fn clear_replica(&mut self)->Result<()> {
         self.remote.clear()?;self.block_plan=None;self.plan_dirty.set(true);self.copy=None;
@@ -521,7 +534,7 @@ impl Controller {
     }
     pub fn control(&mut self,command:ClientCommand)->Result<()> {self.control_id(command).map(|_|())}
     fn control_id(&mut self, command: ClientCommand) -> Result<String> {
-        let epoch = self.epoch.ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let epoch = self.epoch.ok_or_else(|| anyhow::Error::from(transport::ConnectionUnavailable))?;
         let session = match &command {
             ClientCommand::Prompt { session_id, text } if text.starts_with('/') => {
                 session_id.clone()
@@ -731,7 +744,7 @@ impl Controller {
         let Some(epoch) = self.epoch else { return Ok(()); };
         if self.requests.contains_key(&request.id) { return Ok(()); }
         if let Err(error) = self.network.as_ref().unwrap().send(Command::Request {epoch, request:request.clone()}) {
-            self.notice = Some(format!("New chat saved locally; will retry after reconnect: {error}"));
+            self.transport_error = Some(error.to_string());
         } else { self.requests.insert(request.id, request.command); }
         Ok(())
     }
@@ -847,7 +860,7 @@ impl Controller {
             return Ok(());
         }
         if let Some(before) = self.remote.history_cursor(&id)? {
-            self.network.as_ref().ok_or_else(||anyhow::anyhow!("Not connected"))?.send(transport::Command::Blocks(crate::blocks::Command::History { scope:id.clone(),before }))?;
+            self.network.as_ref().ok_or_else(||anyhow::Error::from(transport::ConnectionUnavailable))?.send(transport::Command::Blocks(crate::blocks::Command::History { scope:id.clone(),before }))?;
             self.chats.get_mut(&id).unwrap().feed.loading = true;
         }
         Ok(())
@@ -861,7 +874,7 @@ impl Controller {
             let lineage=self.account.source_lineage.as_deref().unwrap_or_default();
             match self.store.saved_download(&self.identity,lineage,session,entry) {
                 Ok(saved) => {self.saved_downloads.insert(key.clone(),saved);}
-                Err(error) => {self.notice=Some(error.to_string());return None;}
+                Err(error) => {self.report_error(error);return None;}
             }
         }
         self.saved_downloads.get(&key).cloned().flatten()
@@ -901,7 +914,9 @@ impl Controller {
             }
             return Ok(path);
         }
-        ensure!(self.network.is_some() && (self.remote.authorized() || self.remote.has_file(session,&format!("file:{entry}"))), "Content connection is not authorized yet");
+        if !(self.network.is_some() && (self.remote.authorized() || self.remote.has_file(session,&format!("file:{entry}")))) {
+            return Err(anyhow::Error::from(transport::ConnectionUnavailable).context("Content connection is not authorized yet"));
+        }
         let key = Self::download_key(session, entry);
         if self.downloads.get(&key).is_some_and(|d| !d.status.done) {
             return Ok(path);
@@ -928,7 +943,7 @@ impl Controller {
     pub fn cancel_download(&self, key: &str) -> Result<()> {
         self.network
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not connected"))?
+            .ok_or_else(|| anyhow::Error::from(transport::ConnectionUnavailable))?
             .send(Command::CancelDownload(key.into()))
     }
     fn not_sent(&mut self, id: &str, detail: &str, retryable: bool) -> Result<()> {
@@ -961,7 +976,8 @@ impl Controller {
                 self.project_result = Some((id.into(), false));
             }
         }
-        if !retrying { self.notice = Some(detail.into()); }
+        if retryable { self.transport_error = Some(detail.into()); }
+        else if !retrying { self.notice = Some(detail.into()); }
         Ok(())
     }
     pub fn poll(&mut self) -> bool {
@@ -972,7 +988,7 @@ impl Controller {
             };
             changed = true;
             if let Err(error) = self.network_event(event) {
-                self.notice = Some(error.to_string());
+                self.report_error(error);
             }
         }
         let mut scopes = std::collections::HashSet::new();
@@ -980,18 +996,18 @@ impl Controller {
             let Some(notice) = self.network.as_mut().and_then(|n|n.blocks.try_recv().ok()) else { break; };
             changed = true;
             if let Some((key,path,status))=notice.transfer {
-                if let Err(error)=self.network_event(transport::Event::Download {key,path,status}) {self.notice=Some(error.to_string());}
-            } else if let Some(error) = notice.error { if let Some(chat)=self.chats.get_mut(&notice.scope) {chat.feed.loading=false;} self.notice = Some(error); }
-            else { scopes.insert(notice.scope); }
+                if let Err(error)=self.network_event(transport::Event::Download {key,path,status}) {self.report_error(error);}
+            } else if let Some(error) = notice.error { if let Some(chat)=self.chats.get_mut(&notice.scope) {chat.feed.loading=false;} self.report_sync_error(error); }
+            else { self.transport_error = None; scopes.insert(notice.scope); }
         }
         for scope in scopes {
-            if self.chats.contains_key(&scope) && let Err(error) = self.refresh_blocks(&scope) { self.notice = Some(error.to_string()); }
+            if self.chats.contains_key(&scope) && let Err(error) = self.refresh_blocks(&scope) { self.report_error(error); }
         }
-        if let Err(error) = self.watch_blocks() { self.notice = Some(error.to_string()); }
-        if let Err(error) = self.reconcile_controls() {self.notice=Some(error.to_string());}
-        if let Err(error) = self.reconcile_receipts() {self.notice=Some(error.to_string());}
+        if let Err(error) = self.watch_blocks() { self.report_error(error); }
+        if let Err(error) = self.reconcile_controls() {self.report_error(error);}
+        if let Err(error) = self.reconcile_receipts() {self.report_error(error);}
         let mut waiting=self.chats.keys().cloned().collect::<Vec<_>>();waiting.sort_by_key(|id|self.account.selected.as_ref()!=Some(id));
-        for id in waiting {if let Err(e)=self.send_waiting(&id,false) {self.notice=Some(e.to_string());}}
+        for id in waiting {if let Err(e)=self.send_waiting(&id,false) {self.report_error(e);}}
         changed
     }
     fn remember_local_body(&mut self, scope: &str) {
@@ -1038,7 +1054,7 @@ impl Controller {
         let previous=self.viewport.as_ref().filter(|(id,_)|id==scope).map(|(_,ids)|ids.clone()).unwrap_or_default();
         self.remote.viewport_changed(scope,ids.iter().cloned().chain(previous));
         self.viewport=Some((scope.into(),ids));self.plan_dirty.set(true);
-        if let Err(error)=self.refresh_blocks(scope) {self.notice=Some(error.to_string());}
+        if let Err(error)=self.refresh_blocks(scope) {self.report_error(error);}
     }
     fn watch_blocks(&mut self) -> Result<()> {
         if !self.plan_dirty.replace(false) {return Ok(());}
@@ -1083,6 +1099,7 @@ impl Controller {
                 self.control_check=None;
                 for saved in self.account.pending_controls.values_mut() {saved.blocked=false;}
                 self.connection = "Connected".into();
+                self.transport_error = None;
                 self.health.connected_at(at);
                 for id in self.store.work_chats(&self.identity, true)? { self.ensure_chat(&id)?; }
                 self.request(ClientCommand::ListSessions)?;
@@ -1102,9 +1119,7 @@ impl Controller {
                 self.requests.clear();
                 self.project_deletions.clear();
                 for (session, chat) in &mut self.chats {
-                    if chat.model_request.take().is_some() {
-                        self.notice = Some("Model change unconfirmed; check the current model after reconnecting. It was not resent.".into());
-                    }
+                    chat.model_request = None;
                     chat.commands_loaded = false;
                     chat.feed.synchronized = false;
                     chat.feed.loading = false;
@@ -1131,7 +1146,7 @@ impl Controller {
             transport::Event::NotSent(id, detail) => {
                 if self.is_creating(&id) {
                     self.requests.remove(&id);
-                    self.notice = Some(format!("New chat saved locally, not yet confirmed: {detail}"));
+                    self.transport_error = Some(detail);
                 } else { self.not_sent(&id, &detail, true)?; }
             },
             transport::Event::Prepared { epoch, id, result, retryable } => {
@@ -1637,6 +1652,34 @@ mod safety_tests {
 use super::*;
 use std::sync::Arc;
 use crate::transport::Event as NetworkEvent;
+#[tokio::test]
+async fn connection_status_does_not_popup_but_real_content_and_storage_failures_still_do() {
+    let root=tempfile::tempdir().unwrap();
+    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
+    c.report_error(transport::ConnectionUnavailable.into());
+    assert!(c.notice.is_none());assert!(c.transport_error.is_some());
+    c.not_sent("background-read","Connection changed",true).unwrap();assert!(c.notice.is_none());
+    let timeout=tokio::time::timeout(std::time::Duration::ZERO,std::future::pending::<()>()).await.unwrap_err();
+    c.report_sync_error(anyhow::Error::from(timeout).context("Content sync"));
+    assert!(c.notice.is_none());assert!(c.diagnostics().contains("Content sync"));
+    let error=c.download("unavailable-chat","unavailable-file",1024).unwrap_err();
+    c.report_error(error);assert!(c.notice.is_none());assert!(c.transport_error.as_deref().unwrap().contains("not authorized"));
+    c.report_sync_error(anyhow::anyhow!("Unknown block").context("Content sync"));
+    assert_eq!(c.notice.as_deref(),Some("Content sync: Unknown block"));
+    c.notice=None;c.report_error(anyhow::anyhow!("Local database is full"));
+    assert_eq!(c.notice.as_deref(),Some("Local database is full"));
+    c.notice=None;c.report_sync_error(anyhow::anyhow!("Block content integrity check failed"));
+    assert_eq!(c.notice.as_deref(),Some("Block content integrity check failed"));
+    c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context("Write replica"));
+    assert!(c.notice.as_deref().unwrap().starts_with("Write replica:"),"A storage IO error is not connection loss");
+    let broken=tau_transfer::blocks::Frame {
+        header:tau_transfer::blocks::Header::Data {version:1,offset:0,hash:String::new(),length:32,codec:tau_transfer::blocks::Codec::Zstd},
+        data:b"not a zstd frame".to_vec(),
+    };
+    c.notice=None;c.report_sync_error(broken.decoded().unwrap_err().context("Content sync"));
+    assert!(c.notice.as_deref().unwrap().starts_with("Content sync: Invalid compressed block chunk:"),"Decompression's IO error must not be mistaken for a network error");
+}
+
 #[test]
 fn unsent_messages_back_off_and_keep_the_original_id_through_failure_and_retry() {
     let root = tempfile::tempdir().unwrap();

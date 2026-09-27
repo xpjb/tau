@@ -25,6 +25,7 @@ use tau_protocol::*;
 
 mod projects;
 mod attachments;
+mod notices;
 
 #[derive(Clone)]
 enum Action {
@@ -321,6 +322,7 @@ pub struct App {
     pub mobile: bool,
     pub(crate) window_focused: bool,
     dirty: bool,
+    notice_popup: notices::NoticePopup,
 }
 impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
@@ -338,6 +340,7 @@ impl App {
         let needs_setup = controller.settings.url().is_err();
         let mut app = Self {
             controller,
+            notice_popup: notices::NoticePopup::default(),
             renderer: Renderer::new(ctx).map_err(anyhow::Error::msg)?,
             size: ctx.size(),
             origin: Vec2::new(0., 0.),
@@ -593,7 +596,7 @@ impl App {
     }
     pub fn report(&mut self, result: Result<()>) {
         if let Err(e) = result {
-            self.controller.notice = Some(e.to_string());
+            self.controller.report_error(e);
         }
         self.dirty = true;
     }
@@ -601,7 +604,7 @@ impl App {
         let visible = self.window_focused && (self.size.0 as f32 / self.scale >= 760. || !self.show_chats)
             && (!self.show_attachments || !self.mobile && self.size.0 as f32 / self.scale >= 1000.)
             && self.modal.is_none() && self.viewer.is_none();
-        if let Err(error) = self.controller.viewing(visible) { self.controller.notice = Some(error.to_string()); }
+        if let Err(error) = self.controller.viewing(visible) { self.controller.report_error(error); }
         self.dirty |= self.controller.poll();
         if self.download_identity != self.controller.identity {
             self.download_identity = self.controller.identity.clone();
@@ -625,7 +628,7 @@ impl App {
             if let Some(previous) = &self.composer_session
                 && self.placed_session.as_deref() == Some(previous.as_str())
                 && let Err(error) = self.controller.save_chat(previous) {
-                self.controller.notice = Some(error.to_string());
+                self.controller.report_error(error);
             }
             self.placed.clear();
             self.placed_session = None;
@@ -659,7 +662,7 @@ impl App {
         if visible && self.connection_visible {
             match self.controller.refresh_codex_usage() {
                 Ok(sent) => self.dirty |= sent,
-                Err(error) => self.controller.notice = Some(error.to_string()),
+                Err(error) => self.controller.report_error(error),
             }
         }
         if visible && self.usage.region.width > 0. && (self.usage.progress > 0. || self.usage.pinned) {
@@ -757,6 +760,10 @@ impl App {
                 || self.info_tip.progress > 0. && self.info_tip.region.width > 0. && matches!(self.info_target, Info::CacheTtl(_)));
         let next_wake = if timed_tooltip { Some(next_wake.map_or(std::time::Duration::from_secs(1),
             |duration| duration.min(std::time::Duration::from_secs(1)))) } else { next_wake };
+        self.dirty |= self.notice_popup.observe(self.controller.notice.as_deref(), now);
+        let next_wake = match (next_wake, self.notice_popup.remaining(now)) {
+            (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b),
+        };
         self.connection_counter.sync(next_wake);
         // Redraw only when the visible counter or dot actually changes.
         self.dirty |= self.counter_bucket != counter_bucket;
@@ -2466,7 +2473,7 @@ impl App {
             self.modal.as_ref().map(|m| &m.kind),
             Some(ModalKind::Settings | ModalKind::Models | ModalKind::Daemon)
         ) && !self.modal.as_ref().is_some_and(|m| projects::is_project_modal(&m.kind)) {
-            self.notice_frame(&mut overlay, bounds);
+            self.notice_frame(ctx, &mut overlay, bounds);
         }
         if self.selecting
             && let Some(p) = &self.pointer
@@ -3726,33 +3733,34 @@ impl App {
             action: Action::ModelSettings,
         });
     }
-    fn notice_frame(&mut self, layer: &mut Layer, b: Rect) {
+    fn notice_frame(&mut self, ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
+        self.notice_popup.observe(self.controller.notice.as_deref(), Instant::now());
+        if !self.notice_popup.visible() { return; }
+        let Some(notice) = self.controller.notice.as_deref() else { return; };
         let s = self.scale;
-        let width = (b.width - 32. * s).min(640. * s);
-        let x = b.x + (b.width - width) / 2.;
-        if let Some(notice) = &self.controller.notice {
-            let rect = Rect::new(x, b.y + 16. * s, width, 68. * s);
-            self.hits.push(Hit { rect, action: Action::DismissNotice });
-            layer.rounded_rect(rect, 12. * s, color(0x452c2a));
-            self.renderer.label(
-                layer,
-                notice,
-                Rect::new(x + 10. * s, rect.y + 8. * s, width - 54. * s, 54. * s),
-                12. * s,
-                color(0xffd8d0),
-                false,
-            );
-            button(
-                &mut self.renderer,
-                layer,
-                &mut self.hits,
-                Rect::new(x + width - 40. * s, rect.y + 8. * s, 32. * s, 32. * s),
-                "×",
-                Action::DismissNotice,
-                s,
-                false,
-            );
+        let size = 16. * s;
+        let max_width = (b.width - 32. * s).max(1.).min(560. * s);
+        let style = sanscale::Style { chain: self.renderer.faces.prose[0], wrap_em: None,
+            align: sanscale::Align::Left, line_spacing: 1.15 };
+        let natural = self.renderer.text.shape_transient(notice, &style)
+            .map(|block| self.renderer.text.measure(block).width_em() * size).unwrap_or(max_width);
+        let width = (natural + 72. * s).max(240. * s).min(max_width);
+        let text_width = (width - 72. * s).max(1.);
+        let text_height = self.renderer.label_height(notice, text_width, size, false);
+        let height = (text_height + 24. * s).max(48. * s).min((b.height - 32. * s).max(1.));
+        let rect = Rect::new(b.x + (b.width - width) / 2., b.y + 16. * s, width, height);
+        self.hits.push(Hit { rect, action: Action::DismissNotice });
+        layer.rounded_rect(rect, 12. * s, color(0x263340));
+        self.renderer.clipped_label(layer, notice,
+            Rect::new(rect.x + 16. * s, rect.y + ((height - text_height) / 2.).max(12. * s), text_width, text_height),
+            size, color(0xe5eaf0), false, rect);
+        let close = Rect::new(rect.x + width - 44. * s, rect.y + (height - 40. * s) / 2., 40. * s, 40. * s);
+        if layer.interaction.hover.is_some_and(|p| contains(close, p)) {
+            layer.rounded_rect(close, 20. * s, layer.control_color(close, color(0x354454)));
         }
+        self.renderer.icon(ctx, layer, Icon::Close,
+            Rect::new(close.x + 10. * s, close.y + 10. * s, 20. * s, 20. * s), 0xe5eaf0);
+        self.hits.push(Hit { rect: close, action: Action::DismissNotice });
     }
     pub fn context_at(&mut self, point: Vec2) {
         if self.hits.iter().rev().find(|hit| contains(hit.rect, point))
@@ -3924,7 +3932,13 @@ impl App {
             return;
         }
         self.info_tip.content = match &self.info_target {
-            Info::Connection => self.controller.health.tooltip(&self.controller.connection,Instant::now()),
+            Info::Connection => {
+                let mut content=self.controller.health.tooltip(&self.controller.connection,Instant::now());
+                if let Some(detail)=&self.controller.transport_error {
+                    content.line().dim("Last transport issue: ").push(detail,false,crate::tooltip::WARNING);
+                }
+                content
+            },
             Info::CacheTtl(id) => {
                 let Some(session) = self
                     .controller

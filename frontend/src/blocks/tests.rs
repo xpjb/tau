@@ -498,3 +498,63 @@ fn body_reuse_is_bounded_disposable_and_does_not_accept_corrupt_cached_candidate
     f.cache.clear().unwrap();
     assert_eq!(f.cache.db.lock().unwrap().query_row("SELECT count(*) FROM local_echoes",[],|r|r.get::<_,u64>(0)).unwrap(),0);
 }
+
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn a_delayed_plan_does_not_refetch_known_text_after_queue_consumption() {
+    use tau_transfer::blocks::Backend;
+    struct Source { db:Arc<Mutex<Connection>>, reads:Arc<Mutex<Vec<String>>>, changes:watch::Receiver<u64> }
+    impl Backend for Source {
+        fn feed(&self, req:FeedRequest)->futures_util::future::BoxFuture<'static,Result<FeedPage>> {
+            let db=self.db.clone();Box::pin(async move {tau_blocks::feed(&db.lock().unwrap(),&req)})
+        }
+        fn read(&self, req:BlockRequest)->futures_util::future::BoxFuture<'static,Result<ContentRange>> {
+            let db=self.db.clone();let reads=self.reads.clone();Box::pin(async move {
+                reads.lock().unwrap().push(req.id.clone());tau_blocks::read(&db.lock().unwrap(),&req)
+            })
+        }
+        fn changes(&self)->watch::Receiver<u64> {self.changes.clone()}
+    }
+    let mut f=Fixture::new();let text="already held text café 😀";let local=local_prompt("request",text);
+    f.cache.remember_local("chat",&local,&f.lineage).unwrap();
+    f.put(QUEUE,None,100,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
+    f.put("queued:request",Some(QUEUE),0,BlockKind::Text,
+        json!({"request":{"requestId":"request","revision":0,"kind":"steer","text":"","images":0},
+            "bodyHash":blake3::hash(text.as_bytes()).to_hex().to_string()}),text.as_bytes());
+    f.page(None,None);f.page(Some(QUEUE),None);f.body(QUEUE);
+    let pending_plan=f.cache.plan("chat",&local,&[]).unwrap();
+    assert!(pending_plan.blocks.iter().any(|(id,head)|id=="queued:request" && head.is_some_and(|(_,len,sealed,stored)|sealed && len==stored)));
+    // The UI has built its plan, but hasn't handed it to the service yet.
+    // Meanwhile the existing body-reuse fix correctly completes the merge.
+    let tx=f.source.transaction().unwrap();tau_blocks::remove(&tx,"chat","queued:request").unwrap();tx.commit().unwrap();
+    f.put("saved",None,1,BlockKind::Text,user_body("saved","request",text),text.as_bytes());
+    f.page(Some(QUEUE),None);f.page(None,None);
+    assert_eq!(f.cache.copy_ready("chat",&["saved".into()]).unwrap().unwrap(),text);
+    let merged_plan=f.cache.plan("chat",&local,&[]).unwrap();
+    let reads=Arc::new(Mutex::new(vec![]));let (_changes,changed)=watch::channel(0);
+    let server=tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
+        db:Arc::new(Mutex::new(f.source)),reads:reads.clone(),changes:changed,
+    })).await.unwrap();
+    let (notices,mut received)=mpsc::channel(32);let service=Service::start(f.cache.clone(),Arc::new(||{}),notices);
+    let mut identity=service.node.clone();
+    tokio::time::timeout(Duration::from_secs(5),async {
+        while identity.borrow().is_none() {identity.changed().await.unwrap();}
+    }).await.unwrap();
+    service.send(Command::Configure(server.authorize(identity.borrow().as_ref().unwrap(),f.lineage.clone()).unwrap(),"127.0.0.1".into()));
+    service.send(Command::Plan(Some(pending_plan)));
+    let first=tokio::time::timeout(Duration::from_secs(5),received.recv()).await.unwrap().unwrap();
+    assert!(first.error.is_none(),"The content was already present: {:?}",first.error);
+    for plan in [None,Some(merged_plan)] {
+        if let Some(plan)=plan {service.send(Command::Plan(Some(plan)));}
+        let until=tokio::time::Instant::now()+Duration::from_millis(250);
+        loop {
+            tokio::select! {
+                _=tokio::time::sleep_until(until)=>break,
+                notice=received.recv()=>assert!(notice.unwrap().error.is_none(),"A stale plan must not cause a content error"),
+            }
+        }
+    }
+    let reads=reads.lock().unwrap().clone();
+    assert!(reads.is_empty(),"Neither the old queue ID nor the merged body needs a read: {reads:?}");
+    assert_eq!(f.cache.copy_ready("chat",&["saved".into()]).unwrap().unwrap(),text);
+    drop(service);server.shutdown().await;
+}
