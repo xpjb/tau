@@ -326,6 +326,7 @@ impl App {
         session: &str,
         entry: &str,
         attachment: &ChatAttachment,
+        surface: &'static str,
         rect: Rect,
         viewport: Rect,
     ) {
@@ -352,6 +353,8 @@ impl App {
         } else {
             exported
         };
+        // The same file can be visible in chat and the sidebar simultaneously.
+        let info_key = format!("{surface}:{key}");
         let x = rect.x + 14. * s;
         let width = (rect.width - 28. * s).max(1.);
         let panel = Rect::new(x, rect.y + rect.height - 76. * s, width, 68. * s);
@@ -381,7 +384,7 @@ impl App {
                 self.renderer.clipped_icon(ctx, layer, Icon::Image,
                     Rect::new(x + width / 2. - 16. * s, preview.y + 74. * s, 32. * s, 32. * s), 0x687e8f, clip);
                 // Center a measured one-line placeholder, rather than an off-center Loading label.
-                let label_width = (label.chars().count() as f32 * 6.5 * s).min(width - 16. * s);
+                let label_width = self.renderer.label_width(label, 12. * s, false).min(width - 16. * s);
                 self.renderer.ellipsized_label(layer, label,
                     Rect::new(x + (width - label_width) / 2., preview.y + 118. * s, label_width, 20. * s),
                     12. * s, color(0x9eaebd), false, false, clip);
@@ -440,11 +443,11 @@ impl App {
             false, false, viewport);
         let detail = format!("{}{}", display.status, caption.map(|c| format!("\n{c}")).unwrap_or_default());
         self.attachment_info(Rect::new(text.x, text.y, text.width, 42. * s), viewport,
-            format!("{key}:details"), &attachment.file_name, &detail, true);
+            format!("{info_key}:details"), &attachment.file_name, &detail, true);
         if let Some(caption) = caption {
             let area = Rect::new(x, panel.y - 24. * s, width, 20. * s);
             self.renderer.ellipsized_label(layer, caption, area, 12. * s, color(0xb7c2ce), false, false, viewport);
-            self.attachment_info(area, viewport, format!("{key}:caption"), &attachment.file_name, caption, true);
+            self.attachment_info(area, viewport, format!("{info_key}:caption"), &attachment.file_name, caption, true);
         }
         if let Some(progress) = display.progress {
             let track = Rect::new(panel.x + 12. * s, panel.y + panel.height - 7. * s, panel.width - 24. * s, 3. * s);
@@ -472,7 +475,7 @@ impl App {
             self.renderer.clipped_icon(ctx, layer, icon,
                 Rect::new(r.x + (target - 20. * s) / 2., r.y + (target - 20. * s) / 2., 20. * s, 20. * s),
                 if !enabled { 0x687e8f } else { 0x67d4ff }, viewport);
-            self.attachment_info(r, viewport, format!("{key}:action:{index}"), label, &attachment.file_name, false);
+            self.attachment_info(r, viewport, format!("{info_key}:action:{index}"), label, &attachment.file_name, false);
             self.hits.push(Hit { rect: clip, action: action.unwrap_or(Action::Noop) });
         }
     }

@@ -1,3 +1,36 @@
+# Inline download icon audit — September 27, 2026 (unreleased)
+
+- Replaced every inline download/save/view/open/cancel/retry/folder/extract control
+  with a native vector icon. The shared chat/Attachments control is 68dp high like
+  Tau1, with 40dp desktop / 44dp touch targets; no empty caption row or text collision.
+- Single-line, extension-preserving filename ellipsis; readable progress/speed,
+  subtle saved/error states, disabled saving, full labels/details on hover/touch.
+  Image failures no longer leave a blank or falsely ready preview. Hover, hold and
+  tooltip clipping cannot activate a download or a control underneath the card.
+- Fixed cached files above 10 MB incorrectly using the image-save limit. Save retries
+  clear stale transfer errors, preserve valid previews and cannot create duplicate
+  OS saves. Saved Open/folder/ZIP actions retain their account/chat/file target.
+- **32 cases × four sizes/scales**, rendered with actual Tau1 Compose and Tau2 GPU
+  renderers. All icon hover/pressed/tooltip/clipped variants and real desktop/phone
+  surfaces are included. Inspected all four control contact sheets plus image,
+  high-DPI, interaction and actual-app captures. Reproducible fixtures, reference
+  provenance, limitations and all contact sheets: [download QA](qa/downloads/README.md).
+- Managed frontend all-target check passed; **90/90 frontend library nextest tests
+  passed**, zero skipped (run `42559314-5dee-463f-a86a-4a66a95bc4be`). Windows x64 and
+  Android ARM64 library compiler checks passed. Android emits target-specific
+  dead-code warnings, including desktop-only folder/extract icons; no lint gate.
+- Actual hit dispatch covers a verified 12 MiB cached file, busy/no-duplicate export,
+  failure/retry, OS-save completion, restart, deleted user copy/cache, view vs save,
+  uppercase ZIP actions and touch-hold labels. Duplicate chat/sidebar instances keep
+  independent tooltip anchors; pinned transfer details update with byte counts.
+- No Clippy, production account, paid model, OS viewer, package/version bump, service
+  restart or deployment. Physical Windows/Android acceptance remains unclaimed.
+
+![Desktop download controls in chat and sidebar](gallery/downloads-desktop.png)
+![Phone download controls](gallery/downloads-phone.png)
+
+---
+
 # Rich tooltips — September 27, 2026 (unreleased)
 
 - Quota, cache TTL and connection cards use native inline bold/colour, with muted

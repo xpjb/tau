@@ -16,6 +16,7 @@ block = app[app.index('                                                        v
 block = textwrap.dedent(block)
 block = re.sub(r'onClick = \{.*?\},', 'onClick = {},', block, flags=re.S)
 block = block.replace('PlatformServices.platformName == "windows"', '!mobile')
+block = block.replace('TextButton(', 'TextButton(modifier = Modifier.onGloballyPositioned { buttons.add(it.boundsInWindow()) },')
 theme = app[app.index('private val TauDarkColors'):app.index('\n\n@Composable\nfun TauApp')]
 byte_source = source('TranscriptText.kt')
 byte_source = byte_source[byte_source.index('internal fun formatByteCount'):]
@@ -30,8 +31,8 @@ def kt(value):
 items = []
 for c in cases:
     size = str(c['size']) + 'L' if 'size' in c else 'null'
-    status = {'active':'Downloading', 'failed':'Failed', 'unavailable':'Downloaded', 'cached':'Downloaded', 'saving':'Downloading', 'save-failed':'Failed', 'saved':'Downloaded', 'missing':None, 'decode-failed':'Downloaded'}.get(c['state'])
-    download = 'null' if status is None else f'AttachmentDownload(AttachmentDownloadStatus.{status}, {c.get("transferred", c.get("size", 0) if c["state"] == "saving" else 0)}L, {size}, ' + (str(c['rate'])+'L' if c.get('rate') else 'null') + f', {"Any()" if c["state"] == "saved" else "null"}, Failure({kt(c.get("error"))}))'
+    status = {'active':'Downloading', 'failed':'Failed', 'unavailable':'Downloaded', 'cached':'Downloaded', 'saving':'Downloading', 'save-failed':'Failed', 'saved':'Downloaded', 'saved-no-cache':'Downloaded', 'missing':None, 'decode-failed':'Downloaded'}.get(c['state'])
+    download = 'null' if status is None else f'AttachmentDownload(AttachmentDownloadStatus.{status}, {c.get("transferred", c.get("size", 0) if c["state"] == "saving" else 0)}L, {size}, ' + (str(c['rate'])+'L' if c.get('rate') else 'null') + f', {"Any()" if c["state"] in ("saved", "saved-no-cache") else "null"}, Failure({kt(c.get("error"))}))'
     items.append(f'Case({kt(c["id"])}, {kt(c["label"])}, Attachment({kt(c.get("name", "preview.png" if c.get("image") else "release-notes.pdf"))}, {size}), {download})')
 code = '''
 import androidx.compose.foundation.background
@@ -43,6 +44,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
 import kotlinx.coroutines.*
 import kotlinx.coroutines.swing.Swing
 import org.jetbrains.skia.EncodedImageFormat
@@ -56,7 +62,7 @@ data class AttachmentDownload(val status: AttachmentDownloadStatus, val transfer
 data class Attachment(val fileName: String, val size: Long?)
 data class Case(val id: String, val label: String, val attachment: Attachment, val download: AttachmentDownload?)
 @Composable
-fun OriginalControl(attachment: Attachment, attachmentDownload: AttachmentDownload?, mobile: Boolean) {
+fun OriginalControl(attachment: Attachment, attachmentDownload: AttachmentDownload?, mobile: Boolean, buttons: MutableList<Rect>) {
 '''+block+'''
 }
 @OptIn(ExperimentalComposeUiApi::class)
@@ -67,13 +73,14 @@ fun main(args: Array<String>) = runBlocking(Dispatchers.Swing) {
     val out = File(args[0]); out.mkdirs()
     for ((profile, width, scale) in listOf(Triple("desktop",552,1f), Triple("sidebar",320,1f), Triple("phone",360,1f), Triple("phone-2x5",900,2.5f))) {
         for (case in cases) {
+            val buttons = mutableListOf<Rect>()
             val scene = ImageComposeScene(width, (148*scale).toInt(), density=Density(scale), coroutineContext=Dispatchers.Swing) {
                 MaterialTheme(colorScheme=TauDarkColors) {
                     CompositionLocalProvider(LocalContentColor provides TauDarkColors.onSurface) {
                     Column(Modifier.fillMaxSize().background(TauDarkColors.surface).padding(12.dp)) {
                         Text(case.label, style=MaterialTheme.typography.labelMedium, color=TauDarkColors.onSurfaceVariant, modifier=Modifier.height(32.dp))
                         Box(Modifier.fillMaxWidth().background(TauDarkColors.surfaceVariant).padding(horizontal=14.dp)) {
-                            OriginalControl(case.attachment, case.download, profile.startsWith("phone"))
+                            OriginalControl(case.attachment, case.download, profile.startsWith("phone"), buttons)
                         }
                     }
                     }
@@ -81,9 +88,25 @@ fun main(args: Array<String>) = runBlocking(Dispatchers.Swing) {
             }
             try {
                 scene.render(0L).close()
-                scene.render(250_000_000L).use { image -> image.encodeToData(EncodedImageFormat.PNG)!!.use { data ->
-                    File(out,"$profile-${case.id}.png").writeBytes(data.bytes)
-                } }
+                var time = 250_000_000L
+                fun capture(suffix: String) {
+                    scene.render(time).use { image -> image.encodeToData(EncodedImageFormat.PNG)!!.use { data ->
+                        File(out,"$profile-${case.id}$suffix.png").writeBytes(data.bytes)
+                    } }
+                    time += 300_000_000L
+                }
+                capture("")
+                for ((index, button) in buttons.distinct().withIndex()) {
+                    scene.sendPointerEvent(PointerEventType.Move, button.center)
+                    scene.render(time).close(); time += 300_000_000L
+                    capture("-hover-$index")
+                    scene.sendPointerEvent(PointerEventType.Press, button.center)
+                    scene.render(time).close(); time += 100_000_000L
+                    capture("-pressed-$index")
+                    scene.sendPointerEvent(PointerEventType.Release, button.center)
+                    scene.sendPointerEvent(PointerEventType.Move, Offset.Zero)
+                    scene.render(time).close(); time += 300_000_000L
+                }
             } finally { scene.close() }
         }
     }

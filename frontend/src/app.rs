@@ -2316,7 +2316,7 @@ impl App {
                 }
                 if y + height >= viewport.y && y <= viewport.y + viewport.height {
                     body.clipped_corners(rect, [12. * s; 4], color(0x18212b), viewport);
-                    self.attachment_card(ctx, &mut body, &session, entry, file, rect, viewport);
+                    self.attachment_card(ctx, &mut body, &session, entry, file, "attachments", rect, viewport);
                 }
                 y += height + 12. * s;
             }
@@ -3364,7 +3364,7 @@ impl App {
                 );
             }
             if let Some((entry, attachment)) = &row.attachment {
-                self.attachment_card(ctx, layer, &session, entry, attachment, rect, viewport);
+                self.attachment_card(ctx, layer, &session, entry, attachment, "chat", rect, viewport);
             }
             layer.surface_highlight(rect, corners, viewport, pinned, true,
                 self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
@@ -4819,3 +4819,6 @@ mod usage_tests {
 
 #[cfg(all(test, not(target_os = "android")))]
 mod download_render_tests;
+
+#[cfg(all(test, not(target_os = "android")))]
+mod download_interaction_tests;
