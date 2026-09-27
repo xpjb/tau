@@ -4,6 +4,7 @@ use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform
 pub enum Icon {
     Attach,
     Attachments,
+    Image,
     Send,
     Stop,
     Close,
@@ -20,6 +21,7 @@ impl Icon {
         match self {
             Self::Attach => "attach",
             Self::Attachments => "attachments",
+            Self::Image => "image",
             Self::Send => "send",
             Self::Stop => "stop",
             Self::Close => "close",
@@ -88,6 +90,16 @@ impl Icon {
                     &p.finish().unwrap(), &paint,
                     &Stroke { width: 1.8, ..Default::default() }, transform, None,
                 );
+                return straight_alpha(pixmap);
+            }
+            Self::Image => {
+                p.move_to(3., 3.); p.line_to(21., 3.); p.line_to(21., 21.);
+                p.line_to(3., 21.); p.close();
+                p.move_to(3., 17.); p.line_to(9., 11.); p.line_to(13., 15.);
+                p.line_to(16., 12.); p.line_to(21., 17.); p.push_circle(16., 8., 1.5);
+                pixmap.stroke_path(&p.finish().unwrap(), &paint,
+                    &Stroke { width: 1.8, line_cap: LineCap::Round,
+                        line_join: tiny_skia::LineJoin::Round, ..Default::default() }, transform, None);
                 return straight_alpha(pixmap);
             }
             Self::Send => {

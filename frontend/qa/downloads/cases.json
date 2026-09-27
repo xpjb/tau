@@ -1,0 +1,222 @@
+[
+  {
+    "id": "01-ready",
+    "label": "Ready · known size",
+    "state": "ready",
+    "size": 12582912
+  },
+  {
+    "id": "02-ready-unknown",
+    "label": "Ready · unknown size",
+    "state": "ready"
+  },
+  {
+    "id": "03-empty",
+    "label": "Ready · empty file",
+    "state": "ready",
+    "size": 0
+  },
+  {
+    "id": "04-starting",
+    "label": "Starting · unknown total",
+    "state": "active",
+    "transferred": 0
+  },
+  {
+    "id": "05-indeterminate",
+    "label": "Downloading · unknown total",
+    "state": "active",
+    "transferred": 2097152,
+    "rate": 262144
+  },
+  {
+    "id": "06-zero-percent",
+    "label": "Downloading · 0%",
+    "state": "active",
+    "size": 12582912,
+    "transferred": 0
+  },
+  {
+    "id": "07-progress",
+    "label": "Downloading · 25% + speed",
+    "state": "active",
+    "size": 12582912,
+    "transferred": 3145728,
+    "rate": 262144
+  },
+  {
+    "id": "08-finishing",
+    "label": "Downloading · 100%, verifying",
+    "state": "active",
+    "size": 12582912,
+    "transferred": 12582912
+  },
+  {
+    "id": "09-cancelled",
+    "label": "Cancelled · retry",
+    "state": "failed",
+    "size": 12582912,
+    "transferred": 3145728,
+    "error": "Download cancelled"
+  },
+  {
+    "id": "10-failed",
+    "label": "Transfer failed · retry",
+    "state": "failed",
+    "size": 12582912,
+    "transferred": 3145728,
+    "error": "Connection interrupted"
+  },
+  {
+    "id": "11-too-large",
+    "label": "Too large · retry",
+    "state": "failed",
+    "size": 62914560,
+    "error": "Attachment exceeds the 50 MB download limit"
+  },
+  {
+    "id": "12-integrity",
+    "label": "Verification failed · retry",
+    "state": "failed",
+    "size": 12582912,
+    "transferred": 12582912,
+    "error": "Content verification failed; retry the download"
+  },
+  {
+    "id": "13-unavailable",
+    "label": "Completed but cache missing · retry",
+    "state": "unavailable",
+    "size": 12582912,
+    "transferred": 12582912
+  },
+  {
+    "id": "14-cached",
+    "label": "Cached · save (works offline)",
+    "state": "cached",
+    "size": 12582912
+  },
+  {
+    "id": "15-saving",
+    "label": "Saving · busy, no duplicate action",
+    "state": "saving",
+    "size": 12582912
+  },
+  {
+    "id": "16-save-failed",
+    "label": "Save failed · retry",
+    "state": "save-failed",
+    "size": 12582912,
+    "error": "Not enough space in Downloads/Tau"
+  },
+  {
+    "id": "17-saved",
+    "label": "Saved · open + show in folder",
+    "state": "saved",
+    "size": 12582912
+  },
+  {
+    "id": "18-saved-zip",
+    "label": "Saved ZIP · open + folder + extract",
+    "state": "saved",
+    "size": 12582912,
+    "name": "source-code.zip"
+  },
+  {
+    "id": "19-missing",
+    "label": "Saved copy deleted · download again",
+    "state": "missing",
+    "size": 12582912
+  },
+  {
+    "id": "20-long-name",
+    "label": "Long filename + caption",
+    "state": "saved",
+    "size": 12582912,
+    "name": "tau-beta-release-notes-and-verification-results-2026-09-27.zip",
+    "caption": "Release artifacts · Windows x64 and Android ARM64"
+  },
+  {
+    "id": "21-unicode",
+    "label": "Unicode filename · no broken glyph clipping",
+    "state": "cached",
+    "size": 2048,
+    "name": "résumé — заметки — 日本語.txt"
+  },
+  {
+    "id": "22-image-ready",
+    "label": "Image · not fetched / offline",
+    "state": "ready",
+    "size": 2097152,
+    "image": true
+  },
+  {
+    "id": "23-image-loading",
+    "label": "Image · downloading preview",
+    "state": "active",
+    "size": 2097152,
+    "transferred": 524288,
+    "image": true
+  },
+  {
+    "id": "24-image-failed",
+    "label": "Image · preview failed / retry",
+    "state": "failed",
+    "size": 2097152,
+    "error": "Preview download interrupted",
+    "image": true
+  },
+  {
+    "id": "25-image-cached",
+    "label": "Image · view + save",
+    "state": "cached",
+    "size": 2097152,
+    "image": true
+  },
+  {
+    "id": "26-image-saving",
+    "label": "Image · saving",
+    "state": "saving",
+    "size": 2097152,
+    "image": true
+  },
+  {
+    "id": "27-image-save-failed",
+    "label": "Image · save failed, keep preview",
+    "state": "save-failed",
+    "size": 2097152,
+    "error": "Permission denied when saving to Downloads/Tau",
+    "image": true
+  },
+  {
+    "id": "28-image-saved",
+    "label": "Image · saved, view + open + folder",
+    "state": "saved",
+    "size": 2097152,
+    "image": true
+  },
+  {
+    "id": "29-image-decode-failed",
+    "label": "Image · cached bytes cannot decode",
+    "state": "decode-failed",
+    "size": 2097152,
+    "image": true
+  },
+  {
+    "id": "30-saved-no-size",
+    "label": "Saved · unknown size",
+    "state": "saved"
+  },
+  {
+    "id": "31-image-saved-no-preview",
+    "label": "Image · saved but preview cache missing",
+    "state": "saved-no-cache",
+    "size": 2097152,
+    "image": true
+  },
+  {
+    "id": "32-empty-saved",
+    "label": "Saved · empty file",
+    "state": "saved",
+    "size": 0
+  }
+]

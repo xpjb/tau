@@ -382,6 +382,12 @@ impl Renderer {
     ) -> f32 {
         self.clipped_label(layer, value, rect, size, color, bold, rect)
     }
+    pub fn label_width(&mut self, value: &str, size: f32, bold: bool) -> f32 {
+        let style = Style { chain: self.faces.prose[usize::from(bold)], wrap_em: None,
+            align: Align::Left, line_spacing: 1.15 };
+        self.text.shape_transient(value, &style)
+            .map(|block| self.text.measure(block).width_em() * size).unwrap_or(0.)
+    }
     pub fn label_height(&mut self, value: &str, width: f32, size: f32, bold: bool) -> f32 {
         let style = Style {
             chain: self.faces.prose[usize::from(bold)],
@@ -425,6 +431,39 @@ impl Renderer {
         } else {
             0.
         }
+    }
+    /// Single-line labels must end in an ellipsis, not a clipped second line.
+    /// Filenames retain a short extension so narrow cards still identify file type.
+    pub fn ellipsized_label(&mut self, layer: &mut Layer, value: &str, rect: Rect,
+        size: f32, tint: Color, bold: bool, filename: bool, clip: Rect) {
+        use unicode_segmentation::UnicodeSegmentation;
+        let value = value.replace(['\n', '\r', '\t'], " ");
+        let style = Style { chain: self.faces.prose[usize::from(bold)], wrap_em: None,
+            align: Align::Left, line_spacing: 1.15 };
+        let Some(mut block) = self.text.shape_transient(&value, &style) else { return; };
+        if self.text.measure(block).width_em() * size > rect.width {
+            let suffix = if filename { value.rsplit_once('.').filter(|(stem, ext)| !stem.is_empty()
+                && !ext.is_empty() && ext.graphemes(true).count() <= 10)
+                .map(|(_, ext)| format!(".{ext}")).unwrap_or_default() } else { String::new() };
+            let tail = format!("…{suffix}");
+            let Some(tail_block) = self.text.shape_transient(&tail, &style) else { return; };
+            let tail = if self.text.measure(tail_block).width_em() * size <= rect.width { tail } else { "…".into() };
+            let end = value.len() - if tail.len() > "…".len() { suffix.len() } else { 0 };
+            let mut cuts: Vec<_> = value[..end].grapheme_indices(true).map(|(i, _)| i).collect();
+            cuts.push(end);
+            let (mut lo, mut hi) = (0, cuts.len());
+            block = self.text.shape_transient(&tail, &style).unwrap();
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let text = format!("{}{tail}", &value[..cuts[mid]]);
+                let candidate = self.text.shape_transient(&text, &style).unwrap();
+                if self.text.measure(candidate).width_em() * size <= rect.width {
+                    block = candidate; lo = mid + 1;
+                } else { hi = mid; }
+            }
+        }
+        layer.draws.push(Draw { block, at: Vec2::new(rect.x, rect.y), size, color: tint,
+            clip: Some(intersect(rect, clip)), ..Default::default() });
     }
     pub fn tooltip_height(&mut self, key: &'static str, content: &crate::tooltip::Content, width: f32, size: f32) -> f32 {
         let label = self.tooltip_labels.entry(key).or_insert_with(|| {
@@ -723,13 +762,10 @@ impl Renderer {
     ) {
         let size = rect.width.ceil().max(1.) as u32;
         let stamp = icon.stamp(color);
-        // Multiple TTL rings in one frame must not alias the final row's texture.
-        // Cache TTL estimates quantize to 61 minute-sized variants rather than caching per chat.
-        let variant = if matches!(icon, crate::icons::Icon::CacheTtl(_)) {
-            stamp
-        } else {
-            0
-        };
+        // Simultaneous disabled/active/hovered icons must not alias the last tint.
+        // Static controls have bounded palettes; TTL has 61 minute-sized variants.
+        // Only the single context gauge can reuse one dynamic texture.
+        let variant = if matches!(icon, crate::icons::Icon::Context(_)) { 0 } else { stamp };
         let key = PathBuf::from(format!("tau-icon/{}/{size}/{variant}", icon.name()));
         if self.icons.get(&key).is_none_or(|(old, _)| *old != stamp) {
             let rgba = icon.pixels(size, color);

@@ -21,6 +21,38 @@ The contention timing used a synthetic local write, not a live-user measurement.
 
 ---
 
+# Inline downloads — Tau1 text actions, September 27, 2026 (unreleased)
+
+- Restored Tau1's **Download / Save / Cancel / Retry / Open / Show / Extract** text
+  actions. Tau2's existing View action is text as well. Removed the custom action
+  glyphs and their always-on circles; other parts of the app are unchanged.
+- Kept the shared 68dp control, optional captions, extension-preserving filename
+  ellipsis, progress/speed, saved/error states and tooltips. Button widths come from
+  measured text rather than icon slots; hit targets are at least 40dp desktop / 44dp
+  touch. Saving stays visibly disabled, with duplicate-export protection.
+- Re-rendered **32 cases × four sizes/scales**, including all hover/pressed/tooltip/
+  clipped states and actual desktop/phone surfaces against Tau1's original Compose
+  renderer. Tests require a visible text label and no icon in every action region,
+  full label containment, minimum target sizes and no filename/status collisions.
+  Refreshed screenshots and reproducible fixtures: [download QA](qa/downloads/README.md).
+- All **five focused render/lifecycle nextest tests passed** (run
+  `30415ac9-5c07-48ac-a67b-db6223dc32a4`; 85 unrelated tests skipped). They cover a
+  verified 12 MiB cache save, busy/failure/retry/completion, restart, missing user
+  copy/cache, view vs save, uppercase ZIP actions, touch hold and independent live
+  tooltip anchors. Earlier 90-test validation belongs to the preceding icon version.
+- Managed native frontend all-target and Windows x64 library compiler checks passed.
+  The Android recheck was deferred after the managed wrapper's shared-build-lock
+  timeout (exit 75); no bypass or fresh Android-pass claim.
+- The previous save-limit, retry, image-placeholder and download-lifecycle fixes
+  remain. No change to network, OS actions, scoped records or ZIP extraction safety.
+- No Clippy, production data, paid provider, OS viewer, packaging/version bump or
+  deployment. Physical Windows/Android acceptance remains unclaimed.
+
+![Desktop text actions in chat and sidebar](gallery/downloads-desktop.png)
+![Phone text actions](gallery/downloads-phone.png)
+
+---
+
 # Rich tooltips — September 27, 2026 (unreleased)
 
 - Quota, cache TTL and connection cards use native inline bold/colour, with muted
