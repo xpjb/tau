@@ -129,6 +129,57 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
 }
 
 #[test]
+fn context_hover_and_pinned_card_show_native_codex_account_quota_not_context_capacity() {
+    let root=tempfile::tempdir().unwrap();
+    let ctx=HeadlessCtx::new(&Config {size:(1000,700),device_limits:crate::desktop::limits(),..Default::default()}).unwrap();
+    let mut app=App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(|| {}),false).unwrap();
+    app.back();crate::demo::populate(&mut app.controller).unwrap();
+    app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);
+    app.frame(&ctx,ctx.view());
+    assert!(app.usage.text.contains("Estimated context usage: 9%"));
+    assert!(app.usage.text.contains("Account quota unavailable for this provider"));
+    app.controller.account.sessions[0].model.as_mut().unwrap().provider="openai-codex".into();
+    app.controller.codex_usage.report=Some(CodexUsage {provider:"openai-codex".into(),fetched_at_ms:1_800_000_000_000,age_ms:0,plan:Some("pro".into()),limit_reached:false,
+        windows:vec![CodexUsageWindow {id:"primary_window".into(),label:"5-hour".into(),duration_seconds:Some(18000),remaining_percent:Some(74.),resets_at_ms:Some(1_800_000_120_000)}]});
+    app.controller.codex_usage.received=Some(Instant::now());
+    app.frame(&ctx,ctx.view());
+    let indicator=app.usage.region;let point=Vec2::new(indicator.x+indicator.width/2.,indicator.y+indicator.height/2.);
+    app.hover(Some(point));std::thread::sleep(Duration::from_millis(255));app.tick(0.);
+    std::thread::sleep(Duration::from_millis(180));app.tick(0.);app.frame(&ctx,ctx.view());
+    assert!(app.usage.progress>0.99,"Context hover opens the quota card");
+    assert!(app.usage.text.contains("Codex quota (pro) · last known\n5-hour: 74% remaining · resets in 2m"));
+    assert!(app.usage.text.contains("Estimated context usage: 9%"),"The context gauge is independent");
+    app.apply(Action::Usage).unwrap();app.hover(None);app.tick(0.);app.frame(&ctx,ctx.view());
+    assert!(app.usage.pinned && app.usage.progress>0.99,"Pinned cards retain the quota on desktop and touch");
+    app.controller.epoch=Some(1);
+    app.controller.codex_usage.in_flight=Some(("pending".into(),Instant::now()));
+    app.controller.codex_usage.attempted=Some(Instant::now());
+    app.frame(&ctx,ctx.view());
+    let refresh=app.hits.iter().find(|hit|matches!(hit.action,Action::RefreshUsage)).expect("Refresh is clickable in the pinned card").rect;
+    let point=Vec2::new(refresh.x+refresh.width/2.,refresh.y+refresh.height/2.);
+    app.press(1,point,false);app.release(1,point);
+    assert!(app.usage.pinned,"Clicking Refresh must not dismiss the card or send a chat prompt");
+}
+
+#[test]
+fn touch_pins_the_quota_card_on_mobile_without_a_model_request() {
+    let root=tempfile::tempdir().unwrap();
+    let ctx=HeadlessCtx::new(&Config {size:(360,720),device_limits:crate::desktop::limits(),..Default::default()}).unwrap();
+    let mut app=App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(|| {}),true).unwrap();
+    app.back();crate::demo::populate(&mut app.controller).unwrap();
+    app.controller.account.sessions[0].model.as_mut().unwrap().provider="openai-codex".into();
+    app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);app.show_chats=false;
+    app.frame(&ctx,ctx.view());
+    let r=app.usage.region;let point=Vec2::new(r.x+r.width/2.,r.y+r.height/2.);
+    app.press(1,point,true);app.release(1,point);
+    app.tick(0.);std::thread::sleep(Duration::from_millis(180));app.tick(0.);
+    app.frame(&ctx,ctx.view());
+    assert!(app.usage.pinned && app.usage.progress>0.99);
+    assert!(app.usage.text.contains("Codex quota unavailable (offline)"));
+    assert!(!app.hits.iter().any(|hit|matches!(hit.action,Action::RefreshUsage)));
+}
+
+#[test]
 fn finished_reply_stays_unread_in_background_until_its_chat_is_visible_and_focused() {
     let root = tempfile::tempdir().unwrap();
     let ctx = HeadlessCtx::new(&Config {

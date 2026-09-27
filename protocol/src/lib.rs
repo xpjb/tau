@@ -66,6 +66,8 @@ pub enum ClientCommand {
     GetSettings,
     SetSettings { revision: u64, settings: Box<settings::Settings> },
     RefreshModelCatalog { provider: String },
+    /// Read-only account quota; never a model prompt or a session operation.
+    GetCodexUsage { #[serde(default)] force: bool },
     CreateSession {
         #[serde(default = "general_project_id")]
         project_id: String,
@@ -195,6 +197,7 @@ pub enum ServerMessage {
         error: Option<String>,
     },
     Settings { request_id: String, settings: Box<settings::Settings> },
+    CodexUsage { request_id: String, report: Option<CodexUsage>, error: Option<String> },
     Commands {
         session_id: String,
         commands: Vec<SlashCommand>,
@@ -339,6 +342,29 @@ pub enum SessionStatus {
     Idle,
     Running,
     Error,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUsageWindow {
+    pub id: String,
+    pub label: String,
+    pub duration_seconds: Option<u64>,
+    pub remaining_percent: Option<f64>,
+    pub resets_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUsage {
+    pub provider: String,
+    pub fetched_at_ms: u64,
+    /// Age of a daemon-cached report when returned, for monotonic reset countdowns.
+    #[serde(default)]
+    pub age_ms: u64,
+    pub plan: Option<String>,
+    pub limit_reached: bool,
+    pub windows: Vec<CodexUsageWindow>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]

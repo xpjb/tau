@@ -14,6 +14,7 @@ use crate::protocol::{ContextUsage, PromptDisposition, QueueOperation, ServerMes
 use crate::settings::{SettingsStore, Settings};
 use crate::state::{StateStore, Receipt, SessionModel};
 use crate::transcript::{QueuedRequest, QueueControl, Transcript};
+use crate::usage::{UsageReader, UsageResult};
 
 const EVENT_BUFFER: usize = 64;
 
@@ -28,6 +29,7 @@ pub(crate) struct ManagerInner {
     pub auth: AuthStore,
     pub projects: Mutex<()>,
     pub catalog: ModelCatalog,
+    pub usage: UsageReader,
     pub catalog_requests: Semaphore,
     pub agent_runs:Semaphore,
     pub title_requests:Semaphore,
@@ -67,7 +69,7 @@ impl AgentManager {
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
         let catalog = ModelCatalog::load(config.settings_path.with_file_name("model-catalog.json")).await;
         Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
-            projects: Mutex::new(()), catalog, catalog_requests: Semaphore::new(2), agent_runs:Semaphore::new(8), title_requests:Semaphore::new(2), block_imports: Arc::new(Semaphore::new(2)), upload_finishes:Mutex::new(HashMap::new()),upload_publication:Mutex::new(()),
+            projects: Mutex::new(()), catalog, usage:UsageReader::default(), catalog_requests: Semaphore::new(2), agent_runs:Semaphore::new(8), title_requests:Semaphore::new(2), block_imports: Arc::new(Semaphore::new(2)), upload_finishes:Mutex::new(HashMap::new()),upload_publication:Mutex::new(()),
             runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false),state_clock:std::sync::atomic::AtomicU64::new(0),deleting:std::sync::Mutex::new(HashSet::new()) }) })
     }
     pub(crate) fn context_window(&self, settings: &Settings, model: &SessionModel) -> Option<u64> {
@@ -115,6 +117,13 @@ impl AgentManager {
         let count = self.resolve_catalog(provider, &config, true).await?;
         self.broadcast_sessions().await;
         Ok(format!("Refreshed {provider} model catalog: {count} models"))
+    }
+    pub async fn codex_usage(&self, force: bool) -> UsageResult {
+        let settings=self.inner.settings.get();
+        let Some(provider)=settings.providers.get("openai-codex").filter(|provider|provider.api==crate::settings::Api::Codex) else {
+            return UsageResult {report:None,error:Some("Codex account quota unavailable for this provider configuration".into())};
+        };
+        self.inner.usage.read(&self.inner.auth, &self.inner.http, provider.api_key_env.as_deref(), force).await
     }
     pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> { self.inner.events.subscribe() }
     #[cfg(test)]
