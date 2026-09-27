@@ -246,27 +246,48 @@ fn new_chat_tiles_are_present_before_creation_and_remain_on_reconnect() {
             "the chooser must be present in the first new-chat frame (mobile={mobile})");
         assert!(!h.app.hits.iter().any(|hit| matches!(hit.action, Action::ChooseModel(..))),
             "unconfirmed offline chats must not expose a live model choice");
+        assert!(!h.app.hits.iter().any(|hit| matches!(hit.action, Action::RetryCreate)),
+            "no retry button until creation actually fails");
+        let composer_label = |h: &Harness| {
+            let field = h.app.hits.iter().find(|hit| matches!(hit.action, Action::Focus(None))).unwrap().rect;
+            let rgba = h.ctx.read_rgba8().unwrap();
+            let stride = h.ctx.size().0 as usize * 4;
+            let x = field.x as usize * 4;
+            let y = field.y as usize - 27;
+            (y..y+22).flat_map(|row| rgba[row*stride+x..row*stride+x+160*4].to_vec()).collect::<Vec<_>>()
+        };
+        let before = composer_label(&h);
+        h.app.controller.account.create_blocked = true;
+        h.frame();
+        assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::RetryCreate)),
+            "a real create failure keeps a recovery action available");
+        h.app.controller.account.create_blocked = false;
+        h.frame();
 
         h.app.controller.message(ServerMessage::Sessions { sessions: vec![SessionSummary {
             id: id.clone(), project_id: general_project_id(), title: "New chat".into(), starter: true,
             status: SessionStatus::Sleeping, detail: None, context_usage: None,
-            model: Some(SessionModel { provider: "fixture".into(), model_id: "last-chosen".into() }),
-            parent_id: None, created_at_ms: 1, updated_at_ms: 1,
+            model: None, parent_id: None, created_at_ms: 1, updated_at_ms: 1,
         }] }).unwrap();
         h.frame();
+        assert_eq!(composer_label(&h), before, "confirmation with no model must not cycle composer status text");
         assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ModelSettings)),
             "confirmation must not dismiss the chooser while the feed loads");
-        h.app.controller.message(ServerMessage::TranscriptSnapshot { session_id: id.clone(), snapshot: TranscriptSnapshot {
-            generation: "g".into(), sequence: 1, events: vec![], queue: QueueState::native(), before: None, delivered: vec![],
-        } }).unwrap();
+        h.app.controller.account.sessions[0].model = Some(SessionModel { provider: "fixture".into(), model_id: "last-chosen".into() });
+        h.frame();
+        assert_ne!(composer_label(&h), before, "a genuinely known model can appear above the composer");
         h.app.controller.epoch = Some(1);
         h.frame();
         assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ChooseModel(..))),
-            "confirmed, synchronized tiles should become clickable");
+            "a confirmed chat can choose a model without a transcript read");
+        h.app.controller.message(ServerMessage::TranscriptSnapshot { session_id: id.clone(), snapshot: TranscriptSnapshot {
+            generation: "g".into(), sequence: 1, events: vec![], queue: QueueState::native(), before: None, delivered: vec![],
+        } }).unwrap();
         h.app.controller.chats.get_mut(&id).unwrap().feed.synchronized = false;
         h.frame();
         assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ModelSettings)));
-        assert!(!h.app.hits.iter().any(|hit| matches!(hit.action, Action::ChooseModel(..))));
+        assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ChooseModel(..))),
+            "content synchronization is independent of model selection");
         h.app.controller.epoch = None;
         h.frame();
         assert!(h.app.hits.iter().any(|hit| matches!(hit.action, Action::ModelSettings)),

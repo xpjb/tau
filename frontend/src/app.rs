@@ -2597,7 +2597,7 @@ impl App {
             let rect = crate::render::intersect(rect, clip);
             self.chat_areas.push((rect, session.id.clone()));
             let unread = self.controller.unread(session);
-            let title = if session.starter {
+            let title = if session.starter || self.controller.is_creating(&session.id) {
                 "New chat"
             } else if session.title.is_empty() {
                 "Unnamed chat"
@@ -2627,7 +2627,8 @@ impl App {
             let status = format!(
                 "{}{}",
                 if unread { "●  " } else { "" },
-                if self.controller.is_creating(&session.id) { "Creating…" }
+                if self.controller.create_needs_retry(&session.id) { "Needs attention" }
+                else if self.controller.quick_start(&session.id) { "" }
                 else if self.controller.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) { "Paused" }
                 else { match session.status {
                     SessionStatus::Running => "Working",
@@ -2975,7 +2976,7 @@ impl App {
         let title = summary
             .as_ref()
             .map(|s| {
-                if s.starter {
+                if s.starter || self.controller.is_creating(&session) {
                     "New chat"
                 } else if s.title.is_empty() {
                     "Unnamed chat"
@@ -2994,8 +2995,10 @@ impl App {
         );
         self.renderer.label(
             chrome,
-            if self.controller.is_creating(&session) {
-                if self.controller.epoch.is_none() { "Saved locally · offline" } else { "Creating…" }
+            if self.controller.create_needs_retry(&session) {
+                "Needs attention"
+            } else if self.controller.quick_start(&session) {
+                ""
             } else if self.controller.epoch.is_none() {
                 "Offline"
             } else if self.controller.chats[&session].feed.queue.paused {
@@ -3383,22 +3386,24 @@ impl App {
             Rect::new(b.x, composer_top, b.width, composer_h),
             color(0x0e141b),
         );
-        let creating = self.controller.is_creating(&session);
-        let choosing = self.controller.chats[&session].model_request.is_some();
         let model = summary
             .as_ref()
             .and_then(|s| s.model.as_ref())
             .map(|m| format!("{}/{}", m.provider, m.model_id))
-            .unwrap_or_else(|| "Model not yet available".into());
+            .unwrap_or_default();
+        let retry_create = self.controller.create_needs_retry(&session);
+        // A blank, locally saved chat needs no narrated creation/sync stages.
+        // Show only a model the daemon has actually named; a tile's pending
+        // choice stays visible in the chooser until it is acknowledged.
         self.renderer.label(
             chrome,
-            if choosing { "Selecting model… Sends are saved locally." } else { &model },
-            Rect::new(x, composer_top + 10. * s, (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s),
+            &model,
+            Rect::new(x, composer_top + 10. * s, (width - if retry_create { 94. * s } else { 0. }).max(1.), 20. * s),
             12. * s,
             color(0x82909f),
             false,
         );
-        if creating && self.controller.epoch.is_some() {
+        if retry_create {
             button(&mut self.renderer, chrome, &mut self.hits,
                 Rect::new(x + width - 88. * s, composer_top + 6. * s, 88. * s, 24. * s),
                 "Retry", Action::RetryCreate, s, false);
@@ -3631,20 +3636,9 @@ impl App {
     fn quick_models_frame(&mut self, layer: &mut Layer, session: &str, b: Rect, clip: Rect) {
         let s = self.scale;
         let chat = &self.controller.chats[session];
-        let connected = self.controller.epoch.is_some();
         let busy = chat.model_request.is_some();
         let ready = self.controller.can_choose_model(session);
-        let hint = if !connected {
-            "Connect to choose a model"
-        } else if busy {
-            "Selecting model… your draft is kept"
-        } else if self.controller.is_creating(session) {
-            "Waiting for chat confirmation"
-        } else if !chat.feed.synchronized {
-            "Waiting for chat synchronization"
-        } else {
-            "Choose before your first message"
-        };
+        let hint = "Optional · new chats use your last model";
         self.renderer.clipped_label(
             layer,
             "Choose a model",
@@ -3707,20 +3701,14 @@ impl App {
                 false,
                 crate::render::intersect(r, clip),
             );
-            let status = if busy && chat
-                .model_request
-                .as_ref()
-                .is_some_and(|(_, slug)| slug == selector)
-            {
+            let status = if busy && chat.model_request.as_ref().is_some_and(|(_, slug)| slug == selector) {
                 "Selecting…"
-            } else if !connected {
-                "Offline"
             } else if !valid {
                 "Invalid provider/model ID"
             } else if selected {
                 "Selected"
             } else if !ready {
-                "Waiting for chat"
+                "Available when connected"
             } else {
                 "Select"
             };

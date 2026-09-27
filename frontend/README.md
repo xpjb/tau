@@ -39,11 +39,12 @@ starts a transfer or writes to the real Downloads folder.
 - New chats use the last explicit model choice. Quick favorites never set that default.
   The new-chat model chooser appears as soon as the local chat is created (also
   offline) and remains on screen across confirmation, feed loading, and reconnects.
-  Its tiles are read-only until the daemon confirms the chat, the feed synchronizes,
-  and the connection is live. An in-flight `/model` selection keeps the tiles
-  visible but prevents another selection; a first queued/sent conversation turn
-  hides them. The small label above the composer shows the last confirmed model
-  when known, not a speculative model while the chat is being created.
+  Its tiles become actionable when the chat is confirmed and connected; reading
+  its transcript or refreshing the model catalog is not a prerequisite. An
+  unresolved `/model` selection keeps the tiles visible but prevents another
+  selection; a first queued/sent conversation turn hides them. The small label
+  above the composer shows only the confirmed model when known, not creation or
+  synchronization progress; create failures offer an explicit Retry action.
 - Settings → Daemon / agent settings edits the full revisioned document. Save uses
   CAS, keeps edits on conflict, distinguishes built-in/null from custom empty prompts,
   and never exposes provider secrets.

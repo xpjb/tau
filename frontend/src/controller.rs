@@ -645,9 +645,9 @@ impl Controller {
         for file in files {let chat=&self.chats[&session].local;if !chat.files.iter().chain(chat.pending.iter().flat_map(|p|&p.files)).any(|f|f.id==file.id) {self.store.discard_import(&self.identity,&session,&file)?;}}
         Ok(())
     }
-    /// Display eligibility is local: neither chat creation nor a fresh content
-    /// snapshot is required to show an untouched new chat's model choices.
-    /// Sending a choice still requires a confirmed, synchronized chat.
+    /// Display eligibility follows the local new-chat intent, not receipt of
+    /// a remote transcript. The create receipt is still needed before sending
+    /// /model, but a content snapshot is never needed to select a model.
     pub fn quick_start(&self, id: &str) -> bool {
         (self.is_creating(id) || self.account.sessions.iter().any(|s| s.id == id && s.starter))
             && !self.account.missing_chats.contains(id)
@@ -655,15 +655,22 @@ impl Controller {
                 c.feed.before.is_none()
                     && c.feed.events.values().all(|e| e.role == EventRole::System)
                     && c.feed.queue.requests.is_empty()
-                    // A model choice is not a conversation turn. Keep the tiles
-                    // visible while its durable /model control is in flight.
-                    && c.local.pending.iter().all(|p| c.model_request.as_ref()
-                        .is_some_and(|(request, _)| request == &p.request.id))
+                    // Even an unconfirmed /model after connection loss is not
+                    // a first conversation turn; the chooser should stay put.
+                    && c.local.pending.iter().all(Self::model_control)
             })
+    }
+    fn model_control(pending: &Pending) -> bool {
+        matches!(&pending.request.command, ClientCommand::Prompt { text, .. } if text.starts_with("/model "))
     }
     pub fn can_choose_model(&self, id: &str) -> bool {
         self.epoch.is_some() && !self.is_creating(id) && self.quick_start(id)
-            && self.chats.get(id).is_some_and(|c| c.feed.synchronized && c.model_request.is_none())
+            && self.chats.get(id).is_some_and(|c| c.model_request.is_none()
+                && c.local.pending.iter().all(|p| !Self::model_control(p) || p.status == Delivery::Rejected))
+    }
+    pub fn create_needs_retry(&self, id: &str) -> bool {
+        self.is_creating(id) && (self.account.create_blocked
+            || self.epoch.is_some() && self.create_failed_epoch == self.epoch)
     }
     pub fn save_model_preferences(
         &mut self,
@@ -676,9 +683,8 @@ impl Controller {
     }
     pub fn choose_model(&mut self, session: &str, selector: &str) -> Result<()> {
         ensure!(
-            self.epoch.is_some() && !self.is_creating(session) && self.quick_start(session)
-                && self.chats.get(session).is_some_and(|c| c.feed.synchronized),
-            "Wait for the untouched new chat to be confirmed and synchronized before choosing a model"
+            self.can_choose_model(session),
+            "Wait until the new chat is connected and the previous model choice is resolved"
         );
         let chat = &self.chats[session];
         ensure!(
@@ -729,7 +735,7 @@ impl Controller {
         Ok(())
     }
     fn creating_summary(id: &str, project: &str, at: u64) -> SessionSummary {
-        SessionSummary { id:id.into(), project_id:project.into(), title:"Creating chat…".into(), starter:false, status:SessionStatus::Sleeping,
+        SessionSummary { id:id.into(), project_id:project.into(), title:"Creating chat…".into(), starter:true, status:SessionStatus::Sleeping,
             detail:Some("Waiting for daemon confirmation".into()), context_usage:None, model:None,
             // There is no daemon activity stamp until creation is confirmed.
             parent_id:None, created_at_ms:at, updated_at_ms:0 }

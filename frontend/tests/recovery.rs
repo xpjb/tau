@@ -126,6 +126,7 @@ fn new_chat_model_choices_stay_visible_through_confirmation_and_reconnect() {
     let id = c.account.selected.clone().unwrap();
     assert!(c.quick_start(&id), "show the chooser immediately, even for a local provisional chat");
     assert!(!c.can_choose_model(&id));
+    assert!(c.account.sessions[0].starter, "a local new chat is already an untouched starter");
     c.draft("Unsent draft".into()).unwrap();
     assert!(c.quick_start(&id), "typing must not consume a model choice");
 
@@ -139,8 +140,7 @@ fn new_chat_model_choices_stay_visible_through_confirmation_and_reconnect() {
     assert!(!c.is_creating(&id));
     assert!(c.quick_start(&id));
     c.epoch = Some(1);
-    assert!(!c.can_choose_model(&id), "do not send /model before the new chat is synchronized");
-    assert!(c.choose_model(&id, "openai-codex/fixture").is_err());
+    assert!(c.can_choose_model(&id), "a confirmed chat can accept /model without a transcript read");
     c.message(ServerMessage::TranscriptSnapshot { session_id: id.clone(), snapshot: snapshot(vec![], None, 1) }).unwrap();
     assert!(c.can_choose_model(&id));
 
@@ -152,17 +152,16 @@ fn new_chat_model_choices_stay_visible_through_confirmation_and_reconnect() {
     });
     assert!(c.quick_start(&id), "an in-flight model choice must not remove the tiles");
     assert!(!c.can_choose_model(&id), "another choice must wait for the first");
-    c.chats.get_mut(&id).unwrap().local.pending.clear();
     c.chats.get_mut(&id).unwrap().model_request = None;
-
+    c.chats.get_mut(&id).unwrap().local.pending[0].status = Delivery::Unconfirmed;
     c.epoch = None;
     c.chats.get_mut(&id).unwrap().feed.synchronized = false;
-    assert!(c.quick_start(&id), "reconnect and a stale feed must not collapse the chooser");
+    assert!(c.quick_start(&id), "reconnect and an uncertain /model must not collapse the chooser");
     assert!(!c.can_choose_model(&id));
     c.epoch = Some(2);
-    assert!(!c.can_choose_model(&id));
-    c.chats.get_mut(&id).unwrap().feed.synchronized = true;
-    assert!(c.can_choose_model(&id));
+    assert!(!c.can_choose_model(&id), "reconcile an uncertain model control before another selection");
+    c.chats.get_mut(&id).unwrap().local.pending.clear();
+    assert!(c.can_choose_model(&id), "transcript sync is not a prerequisite for a model choice");
     c.epoch = None;
     c.send_prompt().unwrap();
     assert!(!c.quick_start(&id), "the first local send ends the new-chat choice");
