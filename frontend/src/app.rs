@@ -3925,16 +3925,14 @@ impl App {
                 else {
                     return;
                 };
-                self.controller
-                    .cache_ttl(session)
-                    .details(self.controller.epoch.is_some())
+                self.controller.cache_ttl(session).details()
             }
         };
         let s = self.scale;
         let margin = 8. * s;
         // Cover the New chat button below, rather than leave its bright edge
         // peeking out from behind a narrow connection card.
-        let width = if self.info_target == Info::Connection { 300. } else { 360. };
+        let width = if self.info_target == Info::Connection { 300. } else { 180. };
         let w = (width * s).min((bounds.width - margin * 2.).max(1.));
         let h = (self.renderer.label_height(
             &self.info_tip.text,

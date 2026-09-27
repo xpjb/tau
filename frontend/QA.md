@@ -294,11 +294,11 @@ are fabricated. The variable-font/synthetic-style limitation recorded below rema
   clarification, not worker-idle deadlines. Existing transcript `timestampMs` or
   RFC3339 `timestamp` supplies the latest received assistant reply time (including
   thinking/tool calls, excluding local tool results, errors and hidden entries).
-  Unloaded chats may use existing `updatedAt` as a clearly labeled activity proxy;
-  its tooltip notes that metadata changes can affect it. Fresh empty chats and
-  missing/unusable/future timestamps show unknown rather than an invented deadline.
-  Reconnect/history receipt and heartbeats do not renew source timestamps; worker
-  running/sleeping state does not freeze or empty the estimate. No extra history
+  Unloaded chats may use existing `updatedAt` as an activity proxy. The tooltip is
+  one line: `TTL ~Nm remaining`, or `Working...` with no ring countdown while running.
+  Fresh empty chats show `No reply yet`; missing/unusable/future timestamps show
+  `TTL unavailable`. Reconnect/history receipt and heartbeats do not renew source
+  timestamps; idle/sleeping chats continue counting down. No extra history
   requests, probes or render timer. Minute-sized rings use bounded, distinct
   texture variants and clip to the list. The one-hour assumption is **not** a
   confirmed OpenAI/ChatGPT/OpenRouter cache lifetime.

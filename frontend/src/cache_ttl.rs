@@ -1,11 +1,12 @@
 //! A one-hour provider-cache *estimate*, not a daemon worker deadline.
 //! Use existing source timestamps; receiving history/heartbeats never renews it.
 use crate::{clock, feed::Feed};
-use tau_protocol::{EventKind, EventRole, SessionSummary};
+use tau_protocol::{EventKind, EventRole, SessionStatus, SessionSummary};
 
 const ESTIMATED_TTL_MS: u64 = 60 * 60 * 1000;
 #[derive(Clone, Copy)]
 enum Basis {
+    Working,
     Reply(u64),
     Activity(u64),
     NoReply,
@@ -15,7 +16,7 @@ impl Basis {
     fn timestamp(self) -> Option<u64> {
         match self {
             Self::Reply(at) | Self::Activity(at) => Some(at),
-            Self::NoReply | Self::Unknown => None,
+            Self::Working | Self::NoReply | Self::Unknown => None,
         }
     }
 }
@@ -35,7 +36,9 @@ impl Estimate {
                     && event.error_message.is_none()
             })
         });
-        let basis = if let Some(reply) = reply {
+        let basis = if session.status == SessionStatus::Running {
+            Basis::Working
+        } else if let Some(reply) = reply {
             clock::event_ms(reply)
                 .filter(|at| *at > 0)
                 .map(Basis::Reply)
@@ -66,34 +69,98 @@ impl Estimate {
                 Some(ms.div_ceil(60_000) as f32 / 60.),
                 if ms <= 300_000 { 0xfbbf24 } else { 0x67d4ff },
             ),
-            None => (None, 0x82909f),
+            None => (
+                None,
+                if matches!(self.basis, Basis::Working) { 0x67d4ff } else { 0x82909f },
+            ),
         }
     }
-    pub fn details(&self, connected: bool) -> String {
-        let state = match self.remaining_ms {
-            Some(0) => "One-hour estimate elapsed".into(),
-            Some(ms) => format!("About {} min remaining", ms.div_ceil(60_000)),
+    pub fn details(&self) -> String {
+        match self.remaining_ms {
+            Some(ms) => format!("TTL ~{}m remaining", ms.div_ceil(60_000)),
             None => match self.basis {
-                Basis::NoReply => "No received reply yet".into(),
-                Basis::Unknown => "Message timestamp unavailable".into(),
-                _ => "Timestamp cannot be compared with this device's clock".into(),
+                Basis::Working => "Working...".into(),
+                Basis::NoReply => "No reply yet".into(),
+                _ => "TTL unavailable".into(),
             },
-        };
-        let mut lines = vec!["Estimated cache TTL · ~1 hour".into(), state];
-        match self.basis {
-            Basis::Reply(at) => {
-                lines.push(format!("Last received reply: {}", clock::label(Some(at))))
-            }
-            Basis::Activity(at) => {
-                lines.push(format!("Chat activity: {}", clock::label(Some(at))));
-                lines.push("Activity proxy; reply time isn't loaded.\nRenames/model changes may also affect this time.".into());
-            }
-            _ => {}
         }
-        if !connected {
-            lines.push("Offline · using last known timestamps".into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(status: SessionStatus, updated_at_ms: u64) -> SessionSummary {
+        SessionSummary {
+            id: "chat".into(),
+            project_id: "general".into(),
+            title: "Chat".into(),
+            starter: false,
+            status,
+            detail: None,
+            context_usage: None,
+            model: None,
+            parent_id: None,
+            created_at_ms: 0,
+            updated_at_ms,
         }
-        lines.push("Heuristic only; actual provider cache TTL may differ.".into());
-        lines.join("\n")
+    }
+
+    #[test]
+    fn tooltip_is_one_line_with_rounded_minutes() {
+        for basis in [Basis::Reply(1), Basis::Activity(1)] {
+            for (ms, minutes) in [
+                (0, 0), (1, 1), (60_000, 1), (60_001, 2), (480_000, 8), (ESTIMATED_TTL_MS, 60),
+            ] {
+                let estimate = Estimate { basis, remaining_ms: Some(ms) };
+                assert_eq!(estimate.details(), format!("TTL ~{minutes}m remaining"));
+            }
+        }
+    }
+
+    #[test]
+    fn working_has_no_countdown_even_without_a_reply_or_after_expiry() {
+        let now = clock::now_ms().unwrap();
+        let mut feed = Feed::default();
+        feed.synchronized = true;
+        for timestamp in [0, now, now - 2 * ESTIMATED_TTL_MS] {
+            let mut session = session(SessionStatus::Running, timestamp);
+            for starter in [false, true] {
+                session.starter = starter;
+                for feed in [None, Some(&feed)] {
+                    let estimate = Estimate::from_session(&session, feed);
+                    assert_eq!(estimate.details(), "Working...");
+                    assert_eq!(estimate.remaining_ms, None);
+                    assert_eq!(estimate.meter(), (None, 0x67d4ff));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn countdown_returns_when_work_stops() {
+        let mut session = session(SessionStatus::Running, clock::now_ms().unwrap() - 52 * 60_000);
+        assert_eq!(Estimate::from_session(&session, None).details(), "Working...");
+        for status in [SessionStatus::Idle, SessionStatus::Sleeping, SessionStatus::Error] {
+            session.status = status;
+            assert_eq!(Estimate::from_session(&session, None).details(), "TTL ~8m remaining");
+        }
+        session.updated_at_ms -= ESTIMATED_TTL_MS;
+        assert_eq!(Estimate::from_session(&session, None).details(), "TTL ~0m remaining");
+    }
+
+    #[test]
+    fn missing_timestamps_and_empty_chats_stay_compact() {
+        let mut session = session(SessionStatus::Idle, 0);
+        assert_eq!(Estimate::from_session(&session, None).details(), "TTL unavailable");
+        session.updated_at_ms = clock::now_ms().unwrap() + ESTIMATED_TTL_MS;
+        assert_eq!(Estimate::from_session(&session, None).details(), "TTL unavailable");
+        session.starter = true;
+        assert_eq!(Estimate::from_session(&session, None).details(), "No reply yet");
+        session.starter = false;
+        let mut feed = Feed::default();
+        feed.synchronized = true;
+        assert_eq!(Estimate::from_session(&session, Some(&feed)).details(), "No reply yet");
     }
 }
