@@ -6,6 +6,7 @@ pub enum Icon {
     Attachments,
     Send,
     Stop,
+    Close,
     Play,
     ChevronDown,
     ChevronRight,
@@ -21,6 +22,7 @@ impl Icon {
             Self::Attachments => "attachments",
             Self::Send => "send",
             Self::Stop => "stop",
+            Self::Close => "close",
             Self::Play => "play",
             Self::ChevronDown => "chevron-down",
             Self::ChevronRight => "chevron-right",
@@ -103,6 +105,13 @@ impl Icon {
                 p.line_to(18., 18.);
                 p.line_to(6., 18.);
                 p.close();
+            }
+            Self::Close => {
+                p.move_to(6., 6.); p.line_to(18., 18.);
+                p.move_to(18., 6.); p.line_to(6., 18.);
+                pixmap.stroke_path(&p.finish().unwrap(), &paint,
+                    &Stroke { width: 2., line_cap: LineCap::Round, ..Default::default() }, transform, None);
+                return straight_alpha(pixmap);
             }
             Self::Play => {
                 p.move_to(7., 4.5);

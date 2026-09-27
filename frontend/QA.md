@@ -1,3 +1,26 @@
+# Alerts and content/control errors — September 27, 2026 (unreleased)
+
+- Four-second popups, measured 16dp text, compact wrapping and a centered vector
+  close icon. Repeated identical updates do not keep an alert alive; idle expiry
+  uses the existing one-shot wake. Persistent inline errors remain available.
+- Temporary connection failures use status/diagnostics instead of popups. Real
+  unknown-block, integrity, decompression and local storage errors still surface.
+- Fixed a reproduced stale-plan fetch of already-known text after queue
+  consumption. The native-scheduler regression requires zero redundant body reads.
+- Short daemon reads no longer wait for content writes on the same connection
+  mutex. Four read-only snapshots use the already-enabled WAL; writes retain their
+  transaction ordering. Bounded admission handles bursts without blocking Pong,
+  and expiry/disconnect cannot execute not-started actions later.
+- Workspace nextest: **230/230 passed**, including real-daemon/controller,
+  impaired-link, crash-recovery and new concurrency/alert regressions. Inspected
+  headless desktop/phone/2.5× phone previews; physical-device acceptance remains
+  open. No package, service restart, schema or wire-format change.
+
+See [the causes, scope and validation record](../docs/alerts-and-contention.md).
+The contention timing used a synthetic local write, not a live-user measurement.
+
+---
+
 # Rich tooltips — September 27, 2026 (unreleased)
 
 - Quota, cache TTL and connection cards use native inline bold/colour, with muted

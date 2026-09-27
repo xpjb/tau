@@ -20,6 +20,7 @@ async fn boot(root: &Path) -> (tokio::process::Child, Client) {
         .env("TAU_CWD",root).env("TAU_ATTACHMENT_ROOT",root.join("outbox")).env("TAU_UPLOAD_ROOT",root.join("uploads"))
         .env("TAU_TELEMETRY_PATH",root.join("crashes.jsonl")).env("RUST_LOG","info")
         .env_remove("TAU_IMPORT_PI_DIR").env_remove("TAU_STATE_PATH").env_remove("TAU_SESSION_DIR").env_remove("TAU_TITLE_COMMAND")
+        .env_remove("TAU_TRANSFER_BIND_V6").env_remove("TAU_CODEX_AUTH_SOURCE")
         .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).kill_on_drop(true).spawn().unwrap();
     let socket = tokio::time::timeout(Duration::from_secs(10),async {
         loop {

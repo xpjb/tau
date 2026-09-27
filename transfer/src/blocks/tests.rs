@@ -68,6 +68,28 @@ async fn collect(mut watch: Watcher) -> (Vec<u8>,usize) {
 }
 
 #[tokio::test]
+async fn connection_loss_is_status_without_hiding_content_or_storage_errors() {
+    let (backend,server,client)=fixture().await;
+    let offer=server.authorize(&client.node_id(),backend.lineage()).unwrap();
+    let mut watch=client.watch(feed_request(None)).await.unwrap();
+    assert!(matches!(frame(&mut watch).await.header,Header::Page {..}));
+    server.shutdown().await;
+    let lost=tokio::time::timeout(Duration::from_secs(3),watch.next()).await.unwrap().unwrap_err();
+    assert!(is_connection_error(&lost.context("Content sync")),"Real connection loss stays typed through context");
+    // NUL cannot be passed to the resolver; no external DNS request is made.
+    let address=client.configure(&offer,"\0").await.unwrap_err();
+    assert!(is_connection_error(&address));
+    for kind in [std::io::ErrorKind::PermissionDenied,std::io::ErrorKind::Other,std::io::ErrorKind::InvalidData] {
+        assert!(!is_connection_error(&anyhow::Error::from(std::io::Error::from(kind)).context("Local content IO")));
+    }
+    let broken=Frame {header:Header::Data {version:1,offset:0,hash:String::new(),length:32,codec:Codec::Zstd},data:b"not a zstd frame".to_vec()};
+    let error=broken.decoded().unwrap_err();assert!(error.is::<std::io::Error>());
+    assert!(!is_connection_error(&error),"Decompression IO errors remain genuine content failures");
+    assert!(!is_connection_error(&anyhow::anyhow!("Unknown block")));
+    client.shutdown().await;
+}
+
+#[tokio::test]
 async fn requested_feed_never_opens_unrequested_tool_content() {
     let (backend,server,client) = fixture().await;
     backend.put("tool",None,BlockKind::Tool,b"",true);

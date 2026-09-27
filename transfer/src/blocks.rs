@@ -17,6 +17,25 @@ const LEASE: Duration = Duration::from_secs(3600);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STREAMS: usize = 16;
 
+/// Mark only socket/DNS/connect failures at their boundary. A generic IO error
+/// can instead mean corrupt compressed data or a failed local cache write.
+#[derive(Debug)]
+struct ConnectionIssue;
+impl std::fmt::Display for ConnectionIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Content connection unavailable") }
+}
+
+/// Local classification for status presentation; peer/content/integrity errors
+/// are deliberately NOT treated as connection loss or successful completion.
+pub fn is_connection_error(error: &anyhow::Error) -> bool {
+    error.is::<ConnectionIssue>() || error.is::<tokio::time::error::Elapsed>()
+        || error.is::<iroh::endpoint::ConnectionError>()
+        || error.is::<iroh::endpoint::ReadError>()
+        || error.is::<iroh::endpoint::ReadExactError>()
+        || error.is::<iroh::endpoint::WriteError>()
+        || error.is::<iroh::endpoint::ClosedStream>()
+}
+
 /// Lifetime application counters plus current-connection QUIC counters. Frame
 /// bytes include Tau framing/compression, not UDP/IP overhead or retransmission.
 #[derive(Clone,Debug,Default,Serialize)]
@@ -423,14 +442,14 @@ pub struct Client {
 impl Client {
     pub async fn bind() -> Result<Self> {
         let endpoint = Endpoint::builder().bind_addr_v6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED,0,0,0))
-            .relay_mode(RelayMode::Disabled).transport_config(config()).bind().await?;
+            .relay_mode(RelayMode::Disabled).transport_config(config()).bind().await.context(ConnectionIssue)?;
         Ok(Self { stats:Arc::new(Counters::default()),endpoint,peer:tokio::sync::Mutex::new(None),connection:tokio::sync::Mutex::new(None),streams:Arc::new(Semaphore::new(MAX_STREAMS-2)),bulk:Arc::new(Semaphore::new(6)),metadata:Arc::new(Semaphore::new(2)),foreground:Arc::new(Semaphore::new(4)),descriptors:Arc::new(Semaphore::new(2)) })
     }
     pub fn node_id(&self) -> String { self.endpoint.node_id().to_string() }
     pub async fn configure(&self, offer: &BulkOffer, host: &str) -> Result<()> {
         let node: NodeId = offer.node_id.parse().context("Invalid block server identity")?;
         let host=host.trim_start_matches('[').trim_end_matches(']');
-        let addresses = tokio::time::timeout(IO_TIMEOUT,tokio::net::lookup_host((host,offer.port))).await??.filter_map(|mut address| {
+        let addresses = tokio::time::timeout(IO_TIMEOUT,tokio::net::lookup_host((host,offer.port))).await?.context(ConnectionIssue)?.filter_map(|mut address| {
             if address.is_ipv6() {address.set_port(offer.port_v6?);}Some(address)
         }).collect::<Vec<_>>();
         ensure!(!addresses.is_empty(),"Block server has no advertised address in the resolved IP family");
@@ -448,7 +467,7 @@ impl Client {
         if let Some(conn) = slot.as_ref().filter(|c|c.close_reason().is_none()) { return Ok(conn.clone()); }
         let peer = self.peer.lock().await.clone().context("Block connection not authorized yet")?;
         self.stats.attempts.fetch_add(1,Ordering::Relaxed);
-        let connection = tokio::time::timeout(IO_TIMEOUT,self.endpoint.connect(peer,ALPN)).await??;
+        let connection = tokio::time::timeout(IO_TIMEOUT,self.endpoint.connect(peer,ALPN)).await?.context(ConnectionIssue)?;
         self.stats.connections.fetch_add(1,Ordering::Relaxed);
         *slot = Some(connection.clone()); Ok(connection)
     }

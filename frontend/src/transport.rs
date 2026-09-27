@@ -19,6 +19,16 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 
+/// Routes temporary connection failures to status/diagnostics, not popups.
+#[derive(Debug)]
+pub struct ConnectionUnavailable;
+impl std::fmt::Display for ConnectionUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Waiting for connection")
+    }
+}
+impl std::error::Error for ConnectionUnavailable {}
+
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 pub enum Command {
     Blocks(crate::blocks::Command),
@@ -107,7 +117,7 @@ impl Network {
     pub fn send(&self, command: Command) -> Result<()> {
         self.tx
             .try_send(command)
-            .map_err(|_| anyhow::anyhow!("Connection is busy or closed"))
+            .map_err(|_| ConnectionUnavailable.into())
     }
 }
 

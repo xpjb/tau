@@ -35,7 +35,7 @@ impl StateStore {
     }
     pub(crate) async fn operation_outcome(&self,id:&str)->Result<ServerMessage> {
         ensure!(!id.is_empty() && id.len()<=128,"Invalid operation ID");let id=id.to_owned();
-        self.access(move |db| {
+        self.read(move |db| {
             let row=db.query_row("SELECT response FROM operations WHERE id=?1",[&id],|r|r.get::<_,Option<String>>(0)).optional()?;
             let registered=row.is_some();let response=row.flatten().map(|s|serde_json::from_str(&s).map(Box::new)).transpose()?;
             Ok(ServerMessage::Operation {operation_id:id,registered,response})
@@ -43,7 +43,7 @@ impl StateStore {
     }
     pub(crate) async fn operation_receipt(&self,id:&str)->Result<Option<tau_protocol::OperationReceipt>> {
         let id=id.to_owned();
-        self.access(move |db| {
+        self.read(move |db| {
             let row=db.query_row("SELECT response FROM operations WHERE id=?1",[&id],|r|r.get::<_,Option<String>>(0)).optional()?;
             row.map(|response| {
                 let complete=response.is_some();
