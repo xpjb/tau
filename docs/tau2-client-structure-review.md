@@ -6,6 +6,9 @@ helper as the main opportunities. Those would help locally, but neither
 addresses the most consequential duplication. This remains an architecture
 proposal, not a runtime change or an instruction to deploy.
 
+The concrete current-to-proposed state structures and message lifecycle are in
+[tau2-client-state-proposal.md](tau2-client-state-proposal.md).
+
 ## Diagnosis
 
 The interesting problem is not the raw 20k-line count, or simply that `app.rs`
