@@ -23,10 +23,17 @@ pub struct AgentSession {
     pub model: SessionModel,
     pub thinking: String,
     pub running: bool,
+    pub resume_after_stop: bool,
     pub cancel: CancellationToken,
     pub task: Option<tokio::task::JoinHandle<()>>,
     pub tokens: Option<u64>,
     pub needs_turn: bool,
+}
+impl AgentSession {
+    pub fn stop(&mut self) {
+        self.resume_after_stop = false;
+        self.cancel.cancel();
+    }
 }
 pub fn now_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().try_into().unwrap_or(u64::MAX) }
 
@@ -118,7 +125,7 @@ impl AgentManager {
         let agent = content.agent.as_mut().unwrap();
         let queue = &content.transcript.as_ref().unwrap().queue;
         if agent.running || queue.paused || queue.requests.is_empty() && !agent.needs_turn { return; }
-        agent.running = true; agent.cancel = CancellationToken::new();
+        agent.running = true; agent.resume_after_stop = false; agent.cancel = CancellationToken::new();
         let manager = self.clone(); let id = id.to_owned(); let runtime = runtime.clone();
         let cancel=agent.cancel.clone();
         self.set_runtime_state(&id, &runtime, SessionStatus::Running, Some("Waiting for agent capacity".into()), None);
@@ -127,21 +134,30 @@ impl AgentManager {
             if !cancel.is_cancelled() {manager.set_runtime_state(&id,&runtime,SessionStatus::Running,None,None);}
             loop {
             let mut result = manager.run_agent(&id, &runtime).await;
+            #[cfg(test)] {
+                let gate = manager.inner.settle_gate.lock().unwrap().take();
+                if let Some(gate) = gate { gate.notified().await; }
+            }
             let mut content = runtime.content.lock().await;
             let Some(agent) = &mut content.agent else { return; };
             let cancelled = agent.cancel.is_cancelled();
             if result.is_ok() && !cancelled && content.transcript.as_ref().is_some_and(|t| !t.queue.paused && !t.queue.requests.is_empty()) { drop(content); continue; }
             let agent = content.agent.as_mut().unwrap();
-            agent.running = false;
+            // Resume may arrive after Abort has cancelled the task but before
+            // its cleanup completes. The old task must not overwrite that newer
+            // explicit intent, nor start the replacement before tools stop.
+            let mut resume = cancelled && agent.resume_after_stop;
+            agent.running = false; agent.resume_after_stop = false;
             let settings = manager.inner.settings.get();
             let usage = manager.context_usage(&settings, &agent.model, agent.tokens);
             let mut queue = content.transcript.as_ref().unwrap().queue.clone();
             queue.run_id = None;
-            if cancelled || result.is_err() { queue.paused = true; }
+            if (cancelled || result.is_err()) && !resume { queue.paused = true; }
             // A run gets one completion bump, including an error/abort that
             // needs attention. Streaming, tools and queued continuations do not.
             if let Err(error) = content.commit_with_activity(&id, Vec::new(), Some(queue), None, true).await {
                 tracing::error!(session=%id, %error, "Could not save settled queue");
+                resume = false;
                 result = Err(error.context("Could not save settled queue"));
             }
             let mut interrupted = TranscriptChange::default();
@@ -155,6 +171,7 @@ impl AgentManager {
             }
             manager.set_runtime_state(&id, &runtime, if result.is_err() && !cancelled { SessionStatus::Error } else { SessionStatus::Idle },
                 result.err().map(|e| bounded(&e.to_string(), 480)), Some(usage));
+            if resume { manager.start_run(&id, &runtime, &mut content); }
             drop(content);
             manager.broadcast_sessions().await;
             break;

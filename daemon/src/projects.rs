@@ -125,7 +125,7 @@ impl AgentManager {
         if mode == DeleteProjectMode::DeleteChats {
             for session in &sessions {
                 let Some(runtime)=self.inner.runtimes.lock().await.get(session).cloned() else {continue;};
-                if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); }
+                if let Some(agent) = &mut runtime.content.lock().await.agent { agent.stop(); }
                 runtimes.push((session.clone(),runtime));
             }
         }

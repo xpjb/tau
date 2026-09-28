@@ -164,3 +164,46 @@ async fn admission_timeout_does_not_execute_or_reserve_the_expired_request() {
     assert!(matches!(manager.inner.state.operation_outcome("deadline-8").await.unwrap(),tau_protocol::ServerMessage::Operation {registered:false,..}));
     drop(client);manager.shutdown().await;server.abort();
 }
+
+#[tokio::test]
+async fn resume_while_abort_is_settling_is_not_overwritten_by_old_cleanup() {
+    for stop_again in [false, true] {
+        let mut blocked = completion("Cancelled response", vec![]);
+        blocked.gate = Some(Arc::new(Notify::new()));
+        let mut model = ModelServer::start(vec![blocked, completion("Resumed once", vec![])]).await;
+        let (_root, manager, _, server) = fixture(&model, Api::ChatCompletions).await;
+        let id = manager.create_session(None, "general").await.unwrap();
+        let gate = Arc::new(Notify::new());
+        *manager.inner.settle_gate.lock().unwrap() = Some(gate.clone());
+        manager.prompt(&id, "Work", "prompt").await.unwrap();
+        model.request().await;
+        manager.abort(&id, "stop").await.unwrap();
+        let runtime = manager.runtime(&id).await.unwrap();
+        let (generation, run_id) = {
+            let content = runtime.content.lock().await;
+            assert!(content.agent.as_ref().unwrap().running, "Cleanup is gated");
+            let transcript = content.transcript.as_ref().unwrap();
+            (transcript.generation.clone(), transcript.queue.run_id.clone())
+        };
+        let resume = crate::protocol::QueueOperation::Resume { run_id };
+        manager.queue_control(&id, &generation, "resume", resume.clone()).await.unwrap();
+        manager.queue_control(&id, &generation, "resume", resume.clone()).await.unwrap();
+        assert!(!manager.inner.state.queue(&id).await.unwrap().paused);
+        if stop_again { manager.abort(&id, "stop-again").await.unwrap(); }
+        gate.notify_one();
+        if !stop_again { model.request().await; }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !runtime.content.lock().await.agent.as_ref().unwrap().running { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(manager.inner.state.queue(&id).await.unwrap().paused, stop_again,
+            "Only a later explicit stop may override the accepted resume");
+        // Lost response retries keep the original immutable ID and cannot restart
+        // work after a subsequent stop, or after the resumed turn has completed.
+        manager.queue_control(&id, &generation, "resume", resume).await.unwrap();
+        assert!(model.requests.try_recv().is_err());
+        manager.shutdown().await; server.abort();
+    }
+}
