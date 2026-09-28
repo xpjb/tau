@@ -1,17 +1,20 @@
-# ZIP Extract QA fix — feature branch, not integrated/deployed
+# ZIP Extract QA fix — integrated source, not deployed
 
-`fix/tau2-extract-behavior` is based on `origin/tau2` at `6da3b4c`, in
-`/root/tau2-extract-behavior`. Commits `f3d3c95` and `637a5b0` restore Tau1-style
-single-root ZIP extraction, remove Extract's tooltip, and guard/disable it across
-both card surfaces until extraction plus opening finish. The feature branch is
-pushed; **tau2 integration, stable/master, packages and services are untouched**.
-No version/protocol/schema change. Existing release/deployment holds below remain.
+At the user's request, `fix/tau2-extract-behavior` (`a66fc3d`) was merged into
+`tau2-integration` as **`3eb2b1d`**. Integration publishes to `origin/tau2`.
+Commits `f3d3c95` and `637a5b0` restore Tau1-style single-root ZIP extraction,
+remove Extract's tooltip, and guard/disable it across both card surfaces until
+extraction plus opening finish. The feature branch/worktree remain preserved.
 
-Managed frontend all-target, Windows MSVC and Android ARM64 compiler checks pass;
-159/159 frontend library nextest tests pass, zero skipped. Offline GPU screenshots
-were inspected; no physical Windows shell or device QA is claimed. See
-`docs/zip-extraction.md` for behavior, intentional re-extraction semantics, regression
-evidence and reproducible checks.
+The conflict-free merge has exactly the feature branch's tree; only Markdown
+status notes change afterward. Reused the existing managed frontend all-target,
+Windows MSVC and Android ARM64 compiler checks and **159/159 frontend library
+nextest** result, zero skipped; no redundant rebuild or test rerun. Offline GPU
+screenshots were inspected during feature QA; no physical Windows acceptance is
+claimed. See `docs/zip-extraction.md` for exact evidence and re-extraction semantics.
+
+**No deployment, package build, service restart, version/protocol/schema change,
+or stable/master change.** Existing release/deployment holds below remain.
 
 ---
 

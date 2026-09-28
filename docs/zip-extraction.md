@@ -2,8 +2,10 @@
 
 Branch/worktree: `fix/tau2-extract-behavior`, `/root/tau2-extract-behavior`, based on
 `origin/tau2` at `6da3b4c`. Implementation: `f3d3c95` (folder handling), `637a5b0`
-(single-flight UI and tooltip removal). Not merged or deployed; no version,
-protocol, persisted schema, package, service or stable/master change.
+(single-flight UI and tooltip removal). At the user's request, feature tip
+`a66fc3d` was merged as **`3eb2b1d`** into `tau2-integration`, which publishes to
+`origin/tau2`. Not deployed; no version, protocol, persisted schema, package,
+service or stable/master change.
 
 ## Behavior
 
@@ -53,6 +55,12 @@ Final managed validation on `637a5b0`:
   passed.
 - Android aarch64/API-29 frontend library check: passed, with the existing NDK
   compiler/archiver environment. No Java changes or package build required.
+
+Integration validation: `3eb2b1d` and feature tip `a66fc3d` have the same Git tree
+(`9d2efa90520c74b61da2b4059989832fae6eac5c`). Compared with tested source `637a5b0`,
+only Markdown documentation differs, including the post-merge status notes. The
+existing checks above are therefore reused, not represented as new merged-tree
+runs; no redundant suite or cross-build was performed.
 
 All commands used `/usr/local/bin/cargo`, `CARGO_BUILD_JOBS=1`,
 `RAYON_NUM_THREADS=1`. No Clippy or Cargo built-in test runner was invoked.

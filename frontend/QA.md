@@ -1,4 +1,4 @@
-# ZIP Extract follow-up — feature branch, not deployed
+# ZIP Extract follow-up — integrated source, not deployed
 
 Removed Extract's remaining hover/context tooltip, made its operation single-flight
 across chat and Attachments (disabled **Extracting…** until the folder is opened),
@@ -10,6 +10,9 @@ Managed frontend all-target, Windows x64 and Android ARM64 checks passed;
 **159/159 frontend library nextest tests**, zero skipped, passed. The 33-case GPU
 matrix and actual busy chat/sidebar previews were inspected. No package, release,
 service restart or physical Windows acceptance is claimed.
+Integrated at the user's request as `3eb2b1d` in `tau2-integration` / `origin/tau2`.
+The merge exactly matches the validated feature tree; subsequent changes are
+Markdown status notes only, so existing checks were reused without rerunning them.
 See [behavior, scope and exact evidence](../docs/zip-extraction.md).
 
 ---

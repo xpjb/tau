@@ -438,3 +438,26 @@ See `docs/tau2-retained-ui-implementation.md` for the complete ownership, deleti
 validation and reproducible size ledger; `docs/tau2-resume-during-stop.md` records
 that bug's failing-before/passing-after evidence. Feature/worktree histories,
 including the unrelated `tau2-remove-pause` WIP, remain preserved.
+
+
+## ZIP Extract QA fixes — source integration only
+
+At the user's request, merged `fix/tau2-extract-behavior` (`a66fc3d`) into local
+`tau2-integration` as **`3eb2b1d`**, publishing to `origin/tau2`. Integration was
+clean and current at `6da3b4c`; the merge was conflict-free. The feature history
+and worktree remain preserved. This is not a stable/master merge or a deployment.
+
+- Removed Extract's remaining hover/context tooltip.
+- A shared scoped claim disables Extract in chat and Attachments until extraction
+  and opening finish, including repeated clicks before repaint. Failure permits
+  retry; old-source completions cannot clear a different job.
+- Restored Tau1's single-root ZIP handling: publish/open the actual root, not a
+  redundant archive-named outer folder. Loose roots and collision suffixes remain.
+- Merge and feature tip have the same tree
+  `9d2efa90520c74b61da2b4059989832fae6eac5c`; compared with tested implementation
+  `637a5b0`, only Markdown notes differ. Reused the **159/159 frontend library
+  nextest** result (`00ff05dc-6818-4807-900f-708d9966934d`), native all-target check,
+  Windows MSVC check and Android ARM64 check. No new test/rebuild claim.
+- No packages, service restarts, production data writes, version/protocol/schema
+  changes or physical-device acceptance. Existing matched-release/deployment
+  requirements and holds remain. See `docs/zip-extraction.md` for full evidence.
