@@ -1,3 +1,20 @@
+# Remote code viewer — feature branch, not deployed
+
+`feat/tau2-remote-code-viewer` / implementation `823fa3e` adds the read-only remote
+file browser, daemon-owned gitignore-aware path index, native streamed reads,
+Tree-sitter/Sanscale code view, live selections and chat line comments. Shared
+Windows/Android UI; folder button beside attachments and Ctrl+Space/Find.
+
+Protocol **21** requires a matching daemon and client; there is no schema change.
+The existing beta/stable services, packages and integration branch are untouched.
+Full workspace check and 257/257 nextest passed; Windows/Android/Java and crate
+documentation checks passed. Physical-device QA is still required. See
+`docs/remote-code-viewer.md` and `frontend/qa/code-viewer/README.md` for limits,
+ownership, run IDs and real headless previews. Worktree is
+`/root/tau2-remote-code-viewer`; source and QA are pushed on the feature branch.
+
+---
+
 # Current rollout hold — beta 0.7.8 packages attached, awaiting download confirmation
 
 **Do not restart or deploy the daemon until the user explicitly confirms both

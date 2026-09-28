@@ -1,3 +1,21 @@
+# Remote code viewer — development only, September 28, 2026
+
+Folder button beside attachments; read-only directory/code views, Ctrl+Space/Find,
+daemon-owned `.gitignore` index, live Sanscale paragraphs, and selected-line
+references in the shared chat composer. Mobile gutter/hold/drag selection dispatches
+Android haptics. Live updates preserve IME/native-editor text and invalidate changed
+selections rather than retargeting comments. Protocol 21; matching daemon/client.
+
+Final managed workspace all-target check and **257/257 nextest tests** passed
+(`9017d8a4-3311-4c4a-9a4b-07b90897f386`). Windows/Android library checks, Android Java
+compilation and crate rustdoc passed. Actual GPU desktop/phone previews were
+inspected; this is **not** physical-device acceptance or a beta deployment.
+
+See [scope, ownership, limits and validation](../docs/remote-code-viewer.md) and
+[reproducible previews](qa/code-viewer/README.md). No Clippy or built-in test runner.
+
+---
+
 # Composer thinking-level indicator
 
 The shared Windows/Android composer status row now reports the saved per-chat

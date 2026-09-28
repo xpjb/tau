@@ -88,3 +88,21 @@ Cargo built-in test runner. Final run IDs/results are recorded below at handoff.
 This branch is **not deployed**. Physical Windows/Android input, native keyboard,
 IME, haptic feedback and weak-device GPU acceptance remain device QA; successful
 cross-compilation or headless phone layouts do not establish those results.
+
+### Handoff — September 28, 2026
+
+Implementation is committed at `823fa3e` on `feat/tau2-remote-code-viewer`.
+Managed workspace all-target compiler check passed. Final full workspace nextest
+run `9017d8a4-3311-4c4a-9a4b-07b90897f386`: **257/257 passed, zero skipped**
+(89.004 seconds of tests). Earlier complete runs also passed (255 tests before the
+additional authentication/cancellation and IME regressions; then 257).
+
+Windows x64 MSVC and Android ARM64 library compiler checks passed, as did Android
+SDK Java compilation and the new crate's all-feature rustdoc build. Android reports
+four cfg/platform dead-code warnings in existing shared frontend code; they are
+not correctness or release gates. No lint-driven cleanup was performed.
+
+Inspected actual headless desktop/code/search and phone/comment frames; reproducible
+fixtures and representative PNGs are in `frontend/qa/code-viewer/`. Physical-device
+acceptance remains open. No release packages, merge into `tau2`, deployment,
+production-data migration, service restart or paid provider request was performed.
