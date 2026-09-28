@@ -14,10 +14,16 @@ press. Their widths are measured from the actual text, with at least 40dp deskto
 and Retry; saving shows disabled **Saving…** and cannot enqueue a duplicate export.
 
 Names and status are shaped as **single lines** with real ellipsis, never clipped
-wrapped text. Long filenames retain their extension. The full name/status/caption
-is available by hovering or tapping the text; buttons retain descriptive hover details
-and touch-and-hold labels without performing the action. Chat and sidebar instances
-of the same file have distinct tooltip anchors, including during progress updates.
+wrapped text. Long filenames retain their extension. The name/status/caption no
+longer opens a duplicate information tooltip (September 28 follow-up). Buttons
+retain descriptive hover details and touch-and-hold labels without performing the
+action. Chat and sidebar instances of the same file have distinct button-tooltip
+anchors.
+
+Completed-save notices now navigate to the exact widget in its chat/current topic.
+See [navigation behavior and QA](../../../docs/client-navigation.md). The render
+matrix below continues to cover the shared controls; the new navigation tests
+also check that card text has no hover/tap information target.
 
 Images are centered, keep their reserved preview area, and show explicit loading,
 failure and undecodable-image placeholders. Undecodable cached images can still be

@@ -1,3 +1,22 @@
+# Download notification navigation and UI selection — September 28, 2026 (unreleased)
+
+- Clicking a completed-save popup selects its chat's current topic and scrolls to
+  that exact download widget. × still dismisses. Loading/older history, offline
+  cached targets, moved chats and stale/deleted destinations are handled.
+- Removed the duplicate filename/status/caption tooltip from both chat and the
+  Attachments pane; button descriptions remain.
+- Consolidated UI selection reconciliation in `app/navigation.rs`. Also fixed a
+  reproduced existing gap where selection changed before the composer was rebound,
+  plus old-layout retention when two accounts selected the same chat ID.
+- **106 frontend library tests and two real-native integration tests passed.**
+  Native all-target, Windows x64 and Android ARM64 compiler checks passed; Android
+  retains four existing desktop-helper dead-code warnings. Desktop/phone/2.5× GPU
+  screenshots were inspected. No physical-device acceptance or deployment claimed.
+
+See [the architecture findings, navigation behavior and exact validation](../docs/client-navigation.md).
+
+---
+
 # Composer thinking-level indicator
 
 The shared Windows/Android composer status row now reports the saved per-chat
