@@ -1,3 +1,20 @@
+# ZIP Extract QA fix — feature branch, not integrated/deployed
+
+`fix/tau2-extract-behavior` is based on `origin/tau2` at `6da3b4c`, in
+`/root/tau2-extract-behavior`. Commits `f3d3c95` and `637a5b0` restore Tau1-style
+single-root ZIP extraction, remove Extract's tooltip, and guard/disable it across
+both card surfaces until extraction plus opening finish. The feature branch is
+pushed; **tau2 integration, stable/master, packages and services are untouched**.
+No version/protocol/schema change. Existing release/deployment holds below remain.
+
+Managed frontend all-target, Windows MSVC and Android ARM64 compiler checks pass;
+159/159 frontend library nextest tests pass, zero skipped. Offline GPU screenshots
+were inspected; no physical Windows shell or device QA is claimed. See
+`docs/zip-extraction.md` for behavior, intentional re-extraction semantics, regression
+evidence and reproducible checks.
+
+---
+
 # Retained UI and repeated-pause fix — integrated source, not deployed
 
 The user reviewed the retained UI's +3,050 same-format production-line increase
