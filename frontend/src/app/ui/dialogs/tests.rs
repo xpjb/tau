@@ -89,13 +89,12 @@ fn modal_scope_blocks_legacy_pointer_wheel_middle_and_context_routes() {
 fn native_editor_and_clipboard_callbacks_cannot_write_a_new_field_or_source() {
     let mut h = Harness::new(true); h.app.apply(Action::NewProject).unwrap(); h.frame();
     h.click(center(h.dialog().fields()[0].control.rect.unwrap()));
-    let token = h.app.actions().into_iter().find_map(|action| match action { PlatformAction::Edit { token, .. } => Some(token), _ => None }).unwrap();
-    // The Java editing window takes focus and may change system-bar insets.
-    // Those cancel gestures, not the originating editor's live session.
+    let token = h.app.native_input().unwrap();
+    // IME insets and backgrounding cancel gestures, not the inline field binding.
     h.app.ui.window_focused = false; h.app.cancel_pointer(); h.app.resize((360, 740), 1., Vec2::new(0., 1.));
-    h.app.native_edit(token, "Native topic".into()); assert_eq!(h.dialog().fields()[0].editor.value, "Native topic");
+    h.app.native_edit(snapshot(&token, "Native topic")); assert_eq!(h.dialog().fields()[0].editor.value, "Native topic");
     h.app.apply(Action::RenameProject("second".into())).unwrap();
-    h.app.native_edit(token, "Stale replacement".into()); assert_eq!(h.dialog().fields()[0].editor.value, "Second");
+    h.app.native_edit(snapshot(&token, "Stale replacement")); assert_eq!(h.dialog().fields()[0].editor.value, "Second");
     h.app.apply(Action::NewProject).unwrap();
     h.app.key("v", true, false);
     let token = h.app.actions().into_iter().find_map(|action| match action { PlatformAction::Paste { token } => Some(token), _ => None }).unwrap();
@@ -105,10 +104,10 @@ fn native_editor_and_clipboard_callbacks_cannot_write_a_new_field_or_source() {
     let token = h.app.actions().into_iter().find_map(|action| match action { PlatformAction::Paste { token } => Some(token), _ => None }).unwrap();
     h.app.paste(token, "Right prompt".into()); assert_eq!(h.dialog().fields()[1].editor.value, "Right prompt");
     h.frame(); h.click(center(h.dialog().fields()[0].control.rect.unwrap()));
-    let token = h.app.actions().into_iter().find_map(|action| match action { PlatformAction::Edit { token, .. } => Some(token), _ => None }).unwrap();
+    let token = h.app.native_input().unwrap();
     let draft = h.app.controller.selected().unwrap().local.draft.clone();
     h.app.controller.identity = "replacement-account".into();
-    h.app.native_edit(token, "Wrong account".into()); assert!(h.dialog().fields()[0].editor.value.is_empty());
+    h.app.native_edit(snapshot(&token, "Wrong account")); assert!(h.dialog().fields()[0].editor.value.is_empty());
     h.app.input("still stale"); assert!(h.app.root.dialog.is_none());
     assert_eq!(h.app.controller.selected().unwrap().local.draft, draft);
 }
@@ -226,13 +225,18 @@ fn shared_control_clip_governs_hover_press_and_paint_with_the_same_bounds() {
 #[test]
 fn native_legacy_composer_session_survives_blur_but_not_a_navigation_round_trip() {
     let mut h = Harness::new(true);
-    h.app.apply(Action::Focus(None)).unwrap();
-    let token = h.app.actions().into_iter().find_map(|a| match a { PlatformAction::Edit { token, .. } => Some(token), _ => None }).unwrap();
-    h.app.cancel_pointer(); h.app.native_edit(token, "Owned native draft".into());
+    h.frame(); h.app.apply(Action::Focus(None)).unwrap();
+    let token = h.app.native_input().unwrap();
+    h.app.cancel_pointer(); h.app.native_edit(snapshot(&token, "Owned native draft"));
     assert_eq!(h.app.controller.selected().unwrap().local.draft, "Owned native draft");
     h.app.controller.select("two").unwrap(); h.app.sync_navigation();
     h.app.controller.select("demo").unwrap(); h.app.sync_navigation();
-    h.app.native_edit(token, "Stale after remount".into());
+    h.app.native_edit(snapshot(&token, "Stale after remount"));
     assert_eq!(h.app.controller.selected().unwrap().local.draft, "Owned native draft",
         "Equal account/chat strings do not revive a detached editing session");
+}
+
+fn snapshot(input: &crate::mobile_input::Input, text: &str) -> crate::mobile_input::Edit {
+    crate::mobile_input::Edit { id: input.id, revision: input.revision, text: text.into(),
+        start: text.encode_utf16().count() as i32, end: text.encode_utf16().count() as i32, composing_start: -1, composing_end: -1 }
 }

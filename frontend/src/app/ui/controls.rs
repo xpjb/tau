@@ -25,8 +25,8 @@ impl Control {
             }
             Event::Down { pointer, point, touch } if self.contains(point) => {
                 if self.enabled && cx.ui.capture.is_none() {
-                    cx.ui.capture = Some(Capture { target: self.target, pointer, start: point, point, touch, dragged: false });
-                    if text { cx.ui.focus = Some(self.target); }
+                    cx.ui.capture = Some(Capture { target: self.target, pointer, start: point, point, touch, dragged: false, started: std::time::Instant::now() });
+                    if text && !touch { cx.ui.focus = Some(self.target); }
                 }
                 cx.ui.dirty = true; true
             }
@@ -125,15 +125,18 @@ impl Widget for TextField {
                 cx.ui.dirty |= self.editor.drag_scroll(&mut renderer.text, renderer.faces.prose[0], capture.unwrap().point, dt);
                 return true;
             }
-            Event::Cancel => { self.editor.preedit(String::new(), None); return false; }
+            Event::Cancel => {
+                if self.editor.composing() && cx.ui.native.is_none() { self.editor.preedit(String::new(), None); }
+                return false;
+            }
             Event::Preedit(text, cursor) if focused => {
                 self.editor.preedit(text.into(), cursor); cx.ui.dirty = true; return true;
             }
             Event::Text(text) if focused && self.control.enabled => {
                 self.editor.replace(text); cx.ui.dirty = true; return true;
             }
-            Event::Native { target: owner, text, replace } if owner == target && self.control.enabled => {
-                if replace { self.editor.replace_all(text); } else { self.editor.replace(text); }
+            Event::Paste { target: owner, text } if owner == target && self.control.enabled => {
+                self.editor.replace(text);
                 cx.ui.dirty = true; return true;
             }
             Event::Key { key, ctrl, shift } if focused && self.control.enabled => {
@@ -156,7 +159,15 @@ impl Widget for TextField {
         }
         let handled = self.control.handle(event, cx, true);
         if self.control.take_click() && cx.ui.mobile {
-            cx.native_edit(EditorTarget::Widget(target), self.label.clone(), self.editor.value.clone(), self.secret, self.editor.single_line);
+            cx.ui.focus = Some(target);
+            if let Event::Up { point, .. } = event {
+                let renderer = &mut cx.services.renderer;
+                self.editor.hit(&mut renderer.text, renderer.faces.prose[0], *point, false);
+                if capture.is_some_and(|c| c.started.elapsed().as_millis() >= 450) {
+                    self.editor.select_word(); cx.services.platform.push(super::PlatformAction::InputMenu);
+                }
+            }
+            cx.focus_native(EditorTarget::Widget(target), self.editor.native_id());
         }
         handled
     }

@@ -17,7 +17,7 @@ pub(super) struct View {
     /// The exact generated reference and its byte position. Never global replace
     /// user prose or other references when a live file moves selected lines.
     pub(super) reference: Option<(usize, String)>,
-    reference_aliases: Vec<String>, reference_sync: Option<bool>,
+    reference_sync: Option<bool>,
     pub(super) drag_anchor: Option<u64>,
     pub(super) scroll: f32, pub(super) max_scroll: f32, horizontal: f32, max_horizontal: f32,
     viewport: Rect, line_height: f32, gutter: f32,
@@ -29,11 +29,11 @@ impl View {
         Self { identity: app.controller.identity.clone(), lineage: app.controller.account.source_lineage.clone(), session,
             generation: 0, subscribed: false, seen: None, path: None, directory: None, parent: None, search_root: None,
             operation: FileOperation::List { after: None }, search: None,
-            entries: vec![], next: None, pages: vec![None], row: 0, document: None, selection: None, reference: None, reference_aliases: vec![], reference_sync: None, drag_anchor: None,
+            entries: vec![], next: None, pages: vec![None], row: 0, document: None, selection: None, reference: None, reference_sync: None, drag_anchor: None,
             scroll: 0., max_scroll: 0., horizontal: 0., max_horizontal: 0., viewport: Rect::new(0.,0.,0.,0.), line_height: 24., gutter: 52.,
             cursor: 0, loading: true, error: None, status: String::new(), paints: HashMap::new() }
     }
-    pub(super) fn sent(&mut self) {self.selection=None;self.reference=None;self.reference_aliases.clear();self.reference_sync=None;}
+    pub(super) fn sent(&mut self) {self.selection=None;self.reference=None;self.reference_sync=None;}
     fn line_at(&self, point: Vec2) -> Option<usize> {
         let doc = self.document.as_ref()?;
         if self.search.is_some() || doc.lines.is_empty() { return None; }
@@ -87,7 +87,7 @@ impl App {
                 let Some(code)=&mut self.root.legacy.code else { return Ok(()); };
                 code.clear_paint(&mut self.services.renderer);
                 code.path=Some(path); code.operation=if directory {FileOperation::List {after:None}} else {FileOperation::Open {revision:None}};
-                code.search=None;code.document=None;code.selection=None;code.reference=None;code.reference_aliases.clear();code.reference_sync=None;code.drag_anchor=None;
+                code.search=None;code.document=None;code.selection=None;code.reference=None;code.reference_sync=None;code.drag_anchor=None;
                 code.entries.clear();code.pages=vec![None];code.next=None;code.scroll=0.;code.horizontal=0.;code.row=0;code.cursor=0;
                 self.root.legacy.focus=None;self.code_request();
             }
@@ -114,7 +114,7 @@ impl App {
                 self.root.legacy.focus=Some(Some(SEARCH_FIELD));self.code_request();
                 if self.ui.mobile { self.apply(Action::Focus(Some(SEARCH_FIELD)))?; }
             }
-            Action::FileClear => { if let Some(code)=&mut self.root.legacy.code {code.selection=None;code.reference=None;code.reference_aliases.clear();code.reference_sync=None;code.drag_anchor=None;}self.root.legacy.focus=None; }
+            Action::FileClear => { if let Some(code)=&mut self.root.legacy.code {code.selection=None;code.reference=None;code.reference_sync=None;code.drag_anchor=None;}self.root.legacy.focus=None; }
             Action::FileCopy => {
                 if let Some(code)=&self.root.legacy.code && let (Some(doc),Some(selection))=(&code.document,&code.selection)
                     && let Some(text)=doc.selected_text(selection) {self.services.platform.push(PlatformAction::Copy(text));}
@@ -155,7 +155,6 @@ impl App {
         let Some(chat)=self.controller.chats.get(&code.session) else {return;};
         let mut draft=chat.local.draft.clone();
         let old=code.reference.take();
-        if let Some((_, marker))=&old && !code.reference_aliases.contains(marker) {code.reference_aliases.push(marker.clone());}
         if let Some((start, old))=old {
             let start=if draft.get(start..start+old.len())==Some(old.as_str()) {Some(start)} else {
                 let mut matches=draft.match_indices(&old);
@@ -171,29 +170,13 @@ impl App {
             if !draft.is_empty() && !draft.ends_with("\n\n") {draft.push_str(if draft.ends_with('\n') {"\n"} else {"\n\n"});}
             let start=draft.len();draft.push_str(&reference);code.reference=Some((start,reference));
         }
-        if let Some((_, marker))=&code.reference && !code.reference_aliases.contains(marker) {code.reference_aliases.push(marker.clone());}
-        // Keep the original marker while Android's current text dialog is open,
-        // plus a bounded recent history for subsequent edits of that same draft.
-        if code.reference_aliases.len()>64 {code.reference_aliases.remove(1);}
+        // Rebinding the inline editor fences all native snapshots of older markers.
         if draft!=self.root.legacy.composer.value || draft!=self.controller.chats[&code.session].local.draft {
             match self.controller.draft(draft.clone()) {
-                Ok(())=>self.root.legacy.composer=Editor::composer(draft),
+                Ok(())=>self.replace_composer(draft),
                 Err(error)=>self.controller.report_error(error),
             }
         }
-    }
-    pub(super) fn code_native_value(&self, mut value: String) -> String {
-        if self.root.legacy.focus!=Some(None) {return value;}
-        let Some(code)=&self.root.legacy.code else {return value;};
-        if self.controller.account.selected.as_ref()!=Some(&code.session) || self.controller.identity!=code.identity || self.controller.account.source_lineage!=code.lineage {return value;}
-        let replacement=code.reference.as_ref().map(|(_,text)|text.as_str()).unwrap_or("");
-        for old in code.reference_aliases.iter().rev() {
-            let mut matches=value.match_indices(old);
-            if let Some((at,_))=matches.next() && matches.next().is_none() {
-                value.replace_range(at..at+old.len(),replacement);break;
-            }
-        }
-        value
     }
     pub(super) fn code_tick(&mut self, dt: f32) {
         let Some(code)=&self.root.legacy.code else {return;};

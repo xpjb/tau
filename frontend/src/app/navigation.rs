@@ -57,7 +57,7 @@ impl App {
         } else if let Some(chat) = self.controller.selected()
             && self.root.legacy.composer.value != chat.local.draft
         {
-            self.root.legacy.composer = Editor::composer(chat.local.draft.clone());
+            self.replace_composer(chat.local.draft.clone());
             self.ui.dirty = true;
         }
     }

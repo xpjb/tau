@@ -14,7 +14,10 @@ impl App {
         let handled = self.with_ui(|root, cx| root.handle_event(&event, cx));
         if old_focus != self.ui.focus {
             if let Some(field) = self.root.editor(old_focus) { field.editor.preedit(String::new(), None); }
-            self.ui.native = None; self.ui.paste = None;
+            if !self.ui.native.as_ref().is_some_and(|input| matches!(input.target, ui::EditorTarget::Widget(target) if Some(target) == self.ui.focus)) {
+                self.ui.native = None;
+            }
+            self.ui.paste = None;
         }
         self.ui.dirty |= self.ui.hot != old_hot;
         if let Err(error) = self.finish_ui_requests() { self.report(Err(error)); }

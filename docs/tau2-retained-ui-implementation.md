@@ -179,3 +179,19 @@ All Rust commands use managed `/usr/local/bin/cargo`.
 Physical Android keyboard/device QA and interactive Windows QA remain open.
 The inline-input branch was not merged. Its editor-ID/revision fence must replace
 the temporary window adapter while retaining source and widget-lifetime safety.
+
+## Inline-input integration (subsequent checkpoint)
+
+Adapted the existing `46618b9` implementation, not a second phone editor. Java's
+same-window InputConnection now edits both retained fields and the shared chat /
+code composer. Field IDs, Rust-edit revisions, account/source/chat bindings and
+clipboard tokens reject detached callbacks. Send retains the active keyboard;
+keyboard insets retain the buffer. Compact connection fields remain above the IME.
+Code-reference changes rebind the editor and fence old snapshots instead of
+rewriting an old fullscreen editor's eventual returned text. Composition still
+defers live-reference updates; user prose is preserved.
+
+Validation: 21 focused nextest cases passed (existing code-view tests plus adapted
+inline-input and retained-dialog tests), Android Rust check and SDK-35 Java compile
+passed. This remains host/headless validation, not physical-device acceptance.
+Stages 2–4 are actively continuing; this checkpoint is not the end of the task.

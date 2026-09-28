@@ -52,16 +52,16 @@ fn directory_code_gutter_selection_and_current_composer_work_at_desktop_and_phon
         h.click(|a|matches!(a,Action::FileCopy));
         assert!(h.app.actions().iter().any(|a|matches!(a,PlatformAction::Copy(t) if t=="fn main() {\n    let answer = 42;\n    println!(\"{answer}\");")));
         h.app.root.legacy.focus=Some(None);h.app.input("Why 42?");h.frame();
+        let old_editor = h.app.root.legacy.composer.native_id();
         h.text(&format!("// inserted above\n{}",source()));
         assert_eq!(h.app.controller.selected().unwrap().local.draft,"Existing draft\n\n`/workspace/src/main.rs:3-5`\nWhy 42?");
-        assert_eq!(h.app.code_native_value("Existing draft\n\n`/workspace/src/main.rs:2-4`\nStill typing".into()), "Existing draft\n\n`/workspace/src/main.rs:3-5`\nStill typing");
+        assert_ne!(old_editor, h.app.root.legacy.composer.native_id(), "Live reference updates fence old native snapshots");
         h.text(&format!("// inserted above\n{}",source().replace("let answer = 42;","let answer = 43;")));
         assert!(h.app.root.legacy.code.as_ref().unwrap().selection.is_none());
         assert!(!h.app.controller.selected().unwrap().local.draft.contains("main.rs:"));
         assert!(h.app.controller.selected().unwrap().local.draft.ends_with("Why 42?"));
         assert!(h.app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::Focus(None))), "An active comment edit is not hidden/lost by a live replacement");
         assert!(h.app.apply(Action::Send).is_err());
-        assert!(!h.app.code_native_value("Existing draft\n\n`/workspace/src/main.rs:2-4`\nStill typing".into()).contains("main.rs:"));
         h.click(|a|matches!(a,Action::FileClear));h.frame();
         assert!(!h.app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::Focus(None))));
         h.click(|a|matches!(a,Action::FileClose));assert!(h.app.root.legacy.code.is_none());

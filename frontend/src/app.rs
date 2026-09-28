@@ -31,6 +31,7 @@ use crate::notice::DownloadTarget;
 mod composer_status;
 mod ui;
 mod ui_owner;
+mod mobile_input;
 use ui::Widget;
 mod code_view;
 
@@ -234,13 +235,7 @@ pub enum PlatformAction {
     OpenUrl(String),
     SaveDownload { key: String, source: PathBuf, name: String },
     UseDownload(crate::store::SavedDownload, SavedAction, DownloadTarget),
-    Edit {
-        token: u64,
-        title: String,
-        value: String,
-        secret: bool,
-        single_line: bool,
-    },
+    InputMenu,
     Background,
 }
 #[derive(Clone, Copy)]
@@ -1197,6 +1192,7 @@ impl App {
         self.ui.dirty = true;
     }
     pub fn motion(&mut self, id: u64, point: Vec2) {
+        let field = self.root.legacy.pointer.as_ref().and_then(|p| self.field_at(p.start));
         if self.ui_event(ui::Event::Move { pointer: id, point }) { return; }
         if self.code_motion(id, point) { return; }
         let Some(p) = &mut self.root.legacy.pointer else {
@@ -1261,6 +1257,13 @@ impl App {
         let dx = point.x - p.last.x;
         p.dragged |= (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 7. * self.ui.scale;
         if p.dragged {
+            if p.touch && field.is_some() && self.root.legacy.focus == field && self.root.legacy.context_menu.is_none() {
+                p.last = point; p.at = Instant::now();
+                if let Some((editor, renderer)) = self.editor_and_renderer() {
+                    editor.wheel(&mut renderer.text, renderer.faces.prose[0], -dy, false);
+                }
+                self.ui.dirty = true; return;
+            }
             if self.root.legacy.context_menu.is_some() {
                 p.last = point;
                 p.at = Instant::now();
@@ -1350,7 +1353,15 @@ impl App {
                 .rev()
                 .find(|h| contains(h.rect, point) && contains(h.rect, p.start))
             {
+                let field = matches!(hit.action, Action::Focus(_));
                 self.activate(hit.action.clone());
+                if p.touch && field {
+                    self.field_hit(point, false);
+                    if p.started.elapsed().as_millis() >= 450 {
+                        if let Some(editor) = self.editor() { editor.select_word(); }
+                        self.services.platform.push(PlatformAction::InputMenu);
+                    }
+                }
             } else if self.root.legacy.context_menu.is_some() {
                 // Empty menu space never activates the transcript behind it.
             } else if let Some(link) = self.services.renderer.hit_link(point) {
@@ -1464,8 +1475,6 @@ impl App {
         if self.editor().is_some_and(|e| e.replace(value)) { self.edited(); }
         self.ui.dirty = true;
     }
-    #[cfg(any(target_os = "android", test))]
-    pub fn native_edit(&mut self, token: u64, value: String) { self.complete_input(token, value, true); }
     #[cfg(not(target_os = "android"))]
     pub fn can_paste_files(&mut self, token: u64) -> bool {
         let allowed = self.ui.paste.as_ref().is_some_and(|edit| edit.matches(token, &self.controller)
@@ -1473,22 +1482,12 @@ impl App {
         if allowed { self.ui.paste = None; }
         allowed
     }
-    pub fn paste(&mut self, token: u64, value: String) { self.complete_input(token, value, false); }
-    fn complete_input(&mut self, token: u64, value: String, replace: bool) {
-        let pending = if replace { &self.ui.native } else { &self.ui.paste };
-        let Some(edit) = pending.as_ref().filter(|edit| edit.matches(token, &self.controller)) else { return; };
-        let target = edit.target;
-        if !replace { self.ui.paste = None; }
+    pub fn paste(&mut self, token: u64, value: String) {
+        let Some(edit) = self.ui.paste.as_ref().filter(|edit| edit.matches(token, &self.controller)) else { return; };
+        let target = edit.target; self.ui.paste = None;
         match target {
-            ui::EditorTarget::Widget(target) => { self.ui_event(ui::Event::Native { target, text: &value, replace }); }
-            ui::EditorTarget::Legacy(field) if self.root.dialog.is_none() && self.root.legacy.focus == Some(field) => {
-                let value = if replace { self.code_native_value(value) } else { value };
-                if let Some(editor) = self.editor() {
-                    let changed = if replace { editor.replace_all(&value) } else { editor.replace(&value) };
-                    if changed { self.edited(); }
-                }
-                self.ui.dirty = true;
-            }
+            ui::EditorTarget::Widget(target) => { self.ui_event(ui::Event::Paste { target, text: &value }); }
+            ui::EditorTarget::Legacy(field) if self.root.dialog.is_none() && self.root.legacy.focus == Some(field) => self.input(&value),
             _ => {}
         }
     }
@@ -1610,7 +1609,7 @@ impl App {
             }
             return;
         }
-        if key == "Enter" && !shift && self.root.legacy.focus == Some(None) {
+        if key == "Enter" && !shift && !self.ui.mobile && self.root.legacy.focus == Some(None) {
             self.activate(Action::Send);
             return;
         }
@@ -1632,7 +1631,7 @@ impl App {
                 _ => {}
             }
         }
-        self.ui.native = None; self.ui.paste = None;
+        self.ui.paste = None;
         self.cancel_preedit();
         if let Action::MoveMenu(ref id) = action { self.move_menu(id); return Ok(()); }
         if matches!(action, Action::ContextBack) {
@@ -1751,7 +1750,7 @@ impl App {
                 }
             }
             Action::ChooseModel(session, slug) => self.controller.choose_model(&session, &slug)?,
-            Action::CopyRecoveredDraft(id)=>{self.controller.copy_missing_draft(&id)?;self.root.legacy.composer.value=self.controller.selected().map(|c|c.local.draft.clone()).unwrap_or_default();}
+            Action::CopyRecoveredDraft(id)=>{self.controller.copy_missing_draft(&id)?;self.replace_composer(self.controller.selected().map(|c|c.local.draft.clone()).unwrap_or_default());}
             Action::ForgetRecovered(id)=>{self.root.legacy.modal=Some(Modal {kind:ModalKind::ForgetRecovered(id),title:"Forget this local chat, its drafts and files? This does not undo or cancel source work. Saved daemon actions remain in Settings.".into(),fields:vec![],options:vec![("Forget local chat".into(),Action::Confirm),("Keep".into(),Action::CancelModal)]});self.root.legacy.focus=None;}
             Action::ReviewRestore(id)=>{
                 self.root.legacy.modal=Some(Modal {kind:ModalKind::ReviewRestore(id),title:"Restored history may omit external effects or paid work. Inspect those outcomes first. This acknowledgment only permits future explicit execution; it does not resume or resend anything.".into(),fields:vec![],options:vec![("Allow future explicit execution".into(),Action::Confirm),("Keep execution blocked".into(),Action::CancelModal)]});self.root.legacy.focus=None;
@@ -1781,21 +1780,9 @@ impl App {
             Action::Settings => self.open_ui(ui::DialogSpec::Connection)?,
             Action::Focus(field) => {
                 self.root.legacy.focus = Some(field);
-                if self.ui.mobile {
-                    let (title, value, secret, single_line) = match field {
-                        Some(code_view::SEARCH_FIELD) if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) => ("Find remote path".into(), self.root.legacy.code.as_ref().unwrap().search.as_ref().unwrap().value.clone(), false, true),
-                        Some(i) => {
-                            let (label, e, secret) = &self.root.legacy.modal.as_ref().unwrap().fields[i];
-                            (label.clone(), e.value.clone(), *secret, e.single_line)
-                        }
-                        None => (
-                            "Message Tau".into(),
-                            self.root.legacy.composer.value.clone(),
-                            false,
-                            false,
-                        ),
-                    };
-                    self.with_ui(|_, cx| cx.native_edit(ui::EditorTarget::Legacy(field), title, value, secret, single_line));
+                if self.ui.mobile && let Some(editor) = self.editor() {
+                    let id = editor.native_id();
+                    self.with_ui(|_, cx| cx.focus_native(ui::EditorTarget::Legacy(field), id));
                 }
             }
             Action::Confirm => {
@@ -2032,7 +2019,8 @@ impl App {
                 if let Some(code)=&self.root.legacy.code {anyhow::ensure!(code.selection.is_some() && code.error.is_none(), "Select current lines again before sending this code comment");}
                 if self.root.legacy.code.is_some() {self.code_reference(false);}
                 self.controller.send_prompt()?;
-                if let Some(code)=&mut self.root.legacy.code { code.sent(); self.root.legacy.focus=None; }
+                if let Some(code)=&mut self.root.legacy.code { code.sent(); }
+                self.replace_composer(self.controller.selected().map(|c| c.local.draft.clone()).unwrap_or_default());
             },
             Action::Abort => {
                 if let Some(id) = selected {
@@ -2101,8 +2089,7 @@ impl App {
             }
             Action::Restore(id) => {
                 self.controller.restore_pending(&id)?;
-                self.root.legacy.composer =
-                    Editor::composer(self.controller.selected().unwrap().local.draft.clone());
+                self.replace_composer(self.controller.selected().unwrap().local.draft.clone());
             }
             Action::RetryPending(id) => self.controller.retry_pending(&id)?,
             Action::Dismiss(id) => self.controller.dismiss_pending(&id)?,
@@ -2194,7 +2181,7 @@ impl App {
                 }
             }
             Action::Suggest(text) => {
-                self.root.legacy.composer = Editor::composer(text.clone());
+                self.replace_composer(text.clone());
                 self.controller.draft(text)?;
             }
         }
@@ -3403,8 +3390,9 @@ impl App {
             .control
             .as_ref()
             .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
-        let composer_h = editor_h
-            + (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
+        let chrome = (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
+        let editor_h = if self.ui.mobile { editor_h.min((b.height - 80. * s - chrome).max(16. * s)) } else { editor_h };
+        let composer_h = editor_h + chrome;
         let bottom = b.y + b.height;
         let composer_top = (bottom - composer_h).max(b.y + 80. * s);
         (x, width, editor_h, composer_h, composer_top)

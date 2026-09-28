@@ -163,6 +163,22 @@ impl Widget for ConnectionDialog {
             }
             return;
         }
+        // The actual fields stay inside the resized activity when the IME is up.
+        // Secondary settings remain available after dismissing the keyboard.
+        if b.height / s < 520. {
+            frame.layer.rect(b, color(0x0e141b));
+            let w = (b.width - 24. * s).min(520. * s).max(1.); let x = b.x + (b.width - w) / 2.;
+            let h = ((b.height - 86. * s) / 2.).clamp(24. * s, 48. * s);
+            for (i, field) in [&mut self.url, &mut self.token].into_iter().enumerate() {
+                let y = b.y + 20. * s + i as f32 * (h + 18. * s);
+                cx.services.renderer.label(frame.layer, &field.label, Rect::new(x, y - 17. * s, w, 16. * s), 11. * s, color(0xb7c2ce), false);
+                field.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x, y, w, h), clip: frame.clip }, cx);
+            }
+            let y = b.y + b.height - 38. * s;
+            self.form.button(ConnectionChoice::Cancel, Rect::new(x, y, (w - 8. * s) / 2., 32. * s), false, false, frame, cx);
+            if self.attempt.is_none() { self.form.button(ConnectionChoice::Connect, Rect::new(x + (w + 8. * s) / 2., y, (w - 8. * s) / 2., 32. * s), true, false, frame, cx); }
+            return;
+        }
         let connected = cx.model.epoch.is_some()
             && self.url.editor.value.trim().trim_end_matches('/') == cx.model.settings.server_url
             && self.token.editor.value.trim() == cx.model.settings.token;

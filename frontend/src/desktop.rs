@@ -334,15 +334,7 @@ impl Desktop {
                     }
                 }
                 PlatformAction::Background | PlatformAction::Haptic => {}
-                PlatformAction::Edit {
-                    token,
-                    title,
-                    value,
-                    secret,
-                    single_line,
-                } => {
-                    let _ = (token, title, value, secret, single_line);
-                }
+                PlatformAction::InputMenu => {}
             }
         }
     }

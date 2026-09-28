@@ -23,7 +23,7 @@ pub(super) struct Target { pub scope: Id, pub widget: Id }
 #[derive(Clone, Copy)]
 pub(super) struct Capture {
     pub target: Target, pub pointer: u64, pub start: Vec2, pub point: Vec2,
-    pub touch: bool, pub dragged: bool,
+    pub touch: bool, pub dragged: bool, pub started: std::time::Instant,
 }
 #[derive(Clone, Copy)]
 pub(super) enum EditorTarget { Widget(Target), Legacy(Option<usize>) }
@@ -48,7 +48,7 @@ pub(super) enum Event<'a> {
     Key { key: &'a str, ctrl: bool, shift: bool },
     Text(&'a str),
     Preedit(&'a str, Option<(usize, usize)>),
-    Native { target: Target, text: &'a str, replace: bool },
+    Paste { target: Target, text: &'a str },
     Tick(f32), Cancel, Back, Submit,
 }
 pub(super) struct Frame<'a> {
@@ -66,11 +66,9 @@ impl Context<'_> {
         if let Err(error) = result { self.model.report_error(error); }
         self.ui.dirty = true;
     }
-    pub fn native_edit(&mut self, target: EditorTarget, title: String, value: String, secret: bool, single_line: bool) {
-        let edit = self.ui.edit_target(self.model, target);
-        let token = edit.token;
-        self.ui.native = Some(edit);
-        self.services.platform.push(PlatformAction::Edit { token, title, value, secret, single_line });
+    pub fn focus_native(&mut self, target: EditorTarget, id: u64) {
+        let mut edit = self.ui.edit_target(self.model, target); edit.token = id;
+        self.ui.native = Some(edit); self.ui.input_request += 1;
     }
     pub fn paste(&mut self, target: EditorTarget) {
         let edit = self.ui.edit_target(self.model, target);
@@ -137,12 +135,13 @@ pub(crate) struct UiState {
     pub(super) requests: VecDeque<Request>,
     pub(super) return_to: Option<(String, Option<String>, Option<String>)>,
     pub(super) native: Option<NativeEdit>,
+    pub(super) input_request: u64,
     pub(super) paste: Option<NativeEdit>,
 }
 impl UiState {
     pub fn new(size: (u32, u32), mobile: bool) -> Self {
         Self { size, origin: Vec2::new(0., 0.), scale: 1., mobile, window_focused: true, dirty: true,
-            focus: None, capture: None, hover: None, hot: None, requests: VecDeque::new(), return_to: None, native: None, paste: None }
+            focus: None, capture: None, hover: None, hot: None, requests: VecDeque::new(), return_to: None, native: None, input_request: 0, paste: None }
     }
     fn edit_target(&self, model: &Controller, target: EditorTarget) -> NativeEdit {
         NativeEdit { token: Id::new().0, target, identity: model.identity.clone(),
@@ -150,9 +149,8 @@ impl UiState {
     }
     pub fn cancel(&mut self) {
         self.capture = None; self.hot = None; self.hover = None; self.dirty = true;
-        // Android's native editor is a separate focused window. Pointer cancel,
-        // focus loss and viewport resize must not invalidate that live editor.
-        // Its scope/focus/source checks, not the gesture lifetime, own the token.
+        // Viewport/IME insets cancel gestures, not a valid inline editing session.
+        // Scope, buffer revision and source checks own that lifetime.
     }
     pub(super) fn navigation_changed(&mut self) {
         if self.native.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Legacy(_))) { self.native = None; }

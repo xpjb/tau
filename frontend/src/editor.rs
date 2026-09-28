@@ -4,6 +4,7 @@ use crate::render::{Layer, Renderer, color, contains};
 use sanscale::{Align, Boundaries, Caret, Draw, FontChainHandle, Layout, Motion, Rect, ShapedHandle, Style, TextService, Vec2};
 use std::{borrow::Cow, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
+mod mobile;
 
 #[derive(Clone)]
 struct Snapshot {
@@ -44,6 +45,9 @@ pub struct Editor {
     pub value: String,
     pub single_line: bool,
     center_one_line: bool,
+    native_id: u64,
+    native_revision: u64,
+    native_composition: Option<Range<usize>>,
     caret: Caret,
     anchor: usize,
     goal: Option<f32>,
@@ -62,6 +66,9 @@ impl Editor {
         let value = normalize(&value, false);
         let end = value.len();
         Self {
+            native_id: mobile::next_id(),
+            native_revision: 0,
+            native_composition: None,
             value, caret: Caret { byte_index: end, line_index: 0 }, anchor: end,
             single_line: false, center_one_line: false, goal: None, after_edit: true, follow_caret: true,
             composition: None, undo: Vec::new(), redo: Vec::new(), layout: None,
@@ -80,6 +87,18 @@ impl Editor {
         self.caret.byte_index.min(self.anchor)..self.caret.byte_index.max(self.anchor)
     }
     pub fn selected(&self) -> &str { &self.value[self.range()] }
+    pub fn select_word(&mut self) {
+        let byte = self.caret.byte_index;
+        let range = self.value.unicode_word_indices().find(|(at, word)| *at <= byte && byte < at + word.len())
+            .or_else(|| self.value.grapheme_indices(true).find(|(at, g)| *at <= byte && byte < at + g.len()))
+            .map(|(at, word)| at..at + word.len()).unwrap_or(byte..byte);
+        self.native_changed();
+        self.anchor = range.start;
+        self.caret.byte_index = range.end;
+        self.after_edit = true;
+        self.follow_caret = true;
+    }
+
     fn snapshot(&self) -> Snapshot {
         Snapshot { value: self.value.clone(), caret: self.caret, anchor: self.anchor }
     }
@@ -89,6 +108,7 @@ impl Editor {
         self.replace_range(range, value)
     }
     fn replace_range(&mut self, range: Range<usize>, value: &str) -> bool {
+        self.native_changed();
         let value = normalize(value, self.single_line);
         if self.value.len() - range.len() + value.len() > tau_protocol::MAX_REQUEST_BYTES {
             return false;
@@ -112,9 +132,6 @@ impl Editor {
         self.follow_caret = true;
         changed
     }
-    pub fn replace_all(&mut self, value: &str) -> bool {
-        self.replace_range(0..self.value.len(), value)
-    }
     fn undo(&mut self, redo: bool) -> bool {
         let previous = if redo { self.redo.pop() } else { self.undo.pop() };
         let Some(previous) = previous else { return false; };
@@ -130,8 +147,15 @@ impl Editor {
         self.follow_caret = true;
         true
     }
-    pub fn composing(&self) -> bool { self.composition.is_some() }
+    fn native_changed(&mut self) {
+        { self.native_revision += 1; self.native_composition = None; }
+    }
+    pub fn composing(&self) -> bool {
+        if self.native_composition.is_some() { return true; }
+        self.composition.is_some()
+    }
     pub fn preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        self.native_changed();
         if text.is_empty() {
             self.composition = None;
         } else {
@@ -229,6 +253,7 @@ impl Editor {
     /// Return true only when draft persistence is needed.
     pub fn key(&mut self, text: &mut TextService, chain: FontChainHandle, key: &str, ctrl: bool, shift: bool) -> bool {
         if self.composing() { return false; }
+        self.native_changed();
         match key {
             "a" | "A" if ctrl => {
                 self.anchor = 0;
@@ -296,6 +321,7 @@ impl Editor {
     // Mouse/wheel operate on the displayed viewport, not a pending keyboard
     // reveal. Repainting is the point where that reveal becomes visible.
     pub fn hit(&mut self, text: &mut TextService, chain: FontChainHandle, point: Vec2, extend: bool) {
+        self.native_changed();
         if self.composing() { self.preedit(String::new(), None); }
         let Some(view) = self.view else { return; };
         let Some(block) = self.prepare_view(text, chain, false) else { return; };
@@ -426,6 +452,13 @@ impl Editor {
                 let (display, _) = self.display();
                 let map = |byte| if secret { display[..byte].graphemes(true).count() * "•".len() } else { byte };
                 for span in layout.selection(map(c.replace.start)..map(c.replace.start + c.text.len())) {
+                    layer.clipped_rect(Rect::new(origin.x + span.x_em * size,
+                        origin.y + (span.y_em + span.height_em) * size - 2.,
+                        span.width_em * size, 1.), color(0x67d4ff), inner);
+                }
+            }
+            if let Some(range) = &self.native_composition {
+                for span in layout.selection(self.display_byte(range.start, secret)..self.display_byte(range.end, secret)) {
                     layer.clipped_rect(Rect::new(origin.x + span.x_em * size,
                         origin.y + (span.y_em + span.height_em) * size - 2.,
                         span.width_em * size, 1.), color(0x67d4ff), inner);
