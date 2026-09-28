@@ -1,7 +1,10 @@
 # 022 — Shared public state semantics and safe local prediction
 
-Status: **Open; architectural follow-up, bounded pilot required.**
-Priority: **After 015 demonstrates the shared-contract approach.**
+Kind: **Design context — not a separately schedulable world-model rewrite.**
+Initiative: **State and replication**; the pilot described below needs its own bounded scope before selection.
+
+Status: **Design context; any future pilot needs a separately bounded implementation decision.**
+Priority: **Reference for shared contracts; no independent implementation slot.**
 Confidence: **5/10** in the value and appropriateness of this scope, not a probability of a LOC saving.
 Net production LOC reduction estimate: **-250 to +100 lines**.
 
@@ -45,7 +48,10 @@ operation-store migration.
 - Public projection excludes provider-private state; partial client knowledge and body
   availability stay explicit. Reject or clearly mark unsupported predictions.
 
-## Honest impact estimate
+## Reference estimate — not an additional implementation budget
+
+This scenario is retained for design comparison. Do not add it to child-task
+estimates or schedule the parent/design record as another implementation.
 
 For the additional pilot beyond 015, perhaps 100–250 lines of mirrored interpretation
 can be replaced by 150–350 lines of shared contracts, pure transitions and host

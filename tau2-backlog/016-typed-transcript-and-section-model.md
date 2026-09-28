@@ -1,7 +1,10 @@
 # 016 — Typed transcript items and shared section membership
 
-Status: **Open; broader follow-up, not approved as a combined rewrite.**
-Priority: **After evidence from 015.**
+Kind: **Parent proposal — not a separate implementation task.**
+Children: **015, 017, 018**. Related cleanup: 035. Design context: 019 / 022.
+
+Status: **Parent proposal; implement through selected child scopes, not as an additional combined rewrite.**
+Priority: **015 first; select subsequent transcript slices after its evidence.**
 Confidence: **7/10** in the value and appropriateness of this scope, not a probability of a LOC saving.
 Net production LOC reduction estimate: **-100 to +300 lines**.
 
@@ -44,7 +47,10 @@ No general operation-store migration or change to deferred scroll-restoration po
 - Remove the superseded native interpretations instead of wrapping them. Preserve live
   startup/full-preview behavior and migrate demo inputs to the same semantic contract.
 
-## Honest impact estimate
+## Reference estimate — not an additional implementation budget
+
+This scenario is retained for design comparison. Do not add it to child-task
+estimates or schedule the parent/design record as another implementation.
 
 Umbrella budget: approximately 450–650 lines of adapter/grouping/reconciliation code
 replaced, with 350–550 lines of model, indexes and compatibility code introduced. Net:

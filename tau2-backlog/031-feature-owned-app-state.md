@@ -1,7 +1,10 @@
 # 031 — Feature-owned App state rather than more impl App files
 
-Status: **Open; partly advanced by upstream navigation ownership.**
-Priority: **Incremental, following real semantic boundaries.**
+Kind: **Design context — not a separately schedulable App rewrite.**
+Initiative: **UI ownership and interaction**; implemented through justified slices such as 028–033.
+
+Status: **Design context; preserve existing navigation ownership, do not schedule a blanket App rewrite.**
+Priority: **Reference for UI slices; no independent implementation slot.**
 Confidence: **6/10** in the value and appropriateness of this scope, not a probability of a LOC saving.
 Net production LOC reduction estimate: **-120 to 0 lines**.
 
@@ -41,7 +44,10 @@ credit for other backlog entries.
 - Demonstrate reduced cross-feature coordination, not merely a shorter app.rs. Preserve
   renderer and Editor reuse.
 
-## Honest impact estimate
+## Reference estimate — not an additional implementation budget
+
+This scenario is retained for design comparison. Do not add it to child-task
+estimates or schedule the parent/design record as another implementation.
 
 For ownership-only reorganization, expect 0–120 added production lines (-120 to 0
 reduction) from owner types/interfaces/constructors. Existing behavior mostly moves. Any

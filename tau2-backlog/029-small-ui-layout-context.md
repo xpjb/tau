@@ -1,5 +1,8 @@
 # 029 — Small UI/layout context over existing drawing primitives
 
+Kind: **Small UI-helper implementation candidate.**
+Design parent: **031**; overlaps registration/lifecycle work in 028 / 032.
+
 Status: **Open; lower-priority two-form pilot.**
 Priority: **After semantic/interaction boundaries are clear.**
 Confidence: **6/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

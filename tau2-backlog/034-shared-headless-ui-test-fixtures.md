@@ -1,5 +1,8 @@
 # 034 — Shared per-test headless UI fixtures
 
+Kind: **Independent supporting cleanup — test-only.**
+Group: **Test tooling**; does not depend on a runtime architecture migration.
+
 Status: **Open; test-only maintenance task.**
 Priority: **Low risk, independent of runtime architecture.**
 Confidence: **9/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

@@ -1,5 +1,8 @@
 # 021 — One durable operation registry for local intent
 
+Kind: **Implementation task with a storage migration.**
+Group: **State and replication / operations**; related tasks 020 and 025, not an umbrella authorizing both.
+
 Status: **Open; requires its own migration/recovery design before implementation.**
 Priority: **Later; separate from 015.**
 Confidence: **6/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

@@ -1,5 +1,8 @@
 # 023 — Reusable publisher/receiver roles for replication
 
+Kind: **Conditional proposal — not currently recommended as standalone work.**
+Group: **State and replication / infrastructure**; requires a concrete host beyond the existing roles.
+
 Status: **Open, conditional; no standalone generalization recommended now.**
 Priority: **Only with a concrete additional host/use case.**
 Confidence: **4/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

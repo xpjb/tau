@@ -1,5 +1,8 @@
 # 018 — Explicit content availability instead of placeholder source text
 
+Kind: **Implementation slice.**
+Parent: **016 (transcript)**; shares availability contracts with 015.
+
 Status: **Open; model-quality improvement, not guaranteed code reduction.**
 Priority: **Alongside the relevant 016 consumers.**
 Confidence: **7/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

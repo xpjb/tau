@@ -1,5 +1,8 @@
 # 025 — Common observation of authoritative operation outcomes
 
+Kind: **Implementation candidate, separate from local-store migration.**
+Group: **State and replication / operations**; related to 020 / 021.
+
 Status: **Open; separate from local registry migration and effect execution.**
 Priority: **Later; justify a small end-to-end outcome slice first.**
 Confidence: **5/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

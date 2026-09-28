@@ -23,10 +23,12 @@ mark an item complete just because code compiles.
 
 ## Client/state/replication investigation — September 28, 2026
 
-One entry per opened improvement topic, including the smaller first-pass ideas
-and the speculative alternatives. All are **open proposals**, not authorized
-implementation work or release gates. **015 remains the recommended first
-implementation**; the larger proposals are not a batch of approved follow-ups.
+The records below form related initiatives, not 21 independent projects.
+**015 is the recommended first implementation.** 016 is its transcript parent;
+019, 022 and 031 are design context, not separately schedulable refactors.
+Other entries are implementation candidates, supporting cleanup or explicitly
+conditional alternatives. Recording them is not implementation authorization.
+Existing IDs are retained so references remain valid.
 
 ### How to read the estimates
 
@@ -44,7 +46,7 @@ implementation**; the larger proposals are not a batch of approved follow-ups.
   crate. Tests/docs/manifests/dependencies are not production LOC.
 - Test-only savings are shown separately for **034**. Most runtime refactors will
   add tests; no reduction in total repository size is promised.
-- **Do not sum this table.** 016 is an inclusive umbrella for 015/017/018; 019/031
+- **Do not sum these estimates.** 016 is an inclusive umbrella for 015/017/018; 019/031
   are ownership-only organization; 020 can be absorbed into 021; 022–026 share
   primitives; 028/029/032 overlap UI coordination. Every entry states its overlap.
   Re-estimate remaining work after earlier changes land.
@@ -53,29 +55,90 @@ implementation**; the larger proposals are not a batch of approved follow-ups.
   not because it promises the largest line-count reduction**. 035 is a clearer
   pure production-code deletion candidate; 034 only reduces test scaffolding.
 
-| Item | Confidence | Estimated net LOC reduction |
+### Parent/design records — context, not extra projects
+
+These retain the architectural reasoning and original estimate scenarios. Do not
+schedule them in addition to their implementation slices or add their estimates
+to child estimates. The 022 rename/queue-edit pilot is a future scoping example,
+not another approved task.
+
+| Record | Role | Confidence | Reference LOC scenario, not an extra budget |
+| --- | --- | --- | --- |
+| [016 Full transcript/section model](016-typed-transcript-and-section-model.md) | Transcript parent: 015, 017, 018; related cleanup 035 | 7/10 | -100 to +300 |
+| [019 Cohesive ClientState ownership](019-cohesive-client-state-ownership.md) | Client-state design context for state/replication work | 6/10 | -150 to 0 |
+| [022 Shared model / safe prediction](022-shared-public-model-and-safe-prediction.md) | Shared-state/prediction design context for state/replication work | 5/10 | -250 to +100 |
+| [031 Feature-owned App state](031-feature-owned-app-state.md) | UI feature-ownership design context for 028–033 | 6/10 | -120 to 0 |
+
+### Initiative A — state and replication
+
+Design context: **019 / 022**. Grouping here expresses shared responsibilities,
+not a requirement to implement every entry or a blanket prerequisite chain.
+
+#### Transcript — parent 016
+
+**Start with 015.** 017 and 018 are later slices of the same model. 035 is related
+legacy cleanup, not a prerequisite to 015 and not included in 016's LOC scenario.
+
+| Task | Confidence | Estimated net LOC reduction |
 | --- | --- | --- |
 | [015 Shared tool projection](015-shared-tool-transcript-projection.md) | 8/10 | -50 to +150 |
-| [016 Full transcript/section model](016-typed-transcript-and-section-model.md) | 7/10 | -100 to +300 |
 | [017 Logical message lifecycle](017-logical-message-lifecycle.md) | 7/10 | -50 to +100 |
 | [018 Typed content availability](018-typed-content-availability.md) | 7/10 | -80 to +20 |
-| [019 Cohesive ClientState ownership](019-cohesive-client-state-ownership.md) | 6/10 | -150 to 0 |
+| [035 Legacy transcript adapters](035-retire-legacy-transcript-fixture-adapters.md) | 8/10 | +80 to +180 |
+
+#### Operation lifecycle
+
+020 is a small extraction that 021 can absorb. 021 is a real local-store migration,
+not merely a parent heading. 025 concerns authoritative outcome observation; it
+is related work, not automatically part of that migration.
+
+| Task | Confidence | Estimated net LOC reduction |
+| --- | --- | --- |
 | [020 Shared recovery policy](020-shared-delivery-recovery-policy.md) | 9/10 | -10 to +25 |
 | [021 Durable operation registry](021-unified-durable-operation-registry.md) | 6/10 | -200 to +100 |
-| [022 Shared model / safe prediction](022-shared-public-model-and-safe-prediction.md) | 5/10 | -250 to +100 |
-| [023 Publisher / receiver roles](023-direction-independent-replica-roles.md) | 4/10 | -400 to 0 |
-| [024 Common catalogue replication](024-catalogue-on-shared-replication.md) | 5/10 | -150 to +100 |
 | [025 Common outcome observation](025-common-operation-outcome-observation.md) | 5/10 | -100 to +80 |
+
+#### Catalogue synchronization
+
+A separate collection-level candidate within the same shared-state direction.
+
+| Task | Confidence | Estimated net LOC reduction |
+| --- | --- | --- |
+| [024 Common catalogue replication](024-catalogue-on-shared-replication.md) | 5/10 | -150 to +100 |
+
+#### Supporting synchronization infrastructure
+
+026 is the concrete receiver extraction. 027 is optional packaging, not another
+algorithmic win. 023 remains conditional on a concrete additional host/use case;
+there is no recommendation to build a general replica engine now.
+
+| Task | Confidence | Estimated net LOC reduction |
+| --- | --- | --- |
 | [026 Shared native receiver](026-shared-native-receiver.md) | 8/10 | -50 to +50 |
 | [027 Merge blocks/transfer packaging](027-unify-blocks-transfer-library.md) | 6/10 | 0 |
+| [023 Publisher / receiver roles](023-direction-independent-replica-roles.md) | 4/10 | -400 to 0 |
+
+### Initiative B — UI ownership and interaction
+
+Design context: **031**. 028 is the interaction/capture work. The other tasks are
+related helpers or feature-level slices, not mandatory stages of a framework
+rewrite. Their overlapping registration/lifecycle code must be counted once.
+
+| Task | Confidence | Estimated net LOC reduction |
+| --- | --- | --- |
 | [028 Interaction scene / capture](028-interaction-scene-and-gesture-capture.md) | 7/10 | -150 to +250 |
 | [029 UI context / layout helpers](029-small-ui-layout-context.md) | 6/10 | -50 to +100 |
 | [030 Scroll-axis mechanics](030-shared-scroll-axis-mechanics.md) | 8/10 | 0 to +35 |
-| [031 Feature-owned App state](031-feature-owned-app-state.md) | 6/10 | -120 to 0 |
 | [032 Typed dialog lifecycle](032-typed-dialog-lifecycle.md) | 7/10 | -50 to +100 |
 | [033 Download acquisition / export job](033-shared-download-acquisition-and-export-job.md) | 8/10 | -25 to +50 |
+
+### Supporting test tooling
+
+034 is independent test scaffolding cleanup, with no production-code saving.
+
+| Task | Confidence | Estimated net LOC reduction |
+| --- | --- | --- |
 | [034 Headless test fixtures](034-shared-headless-ui-test-fixtures.md) | 9/10 | 0 production; +100 to +250 tests |
-| [035 Legacy transcript adapters](035-retire-legacy-transcript-fixture-adapters.md) | 8/10 | +80 to +180 |
 
 ### Evidence and topic coverage
 

@@ -1,5 +1,8 @@
 # 028 — One interaction scene and explicit gesture capture
 
+Kind: **UI architecture task — pilot before broad migration.**
+Design parent: **031**. Related slices/helpers: 029, 030, 032, 033.
+
 Status: **Open; independent UI architecture topic, not in the first tool slice.**
 Priority: **Separate pilot before broader input migration.**
 Confidence: **7/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

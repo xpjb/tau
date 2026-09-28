@@ -1,5 +1,8 @@
 # 032 — Typed dialog state and one submit/completion lifecycle
 
+Kind: **UI lifecycle implementation candidate.**
+Design parent: **031**; related helpers/routing in 028 / 029.
+
 Status: **Open; separate UI-state cleanup.**
 Priority: **After a representative dialog is selected.**
 Confidence: **7/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

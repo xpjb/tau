@@ -1,5 +1,8 @@
 # 024 — Reuse record replication for chat/topic catalogues
 
+Kind: **Collection-level implementation candidate.**
+Group: **State and replication / catalogue**; design context 019 / 022.
+
 Status: **Open; protocol/migration design required, not started.**
 Priority: **Later, after shared semantic contracts prove useful.**
 Confidence: **5/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

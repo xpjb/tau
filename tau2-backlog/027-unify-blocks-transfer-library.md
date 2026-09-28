@@ -1,5 +1,8 @@
 # 027 — One native sync library with storage/transport modules
 
+Kind: **Optional packaging decision — not an independent algorithmic simplification.**
+Group: **State and replication / infrastructure**; related implementation is 026.
+
 Status: **Open; optional packaging decision, not a LOC-reduction priority.**
 Priority: **Only alongside a justified API boundary change.**
 Confidence: **6/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

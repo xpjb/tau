@@ -1,5 +1,8 @@
 # 035 — Retire non-wire transcript update/page fixture adapters
 
+Kind: **Supporting transcript cleanup.**
+Related parent: **016**; independently scoping this is possible, and it is not a prerequisite to 015.
+
 Status: **Open; migrate remaining demo/test callers before deletion.**
 Priority: **Independent cleanup; relatively credible LOC saving.**
 Confidence: **8/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

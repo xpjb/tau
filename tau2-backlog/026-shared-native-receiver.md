@@ -1,5 +1,8 @@
 # 026 — One native receive/verify/commit state machine
 
+Kind: **Bounded implementation candidate.**
+Group: **State and replication / infrastructure**; does not require packaging change 027.
+
 Status: **Open; useful bounded follow-up, not the selected first change.**
 Priority: **After 015, or independently if receive behavior changes.**
 Confidence: **8/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

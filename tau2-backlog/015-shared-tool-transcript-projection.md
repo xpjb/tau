@@ -1,5 +1,8 @@
 # 015 — One shared typed tool-transcript projection
 
+Kind: **Implementation slice — recommended first.**
+Parent: **016 (transcript)**; design context 019 / 022.
+
 Status: **Open; recommended first implementation, not started.**
 Priority: **First from this investigation.**
 Confidence: **8/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

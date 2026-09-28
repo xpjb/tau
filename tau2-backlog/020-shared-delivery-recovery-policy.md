@@ -1,5 +1,8 @@
 # 020 — One typed delivery-recovery transition and retry classification
 
+Kind: **Small implementation task.**
+Group: **State and replication / operations**; 021 may absorb this extraction.
+
 Status: **Open; small independent cleanup with safety-sensitive acceptance.**
 Priority: **Small follow-up; not prerequisite to 015.**
 Confidence: **9/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

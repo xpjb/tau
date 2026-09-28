@@ -1,7 +1,10 @@
 # 019 — Cohesive ClientState ownership around the shared model
 
-Status: **Open; organizing umbrella, not a standalone LOC-reduction project.**
-Priority: **As semantic owners become established.**
+Kind: **Design context — not a separately schedulable refactor.**
+Initiative: **State and replication**; used by transcript, operation and catalogue tasks.
+
+Status: **Design context; not a standalone implementation or LOC-reduction project.**
+Priority: **Reference when defining state owners; no independent implementation slot.**
 Confidence: **6/10** in the value and appropriateness of this scope, not a probability of a LOC saving.
 Net production LOC reduction estimate: **-150 to 0 lines**.
 
@@ -43,7 +46,10 @@ of them together.
 - Adopt already-landed navigation and recent-chat ownership rather than replacing them
   to match a diagram.
 
-## Honest impact estimate
+## Reference estimate — not an additional implementation budget
+
+This scenario is retained for design comparison. Do not add it to child-task
+estimates or schedule the parent/design record as another implementation.
 
 Expected production impact of organization alone: 0–150 added lines, or -150 to 0
 reduction, for owner types and interfaces. Moving Controller fields/methods between

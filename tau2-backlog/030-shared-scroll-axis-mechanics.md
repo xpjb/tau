@@ -1,5 +1,8 @@
 # 030 — Shared scroll-axis mechanics without restoration redesign
 
+Kind: **Mechanics-only implementation candidate.**
+Design parent: **031**; may support 028, but is not the deferred restoration work in 012.
+
 Status: **Open; mechanics-only extraction, 012 remains deferred.**
 Priority: **Small independent cleanup when touching these paths.**
 Confidence: **8/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

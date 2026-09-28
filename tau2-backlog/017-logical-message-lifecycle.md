@@ -1,5 +1,8 @@
 # 017 — One logical message through pending, queue and history
 
+Kind: **Implementation slice.**
+Parent: **016 (transcript)**; related operation work 021.
+
 Status: **Open; design follow-up, not a storage-lifetime fix.**
 Priority: **Within 016, after 015.**
 Confidence: **7/10** in the value and appropriateness of this scope, not a probability of a LOC saving.

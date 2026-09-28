@@ -1,5 +1,8 @@
 # 033 — Shared download acquisition and explicit export-job intent
 
+Kind: **Feature-level implementation candidate.**
+Design parent: **031**; network receiver mechanics are separately 026.
+
 Status: **Open; preserve newer DownloadTarget/navigation work.**
 Priority: **Small independent cleanup if download flow is edited.**
 Confidence: **8/10** in the value and appropriateness of this scope, not a probability of a LOC saving.
