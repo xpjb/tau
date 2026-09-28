@@ -50,9 +50,9 @@ impl App {
                     .unwrap_or_default(),
             );
             self.root.legacy.show_chats = self.root.legacy.navigation.session.is_none();
-            self.root.legacy.attachment_scroll = 0.;
-            self.root.legacy.max_attachment_scroll = 0.;
-            if self.root.legacy.show_chats { self.root.legacy.show_attachments = false; }
+            self.root.attachments.scroll.value = 0.;
+            self.root.attachments.scroll.max = 0.;
+            if self.root.legacy.show_chats { self.root.attachments.show = false; }
             self.ui.dirty = true;
         } else if let Some(chat) = self.controller.selected()
             && self.root.legacy.composer.value != chat.local.draft
@@ -88,7 +88,7 @@ impl App {
         self.save()?;
         self.controller.select_project(id, self.ui.size.0 as f32 / self.ui.scale >= 760.)?;
         self.sync_navigation();
-        self.root.legacy.list_scroll = 0.;
+        self.root.sidebar.scroll.value = 0.;
         self.root.legacy.show_chats = self.controller.account.selected.is_none();
         self.root.legacy.focus = None;
         Ok(())
@@ -110,8 +110,8 @@ impl App {
         self.root.viewer = None;
         self.root.legacy.focus = None;
         self.root.legacy.show_chats = false;
-        self.root.legacy.show_attachments = false;
-        self.root.legacy.list_scroll = 0.;
+        self.root.attachments.show = false;
+        self.root.sidebar.scroll.value = 0.;
         self.root.legacy.horizontal = 0.;
         self.root.legacy.scroll = 0.;
         self.root.legacy.placed.clear();

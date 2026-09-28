@@ -12,8 +12,7 @@ fn switch(app: &mut App, ctx: &HeadlessCtx, id: &str) {
         app.back();
         frame(app, ctx);
     }
-    let rect = app
-        .root.legacy.hits
+    let rect = app.test_hits()
         .iter()
         .find(|h| matches!(&h.action, Action::Select(chat) if chat == id))
         .unwrap()

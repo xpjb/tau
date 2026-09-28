@@ -47,7 +47,7 @@ fn forms_bind_focus_and_replacement_before_the_next_input_without_a_frame() {
         assert_eq!(h.dialog().fields()[0].editor.value, "Second edited");
         assert_eq!(h.app.controller.selected().unwrap().local.draft, draft);
         h.frame();
-        assert!(!h.app.root.legacy.hits.iter().any(|hit| matches!(hit.action, Action::Focus(Some(_)) | Action::Confirm | Action::CancelModal)),
+        assert!(!h.app.test_hits().iter().any(|hit| matches!(hit.action, Action::Focus(Some(_)) | Action::Confirm | Action::CancelModal)),
             "Migrated fields/buttons never register legacy actions");
     }
 }

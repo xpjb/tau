@@ -3,7 +3,7 @@ use super::*;
 use tau_transfer::TransferStatus;
 
 // Match Tau 1's byte labels without overflowing on large advertised sizes.
-fn format_bytes(bytes: u64) -> String {
+pub(in crate::app) fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");
     }
@@ -23,12 +23,12 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 #[derive(Debug, PartialEq)]
-enum Progress {
+pub(in crate::app) enum Progress {
     Known(f32),
     Unknown,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Control {
+pub(in crate::app) enum Control {
     Download,
     Save,
     View,
@@ -38,7 +38,7 @@ enum Control {
     Busy,
 }
 impl Control {
-    fn label(self) -> &'static str {
+    pub(in crate::app) fn label(self) -> &'static str {
         match self {
             Self::Download => "Download",
             Self::Save => "Save",
@@ -49,7 +49,7 @@ impl Control {
             Self::Busy => "Saving…",
         }
     }
-    fn description(self) -> &'static str {
+    pub(in crate::app) fn description(self) -> &'static str {
         match self {
             Self::Save => "Save to Downloads",
             Self::View => "View image",
@@ -61,14 +61,14 @@ impl Control {
     }
 }
 
-struct AttachmentDisplay {
-    status: String,
-    control: Control,
-    progress: Option<Progress>,
-    failed: bool,
+pub(in crate::app) struct AttachmentDisplay {
+    pub(in crate::app) status: String,
+    pub(in crate::app) control: Control,
+    pub(in crate::app) progress: Option<Progress>,
+    pub(in crate::app) failed: bool,
 }
 impl AttachmentDisplay {
-    fn new(
+    pub(in crate::app) fn new(
         file: &ChatAttachment,
         cached: bool,
         download: Option<&crate::controller::Download>,
@@ -314,176 +314,11 @@ impl ui::Context<'_> {
     }
 }
 impl App {
-    pub(super) fn attachment_card(
-        &mut self,
-        ctx: &impl RenderContext,
-        layer: &mut Layer,
-        session: &str,
-        entry: &str,
-        attachment: &ChatAttachment,
-        surface: &'static str,
-        rect: Rect,
-        viewport: Rect,
-    ) {
-        let s = self.ui.scale;
-        let image = attachment.kind == AttachmentKind::Image;
-        let path = self.controller.attachment_path(session, entry);
-        let key = Controller::download_key(session, entry);
-        let cached = path.is_file()
-            && self
-                .controller
-                .downloads
-                .get(&key)
-                .is_none_or(|d| d.status.done && d.status.failure.is_none());
-        let exported = self.controller.saved_download(session, entry);
-        #[cfg(not(target_os = "android"))]
-        let exported = if exported
-            .as_ref()
-            .is_some_and(|saved| !std::path::Path::new(&saved.reference).is_file())
-        {
-            if let Err(error) = self.controller.forget_download(session, entry) {
-                self.controller.notice = Some(error.to_string().into());
-            }
-            None
-        } else {
-            exported
-        };
-        // The same file can be visible in chat and the sidebar simultaneously.
-        let info_key = format!("{surface}:{key}");
-        let x = rect.x + 14. * s;
-        let width = (rect.width - 28. * s).max(1.);
-        let panel = control_panel(rect, s);
-        let caption = attachment.caption.as_deref().filter(|text| !text.is_empty());
-        let mut preview_available = false;
-        if image {
-            let preview = Rect::new(x, panel.y - (224. + if caption.is_some() { 24. } else { 0. }) * s,
-                width, 216. * s);
-            let clip = crate::render::intersect(preview, viewport);
-            layer.clipped_rounded_rect(preview, 8. * s, color(0x101820), viewport);
-            if cached && let Ok((w, h)) = self.services.renderer.image_size(ctx, &path) {
-                preview_available = true;
-                let fit = (width / w as f32).min(preview.height / h as f32);
-                let image_rect = Rect::new(x + (width - w as f32 * fit) / 2.,
-                    preview.y + (preview.height - h as f32 * fit) / 2., w as f32 * fit, h as f32 * fit);
-                layer.images.push((path.clone(), image_rect, clip));
-                if clip.width > 0. && clip.height > 0. {
-                    self.root.legacy.hits.push(Hit { rect: clip, action: Action::Attachment(session.into(), entry.into(),
-                        attachment.file_name.clone(), true) });
-                }
-            } else {
-                let download = self.controller.downloads.get(&key);
-                let label = if cached { "Preview unavailable · save original" }
-                    else if download.is_some_and(|d| d.status.failure.is_some()) { "Preview unavailable" }
-                    else if download.is_some_and(|d| !d.status.done) { "Loading preview…" }
-                    else { "Download to preview" };
-                self.services.renderer.clipped_icon(ctx, layer, Icon::Image,
-                    Rect::new(x + width / 2. - 16. * s, preview.y + 74. * s, 32. * s, 32. * s), 0x687e8f, clip);
-                // Center a measured one-line placeholder, rather than an off-center Loading label.
-                let label_width = self.services.renderer.label_width(label, 12. * s, false).min(width - 16. * s);
-                self.services.renderer.ellipsized_label(layer, label,
-                    Rect::new(x + (width - label_width) / 2., preview.y + 118. * s, label_width, 20. * s),
-                    12. * s, color(0x9eaebd), false, false, clip);
-            }
-            if !cached && self.controller.content_authorized() && !self.controller.downloads.contains_key(&key)
-                && let Err(error) = self.controller.download(session, entry, 10_000_000) {
-                self.controller.notice = Some(error.to_string().into());
-            }
-        }
-        let mut display = AttachmentDisplay::new(attachment, cached, self.controller.downloads.get(&key),
-            exported.is_some(), self.services.transfers.saving_downloads.contains(&key), self.services.transfers.export_errors.get(&key).map(String::as_str));
-        if display.control == Control::View && !preview_available {
-            display.status = format!("{}Preview unavailable", attachment.size
-                .map(|n| format!("{} · ", format_bytes(n))).unwrap_or_default());
-            display.failed = true;
-        }
-        let control = if display.control == Control::View && !preview_available { Control::Save } else { display.control };
-        let action = match control {
-            Control::Download | Control::Retry if image && self.services.transfers.export_errors.contains_key(&key) =>
-                Some(Action::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone())),
-            Control::Download | Control::Retry | Control::View => Some(Action::Attachment(
-                session.into(), entry.into(), attachment.file_name.clone(), image)),
-            Control::Save => Some(Action::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone())),
-            Control::Open => Some(Action::UseSaved(session.into(), entry.into(), SavedAction::Open)),
-            Control::Cancel => Some(Action::CancelDownload(key.clone())),
-            Control::Busy => None,
-        };
-        let mut actions = vec![(control.label(), control.description(), action)];
-        if exported.is_some() {
-            if image && preview_available {
-                actions.push(("View", "View image", Some(Action::Attachment(session.into(), entry.into(),
-                    attachment.file_name.clone(), true))));
-            }
-            #[cfg(not(target_os = "android"))]
-            if !self.ui.mobile {
-                actions.push(("Show", "Show in folder", Some(Action::UseSaved(session.into(), entry.into(), SavedAction::Show))));
-                if attachment.file_name.to_ascii_lowercase().ends_with(".zip") {
-                    actions.push(("Extract", "Extract ZIP and open folder", Some(Action::UseSaved(session.into(), entry.into(), SavedAction::Extract))));
-                }
-            }
-        } else if image && preview_available && control == Control::View {
-            actions.push(("Save", "Save to Downloads", Some(Action::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone()))));
-        } else if image && preview_available && control == Control::Retry {
-            // Retrying an OS save must not hide or discard a perfectly good preview.
-            actions.push(("View", "View image", Some(Action::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true))));
-        }
-        layer.clipped_rounded_rect(panel, 10. * s, color(0x101820), viewport);
-        let target = if self.ui.mobile { 44. } else { 40. } * s;
-        // Tau1 uses text for these actions. Measure each complete label instead
-        // of reserving icon-sized slots or guessing widths from character counts.
-        let widths = actions.iter().map(|(label, _, _)|
-            (self.services.renderer.label_width(label, 14. * s, false).ceil() + 16. * s).max(target))
-            .collect::<Vec<_>>();
-        let actions_width = widths.iter().sum::<f32>();
-        let text = Rect::new(panel.x + 12. * s, panel.y + 12. * s,
-            (panel.width - actions_width - 20. * s).max(1.), 20. * s);
-        self.services.renderer.ellipsized_label(layer, &attachment.file_name, text, 13. * s, color(0xe5eaf0), true, true, viewport);
-        let status = Rect::new(text.x, panel.y + 34. * s, text.width, 18. * s);
-        self.services.renderer.ellipsized_label(layer, &display.status, status, 11. * s,
-            color(if display.failed { 0xffb4ab } else if exported.is_some() { 0x93cbb4 } else { 0x9eaebd }),
-            false, false, viewport);
-        if let Some(caption) = caption {
-            let area = Rect::new(x, panel.y - 24. * s, width, 20. * s);
-            self.services.renderer.ellipsized_label(layer, caption, area, 12. * s, color(0xb7c2ce), false, false, viewport);
-        }
-        if let Some(progress) = display.progress {
-            let track = Rect::new(panel.x + 12. * s, panel.y + panel.height - 7. * s, panel.width - 24. * s, 3. * s);
-            layer.clipped_rounded_rect(track, 1.5 * s, color(0x263947), viewport);
-            let fill = match progress {
-                Progress::Known(fraction) => Rect::new(track.x, track.y, track.width * fraction, track.height),
-                Progress::Unknown => Rect::new(track.x + track.width *
-                    (self.services.transfers.progress_clock.elapsed().as_secs_f32() * 0.45).fract() * 0.75,
-                    track.y, track.width * 0.25, track.height),
-            };
-            layer.clipped_rounded_rect(fill, 1.5 * s, color(0x67d4ff), viewport);
-        }
-        let mut left = panel.x + panel.width - actions_width - 4. * s;
-        for (index, ((label, description, action), width)) in actions.into_iter().zip(widths).enumerate() {
-            let r = Rect::new(left, panel.y + (60. * s - target) / 2., width, target);
-            left += width;
-            let clip = crate::render::intersect(r, viewport);
-            if clip.width <= 0. || clip.height <= 0. { continue; }
-            let enabled = action.is_some();
-            if enabled && layer.interaction.hover.is_some_and(|p| contains(clip, p)) {
-                layer.clipped_rounded_rect(r, target / 2., layer.control_color(r, color(0x18212b)), viewport);
-            }
-            let label_width = self.services.renderer.label_width(label, 14. * s, false);
-            let label_height = self.services.renderer.label_height(label, width, 14. * s, false);
-            self.services.renderer.ellipsized_label(layer, label,
-                Rect::new(r.x + (width - label_width) / 2., r.y + (target - label_height) / 2.,
-                    label_width.ceil() + 1., label_height),
-                14. * s, color(if enabled { 0x67d4ff } else { 0x687e8f }), false, false, viewport);
-            self.attachment_info(r, viewport, format!("{info_key}:action:{index}"), description, &attachment.file_name);
-            self.root.legacy.hits.push(Hit { rect: clip, action: action.unwrap_or(Action::Noop) });
-        }
+    pub(super) fn attachment_card(&mut self, _gpu: &impl RenderContext, layer: &mut Layer, session: &str, entry: &str, file: &ChatAttachment, surface: &'static str, rect: Rect, clip: Rect) {
+        self.with_ui(|root,cx| root.legacy.cards.paint(session,entry,file,surface,&mut ui::Frame { layer,bounds:rect,clip },cx));
     }
-    fn attachment_info(&mut self, rect: Rect, viewport: Rect, key: String, title: &str, detail: &str) {
-        let rect = crate::render::intersect(rect, viewport);
-        if rect.width > 0. && rect.height > 0. {
-            let info = Info::Attachment(key, title.into(), detail.into());
-            self.root.legacy.info_areas.push((rect, info));
-        }
 
-    }
+
 }
 
 

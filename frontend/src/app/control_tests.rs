@@ -45,15 +45,14 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         assert!(!rows.iter().any(|r| r.key == "pending:edit" || r.source.contains("Control requested")));
         let chat = app.controller.chats.get_mut("demo").unwrap();
         chat.local.pending.clear(); chat.feed.queue.requests.clear();
-        let stop = app
-            .root.legacy.hits
+        let stop = app.test_hits()
             .iter()
             .find(|h| matches!(h.action, Action::Abort))
             .unwrap()
             .rect;
         app.controller.notice = Some("Saved for later".into());
         frame(&mut app);
-        let notice = app.root.legacy.hits.iter().find(|h| matches!(h.action, Action::DismissNotice)).unwrap().rect;
+        let notice = app.test_hits().iter().find(|h| matches!(h.action, Action::DismissNotice)).unwrap().rect;
         let overlap = crate::render::intersect(stop, notice);
         if overlap.width > 0. && overlap.height > 0. {
             let point = Vec2::new(overlap.x + overlap.width / 2., overlap.y + overlap.height / 2.);
@@ -61,9 +60,10 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
                 app.controller.notice = Some("Saved for later".into());
                 frame(&mut app);
                 app.press(42, point, touch);
-                assert!(app.controller.notice.is_none());
+                assert!(app.controller.notice.is_some(), "Notifications activate on release, not press");
                 frame(&mut app);
                 app.release(42, point);
+                assert!(app.controller.notice.is_none());
                 assert!(app.controller.selected().unwrap().local.pending.is_empty(), "dismiss never requests Stop");
             }
         }
@@ -86,14 +86,14 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         queue.paused = true;
         queue.run_id = Some("held-run".into());
         frame(&mut app);
-        let resume = app.root.legacy.hits.iter().find(|h| matches!(&h.action,
+        let resume = app.test_hits().iter().find(|h| matches!(&h.action,
             Action::Queue(QueueOperation::Resume { run_id }) if run_id.as_deref() == Some("held-run"))).unwrap().rect;
         assert_eq!(
             (resume.x, resume.y, resume.width, resume.height),
             (stop.x, stop.y, stop.width, stop.height),
             "play uses the exact stop hit target"
         );
-        assert!(!app.root.legacy.hits.iter().any(|h| matches!(h.action, Action::Abort)));
+        assert!(!app.test_hits().iter().any(|h| matches!(h.action, Action::Abort)));
         assert_eq!(
             app.root.legacy.transcript.height, viewport_height,
             "pausing must not add a row under the editor"
@@ -111,7 +111,7 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
             .queue
             .paused = false;
         frame(&mut app);
-        assert!(!app.root.legacy.hits.iter().any(|h| matches!(
+        assert!(!app.test_hits().iter().any(|h| matches!(
             h.action,
             Action::Abort | Action::Queue(QueueOperation::Resume { .. })
         )));
@@ -127,7 +127,7 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         app.controller.epoch = None;
         frame(&mut app);
         assert!(
-            !app.root.legacy.hits
+            !app.test_hits()
                 .iter()
                 .any(|h| matches!(h.action, Action::Queue(QueueOperation::Resume { .. }))),
             "offline play is visible but not clickable"
@@ -150,8 +150,7 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
             detail: None,
         });
         frame(&mut app);
-        let cancel = app
-            .root.legacy.hits
+        let cancel = app.test_hits()
             .iter()
             .find(|h| {
                 matches!(&h.action,
@@ -159,8 +158,7 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
             })
             .unwrap()
             .rect;
-        let editor = app
-            .root.legacy.hits
+        let editor = app.test_hits()
             .iter()
             .find(|h| matches!(h.action, Action::Focus(None)))
             .unwrap()
@@ -172,7 +170,7 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
             "only pending control occupies a composer row"
         );
         assert!(
-            app.root.legacy.hits
+            app.test_hits()
                 .iter()
                 .any(|h| matches!(h.action, Action::Queue(QueueOperation::Resume { .. })))
         );

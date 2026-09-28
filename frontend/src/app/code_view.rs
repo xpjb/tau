@@ -78,7 +78,7 @@ impl App {
             Action::Files => {
                 if self.root.legacy.code.is_some() { self.close_code(); return Ok(()); }
                 let Some(session)=self.controller.account.selected.clone() else { return Ok(()); };
-                self.save()?; self.cancel_pointer(); self.root.legacy.focus=None; self.root.legacy.show_attachments=false; self.root.legacy.show_chats=false;
+                self.save()?; self.cancel_pointer(); self.root.legacy.focus=None; self.root.attachments.show=false; self.root.legacy.show_chats=false;
                 self.root.legacy.code=Some(View::new(self,session)); self.code_request();
             }
             Action::FileClose => { self.close_code(); }

@@ -60,8 +60,8 @@ impl Harness {
     fn assert_target_visible(&self, entry: &str) {
         assert_eq!(self.app.controller.account.selected.as_deref(), Some("demo"));
         assert!(self.app.root.legacy.navigation.download.is_none());
-        let rect = self.app.root.legacy.hits.iter().find(|h| matches!(&h.action, Action::UseSaved(session, id, SavedAction::Open)
-            if session == "demo" && id == entry)).expect("Target download's Open control is on screen").rect;
+        let rect = self.app.root.legacy.cards.cards.values().flat_map(|c| c.controls.items.iter()).find_map(|(_, b, choice)|
+            matches!(choice, ui::CardChoice::UseSaved(session, id, SavedAction::Open) if session == "demo" && id == entry).then_some(b.control.rect).flatten()).expect("Target download's Open control is on screen");
         assert!(rect.y >= self.app.root.legacy.transcript.y && rect.y + rect.height <= self.app.root.legacy.transcript.y + self.app.root.legacy.transcript.height);
         assert!(!self.app.controller.chats["demo"].local.position.follow);
         assert!(self.app.services.platform.is_empty(), "Navigation never opens/exports/re-downloads the file");
@@ -82,7 +82,7 @@ fn download_notice_selects_current_topic_chat_and_exact_widget_on_desktop_and_ph
         // Membership is resolved on click, not captured when the save finishes.
         h.app.controller.account.projects.push(Project { id: "moved".into(), name: "Moved files".into(), prompt: String::new(), revision: 1 });
         h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().project_id = "moved".into();
-        h.app.root.legacy.show_attachments = true;
+        h.app.root.attachments.show = true;
         h.app.apply(Action::Delete("two".into())).unwrap(); h.frame();
         assert!(h.app.root.notice.body.rect.is_none(),
             "A download notification must not navigate away from an open form");
@@ -91,7 +91,7 @@ fn download_notice_selects_current_topic_chat_and_exact_widget_on_desktop_and_ph
         h.click_notice(false);
         h.assert_target_visible("entry-20");
         assert_eq!(h.app.controller.account.selected_project, "moved");
-        assert!(!h.app.root.legacy.show_chats && !h.app.root.legacy.show_attachments && h.app.root.dialog.is_none() && h.app.root.viewer.is_none());
+        assert!(!h.app.root.legacy.show_chats && !h.app.root.attachments.show && h.app.root.dialog.is_none() && h.app.root.viewer.is_none());
         assert!(h.app.root.legacy.focus.is_none(), "Locating a widget must not pop up the keyboard");
         let saved = h.app.controller.store.load_chat(&h.app.controller.identity, "two").unwrap();
         assert_eq!(saved.draft, "Keep my other chat's draft");
@@ -154,7 +154,7 @@ fn dismiss_replacement_failure_and_stale_destinations_do_not_navigate() {
     assert!(h.app.controller.notice.is_none());
     h.complete("entry-20");
     h.app.controller.notice = Some("An unrelated error".into()); h.frame();
-    assert!(!h.app.root.legacy.hits.iter().any(|hit| matches!(hit.action, Action::OpenDownloadNotice(_))));
+    assert!(!h.app.test_hits().iter().any(|hit| matches!(hit.action, Action::OpenDownloadNotice(_))));
     h.click_notice(true);
     h.app.begin_save("demo", "entry-20", h._root.path().join("cached"), "same-name.zip".into());
     h.app.services.platform.clear();

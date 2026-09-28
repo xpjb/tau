@@ -73,6 +73,15 @@ impl App {
                     }
                     Ok(())
                 }
+                ui::Request::Select(id) => self.navigate_chat(&id),
+                ui::Request::Project(id) => self.navigate_project(&id),
+                ui::Request::NewChat => self.save().and_then(|()| self.controller.new_chat()).map(|()| {self.root.legacy.show_chats=false;self.root.legacy.focus=Some(None);self.sync_navigation();}),
+                ui::Request::Attachments(show) => {
+                    self.cancel_pointer(); self.close_code(); self.save()?;
+                    self.root.legacy.focus = None; self.root.legacy.show_chats = false; self.root.attachments.show = show;
+                    if !show { self.root.attachments.hide(); }
+                    Ok(())
+                }
                 ui::Request::Tip { info, rect } => { self.root.tooltips.pin(info,rect); Ok(()) }
                 ui::Request::Download(target) => {
                     self.controller.notice = None;
@@ -101,6 +110,8 @@ impl App {
             // One failed request must not drop the remainder of a taken queue.
             if let Err(error) = result { if failure.is_none() { failure = Some(error); } }
         }
+        self.ui.menu_chat = self.root.menu.as_ref().and_then(|m|m.chat.clone());
+        self.ui.menu_section = self.root.menu.as_ref().and_then(|m|m.section.clone());
         if structural { self.code_tick(0.); }
         failure.map_or(Ok(()), Err)
     }

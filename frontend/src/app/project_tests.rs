@@ -19,7 +19,7 @@ impl Harness {
     }
     fn frame(&mut self) { self.app.tick(0.); self.app.frame(&self.ctx,self.ctx.view()); }
     fn click(&mut self, pred: impl Fn(&Action)->bool) {
-        let r = self.app.root.legacy.hits.iter().find(|h| pred(&h.action)).expect("visible action").rect;
+        let r = self.app.test_hits().iter().find(|h| pred(&h.action)).expect("visible action").rect;
         let p = Vec2::new(r.x+r.width/2.,r.y+r.height/2.);
         self.app.press(1,p,self.app.ui.mobile); self.app.release(1,p); self.frame();
     }
@@ -48,36 +48,36 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
             for y in 140..175 {
                 assert_eq!(at(y), at(130), "tab strip painted over the separator at y={y}");
             }
-            assert!(h.app.root.legacy.project_areas.iter().all(|(r,_)| r.x+r.width<=299.));
+            assert!(h.app.test_projects().iter().all(|(r,_)| r.x+r.width<=299.));
         }
         assert!(h.app.controller.project_unread("p24"));
-        assert_eq!(h.app.root.legacy.chat_areas.iter().filter(|(r,_)| contains(h.app.root.legacy.list_rect, Vec2::new(r.x+1.,r.y+1.))).count(),2,"Only General's chats appear");
-        assert!(!h.app.root.legacy.hits.iter().any(|hit| matches!(hit.action,Action::NewProject)),"The plus belongs at the scrolling end");
+        assert_eq!(h.app.test_chats().iter().filter(|(r,_)| contains(h.app.root.sidebar.scroll.rect, Vec2::new(r.x+1.,r.y+1.))).count(),2,"Only General's chats appear");
+        assert!(!h.app.test_hits().iter().any(|hit| matches!(hit.action,Action::NewProject)),"The plus belongs at the scrolling end");
         let point = Vec2::new(100.,160.);
         h.app.wheel(300.,false,point);
-        assert_eq!(h.app.root.legacy.wheel.as_ref().unwrap().lane,Lane::Projects);
-        h.app.root.legacy.wheel.as_mut().unwrap().last = Instant::now()-std::time::Duration::from_secs(1);
-        h.frame(); assert!(h.app.root.legacy.project_scroll>0.); assert_eq!(h.app.root.legacy.list_scroll,0.);
-        h.app.wheel(100.,true,point); assert_eq!(h.app.root.legacy.wheel.as_ref().unwrap().lane,Lane::Projects);
+        assert!(h.app.root.sidebar.projects.scroll.wheel.is_some());
+        h.app.root.sidebar.projects.scroll.wheel.as_mut().unwrap().1 = Instant::now()-std::time::Duration::from_secs(1);
+        h.frame(); assert!(h.app.root.sidebar.projects.scroll.value>0.); assert_eq!(h.app.root.sidebar.scroll.value,0.);
+        h.app.wheel(100.,true,point); assert!(h.app.root.sidebar.projects.scroll.wheel.is_some());
         h.app.press(4,point,true); h.app.motion(4,Vec2::new(35.,161.));
-        assert!(h.app.root.legacy.pointer.as_ref().unwrap().dragged); h.app.release(4,Vec2::new(35.,161.));
+        assert!(h.app.ui.capture.as_ref().unwrap().dragged); h.app.release(4,Vec2::new(35.,161.));
         assert!(h.app.root.menu.is_none(),"Swiping is not a long press or a tab selection");
-        h.app.root.legacy.project_velocity=0.; h.app.apply(Action::SelectProject("p24".into())).unwrap(); h.frame();
+        h.app.root.sidebar.projects.scroll.velocity=0.; h.app.apply(Action::SelectProject("p24".into())).unwrap(); h.frame();
         assert_eq!(h.app.controller.account.selected.as_deref(),if mobile { None } else { Some("three") },"Only desktop resumes the last chat");
         assert_eq!(h.app.controller.project_unread("p24"), mobile, "Only a visible chat is read");
         assert_eq!(h.app.root.legacy.show_chats, mobile, "Mobile topic switches keep the list open");
-        assert_eq!(h.app.root.legacy.chat_areas.iter().filter(|(r,_)| contains(h.app.root.legacy.list_rect,Vec2::new(r.x+1.,r.y+1.))).map(|(_,id)| id.as_str()).collect::<Vec<_>>(),vec!["three"]);
-        assert!(h.app.root.legacy.project_areas.iter().any(|(_,id)| id=="p24"),"Selected tab auto-reveals");
+        assert_eq!(h.app.test_chats().iter().filter(|(r,_)| contains(h.app.root.sidebar.scroll.rect,Vec2::new(r.x+1.,r.y+1.))).map(|(_,id)| id.as_str()).collect::<Vec<_>>(),vec!["three"]);
+        assert!(h.app.test_projects().iter().any(|(_,id)| id=="p24"),"Selected tab auto-reveals");
         h.click(|a| matches!(a,Action::Select(id) if id=="three"));
         assert!(!h.app.controller.project_unread("p24"));
         h.app.apply(Action::SelectProject("general".into())).unwrap(); h.frame();
         assert_eq!(h.app.controller.account.selected.as_deref(),if mobile { None } else { Some("demo") });
         h.app.controller.select("demo").unwrap(); h.app.tick(0.); h.app.root.legacy.show_chats=mobile; h.frame();
-        let target = h.app.root.legacy.chat_areas.iter().find(|(_,id)| id=="two").unwrap().0;
+        let target = h.app.test_chats().iter().find(|(_,id)| id=="two").unwrap().0;
         let point=Vec2::new(target.x+60.,target.y+20.);
         if mobile {
-            h.app.press(2,point,true); h.app.root.legacy.pointer.as_mut().unwrap().started=Instant::now()-std::time::Duration::from_millis(500);
-            h.frame(); assert!(h.app.root.legacy.pointer.is_none(),"Hold opens before lift");
+            h.app.press(2,point,true); h.app.ui.capture.as_mut().unwrap().started=Instant::now()-std::time::Duration::from_millis(500);
+            h.frame(); assert!(h.app.ui.capture.is_none(),"Hold opens before lift");
             h.app.release(2,point);
         } else { h.app.context_at(point); h.frame(); }
         assert_eq!(h.app.controller.account.selected.as_deref(),Some("demo"));
@@ -90,15 +90,15 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
         h.frame();
         assert!(h.app.root.menu.as_ref().unwrap().scroll.value>0.);
         assert!(h.app.root.menu.as_ref().unwrap().button(|a| matches!(a,ui::MenuChoice::MoveChat(chat,project) if chat=="two" && project=="p24")).is_some_and(|r| r.height > 0.),"Every topic is reachable in the clipped submenu");
-        assert!(h.app.root.legacy.hits.iter().all(|hit| hit.rect.y>=0. && hit.rect.y+hit.rect.height<=size.1 as f32));
+        assert!(h.app.test_hits().iter().all(|hit| hit.rect.y>=0. && hit.rect.y+hit.rect.height<=size.1 as f32));
         h.app.key("ArrowLeft",false,false); h.frame(); assert!(h.app.root.menu.as_ref().unwrap().parent.is_none());
         h.app.key("Escape",false,false); h.frame();
-        let general_tab=h.app.root.legacy.project_areas.iter().find(|(_,id)| id=="general").unwrap().0;
+        let general_tab=h.app.test_projects().iter().find(|(_,id)| id=="general").unwrap().0;
         let point=Vec2::new(general_tab.x+20.,general_tab.y+20.);
         h.app.context_at(point); h.frame();
         assert_eq!(h.app.root.menu.as_ref().unwrap().options.len(),1,"General is permanent but its prompt is editable");
         h.app.key("Escape",false,false);
-        h.app.root.legacy.project_scroll=h.app.root.legacy.max_project_scroll; h.frame();
+        h.app.root.sidebar.projects.scroll.value=h.app.root.sidebar.projects.scroll.max; h.frame();
         h.click(|a| matches!(a,Action::NewProject));
         assert_eq!(h.app.root.dialog.as_ref().unwrap().topic_key().unwrap().0, "new");
         h.app.input("gypqj New work"); // descenders in the compact Name editor
@@ -117,7 +117,7 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
         h.click_dialog("Cancel");
         assert_eq!(h.app.controller.account.projects.len(),25);
         assert_eq!(h.app.controller.account.sessions.len(),3,"Cancellation changes nothing");
-        h.app.root.legacy.project_scroll=0.; h.app.apply(Action::SelectProject("general".into())).unwrap(); h.frame();
+        h.app.root.sidebar.projects.scroll.value=0.; h.app.apply(Action::SelectProject("general".into())).unwrap(); h.frame();
         h.dump(if mobile {"projects-phone-tabs.png"} else {"projects-desktop-tabs.png"});
     }
 }
@@ -132,9 +132,9 @@ fn topics_restore_the_last_open_chat_across_switches_restart_and_membership_chan
         older.updated_at_ms = 2;
         h.app.controller.account.sessions.push(older);
         h.frame();
-        let general = h.app.root.legacy.project_areas.iter().find(|(_, id)| id == "general").unwrap().0;
+        let general = h.app.test_projects().iter().find(|(_, id)| id == "general").unwrap().0;
         assert_eq!(general.height, 34.);
-        assert_eq!(h.app.root.legacy.list_rect.y, general.y + general.height + 8.);
+        assert_eq!(h.app.root.sidebar.scroll.rect.y, general.y + general.height + 8.);
 
         // Upgrading an old account with only a global selected chat seeds its
         // General resume target on the first topic switch.
@@ -196,8 +196,8 @@ fn topic_tabs_follow_contained_chat_activity_on_desktop_and_mobile() {
         }
         h.app.controller.message(ServerMessage::Sessions { sessions }).unwrap();
         h.frame();
-        fn tabs(h: &Harness) -> Vec<&str> {
-            h.app.root.legacy.project_areas.iter().map(|(_, id)| id.as_str()).collect()
+        fn tabs(h: &Harness) -> Vec<String> {
+            h.app.test_projects().iter().map(|(_, id)| id.clone()).collect()
         }
         assert_eq!(tabs(&h), ["general", "p2", "p1"]);
         h.app.controller.select("two").unwrap();
@@ -227,8 +227,8 @@ fn selected_topic_stays_visible_when_its_chat_bumps_from_the_far_right() {
         h.app.controller.message(ServerMessage::Sessions { sessions }).unwrap();
         h.app.apply(Action::SelectProject("p24".into())).unwrap();
         h.frame();
-        assert!(h.app.root.legacy.project_scroll > 0.);
-        assert!(h.app.root.legacy.project_areas.iter().any(|(_, id)| id == "p24"));
+        assert!(h.app.root.sidebar.projects.scroll.value > 0.);
+        assert!(h.app.test_projects().iter().any(|(_, id)| id == "p24"));
         h.app.apply(Action::Select("three".into())).unwrap();
         h.app.tick(0.);
         if mobile { h.app.apply(Action::Back).unwrap(); }
@@ -236,7 +236,7 @@ fn selected_topic_stays_visible_when_its_chat_bumps_from_the_far_right() {
         h.app.controller.draft("bump this topic".into()).unwrap();
         h.frame();
         assert_eq!(h.app.controller.account.projects[1].id, "p24");
-        assert!(h.app.root.legacy.project_areas.iter().any(|(_, id)| id == "p24"), "the selected tab remains visible after moving left (mobile={mobile}, scroll={}, tabs={:?})", h.app.root.legacy.project_scroll, h.app.root.legacy.project_areas.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>());
+        assert!(h.app.test_projects().iter().any(|(_, id)| id == "p24"), "the selected tab remains visible after moving left (mobile={mobile}, scroll={}, tabs={:?})", h.app.root.sidebar.projects.scroll.value, h.app.test_projects().iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>());
     }
 }
 
@@ -245,21 +245,21 @@ fn chat_activity_updates_the_visible_list_on_desktop_and_mobile() {
     for (size, mobile) in [((1000, 800), false), ((360, 720), true)] {
         let mut h = Harness::new(size, mobile);
         h.frame();
-        assert_eq!(h.app.root.legacy.chat_areas[0].1, "demo");
+        assert_eq!(h.app.test_chats()[0].1, "demo");
         h.click(|a| matches!(a, Action::Select(id) if id == "two"));
         h.app.input("typing in the older chat");
         if mobile { h.app.apply(Action::Back).unwrap(); }
         h.frame();
-        assert_eq!(h.app.root.legacy.chat_areas[0].1, "two");
+        assert_eq!(h.app.test_chats()[0].1, "two");
         h.click(|a| matches!(a, Action::Select(id) if id == "demo"));
         h.app.key("ArrowRight", false, false);
         if mobile { h.app.apply(Action::Back).unwrap(); }
         h.frame();
-        assert_eq!(h.app.root.legacy.chat_areas[0].1, "two", "selection and caret movement do not bump");
+        assert_eq!(h.app.test_chats()[0].1, "two", "selection and caret movement do not bump");
         h.click(|a| matches!(a, Action::New));
         let created = h.app.controller.account.selected.clone().unwrap();
         if mobile { h.app.apply(Action::Back).unwrap(); }
         h.frame();
-        assert_eq!(h.app.root.legacy.chat_areas[0].1, created, "new chat appears at the top immediately, even offline");
+        assert_eq!(h.app.test_chats()[0].1, created, "new chat appears at the top immediately, even offline");
     }
 }

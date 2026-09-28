@@ -229,13 +229,17 @@ pub(in crate::app) struct Controls<A> { pub id: Id, pub items: Vec<(String, Butt
 impl<A: Clone + std::fmt::Debug> Controls<A> {
     pub fn new(id: Id) -> Self { Self { id, items: vec![] } }
     pub fn begin(&mut self) { for (_, b, _) in &mut self.items { b.control.rect = None; } }
-    pub fn finish(&mut self) { self.items.retain(|(_, b, _)| b.control.rect.is_some()); }
+    pub fn finish(&mut self, cx: &mut Context<'_>) { self.items.retain(|(_, b, _)| { if b.control.rect.is_some() { true } else { cx.ui.detach_target(b.control.target); false } }); }
     pub fn place(&mut self, choice: A, rect: Rect, clip: Rect, rounded: bool) -> &mut Button {
-        let key = format!("{choice:?}");
+        self.place_key("", choice, rect, clip, rounded)
+    }
+    pub fn place_key(&mut self, slot: &str, choice: A, rect: Rect, clip: Rect, rounded: bool) -> &mut Button {
+        let key = format!("{slot}:{choice:?}");
         let index = self.items.iter().position(|(k, _, _)| k == &key).unwrap_or_else(|| {
             self.items.push((key, Button::new(self.id, ""), choice)); self.items.len() - 1
         });
-        let button = &mut self.items[index].1;
+        let item = self.items.remove(index); self.items.push(item);
+        let button = &mut self.items.last_mut().unwrap().1;
         button.control.rect = Some(rect); button.control.clip = clip; button.control.rounded = rounded;
         button
     }
@@ -246,4 +250,36 @@ impl<A: Clone + std::fmt::Debug> Controls<A> {
         (false, None)
     }
     pub fn contains(&self, point: Vec2) -> bool { self.items.iter().any(|(_, b, _)| b.control.contains(point)) }
+}
+
+impl<A: Clone + std::fmt::Debug> Controls<A> {
+    pub fn context(&self, event: &Event<'_>, cx: &Context<'_>) -> Option<(A,Vec2)> {
+        let point = match *event {
+            Event::Context(point) => point,
+            Event::Tick(_) | Event::Up { .. } => {
+                let capture = cx.ui.capture?;
+                if !capture.touch || capture.dragged || capture.started.elapsed().as_millis() < 450 { return None; }
+                let (_,button,choice) = self.items.iter().find(|(_,b,_)| b.control.target == capture.target && b.control.contains(capture.point))?;
+                let _ = button;
+                return Some((choice.clone(),capture.point));
+            }
+            _ => return None,
+        };
+        self.items.iter().rev().find(|(_,b,_)| b.control.contains(point)).map(|(_,_,a)|(a.clone(),point))
+    }
+    pub fn hints(&self) -> impl Iterator<Item=(Rect,&crate::app::Info)> {
+        self.items.iter().filter_map(|(_,b,_)| b.control.rect.zip(b.control.info.as_ref()).map(|(r,i)|(crate::render::intersect(r,b.control.clip),i))).filter(|(r,_)| r.width > 0. && r.height > 0.)
+    }
+}
+pub(in crate::app) fn button<A:Clone+std::fmt::Debug>(renderer:&mut Renderer,layer:&mut Layer,controls:&mut Controls<A>,rect:Rect,label:&str,choice:A,scale:f32,primary:bool){
+    paint_button(renderer,layer,rect,label,scale,primary,false);
+    let b=controls.place(choice,rect,rect,true);b.label=label.into();b.primary=primary;
+}
+pub(in crate::app) fn icon_button<A:Clone+std::fmt::Debug>(cx:&mut Context<'_>,controls:&mut Controls<A>,layer:&mut Layer,r:Rect,icon:crate::icons::Icon,size:f32,choice:A,primary:bool,enabled:bool){
+    use crate::icons::Icon;
+    let hovered=layer.interaction.hover.is_some_and(|p|contains(r,p));let tonal=matches!(icon,Icon::Stop|Icon::Play|Icon::Attachments);
+    if primary||tonal||enabled&&hovered {layer.rounded_rect(r,r.height/2.,layer.control_color(r,color(if !enabled{0x303942}else if primary{0x67d4ff}else if tonal{0x18212b}else{0x24303b})));}
+    let pixels=size*cx.ui.scale;
+    cx.services.renderer.icon(&cx.services.gpu,layer,icon,Rect::new(r.x+(r.width-pixels)/2.,r.y+(r.height-pixels)/2.,pixels,pixels),if !enabled{0x68727e}else if primary{0x003546}else if matches!(icon,Icon::Attach){0xb7c2ce}else{0x67d4ff});
+    controls.place(choice,r,r,true).control.enabled=enabled;
 }

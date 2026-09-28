@@ -9,7 +9,7 @@ use std::time::Instant;
 pub(in crate::app) struct ScrollState {
     pub target: Target, pub value: f32, pub max: f32, pub velocity: f32,
     pub rect: Rect, pub horizontal: bool,
-    wheel: Option<(f32, Instant)>, candidate: Option<Capture>, drag: Option<f32>,
+    pub(in crate::app) wheel: Option<(f32, Instant)>, candidate: Option<Capture>, drag: Option<f32>,
 }
 impl ScrollState {
     pub fn new(scope: Id, horizontal: bool) -> Self {

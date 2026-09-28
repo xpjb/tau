@@ -142,3 +142,22 @@ impl Widget for Menu {
         self.paint(&mut Frame {layer:frame.layer,bounds:rect,clip:frame.clip},cx,true);
     }
 }
+
+impl Context<'_> {
+    pub fn project_menu(&mut self,id:&str,point:Vec2){
+        let mut options=vec![];
+        if id!=GENERAL_PROJECT_ID {options.push(("Rename…".into(),Choice::RenameProject(id.into())));}
+        options.push(("Edit topic prompt…".into(),Choice::ProjectPrompt(id.into())));
+        if id!=GENERAL_PROJECT_ID {options.push(("Delete topic…".into(),Choice::DeleteProject(id.into())));}
+        let menu=Menu::new(point,None,None,options,self);self.ui.requests.push_back(Request::Menu(Box::new(menu)));
+    }
+    pub fn chat_menu(&mut self,id:&str,point:Vec2){
+        let id=id.to_owned();
+        let options=if self.model.account.missing_chats.contains(&id){vec![("Copy draft to a new chat (not sent)".into(),Choice::CopyRecoveredDraft(id.clone())),("Forget this local recovery…".into(),Choice::ForgetRecovered(id.clone()))]}
+        else {vec![("Model…".into(),Choice::AgentSetting(id.clone(),"model".into())),("Thinking…".into(),Choice::AgentSetting(id.clone(),"thinking".into())),
+            ("Compact context…".into(),Choice::AgentSetting(id.clone(),"compact".into())),("Codex priority…".into(),Choice::AgentSetting(id.clone(),"fast".into())),
+            ("Move to topic  ›".into(),Choice::MoveMenu(id.clone())),("Rename…".into(),Choice::Rename(id.clone())),("Review restored history…".into(),Choice::ReviewRestore(id.clone())),
+            ("Clone chat".into(),Choice::Clone(id.clone())),("Release idle runtime".into(),Choice::Sleep(id.clone())),("Delete chat…".into(),Choice::Delete(id.clone()))]};
+        let menu=Menu::new(point,None,Some(id),options,self);self.ui.requests.push_back(Request::Menu(Box::new(menu)));
+    }
+}

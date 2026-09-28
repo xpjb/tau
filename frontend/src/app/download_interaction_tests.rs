@@ -1,7 +1,7 @@
 //! Exercise the real hit dispatch and save lifecycle without invoking OS apps or a daemon.
 use super::*;
 use tau_protocol::blocks::{BlockHeader, BlockKind};
-use super::download_render_tests::{Case, cases, install, controls, panel, save};
+use super::download_render_tests::{Case, cases, install, controls, panel, save, hints};
 use chad::{Config, HeadlessCtx};
 use std::{sync::Arc, time::Duration};
 
@@ -61,11 +61,11 @@ fn cached_large_file_saves_once_retries_failure_and_survives_restart_then_missin
     paint(&mut app, &ctx, &case, &file); tap(&mut app, 0, false);
     assert!(matches!(&app.services.platform[..], [PlatformAction::SaveDownload { key:k, source, .. }] if k==&key && source==&path));
     paint(&mut app, &ctx, &case, &file);
-    assert!(matches!(controls(&app)[0].action, Action::Noop));
+    assert!(matches!(controls(&app)[0].action, ui::CardChoice::Noop));
     tap(&mut app,0,false); assert_eq!(app.services.platform.len(),1,"saving cannot queue a duplicate export");
     app.services.platform.clear(); app.complete_save(&key, Err("Disk full".into()));
     paint(&mut app, &ctx, &case, &file);
-    assert!(app.root.legacy.info_areas.iter().any(|(_,info)| matches!(info, Info::Attachment(_,title,_) if title=="Retry")));
+    assert!(hints(&app).iter().any(|(_,info)| matches!(info, Info::Attachment(_,title,_) if title=="Retry")));
     tap(&mut app,0,false);
     assert_eq!(app.services.platform.len(),1);
     let saved = crate::downloads::save_into(&root.path().join("user-downloads"), &path, &file.file_name).unwrap();
@@ -77,13 +77,13 @@ fn cached_large_file_saves_once_retries_failure_and_survives_restart_then_missin
     let mut app = App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),false).unwrap();
     app.back(); crate::demo::populate(&mut app.controller).unwrap(); app.resize(ctx.size(),1.,Vec2::new(0.,0.));
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,Action::UseSaved(_,_,SavedAction::Open)),"saved copy survives restart");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::UseSaved(_,_,SavedAction::Open)),"saved copy survives restart");
     std::fs::remove_file(&saved.reference).unwrap();
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,Action::SaveAttachment(..)),"missing copy can be saved again from cache");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::SaveAttachment(..)),"missing copy can be saved again from cache");
     assert!(app.controller.saved_download("demo",&case.id).is_none());
     std::fs::remove_file(path).unwrap(); paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,Action::Attachment(_,_,_,false)),"evicted cache returns to Download");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Attachment(_,_,_,false)),"evicted cache returns to Download");
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn image_view_save_and_touch_labels_do_not_confuse_actions_or_trigger_on_long_pr
     let view=controls(&app)[0].rect;
     let point=Vec2::new(view.x+22.,view.y+22.);
     app.press(1,point,true);
-    app.root.legacy.pointer.as_mut().unwrap().started=Instant::now()-Duration::from_millis(500);
+    app.ui.capture.as_mut().unwrap().started=Instant::now()-Duration::from_millis(500);
     app.tick(0.); app.release(1,point);
     assert!(app.root.tooltips.info.pinned);
     assert!(matches!(&app.root.tooltips.target,Info::Attachment(_,title,_) if title=="View image"));
@@ -110,8 +110,8 @@ fn image_view_save_and_touch_labels_do_not_confuse_actions_or_trigger_on_long_pr
     let key=Controller::download_key("demo",&case.id);
     app.services.platform.clear(); app.complete_save(&key,Err("Permission denied".into()));
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,Action::SaveAttachment(..)),"retry resumes saving, not just viewing");
-    assert!(matches!(controls(&app)[1].action,Action::Attachment(_,_,_,true)),"save failure keeps View");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::SaveAttachment(..)),"retry resumes saving, not just viewing");
+    assert!(matches!(controls(&app)[1].action,ui::CardChoice::Attachment(_,_,_,true)),"save failure keeps View");
     tap(&mut app,0,true); assert!(matches!(&app.services.platform[..],[PlatformAction::SaveDownload {..}]));
 }
 
@@ -129,17 +129,17 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
         app.controller.account.sessions[0].title="Inline file downloads".into();
         app.root.legacy.show_chats=false; app.tick(0.); app.frame(&ctx,ctx.view());
         save(&ctx,&format!("context-{name}-chat"));
-        app.root.legacy.show_attachments=true; app.frame(&ctx,ctx.view());
+        app.root.attachments.show=true; app.frame(&ctx,ctx.view());
         save(&ctx,&format!("context-{name}-attachments"));
-        let (rect,info)=app.root.legacy.info_areas.iter().find(|(_,info)| matches!(info,Info::Attachment(key,title,_)
+        let (rect,info)=hints(&app).iter().find(|(_,info)| matches!(info,Info::Attachment(key,title,_)
             if key.starts_with("attachments:") && title=="Save to Downloads")).unwrap().clone();
         app.root.tooltips.target=info; app.root.tooltips.info.region=rect; app.root.tooltips.info.pinned=true; app.root.tooltips.info.progress=1.;
         app.frame(&ctx,ctx.view());
         assert_eq!(app.root.tooltips.info.region,rect,"duplicate file in chat must not steal sidebar tooltip anchor");
         save(&ctx,&format!("context-{name}-tooltip"));
-        assert!(app.root.legacy.info_areas.iter().all(|(_,info)| !matches!(info,Info::Attachment(key,_,_)
+        assert!(hints(&app).iter().all(|(_,info)| !matches!(info,Info::Attachment(key,_,_)
             if key.ends_with(":details") || key.ends_with(":caption"))), "Card text must not repeat itself in a tooltip");
-        app.root.legacy.show_attachments=false; app.frame(&ctx,ctx.view());
+        app.root.attachments.show=false; app.frame(&ctx,ctx.view());
         assert!(!app.root.tooltips.info.pinned,"hidden attachment pane must dismiss its tooltip");
     }
 }
@@ -168,12 +168,12 @@ fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
         case.caption = Some("This caption stays on the card".into());
         let file = install(&mut app, &case);
         paint(&mut app, &ctx, &case, &file);
-        assert!(app.root.legacy.info_areas.iter().all(|(_, info)| matches!(info, Info::Attachment(key, ..) if key.contains(":action:"))));
-        assert!(!app.root.legacy.hits.iter().any(|hit| matches!(hit.action, Action::Info(Info::Attachment(..)))));
+        assert!(hints(&app).iter().all(|(_, info)| matches!(info, Info::Attachment(key, ..) if key.contains(":action:"))));
+        assert!(!app.test_hits().iter().any(|hit| matches!(hit.action, Action::Info(Info::Attachment(..)))));
         let card = attachments::control_panel(Rect::new(12., 44., 336., attachments::card_height(&file)), 1.);
         for point in [Vec2::new(card.x + 16., card.y + 20.), Vec2::new(card.x + 16., card.y + 42.),
             Vec2::new(card.x + 16., card.y - 14.)] {
-            assert!(!app.root.legacy.info_areas.iter().any(|(r, _)| contains(*r, point)));
+            assert!(!hints(&app).iter().any(|(r, _)| contains(*r, point)));
             app.hover(Some(point)); app.tick(0.);
             app.press(3, point, mobile); app.release(3, point);
             assert!(!app.root.tooltips.info.pinned && app.root.tooltips.info.progress == 0.);

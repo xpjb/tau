@@ -297,7 +297,7 @@ fn saved_actions_and_restore_warning_fit_mobile_and_preserve_intents() {
             app.apply(action).unwrap();app.tick(0.);app.frame(&ctx,ctx.view());
             let rects = if let Some(dialog) = &app.root.dialog {
                 dialog.buttons().into_iter().map(|(_, rect)| rect).chain(dialog.fields().into_iter().filter_map(|field| field.control.rect)).collect::<Vec<_>>()
-            } else { app.root.legacy.hits.iter().map(|hit| hit.rect).collect() };
+            } else { app.test_hits().iter().map(|hit| hit.rect).collect() };
             for rect in rects { assert!(rect.y >= 0. && rect.y + rect.height <= size.1 as f32, "Unreachable modal action at {rect:?}"); }
         }
         let ui::Dialog::Operation(modal)=app.root.dialog.as_ref().unwrap() else { panic!("operation dialog"); };let width=(size.0 as f32-24.).min(620.)-40.;assert!(app.services.renderer.label_height(&modal.title,width,17.,true)>60.,"Fixture must exercise the complete multi-line warning");

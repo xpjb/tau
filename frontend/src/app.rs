@@ -23,7 +23,6 @@ mod ripple;
 use ripple::Ripple;
 use tau_protocol::*;
 
-mod projects;
 mod attachments;
 mod notices;
 mod navigation;
@@ -107,7 +106,7 @@ enum Action {
     CancelDownload(String),
     Suggest(String),
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Info {
     Connection,
     CacheTtl(String),
@@ -198,7 +197,7 @@ pub enum PlatformAction {
     InputMenu,
     Background,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum SavedAction { Open, #[cfg(not(target_os = "android"))] Show, #[cfg(not(target_os = "android"))] Extract }
 
 #[cfg(not(target_os = "android"))]
@@ -219,6 +218,7 @@ pub struct App {
 // Transitional workspace state. Migrated widgets are siblings of this adapter
 // under RootWidget; model/services and shared input state never live inside it.
 struct LegacyWorkspace {
+    cards: ui::CardDeck,
     hits: Vec<Hit>,
     composer: Editor,
     code: Option<code_view::View>,
@@ -227,14 +227,6 @@ struct LegacyWorkspace {
     detail_areas: Vec<DetailArea>,
     ripple: Option<Ripple>,
     chat_areas: Vec<(Rect, String)>,
-    project_areas: Vec<(Rect, String)>,
-    projects_rect: Rect,
-    list_rect: Rect,
-    project_scroll: f32,
-    max_project_scroll: f32,
-    project_velocity: f32,
-    revealed_project: String,
-    revealed_project_position: Option<usize>,
     info_areas: Vec<(Rect, Info)>,
     connection_counter: CounterTicker,
     counter_bucket: Option<u128>,
@@ -242,15 +234,8 @@ struct LegacyWorkspace {
     connection_visible: bool,
     navigation: navigation::Navigation,
     show_chats: bool,
-    show_attachments: bool,
-    attachments_rect: Rect,
-    attachment_scroll: f32,
-    max_attachment_scroll: f32,
-    attachment_velocity: f32,
     scroll: f32,
     max_scroll: f32,
-    list_scroll: f32,
-    max_list_scroll: f32,
     wheel: Option<Wheel>,
     autoscroll: Option<Autoscroll>,
     scrollbars: Vec<Scrollbar>,
@@ -298,7 +283,10 @@ impl App {
                 menu: None,
                 notice: ui::NoticeWidget::new(),
                 tooltips: ui::TooltipHost::default(),
+                attachments: ui::AttachmentBrowser::new(),
+                sidebar: ui::Sidebar::new(),
                 legacy: LegacyWorkspace {
+                    cards: ui::CardDeck::new(),
                     hits: vec![],
                     composer,
                     code: None,
@@ -307,14 +295,6 @@ impl App {
                     detail_areas: vec![],
                     ripple: None,
                     chat_areas: vec![],
-                    project_areas: vec![],
-                    projects_rect: Rect::new(0., 0., 0., 0.),
-                    list_rect: Rect::new(0., 0., 0., 0.),
-                    project_scroll: 0.,
-                    max_project_scroll: 0.,
-                    project_velocity: 0.,
-                    revealed_project: String::new(),
-                    revealed_project_position: None,
 
                     info_areas: vec![],
                     connection_counter: CounterTicker::new(wake.clone()),
@@ -323,16 +303,9 @@ impl App {
                     connection_visible: true,
                     navigation,
                     show_chats,
-                    show_attachments: false,
-                    attachments_rect: Rect::new(0., 0., 0., 0.),
-                    attachment_scroll: 0.,
-                    max_attachment_scroll: 0.,
-                    attachment_velocity: 0.,
 
                     scroll: 0.,
                     max_scroll: 0.,
-                    list_scroll: 0.,
-                    max_list_scroll: 0.,
                     wheel: None,
                     autoscroll: None,
                     scrollbars: vec![],
@@ -360,7 +333,7 @@ impl App {
     }
     /// Headless-only attachment preview; never starts a transfer.
     #[cfg(not(target_os = "android"))]
-    pub(crate) fn preview_attachments(&mut self) { self.root.legacy.show_attachments = true; }
+    pub(crate) fn preview_attachments(&mut self) { self.root.attachments.show = true; }
     /// Headless-only heartbeat injection; never starts a socket or uses credentials.
     #[cfg(not(target_os = "android"))]
     pub fn preview_connection(&mut self, preview: ConnectionPreview) {
@@ -412,11 +385,11 @@ impl App {
     pub fn resize(&mut self, size: (u32, u32), scale: f32, origin: Vec2) {
         if self.ui.size != size || self.ui.scale != scale || self.ui.origin != origin {
             self.cancel_pointer();
-            if self.root.legacy.show_attachments && (self.ui.mobile || size.0 as f32 / scale < 1000.) {
+            if self.root.attachments.show && (self.ui.mobile || size.0 as f32 / scale < 1000.) {
                 self.cancel_preedit();
                 self.root.legacy.focus = None;
             }
-            self.root.legacy.revealed_project.clear();
+            self.root.sidebar.projects.revealed.clear();
             self.ui.size = size;
             self.ui.scale = scale;
             self.ui.origin = origin;
@@ -476,7 +449,7 @@ impl App {
     #[cfg(not(target_os = "android"))]
     pub fn cursor(&self) -> chad::winit::window::CursorIcon {
         use chad::winit::window::CursorIcon;
-        if self.root.dialog.is_some() {
+        if self.root.dialog.is_some() || self.root.viewer.is_some() || self.root.menu.is_some() || self.ui.hot.is_some() {
             return self.ui.hot.map_or(CursorIcon::Default, |(_, text)| if text { CursorIcon::Text } else { CursorIcon::Pointer });
         }
         if let Some(auto) = &self.root.legacy.autoscroll {
@@ -535,7 +508,7 @@ impl App {
     }
     pub fn tick(&mut self, dt: f32) -> bool {
         let visible = self.ui.window_focused && (self.ui.size.0 as f32 / self.ui.scale >= 760. || !self.root.legacy.show_chats)
-            && (!self.root.legacy.show_attachments || !self.ui.mobile && self.ui.size.0 as f32 / self.ui.scale >= 1000.)
+            && (!self.root.attachments.show || !self.ui.mobile && self.ui.size.0 as f32 / self.ui.scale >= 1000.)
             && self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.legacy.code.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.report_error(error); }
         self.ui.dirty |= self.controller.poll();
@@ -595,7 +568,7 @@ impl App {
             self.controller.health.next_color_wake(now)
         };
         let indeterminate = self.root.legacy.connection_visible && self.root.dialog.is_none() && self.root.viewer.is_none()
-            && (!self.ui.mobile || !self.root.legacy.show_chats || self.root.legacy.show_attachments)
+            && (!self.ui.mobile || !self.root.legacy.show_chats || self.root.attachments.show)
             && (self.controller.downloads.values().any(|d|!d.status.done && d.status.total==0)
                 || !self.services.transfers.saving_downloads.is_empty());
         let progress_bucket=indeterminate.then(||now.duration_since(self.services.transfers.progress_clock).as_millis()/80);
@@ -675,23 +648,11 @@ impl App {
             self.remember_scroll();
             self.ui.dirty = true;
         }
-        if self.root.legacy.pointer.is_none() && self.root.legacy.attachment_velocity.abs() > 4. {
-            let old = self.root.legacy.attachment_scroll;
-            self.root.legacy.attachment_scroll = (old + self.root.legacy.attachment_velocity * dt.min(0.05)).clamp(0., self.root.legacy.max_attachment_scroll);
-            self.root.legacy.attachment_velocity *= (-9. * dt).exp();
-            if (old - self.root.legacy.attachment_scroll).abs() < 0.1 { self.root.legacy.attachment_velocity = 0.; }
-            self.ui.dirty = true;
-        }
-        if self.root.legacy.pointer.is_none() && self.root.legacy.project_velocity.abs() > 4. {
-            let old = self.root.legacy.project_scroll;
-            self.root.legacy.project_scroll = (old + self.root.legacy.project_velocity * dt.min(0.05)).clamp(0., self.root.legacy.max_project_scroll);
-            self.root.legacy.project_velocity *= (-9. * dt).exp();
-            if (old - self.root.legacy.project_scroll).abs() < 0.1 { self.root.legacy.project_velocity = 0.; }
-            self.ui.dirty = true;
-        }
+
+
         if let Some(point) = self.root.legacy.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
             && self.root.dialog.is_none() && self.root.menu.is_none() && self.root.viewer.is_none()
-            && (self.root.legacy.project_areas.iter().any(|(r,_)| contains(*r, point)) || self.root.legacy.chat_areas.iter().any(|(r,_)| contains(*r, point))) {
+            && (self.root.legacy.chat_areas.iter().any(|(r,_)| contains(*r, point))) {
             self.context_at(point);
         }
         if let Some(point) = self.root.legacy.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
@@ -716,7 +677,7 @@ impl App {
         }
         let dirty = self.ui.dirty;
         self.ui.dirty = false;
-        dirty || self.root.legacy.velocity.abs() > 4. || self.root.legacy.project_velocity.abs() > 4. || self.root.legacy.attachment_velocity.abs() > 4. || waiting_hold
+        dirty || self.root.legacy.velocity.abs() > 4. || waiting_hold || self.ui.capture.is_some_and(|c| c.touch && !c.dragged && c.started.elapsed().as_millis() < 450)
     }
     fn section_at(&self, point: Vec2) -> Option<(&str, Rect)> {
         self.root.legacy.detail_areas.iter().rev().find(|a| a.contains(point))
@@ -770,8 +731,8 @@ impl App {
         self.root.legacy.navigation.download = None;
         if self.root.legacy.code.is_some() {
             self.code_back();
-        } else if self.root.legacy.show_attachments {
-            self.root.legacy.show_attachments = false;
+        } else if self.root.attachments.show {
+            self.root.attachments.show = false;
             self.cancel_pointer();
         } else if !self.root.legacy.show_chats && self.ui.size.0 as f32 / self.ui.scale < 760. {
             self.root.legacy.show_chats = true;
@@ -783,10 +744,7 @@ impl App {
     fn scroll_value(&self, lane: Lane) -> (f32, f32) {
         match lane {
             Lane::Transcript => (self.root.legacy.scroll, self.root.legacy.max_scroll),
-            Lane::Sidebar => (self.root.legacy.list_scroll, self.root.legacy.max_list_scroll),
-            Lane::Attachments => (self.root.legacy.attachment_scroll, self.root.legacy.max_attachment_scroll),
             Lane::Files => self.root.legacy.code.as_ref().map_or((0.,0.),|c|(c.scroll,c.max_scroll)),
-            Lane::Projects => (self.root.legacy.project_scroll, self.root.legacy.max_project_scroll),
             Lane::Horizontal => (self.root.legacy.horizontal, self.root.legacy.max_horizontal),
         }
     }
@@ -797,10 +755,7 @@ impl App {
                 self.root.legacy.scroll = value.clamp(0., self.root.legacy.max_scroll);
                 self.remember_scroll();
             }
-            Lane::Sidebar => self.root.legacy.list_scroll = value.clamp(0., self.root.legacy.max_list_scroll),
-            Lane::Attachments => self.root.legacy.attachment_scroll = value.clamp(0., self.root.legacy.max_attachment_scroll),
             Lane::Files => { if let Some(c)=&mut self.root.legacy.code {c.scroll=value.clamp(0.,c.max_scroll);} },
-            Lane::Projects => self.root.legacy.project_scroll = value.clamp(0., self.root.legacy.max_project_scroll),
             Lane::Horizontal => self.root.legacy.horizontal = value.clamp(0., self.root.legacy.max_horizontal),
         }
     }
@@ -848,8 +803,8 @@ impl App {
         if self.ui_event(ui::Event::Wheel { amount, horizontal, point }) { return; }
 
         self.root.menu = None;
-        self.root.legacy.project_velocity = 0.;
-        self.root.legacy.attachment_velocity = 0.;
+
+
         self.root.tooltips.usage.dismiss();
         self.root.tooltips.info.dismiss();
         self.cancel_autoscroll();
@@ -868,20 +823,7 @@ impl App {
         }
         if self.root.dialog.is_none() && self.code_wheel(amount, horizontal, point) { return; }
         if self.root.dialog.is_none() {
-            let lane = if contains(self.root.legacy.attachments_rect, point) {
-                Lane::Attachments
-            } else if contains(self.root.legacy.projects_rect, point) {
-                Lane::Projects
-            } else if horizontal {
-                Lane::Horizontal
-            } else if self.root.legacy.show_chats
-                || self.ui.size.0 as f32 / self.ui.scale >= 760.
-                    && point.x < self.ui.origin.x + 300. * self.ui.scale
-            {
-                Lane::Sidebar
-            } else {
-                Lane::Transcript
-            };
+            let lane = if horizontal { Lane::Horizontal } else { Lane::Transcript };
             let (value, max) = self.scroll_value(lane);
             if let Some(wheel) = &mut self.root.legacy.wheel
                 && wheel.lane == lane
@@ -956,8 +898,8 @@ impl App {
         self.root.legacy.expansion_pin = None;
         self.root.legacy.history_attempt = None;
         self.root.legacy.velocity = 0.;
-        self.root.legacy.project_velocity = 0.;
-        self.root.legacy.attachment_velocity = 0.;
+
+
         self.root.legacy.ripple = None;
         if self.root.legacy.pointer.is_some() {
 
@@ -1094,18 +1036,7 @@ impl App {
             }
 
             if self.root.dialog.is_none() {
-                if contains(self.root.legacy.projects_rect, p.start) {
-                    self.root.legacy.project_scroll = (self.root.legacy.project_scroll - dx).clamp(0., self.root.legacy.max_project_scroll);
-                    if p.touch { self.root.legacy.project_velocity = (-dx / p.at.elapsed().as_secs_f32().max(0.008)).clamp(-3000. * self.ui.scale, 3000. * self.ui.scale); }
-                } else if contains(self.root.legacy.attachments_rect, p.start) {
-                    self.root.legacy.attachment_scroll = (self.root.legacy.attachment_scroll - dy).clamp(0., self.root.legacy.max_attachment_scroll);
-                    if p.touch {
-                        self.root.legacy.attachment_velocity = (-dy / p.at.elapsed().as_secs_f32().max(0.008))
-                            .clamp(-3000. * self.ui.scale, 3000. * self.ui.scale);
-                    }
-                } else if contains(self.root.legacy.list_rect, p.start) {
-                    self.root.legacy.list_scroll = (self.root.legacy.list_scroll - dy).clamp(0., self.root.legacy.max_list_scroll);
-                } else if contains(self.root.legacy.transcript, p.start)
+                if contains(self.root.legacy.transcript, p.start)
                     && self.root.legacy.max_horizontal > 0.
                     && (point.x - p.start.x).abs() > 1.5 * (point.y - p.start.y).abs()
                 {
@@ -1146,8 +1077,7 @@ impl App {
             } else if p.touch
                 && p.started.elapsed().as_millis() > 450
                 && self.root.menu.is_none()
-                && (self.root.legacy.project_areas.iter().any(|(r,_)| contains(*r, point) && contains(*r, p.start))
-                    || contains(self.root.legacy.transcript, point)
+                && (contains(self.root.legacy.transcript, point)
                     || self
                         .root.legacy.chat_areas
                         .iter()
@@ -1192,8 +1122,8 @@ impl App {
         self.root.legacy.field_selection = None;
         if p.at.elapsed().as_millis() > 150 {
             self.root.legacy.velocity = 0.;
-            self.root.legacy.project_velocity = 0.;
-            self.root.legacy.attachment_velocity = 0.;
+
+
         }
         let result = self.save();
         self.report(result);
@@ -1215,8 +1145,8 @@ impl App {
         self.root.legacy.ripple = None;
 
         self.root.legacy.velocity = 0.;
-        self.root.legacy.project_velocity = 0.;
-        self.root.legacy.attachment_velocity = 0.;
+
+
         self.root.legacy.selecting = false;
         self.root.legacy.field_selection = None;
     }
@@ -1337,7 +1267,7 @@ impl App {
         self.root.legacy.expansion_pin = None;
         self.root.legacy.wheel = None;
         if key == "Escape" {
-            if self.root.dialog.is_some() || self.root.viewer.is_some() || self.root.legacy.show_attachments {
+            if self.root.dialog.is_some() || self.root.viewer.is_some() || self.root.attachments.show {
                 self.back();
             } else {
                 self.activate(Action::Abort);
@@ -1438,7 +1368,7 @@ impl App {
                 self.save()?;
                 self.cancel_pointer();
                 self.root.legacy.focus = None;
-                self.root.legacy.show_attachments = !self.root.legacy.show_attachments;
+                self.root.attachments.show = !self.root.attachments.show;
                 self.root.legacy.show_chats = false;
                 self.root.legacy.history_attempt = None;
             }
@@ -1609,13 +1539,13 @@ impl App {
             self.ui.size.1 as f32,
         );
         let input = Interaction {
-            hover: self.root.legacy.pointer.as_ref().map(|p| p.last).or(self.root.legacy.hover),
-            pressed: self
+            hover: self.ui.capture.map(|c|c.point).or(self.ui.hover).or_else(|| self.root.legacy.pointer.as_ref().map(|p| p.last)).or(self.root.legacy.hover),
+            pressed: self.ui.capture.filter(|c| !c.dragged).map(|c|c.start).or(self
                 .root.legacy.pointer
                 .as_ref()
                 .filter(|p| !p.dragged)
-                .map(|p| p.start),
-            held: self.root.legacy.pointer.is_some(),
+                .map(|p| p.start)),
+            held: self.ui.capture.is_some() || self.root.legacy.pointer.is_some(),
         };
         let background_input =
             if self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.menu.is_none() {
@@ -1627,16 +1557,18 @@ impl App {
         let mut body = Layer::new(background_input);
         let mut chrome = Layer::new(background_input);
         let mut overlay = Layer::new(input);
+        self.root.sidebar.hide();
+        self.root.legacy.cards.begin();
         self.root.legacy.hits.clear();
         self.root.legacy.scrollbars.clear();
         self.root.legacy.message_areas.clear();
         self.root.legacy.detail_areas.clear();
         self.root.legacy.chat_areas.clear();
-        self.root.legacy.project_areas.clear();
-        self.root.legacy.projects_rect = Rect::new(0.,0.,0.,0.);
-        self.root.legacy.list_rect = Rect::new(0.,0.,0.,0.);
+
+
+
         self.root.legacy.transcript = Rect::new(0.,0.,0.,0.);
-        self.root.legacy.attachments_rect = Rect::new(0., 0., 0., 0.);
+
         self.root.legacy.info_areas.clear();
         self.root.tooltips.usage.region = Rect::new(0., 0., 0., 0.);
         self.root.tooltips.info.region = Rect::new(0., 0., 0., 0.);
@@ -1646,8 +1578,8 @@ impl App {
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
         let side = if wide { 300. * s } else { 0. };
-        let file_side = self.root.legacy.show_attachments && !self.ui.mobile && bounds.width / s >= 1000.;
-        let file_screen = self.root.legacy.show_attachments && !file_side;
+        let file_side = self.root.attachments.show && !self.ui.mobile && bounds.width / s >= 1000.;
+        let file_screen = self.root.attachments.show && !file_side;
         let file_width = if file_side { 320. * s } else { 0. };
         let mut interests = std::collections::BTreeSet::new();
         if !file_screen && (wide || self.root.legacy.show_chats) {
@@ -1676,79 +1608,17 @@ impl App {
                 &mut interests,
             );
         }
-        if self.root.legacy.show_attachments && let Some(session) = self.controller.account.selected.clone()
-            && let Some(chat) = self.controller.chats.get(&session)
-        {
-            let files = chat.feed.events.values().rev().filter_map(|event|
-                event.attachment.clone().map(|file| (event.id.clone(), event.entry_id.clone(), file)))
-                .collect::<Vec<_>>();
-            let older = chat.feed.before.is_some();
-            let loading = chat.feed.loading;
-            let synchronized = chat.feed.synchronized;
-            let b = if file_side {
-                Rect::new(bounds.x + bounds.width - file_width, bounds.y, file_width, bounds.height)
-            } else { bounds };
-            main.rect(b, color(0x0e141b));
-            if file_side { main.rect(Rect::new(b.x, b.y, s, b.height), color(0x2a3541)); }
-            chrome.rect(Rect::new(b.x, b.y + 56. * s, b.width, s), color(0x2a3541));
-            let title_x = b.x + if file_screen { 80. * s } else { 14. * s };
-            let title_width = b.width - if file_screen { 94. * s } else { 70. * s };
-            self.services.renderer.label(&mut chrome, "Attachments",
-                Rect::new(title_x, b.y + 8. * s, title_width, 22. * s), 16. * s, color(0xe5eaf0), true);
-            self.services.renderer.label(&mut chrome, &format!("{} loaded · newest first", files.len()),
-                Rect::new(title_x, b.y + 30. * s, title_width, 18. * s), 12. * s, color(0x82909f), false);
-            button(&mut self.services.renderer, &mut chrome, &mut self.root.legacy.hits,
-                Rect::new(if file_screen { b.x + 8. * s } else { b.x + b.width - 48. * s }, b.y + 8. * s,
-                    if file_screen { 64. * s } else { 40. * s }, 40. * s),
-                if file_screen { "Back" } else { "×" },
-                if file_screen { Action::Back } else { Action::Attachments }, s, false);
-            let viewport = Rect::new(b.x + s, b.y + 57. * s, b.width - s, (b.height - 57. * s).max(0.));
-            self.root.legacy.attachments_rect = viewport;
-            let heights = files.iter().map(|(_, _, file)|
-                attachments::card_height(file) * s).collect::<Vec<_>>();
-            let content_height = 12. * s + heights.iter().map(|h| h + 12. * s).sum::<f32>();
-            self.root.legacy.max_attachment_scroll = (content_height + if older { 52. * s } else { 0. } - viewport.height).max(0.);
-            self.root.legacy.attachment_scroll = self.root.legacy.attachment_scroll.clamp(0., self.root.legacy.max_attachment_scroll);
-            let mut y = viewport.y + 12. * s - self.root.legacy.attachment_scroll;
-            for ((id, entry, file), height) in files.iter().zip(heights) {
-                let rect = Rect::new(b.x + 12. * s, y, b.width - 28. * s, height);
-                if y + height >= viewport.y - viewport.height && y <= viewport.y + 2. * viewport.height {
-                    interests.insert(id.clone());
-                }
-                if y + height >= viewport.y && y <= viewport.y + viewport.height {
-                    body.clipped_corners(rect, [12. * s; 4], color(0x18212b), viewport);
-                    self.attachment_card(ctx, &mut body, &session, entry, file, "attachments", rect, viewport);
-                }
-                y += height + 12. * s;
-            }
-            if files.is_empty() {
-                let text = if self.controller.epoch.is_none() {
-                    "No cached attachments.\nConnect to load sent files."
-                } else if older || !synchronized {
-                    "Loading attachments…"
-                } else { "No attachments yet.\nFiles sent in this chat appear here." };
-                self.services.renderer.label(&mut body, text,
-                    Rect::new(b.x + 24. * s, viewport.y + 80. * s, b.width - 48. * s, 100. * s),
-                    14. * s, color(0xb7c2ce), false);
-            }
-            if older {
-                let r = crate::render::intersect(Rect::new(b.x + 16. * s, y, b.width - 44. * s, 36. * s), viewport);
-                if r.height > 0. {
-                    if loading || !synchronized || self.controller.epoch.is_none() {
-                        self.services.renderer.clipped_label(&mut body,
-                            if self.controller.epoch.is_none() { "Connect to load older files" } else { "Loading older files…" },
-                            Rect::new(b.x + 16. * s, y + 8. * s, b.width - 44. * s, 24. * s),
-                            12. * s, color(0x82909f), false, viewport);
-                    } else {
-                        button(&mut self.services.renderer, &mut body, &mut self.root.legacy.hits, r,
-                            "Load older files", Action::History, s, false);
-                    }
-                }
-                self.history_near_edge(&session, self.root.legacy.max_attachment_scroll - self.root.legacy.attachment_scroll <= 2. * viewport.height);
-            }
-            self.scrollbar(&mut chrome, Lane::Attachments, viewport);
+        self.root.attachments.hide();
+        if self.root.attachments.show {
+            let b = if file_side { Rect::new(bounds.x + bounds.width - file_width, bounds.y, file_width, bounds.height) } else { bounds };
+            self.with_ui(|root,cx| {
+                root.attachments.side=file_side;
+                root.attachments.visit_perframe(&mut ui::Frame {layer:&mut body,bounds:b,clip:b},cx);
+            });
+            interests.extend(self.root.attachments.interests.iter().cloned());
         }
-        if (wide || !self.root.legacy.show_chats || self.root.legacy.show_attachments)
+
+        if (wide || !self.root.legacy.show_chats || self.root.attachments.show)
             && let Some(session) = self.controller.account.selected.clone()
         {
             self.controller.viewport(&session, interests);
@@ -1756,6 +1626,9 @@ impl App {
         if let Some((rect, target)) = self.root.legacy.info_areas.iter().find(|(_, target)| self.root.tooltips.target.same_anchor(target)) {
             self.root.tooltips.info.region = *rect;
             self.root.tooltips.target = target.clone();
+        }
+        if let Some((rect, target)) = self.root.sidebar.hints().chain(self.root.legacy.cards.hints()).chain(self.root.attachments.cards.hints()).find(|(_, target)| self.root.tooltips.target.same_anchor(target)) {
+            self.root.tooltips.info.region = rect; self.root.tooltips.target = target.clone();
         }
         if self.root.tooltips.info.region.width <= 0. {
             self.root.tooltips.info.hover(false);
@@ -1805,6 +1678,7 @@ impl App {
         {
             self.ui.dirty |= self.services.renderer.extend_selection(caret);
         }
+        self.with_ui(|root,cx| root.legacy.cards.finish(cx));
         self.services.renderer
             .draw(ctx, view, &[main, body, chrome, overlay]);
         // Geometry is now presented. Re-probe it through the same route and
@@ -1812,173 +1686,10 @@ impl App {
         if self.root.dialog.is_some() { self.ui_event(ui::Event::Hover(self.ui.hover)); }
         else if let Err(error) = self.finish_ui_requests() { self.report(Err(error)); }
     }
-    fn sidebar(&mut self, ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
-        let s = self.ui.scale;
-        layer.rect(b, color(0x0e141b));
-        layer.rect(
-            Rect::new(b.x + b.width - s, b.y, s, b.height),
-            color(0x2a3541),
-        );
-        let indicator = Rect::new(b.x + 72. * s, b.y + 22. * s, 28. * s, 34. * s);
-        self.root.legacy.info_areas.push((indicator, Info::Connection));
-        layer.rounded_rect(
-            indicator,
-            8. * s,
-            layer.control_color(indicator, color(0x0e141b)),
-        );
-        layer.rounded_rect(
-            Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s),
-            4. * s,
-            color(self.controller.health.color(Instant::now())),
-        );
-        self.root.legacy.hits.push(Hit {
-            rect: indicator,
-            action: Action::Info(Info::Connection),
-        });
-        self.services.renderer.label(
-            layer,
-            "Tau",
-            Rect::new(b.x + 16. * s, b.y + 20. * s, b.width - 140. * s, 36. * s),
-            30. * s,
-            color(0xe5eaf0),
-            true,
-        );
-        self.icon_button(
-            ctx,
-            layer,
-            Rect::new(b.x + b.width - 56. * s, b.y + 16. * s, 40. * s, 40. * s),
-            Icon::Gear,
-            22.,
-            Action::Settings,
-            false,
-            true,
-        );
-        button(
-            &mut self.services.renderer,
-            layer,
-            &mut self.root.legacy.hits,
-            Rect::new(b.x + 16. * s, b.y + 84. * s, b.width - 32. * s, 40. * s),
-            "New chat",
-            Action::New,
-            s,
-            true,
-        );
-        // Reserve the sidebar's rightmost column for its separator. The
-        // scrolling tabs (including the clipped add tab) must not paint over it.
-        self.project_tabs(layer, Rect::new(b.x, b.y + 140. * s, b.width - s, 34. * s));
-        let clip = Rect::new(b.x, b.y + 182. * s, b.width, (b.height - 190. * s).max(0.));
-        self.root.legacy.list_rect = clip;
-        let sessions = self.controller.account.sessions.iter().filter(|c| c.project_id == self.controller.account.selected_project);
-        self.root.legacy.max_list_scroll =
-            (sessions.clone().count() as f32 * 90. * s - clip.height).max(0.);
-        self.root.legacy.list_scroll = self.root.legacy.list_scroll.min(self.root.legacy.max_list_scroll);
-        for (i, session) in sessions.enumerate() {
-            let y = clip.y + i as f32 * 90. * s - self.root.legacy.list_scroll;
-            let rect = Rect::new(b.x + 8. * s, y, b.width - 16. * s, 84. * s);
-            if y + rect.height < clip.y || y > clip.y + clip.height {
-                continue;
-            }
-            let selected = self.controller.account.selected.as_ref() == Some(&session.id);
-            let targeted = self
-                .root.menu
-                .as_ref()
-                .is_some_and(|m| m.chat.as_ref() == Some(&session.id));
-            layer.clipped_rounded_rect(
-                rect,
-                12. * s,
-                layer.control_color(
-                    rect,
-                    color(if targeted {
-                        0x35415a
-                    } else if selected {
-                        0x303a66
-                    } else {
-                        0x0e141b
-                    }),
-                ),
-                clip,
-            );
-            let rect = crate::render::intersect(rect, clip);
-            self.root.legacy.chat_areas.push((rect, session.id.clone()));
-            let unread = self.controller.unread(session);
-            let title = if session.starter {
-                "New chat"
-            } else if session.title.is_empty() {
-                "Unnamed chat"
-            } else {
-                &session.title
-            };
-            self.services.renderer.clipped_label(
-                layer,
-                title,
-                Rect::new(rect.x + 12. * s, y + 10. * s, rect.width - 56. * s, 22. * s),
-                16. * s,
-                color(0xe5eaf0),
-                unread || selected,
-                clip,
-            );
-            if let Some(model) = &session.model {
-                self.services.renderer.clipped_label(
-                    layer,
-                    &format!("{}/{}", model.provider, model.model_id),
-                    Rect::new(rect.x + 12. * s, y + 38. * s, rect.width - 24. * s, 18. * s),
-                    12. * s,
-                    color(0xb7c2ce),
-                    false,
-                    clip,
-                );
-            }
-            let status = format!(
-                "{}{}",
-                if unread { "●  " } else { "" },
-                if self.controller.is_creating(&session.id) { "Creating…" }
-                else if self.controller.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) { "Paused" }
-                else { match session.status {
-                    SessionStatus::Running => "Working",
-                    SessionStatus::Error => "Error",
-                    SessionStatus::Idle => "Ready",
-                    SessionStatus::Sleeping => "Sleeping",
-                }}
-            );
-            self.services.renderer.clipped_label(
-                layer,
-                &status,
-                Rect::new(rect.x + 12. * s, y + 58. * s, rect.width - 24. * s, 18. * s),
-                12. * s,
-                color(if session.status == SessionStatus::Running {
-                    0x67d4ff
-                } else {
-                    0x82909f
-                }),
-                false,
-                clip,
-            );
-            self.root.legacy.hits.push(Hit {
-                rect,
-                action: Action::Select(session.id.clone()),
-            });
-            let ring = Rect::new(rect.x + rect.width - 33. * s, y + 11. * s, 18. * s, 18. * s);
-            let (ratio, tint) = self.controller.cache_ttl(session).meter();
-            self.services.renderer
-                .clipped_icon(ctx, layer, Icon::CacheTtl(ratio), ring, tint, clip);
-            let target = crate::render::intersect(
-                Rect::new(ring.x - 7. * s, ring.y - 7. * s, 32. * s, 32. * s),
-                clip,
-            );
-            if target.height > 0. {
-                let info = Info::CacheTtl(session.id.clone());
-                self.root.legacy.info_areas.push((target, info.clone()));
-                self.root.legacy.hits.push(Hit {
-                    rect: target,
-                    action: Action::Info(info),
-                });
-            }
-        }
-        if self.root.legacy.max_list_scroll == 0. && !self.controller.account.sessions.iter().any(|c| c.project_id == self.controller.account.selected_project) {
-            self.services.renderer.clipped_label(layer, "No chats in this topic yet", Rect::new(b.x + 20. * s, clip.y + 20. * s, b.width - 40. * s, 40. * s), 13. * s, color(0x82909f), false, clip);
-        }
-        self.scrollbar(layer, Lane::Sidebar, clip);
+    fn sidebar(&mut self, _gpu: &impl RenderContext, layer: &mut Layer, bounds: Rect) {
+        self.with_ui(|root,cx| root.sidebar.visit_perframe(&mut ui::Frame {layer,bounds,clip:bounds},cx));
     }
+
     fn rows(&self, session: &str) -> Vec<Row> {
         let chat = &self.controller.chats[session];
         let tools = Tools::new(chat.feed.events.values()).with_lengths(&chat.feed.block_lengths).with_states(&chat.feed.block_states);
@@ -2327,7 +2038,7 @@ impl App {
             ctx, chrome,
             Rect::new(b.x + b.width - if running || paused { 96. * s } else { 52. * s },
                 header.y + (header.height - 40. * s) / 2., 40. * s, 40. * s),
-            Icon::Attachments, 22., Action::Attachments, self.root.legacy.show_attachments, true,
+            Icon::Attachments, 22., Action::Attachments, self.root.attachments.show, true,
         );
         if running || paused {
             let (icon, action) = if running {
@@ -3095,10 +2806,7 @@ impl App {
             self.activate(Action::Info(info));
             return;
         }
-        if let Some(id) = self.root.legacy.project_areas.iter().find(|(r,_)| contains(*r, point)).map(|(_,id)| id.clone()) {
-            self.project_context(&id, point);
-            return;
-        }
+
         let mut chat = self
             .root.legacy.chat_areas
             .iter()
@@ -3370,3 +3078,6 @@ mod download_interaction_tests;
 
 #[cfg(all(test, not(target_os = "android")))]
 mod composer_status_tests;
+
+#[cfg(test)]
+mod test_ui;

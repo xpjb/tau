@@ -230,3 +230,25 @@ After disk space was restored, the managed all-target frontend check completed.
 viewer, retained-dialog and download rendering/interaction tests. A preceding
 14-case run covered notice/navigation/inline-input/viewer paths. Physical-device
 acceptance remains separate from headless checks.
+
+## Nested routing and sidebar checkpoint
+
+AttachmentCard now owns its actual clipped, retained controls, shared by transcript
+and attachment browser. AttachmentBrowser owns scrolling, paging interest and card
+reconciliation. A real headless nested-input pilot verifies child-button capture,
+scroll-parent takeover without activation, pointer-ID isolation and cancellation
+when a captured card disappears. This is exercised through App's real event entry
+points, not a flat target-routing simulation.
+
+Sidebar and project tabs now own retained controls, context/hold behavior and their
+own ScrollStates. The corresponding root lane switches, parallel project hit
+areas, inertial state and old project renderer have been removed. Tests inspect
+placed retained controls through test-only selectors; those snapshots are never
+used to dispatch input. Retained children are reordered in paint order while
+keeping their identities (two ordering regressions caught by project tests were
+fixed and all five project tests rerun successfully).
+
+Checks: managed frontend all-target compilation; 6 attachment presentation/action
+cases; 13 nested/navigation/attachment cases; 15 initial passing sidebar/control/
+scroll cases plus the two corrected ordering cases in the five-case rerun.
+Composer, code browser and transcript ownership still require completion.

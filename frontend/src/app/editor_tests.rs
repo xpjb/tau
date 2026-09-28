@@ -57,7 +57,7 @@ fn composer_placeholder_and_single_line_caret_are_vertically_centered() {
     for value in ["", "one line"] {
         if !value.is_empty() { h.app.input(value); }
         h.frame();
-        let rect = h.app.root.legacy.hits.iter().find(|hit| matches!(hit.action, Action::Focus(None))).unwrap().rect;
+        let rect = h.app.test_hits().iter().find(|hit| matches!(hit.action, Action::Focus(None))).unwrap().rect;
         let caret = h.app.ime_rect().unwrap();
         assert!((caret.y + caret.height / 2. - (rect.y + rect.height / 2.)).abs() < 3.,
             "one-line caret in actual composer frame: {value:?}");

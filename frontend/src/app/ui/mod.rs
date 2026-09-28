@@ -13,6 +13,10 @@ mod viewer;
 mod notice;
 mod tooltips;
 mod menu;
+mod attachments;
+pub(super) mod sidebar;
+pub(super) use sidebar::Sidebar;
+pub(super) use attachments::{AttachmentBrowser, CardDeck, CardChoice};
 pub(super) use menu::{Menu, Choice as MenuChoice};
 pub(super) use tooltips::TooltipHost;
 pub(super) use notice::NoticeWidget;
@@ -99,6 +103,7 @@ pub(super) trait Widget {
 pub(super) enum Request {
     Open(DialogSpec),
     View(ImageSpec), CloseViewer(Id), Download(crate::notice::DownloadTarget),
+    Attachments(bool), Select(String), Project(String), NewChat,
     Tip { info: super::Info, rect: Rect },
     Close(Id),
     Menu(Box<Menu>), CloseMenu(Id), MoveMenu { owner: Id, session: String },
@@ -111,6 +116,8 @@ pub(super) struct RootWidget {
     pub(super) menu: Option<Box<Menu>>,
     pub(super) notice: NoticeWidget,
     pub(super) tooltips: TooltipHost,
+    pub(super) attachments: AttachmentBrowser,
+    pub(super) sidebar: Sidebar,
 }
 impl RootWidget {
     pub fn editor(&mut self, focus: Option<Target>) -> Option<&mut TextField> {
@@ -126,7 +133,10 @@ impl Widget for RootWidget {
             if let Some(viewer) = &mut self.viewer { return viewer.handle_event(event, cx); }
             if let Some(menu) = &mut self.menu { return menu.handle_event(event,cx); }
             if self.notice.handle_event(event, cx) { return true; }
-            return self.tooltips.handle_event(event, cx);
+            if self.tooltips.handle_event(event, cx) { return true; }
+            let handled = self.attachments.handle_event(event,cx) || self.sidebar.handle_event(event,cx) || self.legacy.cards.event(event,cx);
+            self.tooltips.hint(cx);
+            return handled;
         };
         dialog.handle_event(event, cx);
         // This is an opaque input scope even in empty or disabled-control space.
@@ -164,6 +174,7 @@ pub(crate) struct UiState {
     pub(super) capture: Option<Capture>,
     pub(super) hover: Option<Vec2>,
     pub(super) hint: Option<(Rect, super::Info)>,
+    pub(super) menu_chat: Option<String>, pub(super) menu_section: Option<String>,
     pub(super) hot: Option<(Target, bool)>, // bool: text cursor
     pub(super) requests: VecDeque<Request>,
     pub(super) return_to: Option<(String, Option<String>, Option<String>)>,
@@ -174,7 +185,7 @@ pub(crate) struct UiState {
 impl UiState {
     pub fn new(size: (u32, u32), mobile: bool) -> Self {
         Self { size, origin: Vec2::new(0., 0.), scale: 1., mobile, window_focused: true, dirty: true,
-            focus: None, capture: None, hover: None, hint: None, hot: None, requests: VecDeque::new(), return_to: None, native: None, input_request: 0, paste: None }
+            focus: None, capture: None, hover: None, hint: None, menu_chat: None, menu_section: None, hot: None, requests: VecDeque::new(), return_to: None, native: None, input_request: 0, paste: None }
     }
     fn edit_target(&self, model: &Controller, target: EditorTarget) -> NativeEdit {
         NativeEdit { token: Id::new().0, target, identity: model.identity.clone(),
@@ -188,6 +199,13 @@ impl UiState {
     pub(super) fn navigation_changed(&mut self) {
         if self.native.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Legacy(_))) { self.native = None; }
         if self.paste.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Legacy(_))) { self.paste = None; }
+    }
+    pub(super) fn detach_target(&mut self, target: Target) {
+        if self.focus == Some(target) { self.focus = None; }
+        if self.capture.is_some_and(|c| c.target == target) { self.capture = None; }
+        if self.hot.is_some_and(|(t,_)| t == target) { self.hot = None; }
+        if self.native.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Widget(t) if t == target)) { self.native = None; }
+        if self.paste.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Widget(t) if t == target)) { self.paste = None; }
     }
     pub(super) fn detach(&mut self, scope: Id) {
         if self.focus.is_some_and(|target| target.scope == scope) { self.focus = None; }

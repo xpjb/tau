@@ -11,7 +11,7 @@ impl Harness {
     }
     fn frame(&mut self) {self.app.tick(0.);self.app.frame(&self.ctx,self.ctx.view());}
     fn click(&mut self,predicate:impl Fn(&Action)->bool) {
-        let r=self.app.root.legacy.hits.iter().find(|h|predicate(&h.action)).unwrap().rect;
+        let r=self.app.test_hits().iter().find(|h|predicate(&h.action)).unwrap().rect;
         let p=Vec2::new(r.x+r.width/2.,r.y+r.height/2.);self.app.press(1,p,self.app.ui.mobile);self.app.release(1,p);self.frame();
     }
     fn update(&mut self,reply:FileReply,document:Option<Arc<Document>>) {
@@ -35,17 +35,17 @@ fn source()->String {format!("// Remote code, café 🦀\nfn main() {{\n    let 
 fn directory_code_gutter_selection_and_current_composer_work_at_desktop_and_phone_sizes() {
     for (name,size,scale,mobile) in [("desktop",(1100,800),1.,false),("phone",(360,720),1.,true),("phone-2x",(900,1800),2.5,true)] {
         let mut h=Harness::new(size,scale,mobile);
-        let attachment=h.app.root.legacy.hits.iter().find(|h|matches!(h.action,Action::Attachments)).unwrap().rect;
-        let files=h.app.root.legacy.hits.iter().find(|h|matches!(h.action,Action::Files)).unwrap().rect;
+        let attachment=h.app.test_hits().iter().find(|h|matches!(h.action,Action::Attachments)).unwrap().rect;
+        let files=h.app.test_hits().iter().find(|h|matches!(h.action,Action::Files)).unwrap().rect;
         assert!(files.x<attachment.x && (attachment.x-files.x)<=48.*scale);
         h.app.controller.draft("Existing draft".into()).unwrap();h.frame();h.click(|a|matches!(a,Action::Files));
         h.update(FileReply::Directory {path:"/workspace".into(),parent:Some("/".into()),entries:vec![FileEntry {path:"/workspace/src".into(),name:"src".into(),directory:true,symlink:false},FileEntry {path:"/workspace/README.md".into(),name:"README.md".into(),directory:false,symlink:false}],next:None},None);
-        assert!(!h.app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::Focus(None))));h.dump(&format!("{name}-directory.png"));
+        assert!(!h.app.test_hits().iter().any(|h|matches!(h.action,Action::Focus(None))));h.dump(&format!("{name}-directory.png"));
         h.app.apply(Action::FileOpen("/workspace/src/main.rs".into(),false)).unwrap();h.text(&source());h.dump(&format!("{name}-code.png"));
-        assert!(!h.app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::Focus(None))));
+        assert!(!h.app.test_hits().iter().any(|h|matches!(h.action,Action::Focus(None))));
         let start=h.line(1,true);let end=h.line(3,true);
         h.app.press(9,start,mobile);h.app.motion(9,end);h.app.release(9,end);h.frame();
-        assert!(h.app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::Focus(None))));
+        assert!(h.app.test_hits().iter().any(|h|matches!(h.action,Action::Focus(None))));
         assert_eq!(h.app.controller.selected().unwrap().local.draft,"Existing draft\n\n`/workspace/src/main.rs:2-4`\n");
         assert!(h.app.controller.selected().unwrap().local.pending.is_empty(),"Selection must not send");
         h.dump(&format!("{name}-comment.png"));
@@ -60,12 +60,12 @@ fn directory_code_gutter_selection_and_current_composer_work_at_desktop_and_phon
         assert!(h.app.root.legacy.code.as_ref().unwrap().selection.is_none());
         assert!(!h.app.controller.selected().unwrap().local.draft.contains("main.rs:"));
         assert!(h.app.controller.selected().unwrap().local.draft.ends_with("Why 42?"));
-        assert!(h.app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::Focus(None))), "An active comment edit is not hidden/lost by a live replacement");
+        assert!(h.app.test_hits().iter().any(|h|matches!(h.action,Action::Focus(None))), "An active comment edit is not hidden/lost by a live replacement");
         assert!(h.app.apply(Action::Send).is_err());
         h.click(|a|matches!(a,Action::FileClear));h.frame();
-        assert!(!h.app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::Focus(None))));
+        assert!(!h.app.test_hits().iter().any(|h|matches!(h.action,Action::Focus(None))));
         h.click(|a|matches!(a,Action::FileClose));assert!(h.app.root.legacy.code.is_none());
-        assert!(h.app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::Focus(None))));
+        assert!(h.app.test_hits().iter().any(|h|matches!(h.action,Action::Focus(None))));
     }
 }
 #[test]

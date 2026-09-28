@@ -37,8 +37,7 @@ fn settings_gear_stays_in_sidebar_header_and_opens_settings() {
             app.root.legacy.show_chats = true;
         }
         app.frame(&ctx, ctx.view());
-        let settings = app
-            .root.legacy.hits
+        let settings = app.test_hits()
             .iter()
             .find(|hit| matches!(hit.action, Action::Settings))
             .unwrap()
@@ -77,7 +76,7 @@ fn latest_is_a_circular_chevron_only_when_scrolled_away_from_tail() {
         app.frame(&ctx, ctx.view());
         assert!(app.root.legacy.max_scroll > 0.);
         assert!(
-            !app.root.legacy.hits
+            !app.test_hits()
                 .iter()
                 .any(|hit| matches!(hit.action, Action::Tail))
         );
@@ -98,8 +97,7 @@ fn latest_is_a_circular_chevron_only_when_scrolled_away_from_tail() {
             .key = None;
         app.root.legacy.scroll = 0.;
         app.frame(&ctx, ctx.view());
-        let latest = app
-            .root.legacy.hits
+        let latest = app.test_hits()
             .iter()
             .find(|hit| matches!(hit.action, Action::Tail))
             .unwrap()
@@ -115,7 +113,7 @@ fn latest_is_a_circular_chevron_only_when_scrolled_away_from_tail() {
         assert_eq!(app.root.legacy.scroll, app.root.legacy.max_scroll);
         app.frame(&ctx, ctx.view());
         assert!(
-            !app.root.legacy.hits
+            !app.test_hits()
                 .iter()
                 .any(|hit| matches!(hit.action, Action::Tail))
         );
