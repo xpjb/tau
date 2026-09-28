@@ -7,6 +7,10 @@ client. No application changes or protocol migration have been made.
 
 ## Selected first improvement: one typed tool-transcript projection
 
+Tracked as `tau2-backlog/015-shared-tool-transcript-projection.md`. All opened
+topics, confidence scores and signed LOC ranges are indexed in
+`tau2-backlog/README.md` (015–035); overlapping estimates are not additive.
+
 **This is the only work item proposed for implementation now.** The broader
 architecture below is background, not an additional work queue. Prefer this slice
 to extracting the receive pump: it removes repeated domain interpretation, not
