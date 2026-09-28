@@ -5,7 +5,68 @@ again for this pass. This extends `tau2-client-state-proposal.md`: the replicate
 part of that state should have a common implementation beneath both daemon and
 client. No application changes or protocol migration have been made.
 
-## Recommendation
+## Selected first improvement: one typed tool-transcript projection
+
+**This is the only work item proposed for implementation now.** The broader
+architecture below is background, not an additional work queue. Prefer this slice
+to extracting the receive pump: it removes repeated domain interpretation, not
+just protocol coordination, while avoiding durable-state migrations.
+
+### Deliverable
+
+A shared typed contract for native tool metadata/relationships, and one derived
+`ToolProjection` carrying native identity, execution state, input/result body
+references and child-discovery completeness. Keep body bytes in the existing cache.
+The projection is a bounded local view, not a new wire object embedding descendants.
+
+- Daemon tool publication uses the shared metadata/relationship helpers while
+  preserving the existing block encoding and IDs.
+- The native client projection builds/updates tool meaning from block headers and
+  parent links. Display, tool-copy membership and tool content interests consume
+  that meaning rather than recovering it independently from flat events or labels.
+- Rendered tool sections carry explicit source/body references. Display and
+  persisted expansion keys remain presentation identifiers; never decode them
+  to discover a block ID.
+
+### Concrete replacement and scope
+
+Replace tool pairing/section reconstruction for the native path, the matching
+tool-child interpretation in fetch/copy planning, and the tool-root rescan and
+reverse display-key parser in `App::chat`. Delete superseded code as consumers
+move; do not retain a second live native interpretation behind the new types.
+Demo/test event inputs may adapt into the same projection at their boundary.
+
+The change is limited to native tool groups: shared metadata helpers, daemon tool
+publication, frontend native projection/details/interest/copy consumers, and
+focused tests. Ordinary message rendering, outer Details grouping and authored
+message/queue reconciliation remain unchanged. Keep current overflow metadata,
+source/version checks, copy completeness checks and content budgets.
+
+No crate merger/rename, general replica framework, receiver extraction, catalogue
+migration, operation-store migration, wire/schema change, scroll-restoration
+redesign or retained-UI work is included.
+
+### Acceptance and stop condition
+
+- Rendering, copying and body-interest selection use the same typed tool
+  relationships. Native block identity comes from references, not display strings
+  or provider tool-call IDs.
+- Cover missing/partial children, repeated provider call IDs, orphan results,
+  multiple results, failure/interruption and overflow metadata without changing
+  their existing presentation or completeness behavior.
+- A tool body visible while its heading is off-screen still requests its correct
+  native content. Collapsed tools do not start fetching unrequested bodies.
+- Preserve persisted disclosure keys and existing body/cache bounds. Existing
+  tool-copy, native sync and two-client weak-link tests must continue to pass.
+- Validate with the managed compiler checks and relevant nextest runs. Report
+  removed/replaced production code across shared, daemon and frontend code; moving
+  code between directories is not itself the success criterion.
+
+Stop when this one tool path has a single semantic owner and the obsolete native
+interpretations are removed. Do not extend it to all transcript or client state.
+This section is a proposal only; no implementation or Rust tests were run.
+
+## Background: broader architectural direction (deferred)
 
 **Build upward from the replication code already shared, with a common typed
 model and pure state transitions.** Put client-specific ownership around that
@@ -227,7 +288,7 @@ Current daemon-to-many-client synchronization does not require that extension.
 This extracts existing guarantees into clear owners; it must not remove them in
 pursuit of superficially symmetrical endpoints.
 
-## Smallest convincing implementation and adoption order
+## Broader model migration (deferred)
 
 1. **Shared semantic contract first.** Define typed public metadata, body refs and
    relationship helpers. Use them in daemon publication and client projection,
