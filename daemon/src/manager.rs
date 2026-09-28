@@ -41,6 +41,7 @@ pub(crate) struct ManagerInner {
     pub events: broadcast::Sender<ServerMessage>,
     pub shutting_down: AtomicBool,
     pub state_clock:std::sync::atomic::AtomicU64,
+    #[cfg(test)] pub settle_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub deleting:std::sync::Mutex<HashSet<String>>,
 }
 pub(crate) struct SessionRuntime {
@@ -72,7 +73,7 @@ impl AgentManager {
         let files = Arc::new(tau_code_viewer::filesystem::FileSystem::new(config.cwd.clone()));
         Ok(Self { inner: Arc::new(ManagerInner { files, config, state, settings, http, auth,
             projects: Mutex::new(()), catalog, usage:UsageReader::default(), catalog_requests: Semaphore::new(2), agent_runs:Semaphore::new(8), title_requests:Semaphore::new(2), block_imports: Arc::new(Semaphore::new(2)), upload_finishes:Mutex::new(HashMap::new()),upload_publication:Mutex::new(()),
-            runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false),state_clock:std::sync::atomic::AtomicU64::new(0),deleting:std::sync::Mutex::new(HashSet::new()) }) })
+            runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false),state_clock:std::sync::atomic::AtomicU64::new(0),#[cfg(test)] settle_gate:std::sync::Mutex::new(None),deleting:std::sync::Mutex::new(HashSet::new()) }) })
     }
     pub(crate) fn context_window(&self, settings: &Settings, model: &SessionModel) -> Option<u64> {
         self.inner.catalog.capacity(settings, model)
@@ -271,6 +272,8 @@ impl AgentManager {
         let mut queue = transcript.queue.clone();
         if matches!(operation, QueueOperation::Pause { .. } | QueueOperation::Prefix { .. } | QueueOperation::Resume { .. })
             && queue.control.as_ref().is_some_and(|control| control.status == "waiting") { bail!("Cancel the pending queue control first"); }
+        let resume_after_stop = matches!(&operation, QueueOperation::Resume { .. })
+            && content.agent.as_ref().is_some_and(|agent| agent.running && agent.cancel.is_cancelled());
         match operation {
             QueueOperation::Edit { request_id, revision, text } => {
                 if text.trim().is_empty() || text.chars().count() > MAX_PROMPT_CHARS { bail!("Invalid queue text"); }
@@ -307,6 +310,7 @@ impl AgentManager {
             bail!("Cancel the pending prefix before editing its messages");
         }
         content.save_queue(id, queue, Some(Receipt { id:command_id.into(),command:Some("queue_control".into()),text:payload,disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
+        if resume_after_stop { content.agent.as_mut().unwrap().resume_after_stop = true; }
         self.start_run(id, &runtime, &mut content);
         Ok("accepted".into())
     }
@@ -323,12 +327,12 @@ impl AgentManager {
             if agent.running || !queue.requests.is_empty() { queue.paused=true; }
         }
         content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:Some("abort".into()),text:String::new(),disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
-        if let Some(agent)=&content.agent {agent.cancel.cancel();}
+        if let Some(agent)=&mut content.agent {agent.stop();}
         Ok(())
     }
     pub async fn close_session(&self, id: &str) -> Result<()> {
         let runtime = self.runtime(id).await?;
-        if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); }
+        if let Some(agent) = &mut runtime.content.lock().await.agent { agent.stop(); }
         let _guard = runtime.operation.lock().await;
         self.retire_session(id, &runtime).await;
         self.broadcast_sessions().await; Ok(())
@@ -336,7 +340,7 @@ impl AgentManager {
     pub(crate) async fn retire_session(&self, id: &str, runtime: &Arc<SessionRuntime>) {
         let task = {
             let mut content = runtime.content.lock().await;
-            content.agent.as_mut().and_then(|agent| { agent.cancel.cancel(); agent.task.take() })
+            content.agent.as_mut().and_then(|agent| { agent.stop(); agent.task.take() })
         };
         if let Some(task) = task && let Err(error) = task.await { warn!(%error, "Agent task stopped unexpectedly"); }
         let mut content = runtime.content.lock().await;
@@ -348,7 +352,7 @@ impl AgentManager {
         let _gate = self.inner.projects.lock().await;
         let _deleting=self.deleting(vec![id.into()]);
         let runtime=self.inner.runtimes.lock().await.get(id).cloned().unwrap_or_else(||Arc::new(SessionRuntime::new()));
-        if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); }
+        if let Some(agent) = &mut runtime.content.lock().await.agent { agent.stop(); }
         let _guard = runtime.operation.lock().await;
         self.retire_session(id, &runtime).await;
         self.inner.state.remove(id).await?;
@@ -378,7 +382,7 @@ impl AgentManager {
     pub async fn shutdown(&self) {
         if self.inner.shutting_down.swap(true, Ordering::AcqRel) { return; }
         let runtimes = self.inner.runtimes.lock().await.iter().map(|(id,r)| (id.clone(),r.clone())).collect::<Vec<_>>();
-        for (_,runtime) in &runtimes { if let Some(agent) = &runtime.content.lock().await.agent { agent.cancel.cancel(); } }
+        for (_,runtime) in &runtimes { if let Some(agent) = &mut runtime.content.lock().await.agent { agent.stop(); } }
         for (id,runtime) in runtimes { let _guard = runtime.operation.lock().await; self.retire_session(&id, &runtime).await; }
     }
     pub(crate) async fn runtime(&self, id: &str) -> Result<Arc<SessionRuntime>> {
@@ -407,7 +411,7 @@ impl AgentManager {
         transcript.generation = format!("{}:{id}",self.inner.state.block_cursor().await?.lineage);
         content.transcript = Some(transcript);
         content.agent = Some(AgentSession { store:self.inner.state.clone(), revision:stored.revision, model:stored.model, thinking:stored.thinking,
-            running:false, cancel:tokio_util::sync::CancellationToken::new(), task:None, tokens:stored.tokens, needs_turn:stored.needs_turn });
+            running:false, resume_after_stop:false, cancel:tokio_util::sync::CancellationToken::new(), task:None, tokens:stored.tokens, needs_turn:stored.needs_turn });
         self.set_runtime_state(id,runtime,SessionStatus::Idle,detail,Some(usage)); Ok(())
     }
     pub(crate) fn set_runtime_state(&self, id: &str, runtime: &Arc<SessionRuntime>, status: SessionStatus, detail: Option<String>, usage: Option<Option<ContextUsage>>) {
