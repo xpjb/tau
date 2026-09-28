@@ -8,6 +8,15 @@ use std::{collections::VecDeque, sync::atomic::{AtomicU64, Ordering}};
 pub(super) mod controls;
 mod dialogs;
 mod settings;
+mod scroll;
+mod viewer;
+mod notice;
+mod tooltips;
+mod menu;
+pub(super) use menu::{Menu, Choice as MenuChoice};
+pub(super) use tooltips::TooltipHost;
+pub(super) use notice::NoticeWidget;
+pub(super) use viewer::{ImageSpec, ImageViewer};
 mod operations;
 pub(super) use operations::Operation;
 pub(super) use dialogs::{Dialog, DialogSpec, TopicEdit};
@@ -26,7 +35,7 @@ pub(super) struct Target { pub scope: Id, pub widget: Id }
 #[derive(Clone, Copy)]
 pub(super) struct Capture {
     pub target: Target, pub pointer: u64, pub start: Vec2, pub point: Vec2,
-    pub touch: bool, pub dragged: bool, pub started: std::time::Instant,
+    pub touch: bool, pub dragged: bool, pub claimed: bool, pub started: std::time::Instant,
 }
 #[derive(Clone, Copy)]
 pub(super) enum EditorTarget { Widget(Target), Legacy(Option<usize>) }
@@ -53,6 +62,7 @@ pub(super) enum Event<'a> {
     Preedit(&'a str, Option<(usize, usize)>),
     Paste { target: Target, text: &'a str },
     Tick(f32), Cancel, Back, Submit,
+    Context(Vec2), Middle { pressed: bool, point: Vec2 },
 }
 pub(super) struct Frame<'a> {
     pub layer: &'a mut super::Layer,
@@ -88,12 +98,19 @@ pub(super) trait Widget {
 
 pub(super) enum Request {
     Open(DialogSpec),
+    View(ImageSpec), CloseViewer(Id), Download(crate::notice::DownloadTarget),
+    Tip { info: super::Info, rect: Rect },
     Close(Id),
+    Menu(Box<Menu>), CloseMenu(Id), MoveMenu { owner: Id, session: String },
     Replace { owner: Id, spec: DialogSpec },
 }
 pub(super) struct RootWidget {
     pub(super) legacy: LegacyWorkspace,
     pub(super) dialog: Option<Dialog>,
+    pub(super) viewer: Option<ImageViewer>,
+    pub(super) menu: Option<Box<Menu>>,
+    pub(super) notice: NoticeWidget,
+    pub(super) tooltips: TooltipHost,
 }
 impl RootWidget {
     pub fn editor(&mut self, focus: Option<Target>) -> Option<&mut TextField> {
@@ -105,12 +122,24 @@ impl RootWidget {
 }
 impl Widget for RootWidget {
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        let Some(dialog) = &mut self.dialog else { return false; };
+        let Some(dialog) = &mut self.dialog else {
+            if let Some(viewer) = &mut self.viewer { return viewer.handle_event(event, cx); }
+            if let Some(menu) = &mut self.menu { return menu.handle_event(event,cx); }
+            if self.notice.handle_event(event, cx) { return true; }
+            return self.tooltips.handle_event(event, cx);
+        };
         dialog.handle_event(event, cx);
         // This is an opaque input scope even in empty or disabled-control space.
         true
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
+        if self.viewer.is_none() && self.dialog.is_none() && self.menu.is_none() { self.tooltips.visit_perframe(frame,cx); }
+        self.notice.hide();
+        if let Some(viewer) = &mut self.viewer { viewer.visit_perframe(frame, cx); }
+        else if self.dialog.is_none() {
+            if let Some(menu) = &mut self.menu { menu.visit_perframe(frame,cx); }
+            else { self.notice.visit_perframe(frame, cx); }
+        }
         if let Some(dialog) = &mut self.dialog {
             let bounds = frame.bounds; let clip = frame.clip;
             frame.layer.with_clip(clip, |layer| dialog.visit_perframe(&mut Frame { layer, bounds, clip }, cx));
@@ -121,6 +150,8 @@ impl Widget for RootWidget {
 pub(super) struct Services {
     pub(super) renderer: Renderer,
     pub(super) platform: Vec<PlatformAction>,
+    pub(super) gpu: Gpu,
+    pub(super) transfers: super::attachments::Transfers,
 }
 pub(crate) struct UiState {
     pub(crate) size: (u32, u32),
@@ -132,6 +163,7 @@ pub(crate) struct UiState {
     pub(super) focus: Option<Target>,
     pub(super) capture: Option<Capture>,
     pub(super) hover: Option<Vec2>,
+    pub(super) hint: Option<(Rect, super::Info)>,
     pub(super) hot: Option<(Target, bool)>, // bool: text cursor
     pub(super) requests: VecDeque<Request>,
     pub(super) return_to: Option<(String, Option<String>, Option<String>)>,
@@ -142,7 +174,7 @@ pub(crate) struct UiState {
 impl UiState {
     pub fn new(size: (u32, u32), mobile: bool) -> Self {
         Self { size, origin: Vec2::new(0., 0.), scale: 1., mobile, window_focused: true, dirty: true,
-            focus: None, capture: None, hover: None, hot: None, requests: VecDeque::new(), return_to: None, native: None, input_request: 0, paste: None }
+            focus: None, capture: None, hover: None, hint: None, hot: None, requests: VecDeque::new(), return_to: None, native: None, input_request: 0, paste: None }
     }
     fn edit_target(&self, model: &Controller, target: EditorTarget) -> NativeEdit {
         NativeEdit { token: Id::new().0, target, identity: model.identity.clone(),
@@ -161,6 +193,23 @@ impl UiState {
         if self.focus.is_some_and(|target| target.scope == scope) { self.focus = None; }
         if self.capture.is_some_and(|capture| capture.target.scope == scope) { self.capture = None; }
         if self.hot.is_some_and(|(target, _)| target.scope == scope) { self.hot = None; }
-        self.native = None; self.paste = None; self.dirty = true;
+        if self.native.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Widget(t) if t.scope == scope)) { self.native = None; }
+        if self.paste.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Widget(t) if t.scope == scope)) { self.paste = None; }
+        self.dirty = true;
     }
+}
+
+/// GPU handles are stable services. Widgets need not borrow the host window or
+/// carry it through the model to upload an icon/image.
+pub(super) struct Gpu { device: chad::wgpu::Device, queue: chad::wgpu::Queue, format: chad::wgpu::TextureFormat }
+impl Gpu { pub fn new(ctx: &impl chad::RenderContext) -> Self { Self { device: ctx.device().clone(), queue: ctx.queue().clone(), format: ctx.format() } } }
+impl chad::RenderContext for Gpu {
+    fn device(&self) -> &chad::wgpu::Device { &self.device }
+    fn queue(&self) -> &chad::wgpu::Queue { &self.queue }
+    fn format(&self) -> chad::wgpu::TextureFormat { self.format }
+    fn size(&self) -> (u32,u32) { (0,0) }
+    fn dt(&self) -> f32 { 0. }
+    fn elapsed(&self) -> f32 { 0. }
+    fn frame_index(&self) -> u64 { 0 }
+    fn alpha(&self) -> f32 { 0. }
 }

@@ -61,7 +61,7 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
         h.app.wheel(100.,true,point); assert_eq!(h.app.root.legacy.wheel.as_ref().unwrap().lane,Lane::Projects);
         h.app.press(4,point,true); h.app.motion(4,Vec2::new(35.,161.));
         assert!(h.app.root.legacy.pointer.as_ref().unwrap().dragged); h.app.release(4,Vec2::new(35.,161.));
-        assert!(h.app.root.legacy.context_menu.is_none(),"Swiping is not a long press or a tab selection");
+        assert!(h.app.root.menu.is_none(),"Swiping is not a long press or a tab selection");
         h.app.root.legacy.project_velocity=0.; h.app.apply(Action::SelectProject("p24".into())).unwrap(); h.frame();
         assert_eq!(h.app.controller.account.selected.as_deref(),if mobile { None } else { Some("three") },"Only desktop resumes the last chat");
         assert_eq!(h.app.controller.project_unread("p24"), mobile, "Only a visible chat is read");
@@ -81,21 +81,22 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
             h.app.release(2,point);
         } else { h.app.context_at(point); h.frame(); }
         assert_eq!(h.app.controller.account.selected.as_deref(),Some("demo"));
-        assert_eq!(h.app.root.legacy.context_menu.as_ref().unwrap().chat.as_deref(),Some("two"));
-        h.click(|a| matches!(a,Action::MoveMenu(id) if id=="two"));
-        assert!(h.app.root.legacy.context_menu.as_ref().unwrap().parent.is_some());
+        assert_eq!(h.app.root.menu.as_ref().unwrap().chat.as_deref(),Some("two"));
+        let r = h.app.root.menu.as_ref().unwrap().button(|a| matches!(a,ui::MenuChoice::MoveMenu(id) if id=="two")).unwrap();
+        let point = Vec2::new(r.x+r.width/2., r.y+r.height/2.); h.app.press(1,point,mobile); h.app.release(1,point); h.frame();
+        assert!(h.app.root.menu.as_ref().unwrap().parent.is_some());
         h.dump(if mobile {"projects-phone-menu.png"} else {"projects-desktop-menu.png"});
         for _ in 0..24 { h.app.key("ArrowDown",false,false); }
         h.frame();
-        assert!(h.app.root.legacy.context_menu.as_ref().unwrap().scroll>0.);
-        assert!(h.app.root.legacy.hits.iter().any(|hit| matches!(&hit.action,Action::MoveChat(chat,project) if chat=="two" && project=="p24")),"Every topic is reachable in the clipped submenu");
+        assert!(h.app.root.menu.as_ref().unwrap().scroll.value>0.);
+        assert!(h.app.root.menu.as_ref().unwrap().button(|a| matches!(a,ui::MenuChoice::MoveChat(chat,project) if chat=="two" && project=="p24")).is_some_and(|r| r.height > 0.),"Every topic is reachable in the clipped submenu");
         assert!(h.app.root.legacy.hits.iter().all(|hit| hit.rect.y>=0. && hit.rect.y+hit.rect.height<=size.1 as f32));
-        h.app.key("ArrowLeft",false,false); h.frame(); assert!(h.app.root.legacy.context_menu.as_ref().unwrap().parent.is_none());
+        h.app.key("ArrowLeft",false,false); h.frame(); assert!(h.app.root.menu.as_ref().unwrap().parent.is_none());
         h.app.key("Escape",false,false); h.frame();
         let general_tab=h.app.root.legacy.project_areas.iter().find(|(_,id)| id=="general").unwrap().0;
         let point=Vec2::new(general_tab.x+20.,general_tab.y+20.);
         h.app.context_at(point); h.frame();
-        assert_eq!(h.app.root.legacy.context_menu.as_ref().unwrap().options.len(),1,"General is permanent but its prompt is editable");
+        assert_eq!(h.app.root.menu.as_ref().unwrap().options.len(),1,"General is permanent but its prompt is editable");
         h.app.key("Escape",false,false);
         h.app.root.legacy.project_scroll=h.app.root.legacy.max_project_scroll; h.frame();
         h.click(|a| matches!(a,Action::NewProject));

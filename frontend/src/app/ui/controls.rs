@@ -9,10 +9,11 @@ pub(in crate::app) struct Control {
     pub enabled: bool,
     pub rounded: bool,
     clicked: bool,
+    pub info: Option<crate::app::Info>,
 }
 impl Control {
     pub fn new(scope: Id, rounded: bool) -> Self {
-        Self { target: Target { scope, widget: Id::new() }, rect: None, clip: Rect::new(0., 0., 0., 0.), enabled: true, rounded, clicked: false }
+        Self { target: Target { scope, widget: Id::new() }, rect: None, clip: Rect::new(0., 0., 0., 0.), enabled: true, rounded, clicked: false, info: None }
     }
     pub fn contains(&self, point: Vec2) -> bool {
         contains(self.clip, point) && self.rect.is_some_and(|r| if self.rounded { contains_rounded(r, [r.height * 0.5; 4], point) } else { contains(r, point) })
@@ -21,11 +22,12 @@ impl Control {
     pub fn handle(&mut self, event: &Event<'_>, cx: &mut Context<'_>, text: bool) -> bool {
         match *event {
             Event::Hover(Some(point)) if self.contains(point) => {
-                if self.enabled { cx.ui.hot = Some((self.target, text)); } true
+                if self.enabled { cx.ui.hot = Some((self.target, text)); }
+                if let Some(info) = &self.info { cx.ui.hint = Some((self.rect.unwrap(), info.clone())); } true
             }
             Event::Down { pointer, point, touch } if self.contains(point) => {
                 if self.enabled && cx.ui.capture.is_none() {
-                    cx.ui.capture = Some(Capture { target: self.target, pointer, start: point, point, touch, dragged: false, started: std::time::Instant::now() });
+                    cx.ui.capture = Some(Capture { target: self.target, pointer, start: point, point, touch, dragged: false, claimed: false, started: std::time::Instant::now() });
                     if text && !touch { cx.ui.focus = Some(self.target); }
                 }
                 cx.ui.dirty = true; true
@@ -38,6 +40,9 @@ impl Control {
             Event::Up { pointer, point } if cx.ui.capture.is_some_and(|c| c.target == self.target && c.pointer == pointer) => {
                 let capture = cx.ui.capture.take().unwrap();
                 self.clicked = self.enabled && !capture.dragged && self.contains(point);
+                if self.clicked && capture.touch && capture.started.elapsed().as_millis() >= 450 && let Some(info) = &self.info {
+                    self.clicked = false; cx.ui.requests.push_back(super::Request::Tip { info: info.clone(), rect: self.rect.unwrap() });
+                }
                 cx.ui.dirty = true; true
             }
             _ => false,
@@ -114,6 +119,7 @@ impl Widget for TextField {
             Event::Move { pointer, point } if capture.is_some_and(|c| c.pointer == pointer) => {
                 let capture = capture.unwrap();
                 if capture.touch {
+                    if let Some(c) = &mut cx.ui.capture { c.claimed = true; }
                     self.editor.wheel(&mut renderer.text, renderer.faces.prose[0], capture.point.y - point.y, false);
                 } else { self.editor.hit(&mut renderer.text, renderer.faces.prose[0], point, true); }
             }
@@ -215,4 +221,29 @@ impl<A: Clone + PartialEq> Form<A> {
         button.primary = primary; button.destructive = destructive;
         button.visit_perframe(&mut Frame { layer: frame.layer, bounds: rect, clip: frame.clip }, cx);
     }
+}
+
+/// A component's retained buttons. Keys include the semantic destination so an
+/// in-flight press never activates a newly rebound item. No root hit/action table.
+pub(in crate::app) struct Controls<A> { pub id: Id, pub items: Vec<(String, Button, A)> }
+impl<A: Clone + std::fmt::Debug> Controls<A> {
+    pub fn new(id: Id) -> Self { Self { id, items: vec![] } }
+    pub fn begin(&mut self) { for (_, b, _) in &mut self.items { b.control.rect = None; } }
+    pub fn finish(&mut self) { self.items.retain(|(_, b, _)| b.control.rect.is_some()); }
+    pub fn place(&mut self, choice: A, rect: Rect, clip: Rect, rounded: bool) -> &mut Button {
+        let key = format!("{choice:?}");
+        let index = self.items.iter().position(|(k, _, _)| k == &key).unwrap_or_else(|| {
+            self.items.push((key, Button::new(self.id, ""), choice)); self.items.len() - 1
+        });
+        let button = &mut self.items[index].1;
+        button.control.rect = Some(rect); button.control.clip = clip; button.control.rounded = rounded;
+        button
+    }
+    pub fn event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> (bool, Option<A>) {
+        for (_, button, choice) in self.items.iter_mut().rev() {
+            if button.handle_event(event, cx) { return (true, button.control.take_click().then(|| choice.clone())); }
+        }
+        (false, None)
+    }
+    pub fn contains(&self, point: Vec2) -> bool { self.items.iter().any(|(_, b, _)| b.control.contains(point)) }
 }

@@ -105,8 +105,6 @@ enum Action {
     SaveAttachment(String, String, String),
     UseSaved(String, String, SavedAction),
     CancelDownload(String),
-    Zoom(f32),
-    Fit,
     Suggest(String),
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -140,7 +138,7 @@ struct Row {
     source: String,
     user: bool,
     error: bool,
-    actions: Vec<(String, Action)>,
+    actions: Vec<(String, ui::MenuChoice)>,
     attachment: Option<(String, ChatAttachment)>,
 }
 impl Row {
@@ -153,22 +151,13 @@ struct Placed {
     top: f32,
     height: f32,
 }
-#[derive(Clone)]
-struct ContextMenu {
-    at: Vec2,
-    section: Option<String>,
-    chat: Option<String>,
-    options: Vec<(String, Action)>,
-    selected: usize,
-    scroll: f32,
-    parent: Option<Box<ContextMenu>>,
-}
+
 struct MessageArea {
     key: String,
     rect: Rect,
     corners: [f32; 4],
     clip: Rect,
-    options: Vec<(String, Action)>,
+    options: Vec<(String, ui::MenuChoice)>,
 }
 impl MessageArea {
     fn contains(&self, point: Vec2) -> bool {
@@ -211,14 +200,7 @@ pub enum PlatformAction {
 }
 #[derive(Clone, Copy)]
 pub enum SavedAction { Open, #[cfg(not(target_os = "android"))] Show, #[cfg(not(target_os = "android"))] Extract }
-struct Viewer {
-    path: PathBuf,
-    name: String,
-    session: String,
-    entry: String,
-    zoom: f32,
-    pan: Vec2,
-}
+
 #[cfg(not(target_os = "android"))]
 #[derive(Clone, Copy)]
 pub enum ConnectionPreview {
@@ -241,9 +223,6 @@ struct LegacyWorkspace {
     composer: Editor,
     code: Option<code_view::View>,
     focus: Option<Option<usize>>,
-    context_menu: Option<ContextMenu>,
-    context_rect: Rect,
-    menu_viewport: Rect,
     message_areas: Vec<MessageArea>,
     detail_areas: Vec<DetailArea>,
     ripple: Option<Ripple>,
@@ -256,9 +235,6 @@ struct LegacyWorkspace {
     project_velocity: f32,
     revealed_project: String,
     revealed_project_position: Option<usize>,
-    usage: Tooltip,
-    info_tip: Tooltip,
-    info_target: Info,
     info_areas: Vec<(Rect, Info)>,
     connection_counter: CounterTicker,
     counter_bucket: Option<u128>,
@@ -271,13 +247,6 @@ struct LegacyWorkspace {
     attachment_scroll: f32,
     max_attachment_scroll: f32,
     attachment_velocity: f32,
-    pending_exports: HashMap<String, (PathBuf, String)>,
-    export_targets: HashMap<String, DownloadTarget>,
-    saving_downloads: HashSet<String>,
-    export_errors: HashMap<String, String>,
-    download_identity: String,
-    progress_clock: Instant,
-    progress_bucket: Option<u128>,
     scroll: f32,
     max_scroll: f32,
     list_scroll: f32,
@@ -296,13 +265,9 @@ struct LegacyWorkspace {
     placed_session: Option<String>,
     pointer: Option<Pointer>,
     hover: Option<Vec2>,
-    pinch: Option<(u64, Vec2)>,
     velocity: f32,
-    viewer: Option<Viewer>,
-    viewer_image: Option<Rect>,
     selecting: bool,
     field_selection: Option<Rect>,
-    notice_popup: notices::NoticePopup,
 }
 impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
@@ -323,18 +288,21 @@ impl App {
             services: ui::Services {
                 renderer: Renderer::new(ctx).map_err(anyhow::Error::msg)?,
                 platform: vec![],
+                gpu: ui::Gpu::new(ctx),
+                transfers: attachments::Transfers { pending_exports: HashMap::new(), export_targets: HashMap::new(), saving_downloads: HashSet::new(), export_errors: HashMap::new(), download_identity, progress_clock: Instant::now(), progress_bucket: None, },
             },
             ui: ui::UiState::new(ctx.size(), mobile),
             root: ui::RootWidget {
                 dialog: None,
+                viewer: None,
+                menu: None,
+                notice: ui::NoticeWidget::new(),
+                tooltips: ui::TooltipHost::default(),
                 legacy: LegacyWorkspace {
                     hits: vec![],
                     composer,
                     code: None,
                     focus: None,
-                    context_menu: None,
-                    context_rect: Rect::new(0., 0., 0., 0.),
-                    menu_viewport: Rect::new(0., 0., 0., 0.),
                     message_areas: vec![],
                     detail_areas: vec![],
                     ripple: None,
@@ -348,9 +316,6 @@ impl App {
                     revealed_project: String::new(),
                     revealed_project_position: None,
 
-                    usage: Tooltip::default(),
-                    info_tip: Tooltip::default(),
-                    info_target: Info::Connection,
                     info_areas: vec![],
                     connection_counter: CounterTicker::new(wake.clone()),
                     counter_bucket: None,
@@ -363,13 +328,6 @@ impl App {
                     attachment_scroll: 0.,
                     max_attachment_scroll: 0.,
                     attachment_velocity: 0.,
-                    pending_exports: HashMap::new(),
-                    export_targets: HashMap::new(),
-                    saving_downloads: HashSet::new(),
-                    export_errors: HashMap::new(),
-                    download_identity,
-                    progress_clock: Instant::now(),
-                    progress_bucket: None,
 
                     scroll: 0.,
                     max_scroll: 0.,
@@ -389,13 +347,9 @@ impl App {
                     placed_session: None,
                     pointer: None,
                     hover: None,
-                    pinch: None,
                     velocity: 0.,
-                    viewer: None,
-                    viewer_image: None,
                     selecting: false,
                     field_selection: None,
-                    notice_popup: notices::NoticePopup::default(),
                 },
             },
         };
@@ -443,10 +397,10 @@ impl App {
                 self.controller.connection = "Not connected".into();
             }
         }
-        self.root.legacy.info_target = Info::Connection;
-        self.root.legacy.info_tip.pinned = true;
-        self.root.legacy.info_tip.suppressed = false;
-        self.root.legacy.info_tip.progress = 1.;
+        self.root.tooltips.target = Info::Connection;
+        self.root.tooltips.info.pinned = true;
+        self.root.tooltips.info.suppressed = false;
+        self.root.tooltips.info.progress = 1.;
     }
     pub fn set_connection_visible(&mut self, visible: bool) {
         self.root.legacy.connection_visible = visible;
@@ -476,23 +430,23 @@ impl App {
     #[cfg(not(target_os = "android"))]
     pub fn hover(&mut self, point: Option<Vec2>) {
         if self.ui_event(ui::Event::Hover(point)) { return; }
-        let enabled = self.root.dialog.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none();
+        let enabled = self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.menu.is_none();
         if enabled
             && let Some((rect, target)) =
                 point.and_then(|p| self.root.legacy.info_areas.iter().find(|(r, _)| contains(*r, p)))
         {
-            if !self.root.legacy.info_target.same_anchor(target) { self.root.legacy.info_tip = Tooltip::default(); }
-            self.root.legacy.info_target = target.clone();
-            self.root.legacy.info_tip.region = *rect;
+            if !self.root.tooltips.target.same_anchor(target) { self.root.tooltips.info = Tooltip::default(); }
+            self.root.tooltips.target = target.clone();
+            self.root.tooltips.info.region = *rect;
         }
-        self.root.legacy.usage
-            .hover(enabled && point.is_some_and(|p| self.root.legacy.usage.contains(p)));
-        self.root.legacy.info_tip
-            .hover(enabled && point.is_some_and(|p| self.root.legacy.info_tip.contains(p)));
-        if enabled && point.is_some_and(|p| contains(self.root.legacy.info_tip.region, p)) {
-            self.root.legacy.usage.dismiss();
-        } else if enabled && point.is_some_and(|p| contains(self.root.legacy.usage.region, p)) {
-            self.root.legacy.info_tip.dismiss();
+        self.root.tooltips.usage
+            .hover(enabled && point.is_some_and(|p| self.root.tooltips.usage.contains(p)));
+        self.root.tooltips.info
+            .hover(enabled && point.is_some_and(|p| self.root.tooltips.info.contains(p)));
+        if enabled && point.is_some_and(|p| contains(self.root.tooltips.info.region, p)) {
+            self.root.tooltips.usage.dismiss();
+        } else if enabled && point.is_some_and(|p| contains(self.root.tooltips.usage.region, p)) {
+            self.root.tooltips.info.dismiss();
         }
         let old = self
             .root.legacy.hover
@@ -511,15 +465,12 @@ impl App {
             p.is_some_and(|p| self.root.legacy.scrollbars.iter().any(|b| contains(b.track, p)))
         };
         self.ui.dirty |= on_bar(self.root.legacy.hover) != on_bar(point);
-        if self.root.dialog.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
+        if self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.menu.is_none() {
             self.ui.dirty |= self.root.legacy.hover.and_then(|p| self.section_at(p).map(|(key, _)| key))
                 != point.and_then(|p| self.section_at(p).map(|(key, _)| key));
         }
         self.root.legacy.hover = point;
-        if self.root.legacy.context_menu.as_ref().is_some_and(|m| m.parent.is_none())
-            && let Some(Action::MoveMenu(id)) = point.and_then(|p| self.root.legacy.hits.iter().rev().find(|h| contains(h.rect, p))).map(|h| h.action.clone()) {
-            self.move_menu(&id);
-        }
+
         self.ui.dirty |= old != new;
     }
     #[cfg(not(target_os = "android"))]
@@ -544,14 +495,14 @@ impl App {
             return CursorIcon::Default;
         };
         if self.root.dialog.is_none()
-            && self.root.legacy.viewer.is_none()
-            && self.root.legacy.context_menu.is_none()
-            && (self.root.legacy.info_tip.contains_card(point) || self.root.legacy.usage.contains_card(point))
+            && self.root.viewer.is_none()
+            && self.root.menu.is_none()
+            && (self.root.tooltips.info.contains_card(point) || self.root.tooltips.usage.contains_card(point))
         {
             return CursorIcon::Default;
         }
         if self.root.dialog.is_none()
-            && self.root.legacy.viewer.is_none()
+            && self.root.viewer.is_none()
             && self.root.legacy.scrollbars.iter().any(|b| contains(b.track, point))
         {
             return CursorIcon::Default;
@@ -563,7 +514,7 @@ impl App {
                 CursorIcon::Pointer
             };
         }
-        if self.root.dialog.is_none() && self.root.legacy.viewer.is_none() {
+        if self.root.dialog.is_none() && self.root.viewer.is_none() {
             if self.services.renderer.hit_link(point).is_some() {
                 return CursorIcon::Pointer;
             }
@@ -585,17 +536,16 @@ impl App {
     pub fn tick(&mut self, dt: f32) -> bool {
         let visible = self.ui.window_focused && (self.ui.size.0 as f32 / self.ui.scale >= 760. || !self.root.legacy.show_chats)
             && (!self.root.legacy.show_attachments || !self.ui.mobile && self.ui.size.0 as f32 / self.ui.scale >= 1000.)
-            && self.root.dialog.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.code.is_none();
+            && self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.legacy.code.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.report_error(error); }
         self.ui.dirty |= self.controller.poll();
-        if self.root.legacy.download_identity != self.controller.identity {
-            self.root.legacy.download_identity = self.controller.identity.clone();
-            self.root.legacy.export_errors.clear();
+        if self.services.transfers.download_identity != self.controller.identity {
+            self.services.transfers.download_identity = self.controller.identity.clone();
+            self.services.transfers.export_errors.clear();
         }
         self.finish_exports();
         if let Some(text)=self.controller.copied.take() && !text.is_empty() {self.services.platform.push(PlatformAction::Copy(text));self.ui.dirty=true;}
-        self.ui.dirty |= self.root.legacy.usage.tick();
-        self.ui.dirty |= self.root.legacy.info_tip.tick();
+
         self.ui_event(ui::Event::Tick(dt));
         self.sync_navigation();
         self.code_tick(dt);
@@ -607,22 +557,22 @@ impl App {
                 Err(error) => self.controller.report_error(error),
             }
         }
-        if visible && self.root.legacy.usage.region.width > 0. && (self.root.legacy.usage.progress > 0. || self.root.legacy.usage.pinned) {
+        if visible && self.root.tooltips.usage.region.width > 0. && (self.root.tooltips.usage.progress > 0. || self.root.tooltips.usage.pinned) {
             let quota = self.controller.codex_usage.content(self.controller.epoch.is_some());
             if self.controller.account.selected.as_ref().and_then(|id|self.controller.account.sessions.iter().find(|s|&s.id==id))
-                .and_then(|s|s.model.as_ref()).is_some_and(|m|m.provider=="openai-codex") && !self.root.legacy.usage.content.text.ends_with(&quota.text) {
+                .and_then(|s|s.model.as_ref()).is_some_and(|m|m.provider=="openai-codex") && !self.root.tooltips.usage.content.text.ends_with(&quota.text) {
                 self.ui.dirty=true;
             }
         }
-        if self.root.legacy.connection_visible && self.root.legacy.info_tip.progress > 0. && self.root.legacy.info_tip.region.width > 0.
-            && let Info::CacheTtl(id) = &self.root.legacy.info_target
+        if self.root.legacy.connection_visible && self.root.tooltips.info.progress > 0. && self.root.tooltips.info.region.width > 0.
+            && let Info::CacheTtl(id) = &self.root.tooltips.target
             && let Some(session) = self.controller.account.sessions.iter().find(|s| &s.id == id)
         {
-            self.ui.dirty |= self.root.legacy.info_tip.content != self.controller.cache_ttl(session).details();
+            self.ui.dirty |= self.root.tooltips.info.content != self.controller.cache_ttl(session).details();
         }
-        if self.root.dialog.is_some() || self.root.legacy.viewer.is_some() {
-            self.root.legacy.usage.dismiss();
-            self.root.legacy.info_tip.dismiss();
+        if self.root.dialog.is_some() || self.root.viewer.is_some() {
+            self.root.tooltips.usage.dismiss();
+            self.root.tooltips.info.dismiss();
             self.root.legacy.autoscroll = None;
             self.root.legacy.wheel = None;
         }
@@ -631,38 +581,38 @@ impl App {
         self.ui.dirty |= self.root.legacy.dot_color != dot_color;
         self.root.legacy.dot_color = dot_color;
         let card_visible = self.root.legacy.connection_visible
-            && self.root.legacy.info_target == Info::Connection
-            && self.root.legacy.info_tip.progress > 0.
-            && self.root.legacy.info_tip.region.width > 0.
-            && self.root.dialog.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none();
+            && self.root.tooltips.target == Info::Connection
+            && self.root.tooltips.info.progress > 0.
+            && self.root.tooltips.info.region.width > 0.
+            && self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.menu.is_none();
         let counter_bucket = card_visible.then(|| self.controller.health.counter(now))
             .flatten().map(|(_, ms)| ms / COUNTER_REFRESH.as_millis());
-        let next_wake = if !self.root.legacy.connection_visible || self.root.dialog.is_some() || self.root.legacy.viewer.is_some() {
+        let next_wake = if !self.root.legacy.connection_visible || self.root.dialog.is_some() || self.root.viewer.is_some() {
             None
         } else if card_visible && counter_bucket.is_some() {
             Some(COUNTER_REFRESH)
         } else {
             self.controller.health.next_color_wake(now)
         };
-        let indeterminate = self.root.legacy.connection_visible && self.root.dialog.is_none() && self.root.legacy.viewer.is_none()
+        let indeterminate = self.root.legacy.connection_visible && self.root.dialog.is_none() && self.root.viewer.is_none()
             && (!self.ui.mobile || !self.root.legacy.show_chats || self.root.legacy.show_attachments)
             && (self.controller.downloads.values().any(|d|!d.status.done && d.status.total==0)
-                || !self.root.legacy.saving_downloads.is_empty());
-        let progress_bucket=indeterminate.then(||now.duration_since(self.root.legacy.progress_clock).as_millis()/80);
-        self.ui.dirty |= self.root.legacy.progress_bucket!=progress_bucket;
-        self.root.legacy.progress_bucket=progress_bucket;
+                || !self.services.transfers.saving_downloads.is_empty());
+        let progress_bucket=indeterminate.then(||now.duration_since(self.services.transfers.progress_clock).as_millis()/80);
+        self.ui.dirty |= self.services.transfers.progress_bucket!=progress_bucket;
+        self.services.transfers.progress_bucket=progress_bucket;
         let next_wake=if indeterminate {Some(next_wake.map_or(std::time::Duration::from_millis(80),
             |duration|duration.min(std::time::Duration::from_millis(80))))} else {next_wake};
         // Quota reset / TTL text stays current when pinned, even while offline.
         // Share the existing timer; closed cards do not acquire a redraw loop.
-        let timed_tooltip = self.root.legacy.connection_visible && self.root.dialog.is_none() && self.root.legacy.viewer.is_none()
-            && self.root.legacy.context_menu.is_none()
-            && (self.root.legacy.usage.progress > 0. && self.root.legacy.usage.region.width > 0.
-                || self.root.legacy.info_tip.progress > 0. && self.root.legacy.info_tip.region.width > 0. && matches!(self.root.legacy.info_target, Info::CacheTtl(_)));
+        let timed_tooltip = self.root.legacy.connection_visible && self.root.dialog.is_none() && self.root.viewer.is_none()
+            && self.root.menu.is_none()
+            && (self.root.tooltips.usage.progress > 0. && self.root.tooltips.usage.region.width > 0.
+                || self.root.tooltips.info.progress > 0. && self.root.tooltips.info.region.width > 0. && matches!(self.root.tooltips.target, Info::CacheTtl(_)));
         let next_wake = if timed_tooltip { Some(next_wake.map_or(std::time::Duration::from_secs(1),
             |duration| duration.min(std::time::Duration::from_secs(1)))) } else { next_wake };
-        self.ui.dirty |= self.root.legacy.notice_popup.observe(self.controller.notice.as_ref(), now);
-        let next_wake = match (next_wake, self.root.legacy.notice_popup.remaining(now)) {
+
+        let next_wake = match (next_wake, self.root.notice.popup.remaining(now)) {
             (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b),
         };
         self.root.legacy.connection_counter.sync(next_wake);
@@ -740,12 +690,12 @@ impl App {
             self.ui.dirty = true;
         }
         if let Some(point) = self.root.legacy.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
-            && self.root.dialog.is_none() && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none()
+            && self.root.dialog.is_none() && self.root.menu.is_none() && self.root.viewer.is_none()
             && (self.root.legacy.project_areas.iter().any(|(r,_)| contains(*r, point)) || self.root.legacy.chat_areas.iter().any(|(r,_)| contains(*r, point))) {
             self.context_at(point);
         }
         if let Some(point) = self.root.legacy.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
-            && self.root.dialog.is_none() && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none()
+            && self.root.dialog.is_none() && self.root.menu.is_none() && self.root.viewer.is_none()
             && let Some((_, info)) = self.root.legacy.info_areas.iter().find(|(r, info)| matches!(info, Info::Attachment(..)) && contains(*r, point)) {
             let info = info.clone();
             self.root.legacy.pointer = None;
@@ -754,7 +704,7 @@ impl App {
             self.activate(Action::Info(info));
         }
         let waiting_hold = self.root.legacy.pointer.as_ref().is_some_and(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() < 450)
-            && self.root.dialog.is_none() && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none();
+            && self.root.dialog.is_none() && self.root.menu.is_none() && self.root.viewer.is_none();
         if let Some(ripple) = &self.root.legacy.ripple {
             let now = Instant::now();
             if ripple.finished(now) {
@@ -805,28 +755,20 @@ impl App {
     }
     pub fn back(&mut self) {
         if self.ui_event(ui::Event::Back) { return; }
-        if self.root.legacy.info_tip.pinned
-            || self.root.legacy.info_tip.progress > 0.
-            || self.root.legacy.usage.pinned
-            || self.root.legacy.usage.progress > 0.
+        if self.root.tooltips.info.pinned
+            || self.root.tooltips.info.progress > 0.
+            || self.root.tooltips.usage.pinned
+            || self.root.tooltips.usage.progress > 0.
         {
-            self.root.legacy.info_tip.dismiss();
-            self.root.legacy.usage.dismiss();
+            self.root.tooltips.info.dismiss();
+            self.root.tooltips.usage.dismiss();
             self.ui.dirty = true;
             return;
         }
-        if self.root.legacy.context_menu.is_some() {
-            self.root.legacy.context_menu = self.root.legacy.context_menu.take().and_then(|m| m.parent.map(|p| *p));
-            self.ui.dirty = true;
-            return;
-        }
+
         self.root.legacy.focus = None;
         self.root.legacy.navigation.download = None;
-        if self.root.legacy.viewer.take().is_some() {
-            self.root.legacy.viewer_image = None;
-        } else if self.root.dialog.is_some() {
-            self.activate(Action::CancelModal);
-        } else if self.root.legacy.code.is_some() {
+        if self.root.legacy.code.is_some() {
             self.code_back();
         } else if self.root.legacy.show_attachments {
             self.root.legacy.show_attachments = false;
@@ -869,13 +811,14 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn middle(&mut self, pressed: bool, point: Vec2) {
+        if self.ui_event(ui::Event::Middle { pressed, point }) { return; }
         if self.root.dialog.is_some() { return; }
         if pressed {
             if self.cancel_autoscroll() {
                 return;
             }
             if self.root.dialog.is_some()
-                || self.root.legacy.viewer.is_some()
+                || self.root.viewer.is_some()
                 || !contains(self.root.legacy.transcript, point)
                 || self.root.legacy.max_scroll <= 0.
             {
@@ -903,20 +846,17 @@ impl App {
     #[cfg(not(target_os = "android"))]
     pub fn wheel(&mut self, amount: f32, horizontal: bool, point: Vec2) {
         if self.ui_event(ui::Event::Wheel { amount, horizontal, point }) { return; }
-        if self.root.legacy.context_menu.is_some() && contains(self.root.legacy.context_rect, point) {
-            self.scroll_menu(amount);
-            return;
-        }
-        self.root.legacy.context_menu = None;
+
+        self.root.menu = None;
         self.root.legacy.project_velocity = 0.;
         self.root.legacy.attachment_velocity = 0.;
-        self.root.legacy.usage.dismiss();
-        self.root.legacy.info_tip.dismiss();
+        self.root.tooltips.usage.dismiss();
+        self.root.tooltips.info.dismiss();
         self.cancel_autoscroll();
         self.root.legacy.expansion_pin = None;
         self.root.legacy.history_attempt = None;
         self.root.legacy.velocity = 0.;
-        if self.root.legacy.viewer.is_none() && let Some(field) = self.field_at(point) {
+        if self.root.viewer.is_none() && let Some(field) = self.field_at(point) {
             let editor = match field {
                 None => &mut self.root.legacy.composer,
                 Some(code_view::SEARCH_FIELD) => self.root.legacy.code.as_mut().unwrap().search.as_mut().unwrap(),
@@ -927,9 +867,7 @@ impl App {
             return;
         }
         if self.root.dialog.is_none() && self.code_wheel(amount, horizontal, point) { return; }
-        if let Some(v) = &mut self.root.legacy.viewer {
-            v.zoom = (v.zoom * (-amount * 0.002).exp()).clamp(1., 16.);
-        } else if self.root.dialog.is_none() {
+        if self.root.dialog.is_none() {
             let lane = if contains(self.root.legacy.attachments_rect, point) {
                 Lane::Attachments
             } else if contains(self.root.legacy.projects_rect, point) {
@@ -979,7 +917,7 @@ impl App {
         }
     }
     fn history_near_edge(&mut self, session: &str, near: bool) {
-        if self.root.dialog.is_some() || self.root.legacy.viewer.is_some() || !near {
+        if self.root.dialog.is_some() || self.root.viewer.is_some() || !near {
             return;
         }
         let feed = &self.controller.chats[session].feed;
@@ -998,32 +936,21 @@ impl App {
     }
     pub fn press(&mut self, id: u64, point: Vec2, touch: bool) {
         if self.ui_event(ui::Event::Down { pointer: id, point, touch }) { return; }
-        if let Some(hit) = self.root.legacy.hits.iter().rev().find(|hit| contains(hit.rect, point))
-            && matches!(hit.action, Action::DismissNotice | Action::OpenDownloadNotice(_)) {
-            let action = hit.action.clone();
-            self.cancel_pointer();
-            self.activate(action);
-            return;
-        }
-        if self.root.legacy.context_menu.is_some() && !contains(self.root.legacy.context_rect, point) {
-            self.root.legacy.context_menu = None;
-            self.ui.dirty = true;
-            return;
-        }
+
         if self.root.dialog.is_none()
-            && self.root.legacy.viewer.is_none()
-            && self.root.legacy.context_menu.is_none()
-            && (self.root.legacy.info_tip.contains_card(point) || self.root.legacy.usage.contains_card(point))
+            && self.root.viewer.is_none()
+            && self.root.menu.is_none()
+            && (self.root.tooltips.info.contains_card(point) || self.root.tooltips.usage.contains_card(point))
         {
             // Read-only cards must not activate the list/message behind them.
             self.ui.dirty = true;
             return;
         }
-        if !self.root.legacy.usage.contains(point) {
-            self.root.legacy.usage.dismiss();
+        if !self.root.tooltips.usage.contains(point) {
+            self.root.tooltips.usage.dismiss();
         }
-        if !self.root.legacy.info_tip.contains(point) {
-            self.root.legacy.info_tip.dismiss();
+        if !self.root.tooltips.info.contains(point) {
+            self.root.tooltips.info.dismiss();
         }
         self.root.legacy.wheel = None;
         self.root.legacy.expansion_pin = None;
@@ -1033,16 +960,14 @@ impl App {
         self.root.legacy.attachment_velocity = 0.;
         self.root.legacy.ripple = None;
         if self.root.legacy.pointer.is_some() {
-            if self.root.legacy.viewer.is_some() && touch {
-                self.root.legacy.pinch = Some((id, point));
-            }
+
             return;
         }
         self.root.legacy.selecting = false;
         self.root.legacy.field_selection = None;
         if self.root.dialog.is_none()
-            && self.root.legacy.viewer.is_none()
-            && self.root.legacy.context_menu.is_none()
+            && self.root.viewer.is_none()
+            && self.root.menu.is_none()
             && let Some(bar) = self
                 .root.legacy.scrollbars
                 .iter()
@@ -1079,7 +1004,7 @@ impl App {
             return;
         }
         if self.code_press(id, point, touch) { return; }
-        if !touch && self.root.legacy.viewer.is_none() {
+        if !touch && self.root.viewer.is_none() {
             if let Some(hit) = self.root.legacy.hits.iter().rev().find(|h| contains(h.rect, point)) {
                 // Controls take priority over transcript selection beneath them.
                 if let Action::Focus(field) = hit.action {
@@ -1090,7 +1015,7 @@ impl App {
                     self.field_hit(point, false);
                 }
             } else if self.root.dialog.is_none()
-                && self.root.legacy.context_menu.is_none()
+                && self.root.menu.is_none()
                 && contains(self.root.legacy.transcript, point)
                 && let Some(caret) = self.services.renderer.nearest_text(point)
             {
@@ -1108,7 +1033,7 @@ impl App {
             dragged: false,
             touch,
         });
-        self.root.legacy.ripple = if self.root.dialog.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
+        self.root.legacy.ripple = if self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.menu.is_none() {
             self.section_at(point).map(|(key, rect)| Ripple::new(key.to_owned(), rect, point))
         } else { None };
         self.ui.dirty = true;
@@ -1120,26 +1045,7 @@ impl App {
         let Some(p) = &mut self.root.legacy.pointer else {
             return;
         };
-        if let Some((second, other)) = &mut self.root.legacy.pinch
-            && let Some(viewer) = &mut self.root.legacy.viewer
-        {
-            let distance = |a: Vec2, b: Vec2| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
-            let old = distance(p.last, *other);
-            if id == *second {
-                *other = point;
-            } else if id == p.id {
-                p.last = point;
-            } else {
-                return;
-            }
-            let new = distance(p.last, *other);
-            if old > 1. {
-                viewer.zoom = (viewer.zoom * new / old).clamp(1., 16.);
-            }
-            p.dragged = true;
-            self.ui.dirty = true;
-            return;
-        }
+
         if p.id != id {
             return;
         }
@@ -1179,23 +1085,15 @@ impl App {
         let dx = point.x - p.last.x;
         p.dragged |= (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 7. * self.ui.scale;
         if p.dragged {
-            if p.touch && field.is_some() && self.root.legacy.focus == field && self.root.legacy.context_menu.is_none() {
+            if p.touch && field.is_some() && self.root.legacy.focus == field && self.root.menu.is_none() {
                 p.last = point; p.at = Instant::now();
                 if let Some((editor, renderer)) = self.editor_and_renderer() {
                     editor.wheel(&mut renderer.text, renderer.faces.prose[0], -dy, false);
                 }
                 self.ui.dirty = true; return;
             }
-            if self.root.legacy.context_menu.is_some() {
-                p.last = point;
-                p.at = Instant::now();
-                self.scroll_menu(-dy);
-                return;
-            }
-            if let Some(v) = &mut self.root.legacy.viewer {
-                v.pan.x += dx;
-                v.pan.y += dy;
-            } else if self.root.dialog.is_none() {
+
+            if self.root.dialog.is_none() {
                 if contains(self.root.legacy.projects_rect, p.start) {
                     self.root.legacy.project_scroll = (self.root.legacy.project_scroll - dx).clamp(0., self.root.legacy.max_project_scroll);
                     if p.touch { self.root.legacy.project_velocity = (-dx / p.at.elapsed().as_secs_f32().max(0.008)).clamp(-3000. * self.ui.scale, 3000. * self.ui.scale); }
@@ -1232,27 +1130,14 @@ impl App {
     pub fn release(&mut self, id: u64, point: Vec2) {
         if self.ui_event(ui::Event::Up { pointer: id, point }) { return; }
         if self.code_release(id, point) { return; }
-        if self.root.legacy.pinch.take().is_some() {
-            self.root.legacy.pointer = None;
-            self.ui.dirty = true;
-            return;
-        }
+
         if self.root.legacy.pointer.as_ref().is_none_or(|p| p.id != id) {
             return;
         }
         let p = self.root.legacy.pointer.take().unwrap();
         self.root.legacy.scroll_drag = None;
         if !p.dragged {
-            if self.root.legacy.viewer.is_some() {
-                if let Some(hit) = self.root.legacy.hits.iter().rev().find(|h|
-                    contains(h.rect, point) && contains(h.rect, p.start)) {
-                    self.activate(hit.action.clone());
-                } else if self.root.legacy.viewer_image.is_none_or(|image|
-                    !contains(image, p.start) && !contains(image, point)) {
-                    self.root.legacy.viewer = None;
-                    self.root.legacy.viewer_image = None;
-                }
-            } else if p.touch && p.started.elapsed().as_millis() > 450
+            if p.touch && p.started.elapsed().as_millis() > 450
                 && self.root.legacy.info_areas.iter().any(|(r, info)| matches!(info, Info::Attachment(..))
                     && contains(*r, point) && contains(*r, p.start)) {
                 let info = self.root.legacy.info_areas.iter().find(|(r, info)| matches!(info, Info::Attachment(..))
@@ -1260,7 +1145,7 @@ impl App {
                 self.activate(Action::Info(info));
             } else if p.touch
                 && p.started.elapsed().as_millis() > 450
-                && self.root.legacy.context_menu.is_none()
+                && self.root.menu.is_none()
                 && (self.root.legacy.project_areas.iter().any(|(r,_)| contains(*r, point) && contains(*r, p.start))
                     || contains(self.root.legacy.transcript, point)
                     || self
@@ -1284,7 +1169,7 @@ impl App {
                         self.services.platform.push(PlatformAction::InputMenu);
                     }
                 }
-            } else if self.root.legacy.context_menu.is_some() {
+            } else if self.root.menu.is_some() {
                 // Empty menu space never activates the transcript behind it.
             } else if let Some(link) = self.services.renderer.hit_link(point) {
                 self.activate(Action::Link(link));
@@ -1317,9 +1202,9 @@ impl App {
         self.with_ui(|root, cx| root.handle_event(&ui::Event::Cancel, cx));
         self.ui.cancel();
         if let Some(code)=&mut self.root.legacy.code { code.drag_anchor=None; }
-        self.root.legacy.context_menu = None;
-        self.root.legacy.usage.dismiss();
-        self.root.legacy.info_tip.dismiss();
+        self.root.menu = None;
+        self.root.tooltips.usage.dismiss();
+        self.root.tooltips.info.dismiss();
         self.ui.dirty = true;
         self.root.legacy.hover = None;
         self.root.legacy.autoscroll = None;
@@ -1328,7 +1213,7 @@ impl App {
         self.root.legacy.expansion_pin = None;
         self.root.legacy.pointer = None;
         self.root.legacy.ripple = None;
-        self.root.legacy.pinch = None;
+
         self.root.legacy.velocity = 0.;
         self.root.legacy.project_velocity = 0.;
         self.root.legacy.attachment_velocity = 0.;
@@ -1436,45 +1321,23 @@ impl App {
             }
             return;
         }
-        if let Some(menu) = &mut self.root.legacy.context_menu {
-            match key {
-                "Escape" | "ArrowLeft" => {
-                    self.root.legacy.context_menu = self.root.legacy.context_menu.take().and_then(|m| m.parent.map(|p| *p));
-                }
-                "ArrowUp" => {
-                    self.root.legacy.hover = None;
-                    menu.selected = (menu.selected + menu.options.len() - 1) % menu.options.len()
-                }
-                "ArrowDown" => {
-                    self.root.legacy.hover = None;
-                    menu.selected = (menu.selected + 1) % menu.options.len();
-                }
-                "Enter" | "ArrowRight" => {
-                    let action = menu.options[menu.selected].1.clone();
-                    if key == "Enter" || matches!(action, Action::MoveMenu(_)) { self.activate(action); }
-                }
-                _ => {}
-            }
-            self.reveal_menu_selection();
-            self.ui.dirty = true;
-            return;
-        }
+
         if key == "Escape"
-            && (self.root.legacy.usage.pinned
-                || self.root.legacy.usage.progress > 0.
-                || self.root.legacy.info_tip.pinned
-                || self.root.legacy.info_tip.progress > 0.)
+            && (self.root.tooltips.usage.pinned
+                || self.root.tooltips.usage.progress > 0.
+                || self.root.tooltips.info.pinned
+                || self.root.tooltips.info.progress > 0.)
         {
-            self.root.legacy.usage.dismiss();
-            self.root.legacy.info_tip.dismiss();
+            self.root.tooltips.usage.dismiss();
+            self.root.tooltips.info.dismiss();
             self.ui.dirty = true;
             return;
         }
-        if self.root.dialog.is_none() && self.root.legacy.viewer.is_none() && self.code_key(key, ctrl, shift) { return; }
+        if self.root.dialog.is_none() && self.root.viewer.is_none() && self.code_key(key, ctrl, shift) { return; }
         self.root.legacy.expansion_pin = None;
         self.root.legacy.wheel = None;
         if key == "Escape" {
-            if self.root.dialog.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.show_attachments {
+            if self.root.dialog.is_some() || self.root.viewer.is_some() || self.root.legacy.show_attachments {
                 self.back();
             } else {
                 self.activate(Action::Abort);
@@ -1520,13 +1383,13 @@ impl App {
 
         self.ui.paste = None;
         self.cancel_preedit();
-        if let Action::MoveMenu(ref id) = action { self.move_menu(id); return Ok(()); }
-        if matches!(action, Action::ContextBack) {
-            self.root.legacy.context_menu = self.root.legacy.context_menu.take().and_then(|m| m.parent.map(|p| *p));
+        if let Action::MoveMenu(session) = &action {
+            if let Some(menu) = &self.root.menu { self.ui.requests.push_back(ui::Request::MoveMenu { owner: menu.id, session: session.clone() }); self.finish_ui_requests()?; }
             return Ok(());
         }
+        if matches!(action, Action::ContextBack) { self.ui_event(ui::Event::Key {key:"ArrowLeft",ctrl:false,shift:false}); return Ok(()); }
         if matches!(action, Action::Noop) { return Ok(()); }
-        self.root.legacy.context_menu = None;
+        self.root.menu = None;
         if matches!(action, Action::Select(_) | Action::SelectProject(_) | Action::New | Action::Tail | Action::Attachments) {
             self.root.legacy.navigation.download = None;
         }
@@ -1543,23 +1406,23 @@ impl App {
             Action::MoveMenu(_) | Action::ContextBack | Action::Noop => {}
             Action::Select(id) => self.navigate_chat(&id)?,
             Action::Info(target) => {
-                self.root.legacy.usage.dismiss();
-                if !self.root.legacy.info_target.same_anchor(&target) { self.root.legacy.info_tip = Tooltip::default(); }
-                self.root.legacy.info_target = target;
+                self.root.tooltips.usage.dismiss();
+                if !self.root.tooltips.target.same_anchor(&target) { self.root.tooltips.info = Tooltip::default(); }
+                self.root.tooltips.target = target;
                 if let Some((rect, _)) = self
                     .root.legacy.info_areas
                     .iter()
-                    .find(|(_, target)| *target == self.root.legacy.info_target)
+                    .find(|(_, target)| *target == self.root.tooltips.target)
                 {
-                    self.root.legacy.info_tip.region = *rect;
+                    self.root.tooltips.info.region = *rect;
                 }
-                self.root.legacy.info_tip.pinned = !self.root.legacy.info_tip.pinned;
-                self.root.legacy.info_tip.suppressed = !self.root.legacy.info_tip.pinned;
+                self.root.tooltips.info.pinned = !self.root.tooltips.info.pinned;
+                self.root.tooltips.info.suppressed = !self.root.tooltips.info.pinned;
             }
             Action::Usage => {
-                self.root.legacy.info_tip.dismiss();
-                self.root.legacy.usage.pinned = !self.root.legacy.usage.pinned;
-                self.root.legacy.usage.suppressed = !self.root.legacy.usage.pinned;
+                self.root.tooltips.info.dismiss();
+                self.root.tooltips.usage.pinned = !self.root.tooltips.usage.pinned;
+                self.root.tooltips.usage.suppressed = !self.root.tooltips.usage.pinned;
             }
             Action::New => {
                 self.save()?;
@@ -1604,13 +1467,7 @@ impl App {
                 }
             }
             Action::Confirm => { self.ui_event(ui::Event::Submit); }
-            Action::CancelModal => {
-                
-                
-                
-                
-                self.root.legacy.focus = None;
-            }
+            Action::CancelModal => { self.ui_event(ui::Event::Back); }
             Action::RefreshCatalog => { self.open_ui(ui::DialogSpec::Operation(ui::Operation::Refresh))?; }
             Action::DaemonSettings => { self.open_ui(ui::DialogSpec::Daemon)?; }
 
@@ -1719,78 +1576,27 @@ impl App {
                 }
             }
             Action::EditQueue(id, rev, text) => { if let Some(session) = selected { self.open_ui(ui::DialogSpec::Operation(ui::Operation::Queue { session, id, revision: rev, text }))?; } }
-            Action::Attachment(session, entry, name, image) => {
-                let key=Controller::download_key(&session,&entry);
-                let path = match self.controller.download(&session,&entry,if image {10_000_000} else {50_000_000}) {
-                    Ok(path)=>path,
-                    Err(error)=>{let text=error.to_string();self.root.legacy.export_errors.insert(key.clone(),text.clone());
-                        self.controller.notice=Some(text.into());return Ok(());}
-                };
-                let in_progress = self.controller.downloads.get(&key).is_some_and(|d| !d.status.done);
-                if image {
-                    if path.is_file() && !in_progress {
-                        self.root.legacy.viewer_image = None;
-                        self.root.legacy.viewer = Some(Viewer {
-                            path,
-                            name,
-                            session,
-                            entry,
-                            zoom: 1.,
-                            pan: Vec2::new(0., 0.),
-                        });
-                    }
-                } else if path.is_file() && !in_progress {
-                    self.begin_save(&session,&entry,path,name);
-                } else {
-                    self.root.legacy.export_targets.insert(key.clone(), self.export_target(&session,&entry));
-                    self.root.legacy.export_errors.remove(&key);
-                    self.root.legacy.pending_exports.insert(key, (path, name));
-                }
-            }
-            Action::SaveAttachment(session,entry,name) => {
-                let key=Controller::download_key(&session,&entry);
-                let file = self.controller.chats.get(&session).is_some_and(|chat| chat.feed.events.values()
-                    .any(|e| e.entry_id == entry && e.attachment.as_ref().is_some_and(|a| a.kind == AttachmentKind::File)));
-                let path=match self.controller.download(&session,&entry,if file {50_000_000} else {10_000_000}) {
-                    Ok(path)=>path,
-                    Err(error)=>{let text=error.to_string();self.root.legacy.export_errors.insert(key.clone(),text.clone());
-                        self.controller.notice=Some(text.into());return Ok(());}
-                };
-                if path.is_file() && !self.controller.downloads.get(&key).is_some_and(|d|!d.status.done) {
-                    self.begin_save(&session,&entry,path,name);
-                } else {
-                    self.root.legacy.export_targets.insert(key.clone(),self.export_target(&session,&entry));
-                    self.root.legacy.export_errors.remove(&key);
-                    self.root.legacy.pending_exports.insert(key,(path,name));
-                }
-            }
+            Action::Attachment(session, entry, name, image) => { self.with_ui(|_, cx| cx.download_attachment(&session, &entry, &name, image, false))?; }
+            Action::SaveAttachment(session,entry,name) => { let image = self.controller.chats.get(&session).is_none_or(|chat| !chat.feed.events.values().any(|e| e.entry_id == entry && e.attachment.as_ref().is_some_and(|a| a.kind == AttachmentKind::File))); self.with_ui(|_, cx| cx.download_attachment(&session, &entry, &name, image, true))?; }
             Action::UseSaved(session,entry,action) => {
                 if let Some(saved)=self.controller.saved_download(&session,&entry) {
                     self.services.platform.push(PlatformAction::UseDownload(saved,action,self.export_target(&session,&entry)));
                 }
             }
             Action::CancelDownload(key) => {
-                self.root.legacy.pending_exports.remove(&key);
-                self.root.legacy.export_targets.remove(&key);
+                self.services.transfers.pending_exports.remove(&key);
+                self.services.transfers.export_targets.remove(&key);
                 self.controller.cancel_download(&key)?;
             },
-            Action::Zoom(factor) => {
-                if let Some(v) = &mut self.root.legacy.viewer {
-                    v.zoom = (v.zoom * factor).clamp(1., 16.);
-                }
-            }
-            Action::Fit => {
-                if let Some(v) = &mut self.root.legacy.viewer {
-                    v.zoom = 1.;
-                    v.pan = Vec2::new(0., 0.);
-                }
-            }
+
+
             Action::Suggest(text) => {
                 self.replace_composer(text.clone());
                 self.controller.draft(text)?;
             }
         }
 
+        self.finish_ui_requests()?;
         self.sync_navigation();
         Ok(())
     }
@@ -1812,7 +1618,7 @@ impl App {
             held: self.root.legacy.pointer.is_some(),
         };
         let background_input =
-            if self.root.dialog.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
+            if self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.menu.is_none() {
                 input
             } else {
                 Interaction::default()
@@ -1832,12 +1638,11 @@ impl App {
         self.root.legacy.transcript = Rect::new(0.,0.,0.,0.);
         self.root.legacy.attachments_rect = Rect::new(0., 0., 0., 0.);
         self.root.legacy.info_areas.clear();
-        self.root.legacy.usage.region = Rect::new(0., 0., 0., 0.);
-        self.root.legacy.info_tip.region = Rect::new(0., 0., 0., 0.);
+        self.root.tooltips.usage.region = Rect::new(0., 0., 0., 0.);
+        self.root.tooltips.info.region = Rect::new(0., 0., 0., 0.);
         self.root.legacy.composer.hide();
 
         self.services.renderer.clear_scenes();
-        self.root.legacy.viewer_image = None;
         main.rect(bounds, color(0x0e141b));
         let wide = bounds.width / s >= 760.;
         let side = if wide { 300. * s } else { 0. };
@@ -1948,17 +1753,16 @@ impl App {
         {
             self.controller.viewport(&session, interests);
         }
-        if let Some((rect, target)) = self.root.legacy.info_areas.iter().find(|(_, target)| self.root.legacy.info_target.same_anchor(target)) {
-            self.root.legacy.info_tip.region = *rect;
-            self.root.legacy.info_target = target.clone();
+        if let Some((rect, target)) = self.root.legacy.info_areas.iter().find(|(_, target)| self.root.tooltips.target.same_anchor(target)) {
+            self.root.tooltips.info.region = *rect;
+            self.root.tooltips.target = target.clone();
         }
-        if self.root.legacy.info_tip.region.width <= 0. {
-            self.root.legacy.info_tip.hover(false);
-            self.root.legacy.info_tip.dismiss();
+        if self.root.tooltips.info.region.width <= 0. {
+            self.root.tooltips.info.hover(false);
+            self.root.tooltips.info.dismiss();
         }
-        self.usage_frame(&mut overlay, bounds);
-        self.info_frame(&mut overlay, bounds);
-        self.context_frame(&mut overlay, bounds);
+
+
         if let Some(auto) = &self.root.legacy.autoscroll {
             let a = auto.anchor;
             let radius = 13.5 * s;
@@ -1991,77 +1795,8 @@ impl App {
                 0x67d4ff,
             );
         }
-        if let Some(viewer) = &self.root.legacy.viewer {
-            self.root.legacy.hits.clear();
-            overlay.rect(bounds, color(0x06090d));
-            let path = viewer.path.clone();
-            let name = viewer.name.clone();
-            let zoom = viewer.zoom;
-            let pan = viewer.pan;
-            match self.services.renderer.image_size(ctx, &path) {
-                Ok((w, h)) => {
-                    let fit = (bounds.width / w as f32).min((bounds.height - 100. * s) / h as f32);
-                    let width = w as f32 * fit * zoom;
-                    let height = h as f32 * fit * zoom;
-                    let image = Rect::new(
-                        bounds.x + (bounds.width - width) / 2. + pan.x,
-                        bounds.y + 60. * s + (bounds.height - 100. * s - height) / 2. + pan.y,
-                        width,
-                        height,
-                    );
-                    let clip = Rect::new(
-                        bounds.x,
-                        bounds.y + 56. * s,
-                        bounds.width,
-                        bounds.height - 100. * s,
-                    );
-                    self.root.legacy.viewer_image = Some(crate::render::intersect(image, clip));
-                    overlay.images.push((path.clone(), image, clip));
-                }
-                Err(e) => {
-                    self.services.renderer.label(
-                        &mut overlay,
-                        &e,
-                        Rect::new(
-                            bounds.x + 20. * s,
-                            bounds.y + 80. * s,
-                            bounds.width - 40. * s,
-                            100. * s,
-                        ),
-                        15. * s,
-                        color(0xffb4ab),
-                        false,
-                    );
-                }
-            }
-            let buttons = [
-                ("Back", Action::Back),
-                ("−", Action::Zoom(0.8)),
-                ("Fit", Action::Fit),
-                ("+", Action::Zoom(1.25)),
-                ("↓", Action::SaveAttachment(viewer.session.clone(), viewer.entry.clone(), name)),
-            ];
-            for (i, (label, action)) in buttons.into_iter().enumerate() {
-                button(
-                    &mut self.services.renderer,
-                    &mut overlay,
-                    &mut self.root.legacy.hits,
-                    Rect::new(
-                        bounds.x + (12. + i as f32 * 66.) * s,
-                        bounds.y + 8. * s,
-                        60. * s,
-                        38. * s,
-                    ),
-                    label,
-                    action,
-                    s,
-                    false,
-                );
-            }
-        }
-        if self.root.dialog.is_none() {
-            self.notice_frame(ctx, &mut overlay, bounds);
-        }
+
+
         self.with_ui(|root, cx| root.visit_perframe(&mut ui::Frame { layer: &mut overlay, bounds, clip: bounds }, cx));
         if self.root.legacy.selecting
             && let Some(p) = &self.root.legacy.pointer
@@ -2145,7 +1880,7 @@ impl App {
             }
             let selected = self.controller.account.selected.as_ref() == Some(&session.id);
             let targeted = self
-                .root.legacy.context_menu
+                .root.menu
                 .as_ref()
                 .is_some_and(|m| m.chat.as_ref() == Some(&session.id));
             layer.clipped_rounded_rect(
@@ -2296,7 +2031,7 @@ impl App {
                     error: false,
                     actions: vec![(
                         "Copy message".into(),
-                        Action::CopyDetails(
+                        ui::MenuChoice::CopyDetails(
                             session.into(),
                             group.iter().map(|e| e.id.clone()).collect(),
                         ),
@@ -2333,10 +2068,10 @@ impl App {
                     }
                 )
             };
-            let mut actions = if let Some(text) = local_text {vec![("Copy text".into(), Action::Copy(text.into()))]}
-                else if chat.feed.incomplete.contains(&e.id) {vec![("Fetch complete message to copy".into(),Action::CopyDetails(session.into(),vec![e.id.clone()]))]} else {vec![("Copy message".into(), Action::Copy(e.text.clone()))]};
+            let mut actions = if let Some(text) = local_text {vec![("Copy text".into(), ui::MenuChoice::Copy(text.into()))]}
+                else if chat.feed.incomplete.contains(&e.id) {vec![("Fetch complete message to copy".into(),ui::MenuChoice::CopyDetails(session.into(),vec![e.id.clone()]))]} else {vec![("Copy message".into(), ui::MenuChoice::Copy(e.text.clone()))]};
             if e.phase == EventPhase::Saved {
-                actions.push(("Fork here".into(), Action::Fork(e.entry_id.clone())));
+                actions.push(("Fork here".into(), ui::MenuChoice::Fork(e.entry_id.clone())));
             }
             let request = e.origin.request_id.as_deref().filter(|id| user && e.kind == EventKind::Text && e.attachment.is_none()
                 && shown_requests.insert(*id));
@@ -2381,15 +2116,15 @@ impl App {
             // a new user message; an unresolved control remains visible by itself
             // only if its target disappeared or it was explicitly rejected.
             if (edit || delete) && in_queue && !matches!(p.status, crate::store::Delivery::Rejected) { continue; }
-            let mut actions = vec![("Copy text".into(), Action::Copy(p.text.clone()))];
+            let mut actions = vec![("Copy text".into(), ui::MenuChoice::Copy(p.text.clone()))];
             if !control && matches!(p.status, crate::store::Delivery::Rejected | crate::store::Delivery::Unconfirmed) {
-                actions.push(("Restore draft".into(), Action::Restore(p.request.id.clone())));
+                actions.push(("Restore draft".into(), ui::MenuChoice::Restore(p.request.id.clone())));
             }
             if matches!(p.request.command, ClientCommand::Prompt { .. })
                 && matches!(p.status, crate::store::Delivery::Rejected | crate::store::Delivery::Unconfirmed) {
-                actions.push(("Retry saved message".into(), Action::RetryPending(p.request.id.clone())));
+                actions.push(("Retry saved message".into(), ui::MenuChoice::RetryPending(p.request.id.clone())));
             }
-            actions.push(("Dismiss".into(), Action::Dismiss(p.request.id.clone())));
+            actions.push(("Dismiss".into(), ui::MenuChoice::Dismiss(p.request.id.clone())));
             rows.push(Row {
                 block: None,
                 details: vec![], header: true, key: if matches!(p.request.command, ClientCommand::Prompt { .. }) && !represented {
@@ -2416,17 +2151,17 @@ impl App {
             let complete=!chat.feed.incomplete.contains(&format!("queued:{}",q.request_id));
             let local_text = (!complete).then(|| local_prompts.get(q.request_id.as_str()))
                 .flatten().map(|p| p.text.as_str());
-            let mut actions = if complete {vec![("Copy message".into(), Action::Copy(q.text.clone()))]} else {vec![]};
+            let mut actions = if complete {vec![("Copy message".into(), ui::MenuChoice::Copy(q.text.clone()))]} else {vec![]};
             if !moving && complete && state.capabilities.iter().any(|c| c == "queue_edit") {
                 actions.push((
                     "Edit".into(),
-                    Action::EditQueue(q.request_id.clone(), q.revision, q.text.clone()),
+                    ui::MenuChoice::EditQueue(q.request_id.clone(), q.revision, q.text.clone()),
                 ));
             }
             if !moving && state.capabilities.iter().any(|c| c == "queue_delete") {
                 actions.push((
                     "Delete".into(),
-                    Action::Queue(QueueOperation::Delete {
+                    ui::MenuChoice::Queue(QueueOperation::Delete {
                         request_id: q.request_id.clone(),
                         revision: q.revision,
                     }),
@@ -2441,7 +2176,7 @@ impl App {
             {
                 actions.push((
                     "Run through here".into(),
-                    Action::Queue(QueueOperation::Prefix {
+                    ui::MenuChoice::Queue(QueueOperation::Prefix {
                         run_id: state.run_id.clone(),
                         requests: state.requests[..=i]
                             .iter()
@@ -2467,11 +2202,11 @@ impl App {
                 ClientCommand::QueueControl { operation: QueueOperation::Edit { text, .. }, .. } => Some(text.as_str()),
                 _ => None,
             });
-            if let Some(text) = local_text { actions = vec![("Copy text".into(), Action::Copy(text.into()))]; }
+            if let Some(text) = local_text { actions = vec![("Copy text".into(), ui::MenuChoice::Copy(text.into()))]; }
             if pending.is_some() {
                 // A second edit/delete using the old revision would race this
                 // one. Wait for the durable receipt before offering actions.
-                actions = vec![("Copy message".into(), Action::Copy(editing.unwrap_or(&q.text).into()))];
+                actions = vec![("Copy message".into(), ui::MenuChoice::Copy(editing.unwrap_or(&q.text).into()))];
             }
             rows.push(Row {
                 block: None,
@@ -2851,7 +2586,7 @@ impl App {
             // Pin by logical key while a menu is open, not screen coordinates:
             // streaming and paging may move the target without changing its copy boundary.
             let pinned = self
-                .root.legacy.context_menu
+                .root.menu
                 .as_ref()
                 .is_some_and(|menu| menu.section.as_deref() == Some(row.key.as_str()));
             self.services.renderer.clipped_label(
@@ -3087,8 +2822,8 @@ impl App {
             false,
             true,
         );
-        self.root.legacy.usage.region = usage_rect;
-        self.root.legacy.usage.content = usage_text;
+        self.root.tooltips.usage.region = usage_rect;
+        self.root.tooltips.usage.content = usage_text;
         if usage.is_some()
             && (!connected
                 || !self.controller.chats[session].feed.synchronized
@@ -3096,15 +2831,15 @@ impl App {
                     !matches!(s.status, SessionStatus::Idle | SessionStatus::Running)
                 }))
         {
-            self.root.legacy.usage.content.line().dim("Last known value");
+            self.root.tooltips.usage.content.line().dim("Last known value");
         }
         match summary.as_ref().and_then(|s|s.model.as_ref()).map(|m|m.provider.as_str()) {
             Some("openai-codex") => {
-                self.root.legacy.usage.content.line().line();
-                self.root.legacy.usage.content.append(self.controller.codex_usage.content(connected));
+                self.root.tooltips.usage.content.line().line();
+                self.root.tooltips.usage.content.append(self.controller.codex_usage.content(connected));
             }
-            Some(_) => { self.root.legacy.usage.content.line().line().dim("Account quota unavailable for this provider"); }
-            None => { self.root.legacy.usage.content.line().line().dim("Account quota unavailable (model unknown)"); }
+            Some(_) => { self.root.tooltips.usage.content.line().line().dim("Account quota unavailable for this provider"); }
+            None => { self.root.tooltips.usage.content.line().line().dim("Account quota unavailable (model unknown)"); }
         }
         let can_send = (!self.root.legacy.composer.value.trim().is_empty() || !files.is_empty())
             && (!in_code || self.root.legacy.code.as_ref().is_some_and(|c|c.selection.is_some() && c.error.is_none()));
@@ -3337,46 +3072,21 @@ impl App {
             action: Action::ModelSettings,
         });
     }
-    fn notice_frame(&mut self, ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
-        self.root.legacy.notice_popup.observe(self.controller.notice.as_ref(), Instant::now());
-        if !self.root.legacy.notice_popup.visible() { return; }
-        let Some(notice) = self.controller.notice.as_deref() else { return; };
-        let s = self.ui.scale;
-        let size = 16. * s;
-        let max_width = (b.width - 32. * s).max(1.).min(560. * s);
-        let style = sanscale::Style { chain: self.services.renderer.faces.prose[0], wrap_em: None,
-            align: sanscale::Align::Left, line_spacing: 1.15 };
-        let natural = self.services.renderer.text.shape_transient(notice, &style)
-            .map(|block| self.services.renderer.text.measure(block).width_em() * size).unwrap_or(max_width);
-        let width = (natural + 72. * s).max(240. * s).min(max_width);
-        let text_width = (width - 72. * s).max(1.);
-        let text_height = self.services.renderer.label_height(notice, text_width, size, false);
-        let height = (text_height + 24. * s).max(48. * s).min((b.height - 32. * s).max(1.));
-        let rect = Rect::new(b.x + (b.width - width) / 2., b.y + 16. * s, width, height);
-        let action = self.controller.notice.as_ref().and_then(|notice| notice.download.clone())
-            .map_or(Action::DismissNotice, Action::OpenDownloadNotice);
-        self.root.legacy.hits.push(Hit { rect, action });
-        layer.rounded_rect(rect, 12. * s, color(0x263340));
-        self.services.renderer.clipped_label(layer, notice,
-            Rect::new(rect.x + 16. * s, rect.y + ((height - text_height) / 2.).max(12. * s), text_width, text_height),
-            size, color(0xe5eaf0), false, rect);
-        let close = Rect::new(rect.x + width - 44. * s, rect.y + (height - 40. * s) / 2., 40. * s, 40. * s);
-        if layer.interaction.hover.is_some_and(|p| contains(close, p)) {
-            layer.rounded_rect(close, 20. * s, layer.control_color(close, color(0x354454)));
-        }
-        self.services.renderer.icon(ctx, layer, Icon::Close,
-            Rect::new(close.x + 10. * s, close.y + 10. * s, 20. * s, 20. * s), 0xe5eaf0);
-        self.root.legacy.hits.push(Hit { rect: close, action: Action::DismissNotice });
+    #[cfg(test)]
+    fn notice_frame(&mut self, _ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
+        self.with_ui(|root, cx| root.notice.visit_perframe(&mut ui::Frame { layer, bounds: b, clip: b }, cx));
     }
+
     pub fn context_at(&mut self, point: Vec2) {
+        if self.ui_event(ui::Event::Context(point)) { return; }
         if self.root.dialog.is_some() { return; }
         if self.root.legacy.hits.iter().rev().find(|hit| contains(hit.rect, point))
                 .is_some_and(|hit| matches!(hit.action, Action::DismissNotice | Action::OpenDownloadNotice(_)))
             || self.root.dialog.is_some()
-            || self.root.legacy.viewer.is_some()
-            || self.root.legacy.usage.contains_card(point)
-            || self.root.legacy.info_tip.contains_card(point)
-            || self.root.legacy.context_menu.is_some() && contains(self.root.legacy.context_rect, point)
+            || self.root.viewer.is_some()
+            || self.root.tooltips.usage.contains_card(point)
+            || self.root.tooltips.info.contains_card(point)
+            || self.root.menu.is_some() && self.root.menu.as_ref().is_some_and(|menu| menu.contains(point))
         {
             return;
         }
@@ -3403,8 +3113,8 @@ impl App {
         }
         self.root.legacy.wheel = None;
         self.root.legacy.velocity = 0.;
-        self.root.legacy.usage.dismiss();
-        self.root.legacy.info_tip.dismiss();
+        self.root.tooltips.usage.dismiss();
+        self.root.tooltips.info.dismiss();
         let area = transcript
             .then(|| self.root.legacy.message_areas.iter().find(|a| a.contains(point)))
             .flatten();
@@ -3415,7 +3125,7 @@ impl App {
                 .selected_text()
                 .is_some_and(|text| !text.is_empty())
             {
-                options.push(("Copy selection".into(), Action::CopySelection));
+                options.push(("Copy selection".into(), ui::MenuChoice::CopySelection));
             }
             if let Some(area) = area {
                 options.extend(area.options.clone());
@@ -3428,40 +3138,39 @@ impl App {
             options = vec![
                 (
                     "Model…".into(),
-                    Action::AgentSetting(id.clone(), "model".into()),
+                    ui::MenuChoice::AgentSetting(id.clone(), "model".into()),
                 ),
                 (
                     "Thinking…".into(),
-                    Action::AgentSetting(id.clone(), "thinking".into()),
+                    ui::MenuChoice::AgentSetting(id.clone(), "thinking".into()),
                 ),
                 (
                     "Compact context…".into(),
-                    Action::AgentSetting(id.clone(), "compact".into()),
+                    ui::MenuChoice::AgentSetting(id.clone(), "compact".into()),
                 ),
                 (
                     "Codex priority…".into(),
-                    Action::AgentSetting(id.clone(), "fast".into()),
+                    ui::MenuChoice::AgentSetting(id.clone(), "fast".into()),
                 ),
-                ("Move to topic  ›".into(), Action::MoveMenu(id.clone())),
-                ("Rename…".into(), Action::Rename(id.clone())),
-                ("Review restored history…".into(),Action::ReviewRestore(id.clone())),
-                ("Clone chat".into(), Action::Clone(id.clone())),
-                ("Release idle runtime".into(), Action::Sleep(id.clone())),
-                ("Delete chat…".into(), Action::Delete(id.clone())),
+                ("Move to topic  ›".into(), ui::MenuChoice::MoveMenu(id.clone())),
+                ("Rename…".into(), ui::MenuChoice::Rename(id.clone())),
+                ("Review restored history…".into(),ui::MenuChoice::ReviewRestore(id.clone())),
+                ("Clone chat".into(), ui::MenuChoice::Clone(id.clone())),
+                ("Release idle runtime".into(), ui::MenuChoice::Sleep(id.clone())),
+                ("Delete chat…".into(), ui::MenuChoice::Delete(id.clone())),
             ];
         }
         if let Some(id)=&chat && self.controller.account.missing_chats.contains(id) {
-            options=vec![("Copy draft to a new chat (not sent)".into(),Action::CopyRecoveredDraft(id.clone())),("Forget this local recovery…".into(),Action::ForgetRecovered(id.clone()))];
+            options=vec![("Copy draft to a new chat (not sent)".into(),ui::MenuChoice::CopyRecoveredDraft(id.clone())),("Forget this local recovery…".into(),ui::MenuChoice::ForgetRecovered(id.clone()))];
         }
-        self.root.legacy.context_menu = (!options.is_empty()).then(|| ContextMenu {
-            at: point,
-            section: area.map(|a| a.key.clone()),
-            chat,
-            options,
-            selected: 0,
-            scroll: 0.,
-            parent: None,
-        });
+        let section = area.map(|a| a.key.clone());
+        if !options.is_empty() {
+            self.with_ui(|_, cx| {
+                let menu = ui::Menu::new(point, section, chat, options, cx);
+                cx.ui.requests.push_back(ui::Request::Menu(Box::new(menu)));
+            });
+            if let Err(error) = self.finish_ui_requests() { self.report(Err(error)); }
+        }
         self.root.legacy.pointer = None;
         self.root.legacy.selecting = false;
         self.ui.dirty = true;
@@ -3523,58 +3232,8 @@ impl App {
             self.root.legacy.hits.push(Hit { rect: r, action });
         }
     }
-    fn usage_frame(&mut self, layer: &mut Layer, bounds: Rect) {
-        if self.root.legacy.usage.progress <= 0.
-            || self.root.legacy.usage.region.width <= 0.
-            || self.root.dialog.is_some()
-            || self.root.legacy.viewer.is_some()
-            || self.root.legacy.context_menu.is_some()
-        {
-            return;
-        }
-        self.root.legacy.usage.frame(&mut self.services.renderer, layer, "usage", bounds, self.ui.scale, 320., true);
-    }
-    fn info_frame(&mut self, layer: &mut Layer, bounds: Rect) {
-        if self.root.legacy.info_tip.progress <= 0.
-            || self.root.legacy.info_tip.region.width <= 0.
-            || self.root.dialog.is_some()
-            || self.root.legacy.viewer.is_some()
-            || self.root.legacy.context_menu.is_some()
-        {
-            return;
-        }
-        self.root.legacy.info_tip.content = match &self.root.legacy.info_target {
-            Info::Attachment(_, title, detail) => {
-                let mut content = Content::default();
-                content.strong(title, crate::tooltip::INK).line().dim(detail);
-                content
-            }
-            Info::Connection => {
-                let mut content=self.controller.health.tooltip(&self.controller.connection,Instant::now());
-                if let Some(detail)=&self.controller.transport_error {
-                    content.line().dim("Last transport issue: ").push(detail,false,crate::tooltip::WARNING);
-                }
-                content
-            }
-            Info::CacheTtl(id) => {
-                let Some(session) = self
-                    .controller
-                    .account
-                    .sessions
-                    .iter()
-                    .find(|session| &session.id == id)
-                else {
-                    return;
-                };
-                self.controller.cache_ttl(session).details()
-            }
-        };
-        // Cover the New chat button beneath the connection card, including on phones.
-        let width = if self.root.legacy.info_target == Info::Connection {
-            if bounds.width / self.ui.scale < 760. { bounds.width / self.ui.scale - 16. } else { 300. }
-        } else if matches!(self.root.legacy.info_target, Info::Attachment(..)) { 300. } else { 180. };
-        self.root.legacy.info_tip.frame(&mut self.services.renderer, layer, "info", bounds, self.ui.scale, width, false);
-    }
+
+
 
 
 

@@ -44,8 +44,8 @@ pub(super) fn install(app: &mut App, case: &Case) -> ChatAttachment {
         download.bytes_per_second = case.rate;
         app.controller.downloads.insert(key.clone(), download);
     }
-    if case.state == "saving" { app.root.legacy.saving_downloads.insert(key.clone()); }
-    if case.state == "save-failed" { app.root.legacy.export_errors.insert(key, case.error.clone().unwrap()); }
+    if case.state == "saving" { app.services.transfers.saving_downloads.insert(key.clone()); }
+    if case.state == "save-failed" { app.services.transfers.export_errors.insert(key, case.error.clone().unwrap()); }
     if matches!(case.state.as_str(), "saved" | "saved-no-cache" | "missing") {
         let saved_path = app.controller.store.root.join(format!("saved-{entry}"));
         if case.state != "missing" { std::fs::write(&saved_path, b"saved fixture").unwrap(); }
@@ -151,11 +151,11 @@ fn render_download_state_matrix() {
                 }
                 let mut layer = panel(&mut app, &ctx, &case, &file, Interaction::default(), bounds);
                 let (rect, info) = app.root.legacy.info_areas.iter().find(|(r, _)| contains(*r, point)).unwrap().clone();
-                app.root.legacy.info_target = info;
-                app.root.legacy.info_tip.region = rect; app.root.legacy.info_tip.progress = 1.;
-                app.info_frame(&mut layer, bounds);
-                assert!(app.root.legacy.info_tip.content.text.contains(&file.file_name), "tooltip names the target file");
-                assert!(app.root.legacy.info_tip.card.y + app.root.legacy.info_tip.card.height <= bounds.height);
+                app.root.tooltips.target = info;
+                app.root.tooltips.info.region = rect; app.root.tooltips.info.progress = 1.;
+                app.with_ui(|root, cx| root.tooltips.info_frame(cx, &mut layer, bounds));
+                assert!(app.root.tooltips.info.content.text.contains(&file.file_name), "tooltip names the target file");
+                assert!(app.root.tooltips.info.card.y + app.root.tooltips.info.card.height <= bounds.height);
                 app.services.renderer.draw(&ctx, ctx.view(), &[layer]);
                 save(&ctx, &format!("{name}-{}-tooltip-{i}", case.id));
             }

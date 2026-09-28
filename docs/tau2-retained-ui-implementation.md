@@ -213,3 +213,20 @@ outgoing draft, source/topic binding and measured destination.
 Validation: frontend suite initially 170/172; fixed the offline settings fixture
 and revised notification precedence, then both regressions passed. All 13 retained
 dialog tests passed, including two new replacement/completion lifetime tests.
+
+## Overlay ownership checkpoint
+
+ImageViewer owns pan/pinch/background gestures and buttons; Menu owns its captured
+controls, keyboard selection, submenu and scrolling; NoticeWidget owns popup
+controls/lifetime; TooltipHost owns tooltip presentation and dismissal. Menu choices
+are local to menus, including transcript context choices. The old context-menu
+renderer, root menu keyboard/scroll dispatcher and root viewer gesture/render paths
+are removed. Download/export lifetime state now belongs to Services, not the legacy
+workspace. Legacy workspace hover anchors are still an adapter until that subtree
+is migrated; the attachment/scroll pilot and stages 3–4 are still in progress.
+
+After disk space was restored, the managed all-target frontend check completed.
+27 focused nextest cases passed, including actual menu/submenu, tooltip, image
+viewer, retained-dialog and download rendering/interaction tests. A preceding
+14-case run covered notice/navigation/inline-input/viewer paths. Physical-device
+acceptance remains separate from headless checks.

@@ -15,8 +15,8 @@ fn report() -> CodexUsage {
 }
 fn assert_card(app: &mut App, bounds: Rect, usage: bool) -> usize {
     let mut layer = Layer::default();
-    if usage { app.usage_frame(&mut layer, bounds); } else { app.info_frame(&mut layer, bounds); }
-    let card = if usage { app.root.legacy.usage.card } else { app.root.legacy.info_tip.card };
+    app.with_ui(|root, cx| if usage { root.tooltips.usage_frame(cx, &mut layer, bounds); } else { root.tooltips.info_frame(cx, &mut layer, bounds); });
+    let card = if usage { app.root.tooltips.usage.card } else { app.root.tooltips.info.card };
     assert!(card.x >= bounds.x && card.y >= bounds.y && card.x + card.width <= bounds.x + bounds.width
         && card.y + card.height <= bounds.y + bounds.height, "Card must fit the viewport: {card:?}");
     assert_eq!(layer.draws.len(), 1, "One shaped rich block, no refresh button");
@@ -52,34 +52,34 @@ fn rich_tooltips_fit_desktop_phone_and_scaled_phone_without_clipping() {
         app.controller.epoch = Some(1); // Rendering only: no tick/network in this fixture.
         app.controller.codex_usage.report = Some(report());
         app.controller.codex_usage.received = Some(Instant::now());
-        app.root.legacy.usage.pinned = true; app.root.legacy.usage.progress = 1.;
+        app.root.tooltips.usage.pinned = true; app.root.tooltips.usage.progress = 1.;
         app.frame(&ctx,ctx.view());
         assert_card(&mut app, bounds, true);
-        assert!(app.root.legacy.usage.content.spans.iter().any(|s|s.bold && s.tint==crate::tooltip::GOOD));
-        assert!(app.root.legacy.usage.content.spans.iter().any(|s|s.bold && s.tint==crate::tooltip::WARNING));
+        assert!(app.root.tooltips.usage.content.spans.iter().any(|s|s.bold && s.tint==crate::tooltip::GOOD));
+        assert!(app.root.tooltips.usage.content.spans.iter().any(|s|s.bold && s.tint==crate::tooltip::WARNING));
         preview(&ctx, &format!("quota-{name}"));
 
         app.controller.codex_usage.report.as_mut().unwrap().windows[0].label = "Longer quota window with literal **stars** and 日本語".into();
         app.controller.codex_usage.error = Some("Codex quota unavailable: sign in to Codex or renew its credentials.".into());
         app.frame(&ctx,ctx.view());
         let lines = assert_card(&mut app, bounds, true);
-        assert!(lines > app.root.legacy.usage.content.text.lines().count(), "Exercise real wrapping, not just newline counting");
-        assert!(app.root.legacy.usage.content.text.contains("**stars**"), "Provider data stays literal");
+        assert!(lines > app.root.tooltips.usage.content.text.lines().count(), "Exercise real wrapping, not just newline counting");
+        assert!(app.root.tooltips.usage.content.text.contains("**stars**"), "Provider data stays literal");
         preview(&ctx, &format!("quota-wrapped-{name}"));
 
-        app.root.legacy.usage = Tooltip::default(); app.root.legacy.show_chats = true;
+        app.root.tooltips.usage = Tooltip::default(); app.root.legacy.show_chats = true;
         let session = app.controller.account.sessions.iter_mut().find(|s|s.id=="two").unwrap();
         session.updated_at_ms = clock::now_ms().unwrap() - 52 * 60_000;
-        app.root.legacy.info_target = Info::CacheTtl("two".into());
-        app.root.legacy.info_tip.pinned = true; app.root.legacy.info_tip.progress = 1.;
+        app.root.tooltips.target = Info::CacheTtl("two".into());
+        app.root.tooltips.info.pinned = true; app.root.tooltips.info.progress = 1.;
         app.frame(&ctx,ctx.view());
         assert_eq!(assert_card(&mut app,bounds,false), 1);
-        assert_eq!(app.root.legacy.info_tip.content.text, "TTL ~8m remaining");
+        assert_eq!(app.root.tooltips.info.content.text, "TTL ~8m remaining");
         preview(&ctx, &format!("ttl-{name}"));
         app.controller.account.sessions.iter_mut().find(|s|s.id=="two").unwrap().status = SessionStatus::Running;
         app.frame(&ctx,ctx.view());
         assert_eq!(assert_card(&mut app,bounds,false), 1);
-        assert_eq!(app.root.legacy.info_tip.content.text, "Working...");
+        assert_eq!(app.root.tooltips.info.content.text, "Working...");
         preview(&ctx, &format!("working-{name}"));
 
         app.preview_connection(ConnectionPreview::Received);
@@ -145,7 +145,7 @@ async fn quota_refreshes_without_opening_a_tooltip_and_stops_when_hidden_or_non_
             app.tick(0.); tokio::time::sleep(Duration::from_millis(10)).await;
             if calls.load(Ordering::SeqCst)==expected && app.controller.codex_usage.in_flight.is_none() { break; }
         }
-        assert_eq!(app.root.legacy.usage.progress,0.,"No hover/click is needed");
+        assert_eq!(app.root.tooltips.usage.progress,0.,"No hover/click is needed");
         assert!(app.controller.codex_usage.report.is_some());
         for _ in 0..5 { app.tick(0.); }
         assert_eq!(calls.load(Ordering::SeqCst),expected,"No duplicate reads while fresh");

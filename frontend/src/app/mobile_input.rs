@@ -16,8 +16,8 @@ impl App {
                 &field.editor
             }
             ui::EditorTarget::Legacy(field) if self.root.dialog.is_none()
-                && self.root.legacy.focus == Some(field) && self.root.legacy.viewer.is_none()
-                && self.root.legacy.context_menu.is_none() => {
+                && self.root.legacy.focus == Some(field) && self.root.viewer.is_none()
+                && self.root.menu.is_none() => {
                 if !self.root.legacy.hits.iter().any(|hit| matches!(hit.action, Action::Focus(i) if i == field)) { return None; }
                 match field {
                     None if self.root.dialog.is_none() && self.root.legacy.navigation.session == self.controller.account.selected

@@ -80,7 +80,7 @@ fn modal_scope_blocks_legacy_pointer_wheel_middle_and_context_routes() {
     h.app.press(7, point, true); h.app.motion(7, Vec2::new(8., 150.)); h.app.release(7, point);
     h.app.wheel(300., false, point); h.app.middle(true, point); h.app.context_at(point);
     assert!(h.app.root.legacy.pointer.is_none()); assert!(h.app.root.legacy.wheel.is_none());
-    assert!(h.app.root.legacy.autoscroll.is_none()); assert!(h.app.root.legacy.context_menu.is_none());
+    assert!(h.app.root.legacy.autoscroll.is_none()); assert!(h.app.root.menu.is_none());
     assert_eq!(h.app.controller.selected().unwrap().local.draft, before);
     assert!(h.app.root.dialog.is_some());
 }

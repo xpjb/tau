@@ -54,90 +54,22 @@ impl App {
     }
     pub(super) fn project_context(&mut self, id: &str, point: Vec2) {
         self.cancel_autoscroll();
-        self.root.legacy.usage.dismiss();
-        self.root.legacy.info_tip.dismiss();
+        self.root.tooltips.usage.dismiss();
+        self.root.tooltips.info.dismiss();
         self.root.legacy.selecting = false;
         let mut options = vec![];
-        if id != GENERAL_PROJECT_ID { options.push(("Rename…".into(), Action::RenameProject(id.into()))); }
-        options.push(("Edit topic prompt…".into(), Action::ProjectPrompt(id.into())));
-        if id != GENERAL_PROJECT_ID { options.push(("Delete topic…".into(), Action::DeleteProject(id.into()))); }
-        self.root.legacy.context_menu = Some(ContextMenu { at: point, section: None, chat: None, options, selected: 0, scroll: 0., parent: None });
+        if id != GENERAL_PROJECT_ID { options.push(("Rename…".into(), ui::MenuChoice::RenameProject(id.into()))); }
+        options.push(("Edit topic prompt…".into(), ui::MenuChoice::ProjectPrompt(id.into())));
+        if id != GENERAL_PROJECT_ID { options.push(("Delete topic…".into(), ui::MenuChoice::DeleteProject(id.into()))); }
+        self.with_ui(|_, cx| {
+            let menu = ui::Menu::new(point, None, None, options, cx);
+            cx.ui.requests.push_back(ui::Request::Menu(Box::new(menu)));
+        });
+        if let Err(error) = self.finish_ui_requests() { self.report(Err(error)); }
         self.root.legacy.pointer = None;
         self.root.legacy.wheel = None;
         self.root.legacy.project_velocity = 0.;
         self.root.legacy.focus = None;
         self.ui.dirty = true;
-    }
-    pub(super) fn move_menu(&mut self, session: &str) {
-        let Some(menu) = self.root.legacy.context_menu.take() else { return; };
-        let parent = menu.parent.unwrap_or_else(|| Box::new(ContextMenu { parent: None, ..menu }));
-        let current = self.controller.account.sessions.iter().find(|s| s.id == session).map(|s| &s.project_id);
-        let mut options = vec![("‹  Move to topic".into(), Action::ContextBack)];
-        options.extend(self.controller.account.projects.iter().map(|p| {
-            if current == Some(&p.id) { (format!("✓  {}", p.name), Action::Noop) }
-            else { (p.name.clone(), Action::MoveChat(session.into(), p.id.clone())) }
-        }));
-        self.root.legacy.context_menu = Some(ContextMenu { at: parent.at, chat: Some(session.into()), section: None, options, selected: 1, scroll: 0., parent: Some(parent) });
-        self.ui.dirty = true;
-    }
-    pub(super) fn scroll_menu(&mut self, amount: f32) {
-        if let Some(menu) = &mut self.root.legacy.context_menu {
-            let max = (menu.options.len() as f32 * 36. * self.ui.scale - self.root.legacy.menu_viewport.height).max(0.);
-            menu.scroll = (menu.scroll + amount).clamp(0., max);
-            self.ui.dirty = true;
-        }
-    }
-    pub(super) fn reveal_menu_selection(&mut self) {
-        if let Some(menu) = &mut self.root.legacy.context_menu {
-            let top = menu.selected as f32 * 36. * self.ui.scale;
-            if top < menu.scroll { menu.scroll = top; }
-            else if top + 36. * self.ui.scale > menu.scroll + self.root.legacy.menu_viewport.height { menu.scroll = (top + 36. * self.ui.scale - self.root.legacy.menu_viewport.height).max(0.); }
-        }
-    }
-    pub(super) fn context_frame(&mut self, layer: &mut Layer, bounds: Rect) {
-        let Some(menu) = &self.root.legacy.context_menu else { return; };
-        let s = self.ui.scale;
-        let w = (240. * s).min(bounds.width - 16. * s).max(1.);
-        let rect_for = |menu: &ContextMenu, x: f32| {
-            let h = ((menu.options.len() as f32 * 36. + 8.) * s).min((bounds.height - 16. * s).max(1.));
-            Rect::new(x.clamp(bounds.x + 8. * s, (bounds.x + bounds.width - w - 8. * s).max(bounds.x + 8. * s)),
-                menu.at.y.clamp(bounds.y + 8. * s, (bounds.y + bounds.height - h - 8. * s).max(bounds.y + 8. * s)), w, h)
-        };
-        let mut rect = rect_for(menu, menu.at.x);
-        self.root.legacy.hits.clear();
-        if let Some(parent) = &menu.parent && bounds.width >= w * 2. + 24. * s {
-            let mut parent_rect = rect_for(parent, parent.at.x);
-            let x = if parent_rect.x + 2. * w + 8. * s <= bounds.x + bounds.width { parent_rect.x + w }
-                else if parent_rect.x - w >= bounds.x { parent_rect.x - w }
-                else { parent_rect.x = bounds.x + 8. * s; parent_rect.x + w };
-            rect = rect_for(menu, x);
-            self.root.legacy.context_rect = Rect::new(rect.x.min(parent_rect.x), rect.y.min(parent_rect.y), w * 2.,
-                (rect.y + rect.height).max(parent_rect.y + parent_rect.height) - rect.y.min(parent_rect.y));
-            draw_menu(&mut self.services.renderer, layer, &mut self.root.legacy.hits, parent, parent_rect, s, self.root.legacy.hover, false);
-        } else { self.root.legacy.context_rect = rect; }
-        self.root.legacy.menu_viewport = Rect::new(rect.x + 4. * s, rect.y + 4. * s, rect.width - 8. * s, (rect.height - 8. * s).max(0.));
-        draw_menu(&mut self.services.renderer, layer, &mut self.root.legacy.hits, menu, rect, s, self.root.legacy.hover, true);
-    }
-}
-fn draw_menu(renderer: &mut Renderer, layer: &mut Layer, hits: &mut Vec<Hit>, menu: &ContextMenu, rect: Rect, s: f32, hover: Option<Vec2>, active: bool) {
-    layer.rounded_rect(rect, 8. * s, color(0x36343b));
-    let clip = Rect::new(rect.x + 4. * s, rect.y + 4. * s, rect.width - 8. * s, (rect.height - 8. * s).max(0.));
-    let max = (menu.options.len() as f32 * 36. * s - clip.height).max(0.);
-    let scroll = menu.scroll.clamp(0., max);
-    for (i, (label, action)) in menu.options.iter().enumerate() {
-        let r = Rect::new(clip.x, clip.y + i as f32 * 36. * s - scroll, clip.width, 36. * s);
-        let hit = crate::render::intersect(r, clip);
-        if hit.height <= 0. { continue; }
-        if hover.is_some_and(|p| contains(hit, p)) || active && hover.is_none() && menu.selected == i || !active && matches!(action, Action::MoveMenu(_)) {
-            layer.clipped_rounded_rect(r, 4. * s, color(0x494750), clip);
-        }
-        let current = matches!(action, Action::Noop);
-        renderer.clipped_label(layer, label, Rect::new(r.x + 12. * s, r.y + 9. * s, r.width - 24. * s, 22. * s), 14. * s,
-            color(if current { 0x82909f } else if matches!(action, Action::DeleteProject(_) | Action::Delete(_)) { 0xffb4ab } else { 0xe5eaf0 }), false, clip);
-        hits.push(Hit { rect: hit, action: action.clone() });
-    }
-    if max > 0. {
-        let h = (clip.height * clip.height / (max + clip.height)).max(18. * s).min(clip.height);
-        layer.rounded_rect(Rect::new(rect.x + rect.width - 4. * s, clip.y + (clip.height - h) * scroll / max, 2. * s, h), s, color(0x82909f));
     }
 }

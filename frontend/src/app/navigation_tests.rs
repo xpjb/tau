@@ -48,11 +48,10 @@ impl Harness {
     }
     fn click_notice(&mut self, close: bool) {
         self.frame();
-        let rect = self.app.root.legacy.hits.iter().rev().find(|h| if close { matches!(h.action, Action::DismissNotice) }
-            else { matches!(h.action, Action::OpenDownloadNotice(_)) }).expect("notice action").rect;
+        let rect = if close { self.app.root.notice.close.rect } else { self.app.root.notice.body.rect }.expect("notice action");
         let point = Vec2::new(rect.x + rect.width / 2., rect.y + rect.height / 2.);
         self.app.context_at(point);
-        assert!(self.app.root.legacy.context_menu.is_none(), "Popup blocks the underlying context menu");
+        assert!(self.app.root.menu.is_none(), "Popup blocks the underlying context menu");
         self.app.press(90, point, self.app.ui.mobile);
         self.frame(); // A repaint before release must not let the release click through.
         self.app.release(90, point);
@@ -85,14 +84,14 @@ fn download_notice_selects_current_topic_chat_and_exact_widget_on_desktop_and_ph
         h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().project_id = "moved".into();
         h.app.root.legacy.show_attachments = true;
         h.app.apply(Action::Delete("two".into())).unwrap(); h.frame();
-        assert!(!h.app.root.legacy.hits.iter().any(|h| matches!(h.action, Action::OpenDownloadNotice(_))),
+        assert!(h.app.root.notice.body.rect.is_none(),
             "A download notification must not navigate away from an open form");
         assert!(h.app.controller.notice.as_ref().is_some_and(|n| n.download.is_some()));
         h.app.back();
         h.click_notice(false);
         h.assert_target_visible("entry-20");
         assert_eq!(h.app.controller.account.selected_project, "moved");
-        assert!(!h.app.root.legacy.show_chats && !h.app.root.legacy.show_attachments && h.app.root.dialog.is_none() && h.app.root.legacy.viewer.is_none());
+        assert!(!h.app.root.legacy.show_chats && !h.app.root.legacy.show_attachments && h.app.root.dialog.is_none() && h.app.root.viewer.is_none());
         assert!(h.app.root.legacy.focus.is_none(), "Locating a widget must not pop up the keyboard");
         let saved = h.app.controller.store.load_chat(&h.app.controller.identity, "two").unwrap();
         assert_eq!(saved.draft, "Keep my other chat's draft");

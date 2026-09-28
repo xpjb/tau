@@ -36,8 +36,8 @@ impl App {
             self.root.legacy.placed_session = None;
             self.cancel_pointer();
             self.root.legacy.history_attempt = None;
-            self.root.legacy.context_menu = None;
-            self.root.legacy.usage = Tooltip::default();
+            self.root.menu = None;
+            self.root.tooltips.usage = Tooltip::default();
             self.root.legacy.navigation.identity = self.controller.identity.clone();
             self.root.legacy.navigation.session = selected;
             self.root.legacy.scroll = 0.;
@@ -107,8 +107,7 @@ impl App {
         self.cancel_pointer();
         self.close_ui();
         
-        self.root.legacy.viewer = None;
-        self.root.legacy.viewer_image = None;
+        self.root.viewer = None;
         self.root.legacy.focus = None;
         self.root.legacy.show_chats = false;
         self.root.legacy.show_attachments = false;

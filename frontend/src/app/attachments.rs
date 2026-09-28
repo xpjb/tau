@@ -217,31 +217,40 @@ fn completed_exports(
     });
     actions
 }
-impl App {
+pub(in crate::app) struct Transfers {
+    pub(in crate::app) pending_exports: HashMap<String, (PathBuf, String)>,
+    pub(in crate::app) export_targets: HashMap<String, DownloadTarget>,
+    pub(in crate::app) saving_downloads: HashSet<String>,
+    pub(in crate::app) export_errors: HashMap<String, String>,
+    pub(in crate::app) download_identity: String,
+    pub(in crate::app) progress_clock: Instant,
+    pub(in crate::app) progress_bucket: Option<u128>,
+}
+impl ui::Context<'_> {
     /// A file button starts a verified cache transfer, then saves to Downloads/Tau
     /// on completion. Image previews are cache-only until Save is explicitly pressed.
-    pub(super) fn finish_exports(&mut self) {
-        let actions = completed_exports(&mut self.root.legacy.pending_exports, &self.controller.downloads);
+    pub(in crate::app) fn finish_exports(&mut self) {
+        let actions = completed_exports(&mut self.services.transfers.pending_exports, &self.model.downloads);
         for action in actions {
             if let PlatformAction::SaveDownload { key, .. } = &action {
-                if self.root.legacy.export_targets.get(key).is_some_and(|target|
-                    target.matches_source(&self.controller.identity, self.controller.account.source_lineage.as_deref())) {
-                    self.root.legacy.saving_downloads.insert(key.clone());
+                if self.services.transfers.export_targets.get(key).is_some_and(|target|
+                    target.matches_source(&self.model.identity, self.model.account.source_lineage.as_deref())) {
+                    self.services.transfers.saving_downloads.insert(key.clone());
                     self.services.platform.push(action);
                 } else {
-                    self.root.legacy.export_targets.remove(key);
+                    self.services.transfers.export_targets.remove(key);
                 }
             }
         }
-        self.root.legacy.export_targets.retain(|key, _| {
-            self.root.legacy.pending_exports.contains_key(key) || self.root.legacy.saving_downloads.contains(key)
+        self.services.transfers.export_targets.retain(|key, _| {
+            self.services.transfers.pending_exports.contains_key(key) || self.services.transfers.saving_downloads.contains(key)
         });
     }
-    pub(super) fn export_target(&self, session: &str, entry: &str) -> DownloadTarget {
+    pub(in crate::app) fn export_target(&self, session: &str, entry: &str) -> DownloadTarget {
         DownloadTarget {
-            identity: self.controller.identity.clone(),
+            identity: self.model.identity.clone(),
             lineage: self
-                .controller
+                .model
                 .account
                 .source_lineage
                 .clone()
@@ -250,14 +259,14 @@ impl App {
             entry: entry.into(),
         }
     }
-    pub(super) fn begin_save(&mut self, session: &str, entry: &str, path: PathBuf, name: String) {
+    pub(in crate::app) fn begin_save(&mut self, session: &str, entry: &str, path: PathBuf, name: String) {
         let key = Controller::download_key(session, entry);
-        if !self.root.legacy.saving_downloads.insert(key.clone()) {
+        if !self.services.transfers.saving_downloads.insert(key.clone()) {
             return;
         }
-        self.root.legacy.export_targets
+        self.services.transfers.export_targets
             .insert(key.clone(), self.export_target(session, entry));
-        self.root.legacy.export_errors.remove(&key);
+        self.services.transfers.export_errors.remove(&key);
         self.services.platform.push(PlatformAction::SaveDownload {
             key,
             source: path,
@@ -269,12 +278,12 @@ impl App {
         key: &str,
         result: Result<crate::store::SavedDownload, String>,
     ) {
-        self.root.legacy.saving_downloads.remove(key);
-        let Some(target) = self.root.legacy.export_targets.remove(key) else {
+        self.services.transfers.saving_downloads.remove(key);
+        let Some(target) = self.services.transfers.export_targets.remove(key) else {
             return;
         };
         let result = result.and_then(|saved| {
-            self.controller
+            self.model
                 .record_download(
                     &target.identity,
                     &target.lineage,
@@ -289,20 +298,22 @@ impl App {
         });
         match result {
             Ok(saved) => {
-                self.root.legacy.export_errors.remove(key);
-                if target.matches_source(&self.controller.identity, self.controller.account.source_lineage.as_deref()) {
-                    self.controller.notice = Some(crate::notice::Notice::download(format!("Saved to {}", saved.location), target));
+                self.services.transfers.export_errors.remove(key);
+                if target.matches_source(&self.model.identity, self.model.account.source_lineage.as_deref()) {
+                    self.model.notice = Some(crate::notice::Notice::download(format!("Saved to {}", saved.location), target));
                 }
             }
             Err(error) => {
-                if target.matches_source(&self.controller.identity, self.controller.account.source_lineage.as_deref()) {
-                    self.root.legacy.export_errors.insert(key.into(), error.clone());
-                    self.controller.notice = Some(error.into());
+                if target.matches_source(&self.model.identity, self.model.account.source_lineage.as_deref()) {
+                    self.services.transfers.export_errors.insert(key.into(), error.clone());
+                    self.model.notice = Some(error.into());
                 }
             }
         }
         self.ui.dirty = true;
     }
+}
+impl App {
     pub(super) fn attachment_card(
         &mut self,
         ctx: &impl RenderContext,
@@ -379,7 +390,7 @@ impl App {
             }
         }
         let mut display = AttachmentDisplay::new(attachment, cached, self.controller.downloads.get(&key),
-            exported.is_some(), self.root.legacy.saving_downloads.contains(&key), self.root.legacy.export_errors.get(&key).map(String::as_str));
+            exported.is_some(), self.services.transfers.saving_downloads.contains(&key), self.services.transfers.export_errors.get(&key).map(String::as_str));
         if display.control == Control::View && !preview_available {
             display.status = format!("{}Preview unavailable", attachment.size
                 .map(|n| format!("{} · ", format_bytes(n))).unwrap_or_default());
@@ -387,7 +398,7 @@ impl App {
         }
         let control = if display.control == Control::View && !preview_available { Control::Save } else { display.control };
         let action = match control {
-            Control::Download | Control::Retry if image && self.root.legacy.export_errors.contains_key(&key) =>
+            Control::Download | Control::Retry if image && self.services.transfers.export_errors.contains_key(&key) =>
                 Some(Action::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone())),
             Control::Download | Control::Retry | Control::View => Some(Action::Attachment(
                 session.into(), entry.into(), attachment.file_name.clone(), image)),
@@ -440,7 +451,7 @@ impl App {
             let fill = match progress {
                 Progress::Known(fraction) => Rect::new(track.x, track.y, track.width * fraction, track.height),
                 Progress::Unknown => Rect::new(track.x + track.width *
-                    (self.root.legacy.progress_clock.elapsed().as_secs_f32() * 0.45).fract() * 0.75,
+                    (self.services.transfers.progress_clock.elapsed().as_secs_f32() * 0.45).fract() * 0.75,
                     track.y, track.width * 0.25, track.height),
             };
             layer.clipped_rounded_rect(fill, 1.5 * s, color(0x67d4ff), viewport);
@@ -473,6 +484,16 @@ impl App {
         }
 
     }
+}
+
+
+impl App {
+    pub(super) fn finish_exports(&mut self) { self.with_ui(|_, cx| cx.finish_exports()); }
+    pub(super) fn export_target(&self, session: &str, entry: &str) -> DownloadTarget {
+        DownloadTarget { identity: self.controller.identity.clone(), lineage: self.controller.account.source_lineage.clone().unwrap_or_default(), session: session.into(), entry: entry.into() }
+    }
+    pub(super) fn begin_save(&mut self, session: &str, entry: &str, path: PathBuf, name: String) { self.with_ui(|_, cx| cx.begin_save(session, entry, path, name)); }
+    pub fn complete_save(&mut self, key: &str, result: Result<crate::store::SavedDownload, String>) { self.with_ui(|_, cx| cx.complete_save(key, result)); }
 }
 
 #[cfg(test)]
@@ -636,5 +657,26 @@ mod tests {
             "12 MB · Downloaded"
         );
         assert_eq!(view(false, None, true, false, None).control, Control::Open);
+    }
+}
+
+impl ui::Context<'_> {
+    pub(in crate::app) fn download_attachment(&mut self, session: &str, entry: &str, name: &str, image: bool, save: bool) -> Result<()> {
+        let key = Controller::download_key(session, entry);
+        let path = match self.model.download(session, entry, if image { 10_000_000 } else { 50_000_000 }) {
+            Ok(path) => path,
+            Err(error) => { self.services.transfers.export_errors.insert(key, error.to_string()); return Err(error); }
+        };
+        let in_progress = self.model.downloads.get(&key).is_some_and(|d| !d.status.done);
+        if path.is_file() && !in_progress {
+            if image && !save {
+                self.ui.requests.push_back(ui::Request::View(ui::ImageSpec { path, name: name.into(), target: self.export_target(session,entry) }));
+            } else { self.begin_save(session,entry,path,name.into()); }
+        } else if !image || save {
+            self.services.transfers.export_targets.insert(key.clone(), self.export_target(session,entry));
+            self.services.transfers.export_errors.remove(&key);
+            self.services.transfers.pending_exports.insert(key,(path,name.into()));
+        }
+        Ok(())
     }
 }

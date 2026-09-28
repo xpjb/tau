@@ -10,7 +10,7 @@ impl App {
     pub(super) fn ui_event(&mut self, event: ui::Event<'_>) -> bool {
         let old_focus = self.ui.focus;
         let old_hot = self.ui.hot;
-        if let ui::Event::Hover(point) = event { self.ui.hover = point; self.ui.hot = None; }
+        if let ui::Event::Hover(point) = event { self.ui.hover = point; self.ui.hot = None; self.ui.hint = None; }
         let handled = self.with_ui(|root, cx| root.handle_event(&event, cx));
         if old_focus != self.ui.focus {
             if let Some(field) = self.root.editor(old_focus) { field.editor.preedit(String::new(), None); }
@@ -50,6 +50,7 @@ impl App {
                             .then(|| (self.controller.identity.clone(), self.controller.account.source_lineage.clone(), self.controller.account.selected.clone()))
                     });
                     self.cancel_pointer();
+                    self.ui.native = None; self.ui.paste = None;
                     self.close_ui();
                     self.ui.return_to = return_to;
                     
@@ -57,6 +58,32 @@ impl App {
                     self.root.dialog = Some(dialog);
                     self.ui.dirty = true;
                 }),
+                ui::Request::Menu(menu) => {
+                    self.cancel_pointer(); self.root.tooltips.dismiss(); self.ui.native = None; self.ui.paste = None; self.root.legacy.focus = None;
+                    self.root.menu = Some(menu); Ok(())
+                }
+                ui::Request::CloseMenu(id) => {
+                    if self.root.menu.as_ref().is_some_and(|m| m.id == id) { self.root.menu = None; self.ui.detach(id); } Ok(())
+                }
+                ui::Request::MoveMenu { owner, session } => {
+                    if self.root.menu.as_ref().is_some_and(|m| m.id == owner) {
+                        let parent = self.root.menu.take().unwrap();
+                        let menu = self.with_ui(|_, cx| ui::Menu::move_submenu(parent, session, cx));
+                        self.ui.requests.push_front(ui::Request::Menu(Box::new(menu)));
+                    }
+                    Ok(())
+                }
+                ui::Request::Tip { info, rect } => { self.root.tooltips.pin(info,rect); Ok(()) }
+                ui::Request::Download(target) => {
+                    self.controller.notice = None;
+                    self.open_download_notice(target)
+                }
+                ui::Request::View(spec) => {
+                    self.cancel_pointer(); self.close_ui(); self.root.viewer = Some(ui::ImageViewer::new(spec)); self.ui.native = None; self.ui.paste = None; Ok(())
+                }
+                ui::Request::CloseViewer(id) => {
+                    if self.root.viewer.as_ref().is_some_and(|v| v.id == id) { self.root.viewer = None; self.ui.detach(id); } Ok(())
+                }
                 ui::Request::Close(owner) => {
                     if self.root.dialog.as_ref().is_some_and(|dialog| dialog.id() == owner) {
                         self.close_ui();

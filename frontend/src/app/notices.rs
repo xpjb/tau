@@ -86,7 +86,7 @@ mod render_tests {
                 }
                 app.root.legacy.hits.clear(); let mut layer = Layer::default();
                 app.notice_frame(&ctx,&mut layer,bounds);
-                let card = app.root.legacy.hits[0].rect; let close = app.root.legacy.hits[1].rect;
+                let card = app.root.notice.body.rect.unwrap(); let close = app.root.notice.close.rect.unwrap();
                 assert!((card.y + card.height/2. - close.y - close.height/2.).abs() < 0.01);
                 assert!(card.x >= 0. && card.x + card.width <= bounds.width && card.y + card.height <= bounds.height);
                 assert_eq!(layer.draws.len(),1,"Only the message is text, never the close icon");
@@ -105,14 +105,14 @@ mod render_tests {
                 app.tick(0.);
             }
             app.controller.notice=Some("Keep this error available inline".into());
-            app.root.legacy.notice_popup.observe(app.controller.notice.as_ref(),Instant::now());
+            app.root.notice.popup.observe(app.controller.notice.as_ref(),Instant::now());
             // Exercise the real idle wake/expiry path without sleeping four seconds per scale.
-            app.root.legacy.notice_popup.until=Some(Instant::now()+Duration::from_millis(60));
+            app.root.notice.popup.until=Some(Instant::now()+Duration::from_millis(60));
             app.tick(0.); let before=wakes.load(Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(120));
             assert!(wakes.load(Ordering::SeqCst)>before,"An idle app wakes to remove the popup");
             app.tick(0.); app.frame(&ctx,ctx.view());
-            assert!(!app.root.legacy.hits.iter().any(|h|matches!(h.action,Action::DismissNotice)));
+            assert!(app.root.notice.close.rect.is_none());
             assert!(app.controller.notice.is_some(),"Persistent inline settings/recovery messages are not lost");
         }
     }

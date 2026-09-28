@@ -72,7 +72,7 @@ fn cached_large_file_saves_once_retries_failure_and_survives_restart_then_missin
     app.services.platform.clear(); app.complete_save(&key, Ok(saved.clone())); app.controller.notice=None;
     paint(&mut app, &ctx, &case, &file); tap(&mut app,0,false); tap(&mut app,1,false);
     assert!(matches!(&app.services.platform[..], [PlatformAction::UseDownload(_,SavedAction::Open,_), PlatformAction::UseDownload(_,SavedAction::Show,_)]));
-    assert!(!app.root.legacy.export_errors.contains_key(&key));
+    assert!(!app.services.transfers.export_errors.contains_key(&key));
     drop(app);
     let mut app = App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),false).unwrap();
     app.back(); crate::demo::populate(&mut app.controller).unwrap(); app.resize(ctx.size(),1.,Vec2::new(0.,0.));
@@ -99,11 +99,11 @@ fn image_view_save_and_touch_labels_do_not_confuse_actions_or_trigger_on_long_pr
     app.press(1,point,true);
     app.root.legacy.pointer.as_mut().unwrap().started=Instant::now()-Duration::from_millis(500);
     app.tick(0.); app.release(1,point);
-    assert!(app.root.legacy.info_tip.pinned);
-    assert!(matches!(&app.root.legacy.info_target,Info::Attachment(_,title,_) if title=="View image"));
-    assert!(app.root.legacy.viewer.is_none() && app.services.platform.is_empty(),"a held control shows its details, never acts");
-    app.root.legacy.info_tip=Tooltip::default(); paint(&mut app,&ctx,&case,&file);
-    tap(&mut app,0,true); assert!(app.root.legacy.viewer.is_some()); assert!(app.services.platform.is_empty());
+    assert!(app.root.tooltips.info.pinned);
+    assert!(matches!(&app.root.tooltips.target,Info::Attachment(_,title,_) if title=="View image"));
+    assert!(app.root.viewer.is_none() && app.services.platform.is_empty(),"a held control shows its details, never acts");
+    app.root.tooltips.info=Tooltip::default(); paint(&mut app,&ctx,&case,&file);
+    tap(&mut app,0,true); assert!(app.root.viewer.is_some()); assert!(app.services.platform.is_empty());
     app.back(); paint(&mut app,&ctx,&case,&file);
     tap(&mut app,1,true);
     assert!(matches!(&app.services.platform[..],[PlatformAction::SaveDownload {..}]));
@@ -133,14 +133,14 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
         save(&ctx,&format!("context-{name}-attachments"));
         let (rect,info)=app.root.legacy.info_areas.iter().find(|(_,info)| matches!(info,Info::Attachment(key,title,_)
             if key.starts_with("attachments:") && title=="Save to Downloads")).unwrap().clone();
-        app.root.legacy.info_target=info; app.root.legacy.info_tip.region=rect; app.root.legacy.info_tip.pinned=true; app.root.legacy.info_tip.progress=1.;
+        app.root.tooltips.target=info; app.root.tooltips.info.region=rect; app.root.tooltips.info.pinned=true; app.root.tooltips.info.progress=1.;
         app.frame(&ctx,ctx.view());
-        assert_eq!(app.root.legacy.info_tip.region,rect,"duplicate file in chat must not steal sidebar tooltip anchor");
+        assert_eq!(app.root.tooltips.info.region,rect,"duplicate file in chat must not steal sidebar tooltip anchor");
         save(&ctx,&format!("context-{name}-tooltip"));
         assert!(app.root.legacy.info_areas.iter().all(|(_,info)| !matches!(info,Info::Attachment(key,_,_)
             if key.ends_with(":details") || key.ends_with(":caption"))), "Card text must not repeat itself in a tooltip");
         app.root.legacy.show_attachments=false; app.frame(&ctx,ctx.view());
-        assert!(!app.root.legacy.info_tip.pinned,"hidden attachment pane must dismiss its tooltip");
+        assert!(!app.root.tooltips.info.pinned,"hidden attachment pane must dismiss its tooltip");
     }
 }
 
@@ -176,7 +176,7 @@ fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
             assert!(!app.root.legacy.info_areas.iter().any(|(r, _)| contains(*r, point)));
             app.hover(Some(point)); app.tick(0.);
             app.press(3, point, mobile); app.release(3, point);
-            assert!(!app.root.legacy.info_tip.pinned && app.root.legacy.info_tip.progress == 0.);
+            assert!(!app.root.tooltips.info.pinned && app.root.tooltips.info.progress == 0.);
             assert!(app.services.platform.is_empty());
         }
         assert!(!controls(&app).is_empty(), "Action controls and their own descriptions remain available");
