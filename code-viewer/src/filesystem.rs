@@ -13,6 +13,7 @@ struct Shared { roots: Mutex<HashMap<PathBuf, Index>>, wake: Condvar, stop: Atom
 pub struct FileSystem { shared: Arc<Shared>, reads: Arc<tokio::sync::Semaphore> }
 impl FileSystem {
     pub fn new(root: PathBuf) -> Self {
+        let root = fs::canonicalize(&root).unwrap_or(root);
         let shared = Arc::new(Shared { roots: Mutex::new(HashMap::new()), wake: Condvar::new(), stop: AtomicBool::new(false) });
         want_index(&shared, &root);
         let worker = shared.clone();
@@ -58,7 +59,9 @@ impl FileSystem {
 impl Drop for FileSystem { fn drop(&mut self) { self.shared.stop.store(true, Ordering::Release); self.shared.wake.notify_all(); } }
 fn wire_path(path: &Path) -> Result<String> {
     let text = path.to_str().context("Non-UTF-8 paths are not supported by the viewer")?;
-    ensure!(text.len() <= MAX_PATH_BYTES, "Path is too long for the viewer"); Ok(text.into())
+    ensure!(text.len() <= MAX_PATH_BYTES, "Path is too long for the viewer");
+    ensure!(!text.chars().any(char::is_control), "Control characters in paths are not supported by the viewer");
+    Ok(text.into())
 }
 fn entry(path: &Path, name: String, metadata: &fs::Metadata) -> Result<FileEntry> {
     Ok(FileEntry { path: wire_path(path)?, name, directory: metadata.is_dir(), symlink: fs::symlink_metadata(path)?.file_type().is_symlink() })
@@ -123,19 +126,23 @@ fn index_worker(shared: Arc<Shared>) {
         };
         let Some(path) = path else { continue; };
         let mut items = vec![]; let mut bytes = 0; let mut limited = false;
-        let walk = ignore::WalkBuilder::new(&path).hidden(false).git_ignore(true).git_global(true).git_exclude(true)
-            .require_git(false).follow_links(false).filter_entry(|e| e.file_name() != ".git").build();
         let started = Instant::now();
+        // Discover project/folder names before one enormous cache subtree can
+        // consume a bounded root index. Both passes use identical ignore rules.
+        'scan: for depth in [Some(2), None] {
+        let walk = ignore::WalkBuilder::new(&path).hidden(false).git_ignore(true).git_global(true).git_exclude(true)
+            .require_git(false).follow_links(false).max_depth(depth).filter_entry(|e| e.file_name() != ".git").build();
         for found in walk {
             if shared.stop.load(Ordering::Acquire) { return; }
-            if items.len() >= INDEX_PATHS || bytes >= INDEX_BYTES || started.elapsed() > Duration::from_secs(15) { limited = true; break; }
+            if items.len() >= INDEX_PATHS || bytes >= INDEX_BYTES || started.elapsed() > Duration::from_secs(15) { limited = true; break 'scan; }
             let Ok(found) = found else { limited = true; continue; };
-            if found.depth() == 0 { continue; }
+            if found.depth() == 0 || depth.is_none() && found.depth() <= 2 { continue; }
             let Some(kind) = found.file_type() else { continue; };
             if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) { continue; }
             let Ok(metadata) = fs::metadata(found.path()) else { continue; };
             let Some(name) = found.file_name().to_str() else { continue; };
             if let Ok(item) = entry(found.path(), name.into(), &metadata) { bytes += item.path.len()+item.name.len(); items.push(item); }
+        }
         }
         let mut roots = shared.roots.lock().unwrap();
         if let Some(index) = roots.get_mut(&path) { index.items = Arc::new(items); index.scanning = false; index.limited = limited; index.refreshed = Some(Instant::now()); }

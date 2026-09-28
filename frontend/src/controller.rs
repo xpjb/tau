@@ -81,6 +81,8 @@ pub struct Controller {
     viewport:Option<(String,std::collections::BTreeSet<String>)>,
     copy:Option<(String,Vec<String>)>,
     pub copied:Option<String>,
+    pub file_update:Option<std::sync::Arc<crate::file_client::Update>>,
+    file_generation:u64,
     network: Option<Network>,
     requests: HashMap<String, ClientCommand>,
     project_deletions: HashMap<String, Vec<String>>,
@@ -124,7 +126,7 @@ impl Controller {
             remote,
             block_plan: None,plan_dirty:std::cell::Cell::new(true),
             viewport:None,
-            copy:None, copied:None,
+            copy:None, copied:None, file_update:None, file_generation:0,
             network: None,
             requests: HashMap::new(),
             project_deletions: HashMap::new(),
@@ -148,6 +150,8 @@ impl Controller {
         Ok(c)
     }
     pub fn connect(&mut self) {
+        self.file_generation += 1;
+        self.file_update = None;
         self.transport_error = None;
         self.epoch = None;
         self.connection = "Connecting…".into();
@@ -163,6 +167,8 @@ impl Controller {
         settings.url()?;
         self.store.put("", "settings", &settings)?;
         self.network = None;
+        self.file_update = None;
+        self.file_generation += 1;
         self.settings = settings;
         self.identity = self.settings.identity();
         self.remote = self.store.block_cache(&self.identity)?;
@@ -467,6 +473,18 @@ impl Controller {
         self.bumped_locally(&session, activity);
         self.send_waiting(&session, false)?;
         Ok(())
+    }
+    pub(crate) fn viewer_generation(&self) -> u64 {self.file_generation}
+    pub fn view_files(&mut self, request: Option<tau_protocol::files::FileRequest>) -> Result<u64> {
+        self.view_files_document(request, None)
+    }
+    pub(crate) fn view_files_document(&mut self, request: Option<tau_protocol::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>) -> Result<u64> {
+        self.file_generation += 1;
+        self.file_update = None;
+        if let Some(network)=&self.network {
+            network.send(Command::Blocks(crate::blocks::Command::Files(request.map(|request|crate::file_client::Interest {generation:self.file_generation,request,document}))))?;
+        } else if request.is_some() { anyhow::bail!("Connect to browse remote files"); }
+        Ok(self.file_generation)
     }
     pub fn request(&mut self, command: ClientCommand) -> Result<String> {
         let epoch=self.epoch.ok_or_else(||anyhow::Error::from(transport::ConnectionUnavailable))?;
@@ -1005,6 +1023,13 @@ impl Controller {
             changed = true;
             if let Err(error) = self.network_event(event) {
                 self.report_error(error);
+            }
+        }
+        if let Some(network)=&mut self.network && network.files.has_changed().unwrap_or(false) {
+            let update=network.files.borrow_and_update().clone();
+            if let Some(update)=update && update.generation==self.file_generation
+                && self.account.source_lineage.as_ref()==Some(&update.lineage) {
+                self.file_update=Some(update); changed=true;
             }
         }
         let mut scopes = std::collections::HashSet::new();

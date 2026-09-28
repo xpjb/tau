@@ -333,7 +333,7 @@ impl Desktop {
                         self.app.report(Err(e.into()));
                     }
                 }
-                PlatformAction::Background => {}
+                PlatformAction::Background | PlatformAction::Haptic => {}
                 PlatformAction::Edit {
                     title,
                     value,

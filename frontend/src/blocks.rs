@@ -397,25 +397,30 @@ fn text_prefix(bytes: &[u8]) -> Result<String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan { pub scope: String, pub parents: BTreeSet<Option<String>>, pub blocks: Vec<(String,Option<(u64,u64,bool,u64)>)>, pub older:Vec<(String,FeedPosition)>, pub foreground:BTreeSet<String> }
-pub enum Command { Reset, Configure(BulkOffer,String), Plan(Option<Plan>), History { scope:String,before:FeedPosition } }
+pub enum Command { Files(Option<crate::file_client::Interest>), Reset, Configure(BulkOffer,String), Plan(Option<Plan>), History { scope:String,before:FeedPosition } }
 pub struct Notice { pub scope: String, pub error: Option<anyhow::Error>, pub transfer:Option<(String,std::path::PathBuf,tau_transfer::TransferStatus)> }
-pub struct Service { tx: mpsc::Sender<Command>, plans:watch::Sender<Option<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
+pub struct Service { viewer:crate::file_client::Service, tx: mpsc::Sender<Command>, plans:watch::Sender<Option<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
 impl Service {
     pub fn start(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>) -> Self {
+        Self::start_with_files(cache, wake, notices, watch::channel(None).0)
+    }
+    pub fn start_with_files(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>, updates:watch::Sender<Option<Arc<crate::file_client::Update>>>) -> Self {
         // Only coalesced plans/configuration and explicit history requests enter
         // this queue; content never passes through it or the control event queue.
         let (tx,rx) = mpsc::channel(8);
         let (plans,plan_rx)=watch::channel(None);let (configuration,config_rx)=watch::channel(None);
         let (node,identity) = watch::channel(None);
         let (endpoint,client)=watch::channel(None); let (ready,lineage)=watch::channel(None);
+        let viewer=crate::file_client::Service::start(client.clone(),lineage.clone(),updates,wake.clone());
         let downloads=files::Downloads {cache:cache.clone(),client,ready:lineage,notices:notices.clone(),wake:wake.clone()};
         let task = tokio::spawn(run(cache,wake,rx,plan_rx,config_rx,notices,node,endpoint,ready));
-        Self { tx,plans,configuration,node:identity,downloads,task }
+        Self { viewer,tx,plans,configuration,node:identity,downloads,task }
     }
     pub fn stats(&self)->Option<tau_transfer::blocks::Stats> {self.downloads.client.borrow().as_ref().map(|client|client.stats())}
     pub(crate) fn downloads(&self) -> files::Downloads { self.downloads.clone() }
     pub fn send(&self, command: Command) {
         match command {
+            Command::Files(interest)=>self.viewer.set(interest),
             Command::Plan(plan)=>{self.plans.send_replace(plan);}
             Command::Configure(offer,host)=>{self.configuration.send_replace(Some((offer,host)));}
             history@(Command::History {..}|Command::Reset)=>{
@@ -449,6 +454,7 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
             result=configuration.changed()=>{if result.is_err() {break;}let Some((offer,host))=configuration.borrow_and_update().clone() else {continue;};Command::Configure(offer,host)}
         };
         match command {
+            Command::Files(_) => unreachable!("viewer has its own coalesced interest"),
             Command::Reset=>{for job in jobs.values() {job.abort();}jobs.clear();}
             Command::Configure(offer,host) => {
                 if let Err(error) = client.configure(&offer,&host).await {
@@ -457,7 +463,7 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
                     let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)();
                 } else {
                     if ready.borrow().as_ref().is_some_and(|old|old != &offer.lineage) { for task in jobs.values() {task.abort();} jobs.clear(); }
-                    ready.send_replace(Some(offer.lineage));
+                    ready.send_if_modified(|current| { if current.as_ref()==Some(&offer.lineage) {false} else {*current=Some(offer.lineage);true} });
                 }
             }
             Command::Plan(next) => { plan = next; }

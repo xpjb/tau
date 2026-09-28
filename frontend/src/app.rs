@@ -27,6 +27,7 @@ mod projects;
 mod attachments;
 mod notices;
 mod composer_status;
+mod code_view;
 
 #[derive(Clone)]
 enum Action {
@@ -87,6 +88,15 @@ enum Action {
     Link(String),
     Attach,
     Attachments,
+    Files,
+    FileOpen(String, bool),
+    FileUp,
+    FileClose,
+    FileFind,
+    FileFindHere,
+    FileClear,
+    FileCopy,
+    FilePage(bool),
     History,
     RemoveFile(String),
     Toggle(String, bool),
@@ -217,6 +227,7 @@ struct Pointer {
     touch: bool,
 }
 pub enum PlatformAction {
+    Haptic,
     Copy(String),
     Paste,
     PickFile {
@@ -262,6 +273,7 @@ pub struct App {
     scale: f32,
     hits: Vec<Hit>,
     composer: Editor,
+    code: Option<code_view::View>,
     focus: Option<Option<usize>>,
     modal: Option<Modal>,
     context_menu: Option<ContextMenu>,
@@ -359,6 +371,7 @@ impl App {
             scale: 1.,
             hits: vec![],
             composer,
+            code: None,
             focus: None,
             modal: None,
             context_menu: None,
@@ -614,7 +627,7 @@ impl App {
     pub fn tick(&mut self, dt: f32) -> bool {
         let visible = self.window_focused && (self.size.0 as f32 / self.scale >= 760. || !self.show_chats)
             && (!self.show_attachments || !self.mobile && self.size.0 as f32 / self.scale >= 1000.)
-            && self.modal.is_none() && self.viewer.is_none();
+            && self.modal.is_none() && self.viewer.is_none() && self.code.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.report_error(error); }
         self.dirty |= self.controller.poll();
         if self.download_identity != self.controller.identity {
@@ -632,6 +645,7 @@ impl App {
             self.dirty = true;
         }
         self.project_result();
+        self.code_tick(dt);
         let selected = self.controller.account.selected.clone();
         if selected != self.composer_session {
             // A selection changed outside the click path (e.g. a server reply).
@@ -933,6 +947,8 @@ impl App {
             self.viewer_image = None;
         } else if self.modal.is_some() {
             self.activate(Action::CancelModal);
+        } else if self.code.is_some() {
+            self.code_back();
         } else if self.show_attachments {
             self.show_attachments = false;
             self.cancel_pointer();
@@ -948,6 +964,7 @@ impl App {
             Lane::Transcript => (self.scroll, self.max_scroll),
             Lane::Sidebar => (self.list_scroll, self.max_list_scroll),
             Lane::Attachments => (self.attachment_scroll, self.max_attachment_scroll),
+            Lane::Files => self.code.as_ref().map_or((0.,0.),|c|(c.scroll,c.max_scroll)),
             Lane::Projects => (self.project_scroll, self.max_project_scroll),
             Lane::Horizontal => (self.horizontal, self.max_horizontal),
         }
@@ -960,6 +977,7 @@ impl App {
             }
             Lane::Sidebar => self.list_scroll = value.clamp(0., self.max_list_scroll),
             Lane::Attachments => self.attachment_scroll = value.clamp(0., self.max_attachment_scroll),
+            Lane::Files => { if let Some(c)=&mut self.code {c.scroll=value.clamp(0.,c.max_scroll);} },
             Lane::Projects => self.project_scroll = value.clamp(0., self.max_project_scroll),
             Lane::Horizontal => self.horizontal = value.clamp(0., self.max_horizontal),
         }
@@ -1019,12 +1037,14 @@ impl App {
         if self.viewer.is_none() && let Some(field) = self.field_at(point) {
             let editor = match field {
                 None => &mut self.composer,
+                Some(code_view::SEARCH_FIELD) => self.code.as_mut().unwrap().search.as_mut().unwrap(),
                 Some(i) => &mut self.modal.as_mut().unwrap().fields[i].1,
             };
             editor.wheel(&mut self.renderer.text, self.renderer.faces.prose[0], amount, horizontal);
             self.dirty = true;
             return;
         }
+        if self.modal.is_none() && self.code_wheel(amount, horizontal, point) { return; }
         if let Some(v) = &mut self.viewer {
             v.zoom = (v.zoom * (-amount * 0.002).exp()).clamp(1., 16.);
         } else if self.modal.is_none() {
@@ -1174,6 +1194,7 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.code_press(id, point, touch) { return; }
         if !touch && self.viewer.is_none() {
             if let Some(hit) = self.hits.iter().rev().find(|h| contains(h.rect, point)) {
                 // Controls take priority over transcript selection beneath them.
@@ -1209,6 +1230,7 @@ impl App {
         self.dirty = true;
     }
     pub fn motion(&mut self, id: u64, point: Vec2) {
+        if self.code_motion(id, point) { return; }
         let Some(p) = &mut self.pointer else {
             return;
         };
@@ -1314,6 +1336,7 @@ impl App {
         self.dirty = true;
     }
     pub fn release(&mut self, id: u64, point: Vec2) {
+        if self.code_release(id, point) { return; }
         if self.pinch.take().is_some() {
             self.pointer = None;
             self.dirty = true;
@@ -1388,6 +1411,7 @@ impl App {
         self.report(result);
     }
     pub fn cancel_pointer(&mut self) {
+        if let Some(code)=&mut self.code { code.drag_anchor=None; }
         self.context_menu = None;
         self.usage.dismiss();
         self.info_tip.dismiss();
@@ -1409,6 +1433,7 @@ impl App {
     fn editor_and_renderer(&mut self) -> Option<(&mut Editor, &mut Renderer)> {
         let editor = match self.focus? {
             None => &mut self.composer,
+            Some(code_view::SEARCH_FIELD) if self.modal.is_none() => self.code.as_mut()?.search.as_mut()?,
             Some(i) => &mut self.modal.as_mut()?.fields.get_mut(i)?.1,
         };
         Some((editor, &mut self.renderer))
@@ -1422,12 +1447,14 @@ impl App {
         if let Some(modal) = &self.modal {
             modal.fields.iter().rposition(|(_, e, _)| e.contains(point)).map(Some)
         } else {
-            self.composer.contains(point).then_some(None)
+            if self.code.as_ref().and_then(|c|c.search.as_ref()).is_some_and(|e|e.contains(point)) { Some(Some(code_view::SEARCH_FIELD)) }
+            else { self.composer.contains(point).then_some(None) }
         }
     }
     pub fn ime_rect(&self) -> Option<Rect> {
         let editor = match self.focus? {
             None => &self.composer,
+            Some(code_view::SEARCH_FIELD) if self.modal.is_none() => self.code.as_ref()?.search.as_ref()?,
             Some(i) => &self.modal.as_ref()?.fields.get(i)?.1,
         };
         editor.ime_rect(&self.renderer.text)
@@ -1441,6 +1468,7 @@ impl App {
     pub fn composing(&self) -> bool {
         match self.focus {
             Some(None) => self.composer.composing(),
+            Some(Some(code_view::SEARCH_FIELD)) if self.modal.is_none() => self.code.as_ref().and_then(|c|c.search.as_ref()).is_some_and(|e|e.composing()),
             Some(Some(i)) => self.modal.as_ref().and_then(|m| m.fields.get(i)).is_some_and(|(_, e, _)| e.composing()),
             None => false,
         }
@@ -1448,15 +1476,18 @@ impl App {
     fn editor(&mut self) -> Option<&mut Editor> {
         match self.focus? {
             None => Some(&mut self.composer),
+            Some(code_view::SEARCH_FIELD) if self.modal.is_none() => self.code.as_mut()?.search.as_mut(),
             Some(i) => self.modal.as_mut()?.fields.get_mut(i).map(|(_, e, _)| e),
         }
     }
     pub fn input(&mut self, value: &str) {
+        if self.focus.is_none() && self.modal.is_none() && self.code.is_some() && self.code_key(value, false, false) { return; }
         if self.editor().is_some_and(|e| e.replace(value)) { self.edited(); }
         self.dirty = true;
     }
     #[cfg(target_os = "android")]
     pub fn native_edit(&mut self, value: String) {
+        let value=self.code_native_value(value);
         if self.editor().is_some_and(|e| e.replace_all(&value)) { self.edited(); }
         self.dirty = true;
     }
@@ -1467,6 +1498,7 @@ impl App {
         ) {
             self.controller.notice = None;
         }
+        if self.focus == Some(Some(code_view::SEARCH_FIELD)) && self.modal.is_none() { self.code_query(); }
         if self.focus == Some(None) {
             let result = self.controller.draft(self.composer.value.clone());
             self.report(result);
@@ -1524,6 +1556,7 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.modal.is_none() && self.viewer.is_none() && self.code_key(key, ctrl, shift) { return; }
         self.expansion_pin = None;
         self.wheel = None;
         if let Some(modal) = &self.modal {
@@ -1649,7 +1682,9 @@ impl App {
             }
             Action::RetryCreate => self.controller.retry_create_manually()?,
             Action::Back => self.back(),
+            Action::Files | Action::FileOpen(..) | Action::FileUp | Action::FileClose | Action::FileFind | Action::FileFindHere | Action::FileClear | Action::FileCopy | Action::FilePage(_) => self.code_action(action)?,
             Action::Attachments => {
+                self.close_code();
                 self.save()?;
                 self.cancel_pointer();
                 self.focus = None;
@@ -1776,6 +1811,7 @@ impl App {
                 self.focus = Some(field);
                 if self.mobile {
                     let (title, value, secret, single_line) = match field {
+                        Some(code_view::SEARCH_FIELD) if self.modal.is_none() => ("Find remote path".into(), self.code.as_ref().unwrap().search.as_ref().unwrap().value.clone(), false, true),
                         Some(i) => {
                             let (label, e, secret) = &self.modal.as_ref().unwrap().fields[i];
                             (label.clone(), e.value.clone(), *secret, e.single_line)
@@ -2043,7 +2079,12 @@ impl App {
                     })?;
                 }
             }
-            Action::Send => self.controller.send_prompt()?,
+            Action::Send => {
+                if let Some(code)=&self.code {anyhow::ensure!(code.selection.is_some() && code.error.is_none(), "Select current lines again before sending this code comment");}
+                if self.code.is_some() {self.code_reference(false);}
+                self.controller.send_prompt()?;
+                if let Some(code)=&mut self.code { code.sent(); self.focus=None; }
+            },
             Action::Abort => {
                 if let Some(id) = selected {
                     self.controller
@@ -2927,6 +2968,7 @@ impl App {
         rows
     }
     fn chat(&mut self, ctx: &impl RenderContext, layer: &mut Layer, chrome: &mut Layer, b: Rect, interests: &mut std::collections::BTreeSet<String>) {
+        if self.code.is_some() { self.code_frame(ctx, layer, chrome, b); return; }
         let s = self.scale;
         let paint_at = Instant::now();
         let wide = self.size.0 as f32 / s >= 760.;
@@ -2968,8 +3010,9 @@ impl App {
             .as_ref()
             .is_some_and(|s| s.status == SessionStatus::Running);
         let paused = self.controller.chats[&session].feed.queue.paused;
+        let connected = self.controller.epoch.is_some();
         let title_width =
-            (b.x + b.width - if running || paused { 108. * s } else { 64. * s } - title_x).max(1.);
+            (b.x + b.width - if running || paused { 152. * s } else { 108. * s } - title_x).max(1.);
         self.chat_areas.push((
             Rect::new(title_x, b.y, title_width, header.height),
             session.clone(),
@@ -3019,21 +3062,41 @@ impl App {
             }),
             false,
         );
-        let files = self.controller.chats[&session].local.files.clone();
-        let width = (b.width - 28. * s).min(900. * s).max(160. * s);
-        let x = b.x + (b.width - width) / 2.;
-        let editor_h = self
-            .composer
-            .height(&mut self.renderer, width - 132. * s, 16. * s);
-        let queue = &self.controller.chats[&session].feed.queue;
-        let controls = queue
-            .control
-            .as_ref()
-            .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
-        let composer_h = editor_h
-            + (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
-        let bottom = b.y + b.height;
-        let composer_top = (bottom - composer_h).max(b.y + 80. * s);
+        self.icon_button(
+            ctx, chrome,
+            Rect::new(b.x + b.width - if running || paused { 96. * s } else { 52. * s },
+                header.y + (header.height - 40. * s) / 2., 40. * s, 40. * s),
+            Icon::Attachments, 22., Action::Attachments, self.show_attachments, true,
+        );
+        if running || paused {
+            let (icon, action) = if running {
+                (Icon::Stop, Action::Abort)
+            } else {
+                (Icon::Play, Action::Queue(QueueOperation::Resume {
+                    run_id: self.controller.chats[&session].feed.queue.run_id.clone(),
+                }))
+            };
+            self.icon_button(
+                ctx,
+                chrome,
+                Rect::new(
+                    b.x + b.width - 52. * s,
+                    header.y + (header.height - 40. * s) / 2.,
+                    40. * s,
+                    40. * s,
+                ),
+                icon,
+                20.,
+                action,
+                false,
+                connected,
+            );
+        }
+        self.icon_button(ctx, chrome,
+            Rect::new(b.x + b.width - if running || paused { 140. * s } else { 96. * s },
+                header.y + (header.height - 40. * s) / 2., 40. * s, 40. * s),
+            Icon::Folder, 22., Action::Files, false, true);
+        let (x, width, _, _, composer_top) = self.composer_layout(b, &session);
         let viewport = Rect::new(
             b.x,
             b.y + 57. * s,
@@ -3381,12 +3444,39 @@ impl App {
                 self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)));
         }
         self.scrollbar(chrome, Lane::Transcript, viewport);
+        self.draw_composer(ctx, chrome, b, &session, false);
+    }
+    fn composer_layout(&mut self, b: Rect, session: &str) -> (f32, f32, f32, f32, f32) {
+        let s = self.scale;
+        let files = &self.controller.chats[session].local.files;
+        let width = (b.width - 28. * s).min(900. * s).max(160. * s);
+        let x = b.x + (b.width - width) / 2.;
+        let editor_h = self
+            .composer
+            .height(&mut self.renderer, width - 132. * s, 16. * s);
+        let queue = &self.controller.chats[session].feed.queue;
+        let controls = queue
+            .control
+            .as_ref()
+            .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
+        let composer_h = editor_h
+            + (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
+        let bottom = b.y + b.height;
+        let composer_top = (bottom - composer_h).max(b.y + 80. * s);
+        (x, width, editor_h, composer_h, composer_top)
+    }
+    fn draw_composer(&mut self, ctx: &impl RenderContext, chrome: &mut Layer, b: Rect, session: &str, in_code: bool) {
+        let s = self.scale;
+        let (x, width, editor_h, composer_h, composer_top) = self.composer_layout(b, session);
+        let files = self.controller.chats[session].local.files.clone();
+        let controls = self.controller.chats[session].feed.queue.control.as_ref().is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
+        let summary = self.controller.account.sessions.iter().find(|s| s.id == session).cloned();
         chrome.rect(
             Rect::new(b.x, composer_top, b.width, composer_h),
             color(0x0e141b),
         );
         let creating = self.controller.is_creating(&session);
-        let choosing = self.controller.chats[&session].model_request.is_some();
+        let choosing = self.controller.chats[session].model_request.is_some();
         let status_rect = Rect::new(x, composer_top + 10. * s,
             (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s);
         if creating || choosing {
@@ -3473,7 +3563,7 @@ impl App {
         self.usage.content = usage_text;
         if usage.is_some()
             && (!connected
-                || !self.controller.chats[&session].feed.synchronized
+                || !self.controller.chats[session].feed.synchronized
                 || summary.as_ref().is_none_or(|s| {
                     !matches!(s.status, SessionStatus::Idle | SessionStatus::Running)
                 }))
@@ -3488,7 +3578,8 @@ impl App {
             Some(_) => { self.usage.content.line().line().dim("Account quota unavailable for this provider"); }
             None => { self.usage.content.line().line().dim("Account quota unavailable (model unknown)"); }
         }
-        let can_send = !self.composer.value.trim().is_empty() || !files.is_empty();
+        let can_send = (!self.composer.value.trim().is_empty() || !files.is_empty())
+            && (!in_code || self.code.as_ref().is_some_and(|c|c.selection.is_some() && c.error.is_none()));
         self.icon_button(
             ctx,
             chrome,
@@ -3499,38 +3590,8 @@ impl App {
             true,
             can_send,
         );
-        self.icon_button(
-            ctx, chrome,
-            Rect::new(b.x + b.width - if running || paused { 96. * s } else { 52. * s },
-                header.y + (header.height - 40. * s) / 2., 40. * s, 40. * s),
-            Icon::Attachments, 22., Action::Attachments, self.show_attachments, true,
-        );
-        if running || paused {
-            let (icon, action) = if running {
-                (Icon::Stop, Action::Abort)
-            } else {
-                (Icon::Play, Action::Queue(QueueOperation::Resume {
-                    run_id: self.controller.chats[&session].feed.queue.run_id.clone(),
-                }))
-            };
-            self.icon_button(
-                ctx,
-                chrome,
-                Rect::new(
-                    b.x + b.width - 52. * s,
-                    header.y + (header.height - 40. * s) / 2.,
-                    40. * s,
-                    40. * s,
-                ),
-                icon,
-                20.,
-                action,
-                false,
-                connected,
-            );
-        }
         let controls_y = field.y + field.height + 4. * s;
-        if self.scroll + 24. * s < self.max_scroll {
+        if !in_code && self.scroll + 24. * s < self.max_scroll {
             self.icon_button(
                 ctx,
                 chrome,
@@ -3542,7 +3603,7 @@ impl App {
                 true,
             );
         }
-        let queue = &self.controller.chats[&session].feed.queue;
+        let queue = &self.controller.chats[session].feed.queue;
         if let Some(control) = &queue.control
             && matches!(control.status.as_str(), "waiting" | "applying")
         {
@@ -3590,7 +3651,7 @@ impl App {
         {
             let query = &self.composer.value[1..];
             let mut suggestions = vec![];
-            for command in &self.controller.chats[&session].commands {
+            for command in &self.controller.chats[session].commands {
                 if let Some(arg) = query.strip_prefix(&format!("{} ", command.name)) {
                     for a in &command.arguments {
                         if a.value.starts_with(arg) {

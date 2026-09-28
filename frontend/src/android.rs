@@ -142,6 +142,7 @@ impl Android {
                 env.with_local_frame(16, |env| {
                     let activity = unsafe { JObject::from_raw(ctx.app.activity_as_ptr().cast()) };
                     match action {
+                        PlatformAction::Haptic => { env.call_method(&activity, "selectionHaptic", "()V", &[])?; }
                         PlatformAction::Background => {
                             env.call_method(&activity, "background", "()V", &[])?;
                         }
