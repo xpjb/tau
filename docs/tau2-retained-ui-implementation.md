@@ -1,4 +1,189 @@
-# Retained UI implementation checkpoint
+# Retained UI implementation and acceptance ledger
+
+**The four implementation stages are complete in source on
+`feat/tau2-retained-ui`. Release acceptance is not complete.** All production
+legacy routing is removed; Android uses the adapted same-window inline editor.
+The line-count reduction target was **not met**, including under identical
+formatting. The proposal's no-growth rollout gate therefore remains closed unless
+the user explicitly accepts the additional code. Physical Android/Windows QA is
+also still required. Nothing has been merged into integration, deployed, restarted
+or packaged by this work.
+
+Source checkpoint and final validation numbers are recorded below. Earlier
+milestone notes after the horizontal rule are historical, not outstanding stage
+lists. Integration baseline remains `415aeff`; no concurrent model/tool-projection
+work or independent pause-removal work is included or credited.
+
+## Final ownership and deletion gates
+
+| Gate | Implemented result |
+|---|---|
+| Global actions/dispatcher | Production `Action`, `Hit`, `activate/apply` and `LegacyWorkspace` removed. Feature owners handle local choices directly. |
+| Parallel area tables | Controls retain bounds and inherited clips. MessageRow owns section/attachment controls; no root chat/project/message/detail/info area tables. |
+| Global scrolling | `Lane`, lane switches, root wheel/drag state and the obsolete scrollbar implementation removed. Each surface owns ScrollState; code keeps its direct scrolling policy. |
+| Modal/editor indices | `Modal`, `ModalKind`, indexed focus and the code-search sentinel removed. Named TextFields retain Editor; focused/native targets have source and ancestor lifetime fences. |
+| Navigation reset lists | Workspace coordinates model navigation, binding, view persistence and subtree cancellation. File interests close synchronously, including same-chat/download navigation. |
+
+App lends Controller, UiState and Services as siblings to a concrete RootWidget.
+Workspace owns Sidebar, ChatPane and AttachmentBrowser. ChatPane owns Header,
+Transcript, the one shared Composer and CodeBrowser. Root's fixed overlay fields
+provide the ordered overlay host; dialogs are a closed enum and menu history stays
+inside Menu. Sidebar chat entries use keyed retained Controls rather than a
+second heavyweight ChatRow wrapper. There is no mutable-widget registry, dynamic
+reflection, second renderer or second editable client model.
+
+Capture follows an active ancestor route even when released over another pane.
+Hidden/detached scopes are rejected before the next event, not after the next
+paint. Keyed transcript widgets are bounded to existing overscan and captured
+owners; offscreen anchor placements remain lightweight. Projection, anchor
+formulas, Editor/Sanscale/Markdown/document algorithms, Controller and native APIs
+are retained. Backlog 012 remains deferred, with only mechanical changes to its
+existing tests; no restoration tests were added or deleted. Backlog 015's tool
+interest suffix mismatch was not silently reimplemented here.
+
+## Deliberate UX decisions
+
+- Adapt the existing inline-input work at `46618b9`, not another phone editor.
+  Rust still paints the actual field; Android's same-window InputConnection
+  supplies the system IME. No separate editing activity/window or Done/save-draft
+  detour. Field IDs, revisions and account/source/chat bindings fence callbacks.
+- Download notices cannot replace an unsaved form. The typed destination waits
+  until the foreground scope closes, then receives a fresh display lifetime.
+  Hidden notices do not keep an expired redraw deadline spinning.
+- Form validation is visible inside its opaque dialog. A retained target never
+  turns a release into a new press on a replacement control.
+- A small touch jitter is still a backdrop tap; a second finger over the viewer
+  toolbar joins an existing pinch rather than activating Back.
+
+## Validation and limits
+
+Source checkpoint: **`b2281ec693ff8ae160c75006eb9bb4d0675bb4e2`**.
+
+- Managed workspace compiler check, all targets: **passed**.
+- Full workspace nextest: **307/307 passed**, zero skipped, 19 binaries;
+  run `54e5fc09-1df1-4a5f-9e92-beb7b3942bae`, 108.376s of tests.
+- Windows x64 MSVC `cargo xwin check`: **passed**.
+- Android aarch64/API-29 Rust compiler check: **passed**.
+- MainActivity Java compilation against SDK 35: **passed** (existing deprecated-API
+  note). Java and Rust must be built/distributed together.
+- Workspace rustdoc (`cargo doc --locked --workspace --no-deps`): **passed**.
+- `git diff --check`: **passed**.
+
+
+The suites exercise real App input and GPU headless rendering, not only a flat
+routing simulation. New lifetime cases cover streaming/reorder identity, source
+replacement, virtualized owners, capture crossing sibling panes, pointer isolation,
+hiding content without a frame, code-search IME insets, nested text selection,
+ancestor invalidation, form feedback and deferred notices. Existing code-browser,
+preview-interest, draft/anchor, download/export, menu, tooltip, recovery and native
+transport tests remain. `FixtureChoice`/`PlacedControl` are test-only selectors;
+fixture setup delegates to actual owners and never provides runtime dispatch.
+
+No physical-device typing/keyboard/pinch test or interactive Windows acceptance
+was performed. Compiler/headless success must not be described as that coverage.
+Known compiler dead-code/platform warnings are not lint or release blockers. No
+Clippy or Cargo built-in test runner was used; all Rust work used the managed
+`/usr/local/bin/cargo` with nextest. Shared build-lock timeouts were retried, never
+bypassed. No live database writes occurred during pause-bug diagnosis.
+
+## Actual size, not a reduction claim
+
+Counts are against integration `415aeff`, excluding solely test code, with all
+other touched frontend/Android production deltas charged. The source checkpoint
+above is immutable. The proposal's original physical baseline reproduces exactly:
+**6,620 physical / 6,582 nonblank production lines**.
+
+| Measurement | Baseline | Implemented scope | Other production delta | Effective charged total | Net change |
+|---|---:|---:|---:|---:|---:|
+| Physical production lines | 6,620 | 10,375 | +304 | 10,679 | **+4,059** |
+| Nonblank production lines | 6,582 | 10,294 | +296 | 10,590 | **+4,008** |
+| Same-format production lines | 7,717 | 10,372 | +395 | 10,767 | **+3,050** |
+| Same-format nonblank production | 7,685 | 10,303 | +389 | 10,692 | **+3,007** |
+
+The same-format comparison runs **both** revisions through rustfmt with edition
+2024, width 120, `use_small_heuristics=Max`, `skip_children=true`, into temporary
+stdout only. It does not reformat unrelated tracked files. In particular the
+baseline code-browser file is substantially condensed; treating its expansion as
+new behavior, or leaving new owners minified to claim a saving, would mislead.
+Even after normalization the production increase is **3,050 lines**.
+
+Test-only source: **3,110 -> 4,528 physical lines (+1,418)**, nonblank
+**3,011 -> 4,395 (+1,384)** across the measured/touched files. Total frontend source
+change is **+5,477 physical lines**, reconciling production +4,059 and tests +1,418
+with `git diff 415aeff b2281ec --numstat -- frontend`. Test growth also exceeds the
+original 350–650-line estimate. Documentation and the 146-line audit script are
+additional review tooling, not product deletions or hidden UI savings.
+
+| Destination responsibility | Physical production | Same-format production |
+|---|---:|---:|
+| App, Root, Workspace, navigation and timers | 1,724 | 1,722 |
+| Shared controls, scroll and routes | 910 | 910 |
+| Sidebar and project tabs | 389 | 389 |
+| Composer and header | 768 | 768 |
+| Transcript, rows and projection adapter | 1,324 | 1,324 |
+| Code browser | 1,303 | 1,302 |
+| Cards, browser, viewer and export workflow | 1,207 | 1,161 |
+| Dialogs, menu, notices and tooltips | 2,640 | 2,697 |
+| App inline-IME adapter and Ripple | 110 | 99 |
+
+The deletion/relocation/replacement ledger is deliberately separate from net size:
+
+- **Old implementation removed:** all 82 production global Action variants and
+  their dispatcher; legacy hit/area/lane/modal/index adapters; old project,
+  navigation and composer-status owner files. Per-file normalized diff removes
+  **6,223 production lines** and adds **9,273**, leaving 4,035 matching lines across
+  measured files. Those gross counts include moves; they are not semantic savings.
+- **Equivalent code relocated, zero simplification credit:** existing row
+  projection into `projection.rs`; code-document/selection/reference algorithms
+  into CodeBrowser; transcript measurement/anchor formulas into Transcript/rows;
+  attachment/export operations into retained cards and Services; existing status,
+  menu and form feature operations into their owners. The unchanged Tooltip,
+  Ripple and domain algorithms are not counted as eliminated logic.
+- **Replacement code:** per-feature retained constructors, local input/frame
+  handlers, shared Control/TextField/Form/ScrollState, menu/overlay ownership and
+  scoped navigation. Destination totals above include carried-over code, not only
+  new infrastructure. In particular the 910-line shared-mechanics bucket contains
+  both new ownership code and preserved scroll/editor math.
+- **Genuinely new infrastructure/capabilities:** non-reused widget identity,
+  active ancestor routes and detachment, keyed row reconciliation, owner-applied
+  structural requests, same-window native editor ID/revision/clipboard fences.
+  These coexist with relocated feature logic inside several files; a line matcher
+  cannot honestly assign every added line to a mutually exclusive semantic bucket.
+  All of their costs are included, and none of the moved code earns a saving.
+
+Reproduce both formats, file-by-file production/test totals and normalized churn:
+
+```sh
+python3 scripts/retained-ui-size.py 415aeff b2281ec
+```
+
+The frontend-local scanner documents its cfg(test) assumptions and asserts the
+published baseline. Java/XML are unchanged by Rust formatting and fully charged.
+
+
+The main missed estimates are overlay/form ownership and lifecycle/input plumbing.
+Concrete controls require constructors, IDs, binding checks and reconciliation;
+those costs did not disappear when the old global branches were deleted. Inline
+IME support also adds real Java/Rust interop. This is an architectural ownership
+change with a **net production increase**, not a LOC simplification. No extra
+formatting/minification, deleted tests, domain rewrite, or relocated code is used
+to hide the increase. Further broad rollout requires a budget decision, not a
+claim that these results meet the old reduction target.
+
+## Separate repeated-pause fix
+
+`fix/tau2-resume-during-stop` at `0b7c2ae`, based directly on `415aeff`, is independent
+of this UI branch. A deterministic regression reproduced Resume being accepted
+while a cancelled run was settling, then overwritten by old cleanup. The fix
+retains the newer explicit intent until cleanup finishes; later stops still win,
+immutable-ID retries remain idempotent, and failures do not auto-retry paid work.
+All **58 daemon tests passed** on that branch. Historical provider-stream failures
+were also found, so this is not a claim that every reported pause has that cause.
+It is pushed but not deployed and can be reviewed/integrated without the UI patch.
+
+---
+
+# Historical implementation checkpoints
 
 **Stage 1 mechanics are implemented; the whole proposal and Android UX are not finished.** Work is on
 `feat/tau2-retained-ui`, based on integration / `origin/tau2` at `415aeff`.

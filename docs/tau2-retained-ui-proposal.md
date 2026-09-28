@@ -4,12 +4,13 @@ Original proposal: September 28, 2026. Historical source and counts below are
 pinned to `cafef7f7ad57e1c5bae6e3e9c89c66beebade80e` on `tau2-integration`.
 The original review branch, `review/tau2-retained-ui`, changed documentation only.
 
-**Implementation follow-up:** the foundational slice is now on
-`feat/tau2-retained-ui`. See `tau2-retained-ui-implementation.md` for actual code,
-deletions, measured growth, checks and remaining work. The full proposal is not
-implemented. Existing UX is not automatically a compatibility requirement:
-Android's separate editing window was explicitly rejected; inline editing is the
-target, and the old window adapter in the first checkpoint is temporary.
+**Implementation follow-up:** all four source migration stages are implemented on
+`feat/tau2-retained-ui`; the global action/hit/lane/modal routing is removed and the
+existing inline Android input implementation is adapted. See
+`tau2-retained-ui-implementation.md` for validation and actual costs. **The code
+exceeds the no-growth budget; the LOC reduction hypothesis failed.** Broad rollout
+still requires an explicit budget decision and physical-device acceptance. The
+first-checkpoint separate-window adapter is historical, not the final Android UX.
 
 **Currentness follow-up:** reviewed `review/tau2-client-structure` at `24b8323`
 and fetched integration / `origin/tau2` at `415aeff` on September 28, 2026.
