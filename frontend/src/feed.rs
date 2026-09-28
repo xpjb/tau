@@ -24,6 +24,14 @@ pub struct Feed {
 }
 
 impl Feed {
+    /// Conservative decoded-view accounting, not a process-RSS promise. Headers
+    /// are <=4 KiB each; preview payloads and full queued text are counted too.
+    pub(crate) fn resident_bytes(&self) -> usize {
+        self.previews.iter().map(|(_,_,bytes)|bytes).sum::<usize>()
+            + self.events.len() * tau_blocks::MAX_BLOCK_HEADER_BYTES
+            + self.queue.requests.iter().map(|q|q.text.len()+1024).sum::<usize>()
+    }
+
     pub(crate) fn retained_roots(&self) -> std::collections::BTreeSet<String> {
         self.previews.iter().map(|(root,_,_)| root.clone()).collect()
     }

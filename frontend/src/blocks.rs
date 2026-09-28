@@ -17,8 +17,13 @@ pub const QUEUE: &str = "@queue";
 pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub lengths:HashMap<String,u64>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,String> }
 #[derive(Default)]
 struct Dirty {full:bool,viewing:bool,ids:BTreeSet<String>}
+#[derive(Default)]
+struct Prefetched {
+    binding: Option<(String,u64)>,
+    bodies: HashMap<(String,String),(u64,u64)>,
+}
 #[derive(Clone)]
-pub struct Cache { exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
+pub struct Cache { prefetched:Arc<Mutex<Prefetched>>,exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
 impl Cache {
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path.parent().context("Cache path has no parent")?)?;
@@ -40,14 +45,18 @@ impl Cache {
         let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;
         db.pragma_update(None,"max_page_count",1024u64*1024*1024/page_size)?;
         let exports=path.parent().filter(|p|p.file_name().is_some_and(|n|n=="blocks")).and_then(Path::parent).map(|root|root.join("downloads"));
-        Ok(Self { exports,dirty:Default::default(),db:Arc::new(Mutex::new(db)),bound:Arc::new(std::sync::atomic::AtomicBool::new(false)),_lease:Arc::new(lease) })
+        Ok(Self { prefetched:Default::default(),exports,dirty:Default::default(),db:Arc::new(Mutex::new(db)),bound:Arc::new(std::sync::atomic::AtomicBool::new(false)),_lease:Arc::new(lease) })
     }
     fn changed(&self,scope:&str,id:&str,full:bool) {
-        let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();d.full|=full;d.ids.insert(id.into());
+        let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();d.full|=full;
+        if !d.full {d.ids.insert(id.into());d.full=d.ids.len()>128;}
+        if d.full {d.ids.clear();}
     }
     pub fn viewport_changed(&self,scope:&str,ids:impl Iterator<Item=String>) {
         let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();
-        d.viewing=true;d.ids.extend(ids);
+        d.viewing=true;
+        if !d.full {d.ids.extend(ids);d.full=d.ids.len()>128;}
+        if d.full {d.ids.clear();}
     }
     pub fn changes(&self,scope:&str,visible:Option<&BTreeSet<String>>,full:bool)->Result<Option<View>> {
         self.changes_retaining(scope, visible, &BTreeSet::new(), full)
@@ -293,6 +302,10 @@ impl Cache {
         }
         Ok(plan)
     }
+    pub(crate) fn retain_background(&self, scopes:&[String]) {
+        let scopes=scopes.iter().collect::<BTreeSet<_>>();
+        self.prefetched.lock().unwrap().bodies.retain(|(scope,_),_|scopes.contains(scope));
+    }
     pub(crate) fn plan_background(&self, scope: &str) -> Result<Plan> {
         // A small tail only. Do not inherit open Details/tool preferences from
         // the foreground, walk old history, or download attachment payloads.
@@ -309,6 +322,33 @@ impl Cache {
         let mut plan = self.plan_visible(scope, &LocalChat::default(), &[], Some(&viewport))?;
         plan.background = true;
         plan.foreground.clear();
+        // A byte-bounded disk cache is not an instruction to download the same
+        // cold bodies forever. Remember successful prefetches for this native
+        // version/prefix; explicit viewing/copy still fetches evicted bytes.
+        let mut candidates=viewport.clone();
+        candidates.extend(plan.blocks.iter().map(|(id,_)|id.clone()));
+        let db=self.db.lock().unwrap();
+        for id in &viewport {
+            if let Some(h)=tau_blocks::header(&db,scope,id)?
+                && let Some(id)=h.meta.pointer("/fullEvent/id").and_then(|v|v.as_str()) {candidates.insert(id.into());}
+        }
+        let binding=(tau_blocks::cursor(&db)?.lineage,replica_epoch(&db)?);
+        let mut fetched=self.prefetched.lock().unwrap();
+        if fetched.binding.as_ref()!=Some(&binding) {fetched.bodies.clear();fetched.binding=Some(binding);}
+        fetched.bodies.retain(|(old,id),_|old!=scope || candidates.contains(id));
+        let required=|id:&str,length:u64| if id==QUEUE || id.starts_with("queued:") {length} else {length.min(256*1024)};
+        for id in candidates {
+            if let Some(h)=tau_blocks::header(&db,scope,&id)? {
+                let length=required(&id,h.length);
+                if length>0 && tau_blocks::cache_budget::stored_bytes(&db,scope,&id)? >= length {
+                    fetched.bodies.insert((scope.into(),id),(h.version,length));
+                }
+            }
+        }
+        plan.blocks.retain(|(id,head)|head.is_none_or(|(version,length,_,stored)| {
+            let length=required(id,length);
+            stored>=length || fetched.bodies.get(&(scope.into(),id.clone()))!=Some(&(version,length))
+        }));
         let mut budget = 8 * 1024 * 1024u64;
         plan.blocks.retain(|(id, head)| {
             let length = head.map_or(0, |(_,length,_,_)|
@@ -515,7 +555,22 @@ impl Service {
 impl Drop for Service { fn drop(&mut self) { self.task.abort(); } }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Key { Feeds(String,Vec<Option<String>>,bool), Block(String,String,bool), History(String,Option<String>,FeedPosition,bool) }
+enum Key { Feeds(String,Vec<Option<String>>,bool), BackgroundFeeds(Vec<(String,Option<String>)>), BackgroundBlock(String,String), Block(String,String,bool), History(String,Option<String>,FeedPosition,bool) }
+
+fn background_batches(cache:&Cache, feeds:BTreeSet<(String,Option<String>)>) -> Result<Vec<Key>> {
+    let mut batches=Vec::new();let mut keys=Vec::new();let mut requests=Vec::new();
+    for (scope,parent) in feeds {
+        let request=cache.feed_request(&scope,parent.as_deref(),None)?;
+        let mut proposed=requests.clone();proposed.push(request.clone());
+        if proposed.len()>16 || serde_json::to_vec(&BlockWatch::Feeds {requests:proposed})?.len()>MAX_BLOCK_HEADER_BYTES {
+            ensure!(!keys.is_empty(),"Background feed exceeds request budget");
+            batches.push(Key::BackgroundFeeds(std::mem::take(&mut keys)));requests.clear();
+        }
+        keys.push((scope,parent));requests.push(request);
+    }
+    if !keys.is_empty() {batches.push(Key::BackgroundFeeds(keys));}
+    Ok(batches)
+}
 struct Watches(HashMap<Key,tokio::task::JoinHandle<()>>);
 impl std::ops::Deref for Watches { type Target = HashMap<Key,tokio::task::JoinHandle<()>>; fn deref(&self) -> &Self::Target { &self.0 } }
 impl std::ops::DerefMut for Watches { fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 } }
@@ -556,11 +611,13 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
             }
         }
         let mut desired=std::collections::HashSet::new();
+        let mut background_feeds=BTreeSet::new();
         for p in &plan {
             // Batch headers, with a hard encoded request budget. Many expanded
             // cards must not consume every stream and starve their own bytes.
             let mut parents=vec![]; let mut requests=vec![];
             for parent in &p.parents {
+                if p.background {background_feeds.insert((p.scope.clone(),parent.clone()));continue;}
                 let Ok(request)=cache.feed_request(&p.scope,parent.as_deref(),None) else {continue;};
                 let mut proposed=requests.clone();proposed.push(request.clone());
                 if proposed.len()>16 || serde_json::to_vec(&BlockWatch::Feeds {requests:proposed}).map_or(true,|b|b.len()>MAX_BLOCK_HEADER_BYTES) {
@@ -574,10 +631,17 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
                 // delayed plan must not turn already-held text into a fetch of
                 // its former queue ID after consumption. A changed/evicted
                 // body gets a fresh plan from its metadata/cache update.
-                if head.is_some_and(|(_,length,sealed,stored)|sealed && length==stored) {continue;}
-                desired.insert(Key::Block(p.scope.clone(),id.clone(),p.foreground.contains(id)));
+                if head.is_some_and(|(_,length,sealed,stored)|(p.background || sealed) && length==stored) {continue;}
+                desired.insert(if p.background {Key::BackgroundBlock(p.scope.clone(),id.clone())}
+                    else {Key::Block(p.scope.clone(),id.clone(),p.foreground.contains(id))});
             }
             for (parent,before) in &p.older {desired.insert(Key::History(p.scope.clone(),Some(parent.clone()),before.clone(),p.background));}
+        }
+        // Root/queue subscriptions are cheap. Batch them across chats instead
+        // of occupying one long-lived stream per chat before any body can run.
+        match background_batches(&cache,background_feeds) {
+            Ok(batches)=>desired.extend(batches),
+            Err(error)=>{let _=notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await;(wake)();}
         }
         jobs.retain(|key,task| {
             let keep=if let Key::History(scope,None,_,_)=key {!task.is_finished() && plan.iter().any(|p|!p.background && &p.scope==scope)} else {desired.contains(key)};
@@ -585,11 +649,19 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
         });
         for key in desired {
             let completed=jobs.get(&key).is_some_and(|t|t.is_finished());
-            let needed=if let Key::Block(scope,id,_)=&key {
-                let db=cache.db.lock().unwrap();
-                tau_blocks::header(&db,scope,id).ok().flatten().is_none_or(|h|!h.sealed ||
-                    tau_blocks::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length))
-            } else {true};
+            let needed=match &key {
+                Key::Block(scope,id,_)=>{
+                    let db=cache.db.lock().unwrap();
+                    tau_blocks::header(&db,scope,id).ok().flatten().is_none_or(|h|!h.sealed ||
+                        tau_blocks::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length))
+                }
+                Key::BackgroundBlock(scope,id)=>{
+                    let db=cache.db.lock().unwrap();
+                    tau_blocks::header(&db,scope,id).ok().flatten().is_none_or(|h|
+                        tau_blocks::cache_budget::stored_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length))
+                }
+                _=>true,
+            };
             if (!jobs.contains_key(&key) || completed) && needed {
                 jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone()));
             }
@@ -601,7 +673,10 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
 
 fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Receiver<Option<String>>, notices:mpsc::Sender<Notice>, wake:crate::transport::Wake) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let scope = match &key { Key::Feeds(scope,_,_) | Key::Block(scope,_,_) | Key::History(scope,_,_,_) => scope.clone() };
+        let scope = match &key {
+            Key::Feeds(scope,_,_) | Key::Block(scope,_,_) | Key::BackgroundBlock(scope,_) | Key::History(scope,_,_,_) => scope.clone(),
+            Key::BackgroundFeeds(_)=>String::new(),
+        };
         while ready.borrow().is_none() { if ready.changed().await.is_err() { return; } }
         let mut delay = 100;
         loop {
@@ -625,11 +700,20 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
     let epoch=cache.epoch();
     let (scope,request) = match key {
         Key::Feeds(scope,parents,_) => (scope.clone(),BlockWatch::Feeds {requests:parents.iter().map(|parent|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
+        Key::BackgroundFeeds(feeds)=>(String::new(),BlockWatch::Feeds {requests:feeds.iter().map(|(scope,parent)|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
         Key::History(scope,parent,before,_) => (scope.clone(),BlockWatch::Feed(cache.feed_request(scope,parent.as_deref(),Some(before.clone()))?)),
         Key::Block(scope,id,_) => (scope.clone(),BlockWatch::Block(cache.block_request(scope,id)?)),
+        Key::BackgroundBlock(scope,id)=>{
+            let mut request=cache.block_request(scope,id)?;
+            // Catch up and release the slot, even for a live body. The shared
+            // metadata feed announces further appends. Quiet background chats
+            // must not hoard bulk slots waiting out a five-second watch slice.
+            request.follow=false;
+            (scope.clone(),BlockWatch::Block(request))
+        }
     };
     let feeds=match &request {BlockWatch::Feed(req)=>vec![req.clone()],BlockWatch::Feeds {requests}=>requests.clone(),BlockWatch::Block(_)=>vec![]};
-    let bulk=matches!(key,Key::Block(_,_,false) | Key::Feeds(_,_,true) | Key::History(_,_,_,true));
+    let bulk=matches!(key,Key::Block(_,_,false) | Key::Feeds(_,_,true) | Key::History(_,_,_,true) | Key::BackgroundFeeds(_) | Key::BackgroundBlock(..));
     let mut watcher = client.watch_scheduled(request.clone(),bulk).await?;
     let mut records = vec![vec![];feeds.len()]; let mut head = None;
     loop {
@@ -642,9 +726,10 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
             Header::Page {watch,reset,cursor,floor,before,more} => {
                 let req=feeds.get(*watch).context("Unrequested feed")?;
                 let page = FeedPage {reset:*reset,records:std::mem::take(&mut records[*watch]),cursor:cursor.clone(),floor:*floor,before:before.clone(),more:*more};
+                let notice_scope=req.scope.clone();
                 let cache = cache.clone(); let req = req.clone(); let lineage = lineage.to_owned();
                 tokio::task::spawn_blocking(move ||cache.page_at(&lineage,&req,&page,epoch)).await??;
-                notices.send(Notice {transfer:None,scope:scope.clone(),error:None}).await?; (wake)();
+                notices.send(Notice {transfer:None,scope:notice_scope,error:None}).await?; (wake)();
             }
             Header::Block {block} => {
                 let BlockWatch::Block(req) = &request else { anyhow::bail!("Unexpected block header"); };

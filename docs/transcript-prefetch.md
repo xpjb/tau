@@ -19,20 +19,35 @@ for selection even though their status was available.
 
 ## Behavior
 
-- Keep at most four native chat views/interests warm. The selected chat is first;
-  ongoing chats are next (recently used ones preferred), then recently opened
-  chats, with catalogue activity as a cold-start fallback. Remember the last eight
-  selections per account across restarts. Starter, provisional and missing-source
-  chats are excluded from background selection.
+- **No chat-count cutoff.** Subscribe to every running chat, plus chats viewed or
+  active in the last 24 hours (including activity from other clients). Keep a
+  settling run eligible while its final body/queue catches up. Old inactive
+  archives are not subscribed merely because they exist. Recency persists per
+  account without an eight-chat list limit. Starter, provisional and
+  missing-source chats are excluded from background selection.
 - Background root/queue watches receive live updates. Fetch at most eight ordinary
   text/attachment-caption roots from the latest 32 headers, with an 8 MiB body
   admission budget per background chat. Do not page its root history or inherit
   open tool/Details preferences. Non-image files, images, thinking and hidden tool
   bodies are not automatically downloaded by these background interests.
-- Background metadata and bodies use bulk admission and low QUIC priority, leaving
-  the selected chat's two metadata/four foreground stream slots reserved. The
-  server no longer promotes a bulk text watch back to foreground priority.
-  The same connection, checkpoint yielding and verified-prefix resumption apply.
+- Batch background root/queue feeds **across chats**, within 16-request/encoded
+  size limits, rather than keeping a separate stream occupied per chat.
+  Background metadata and bodies share six bulk slots and low QUIC priority,
+  leaving the selected chat's two metadata/four foreground slots reserved.
+  The server no longer promotes bulk text back to foreground priority. The same
+  connection, checkpoint yielding and verified-prefix resumption apply. Background
+  bodies are finite catch-ups: once current bytes are cached they release their
+  slot, even during a live turn. Batched metadata announces the next append;
+  idle body watches do not hold slots for five seconds per chat.
+- Keep decoded UI views independently of network subscriptions: a 32 MiB accounted
+  preview/header/queue working set, with the selected view protected and other
+  views evicted least-recently-used. Small chats can all fit; there is no four-view
+  cutoff. This is conservative view accounting, not an exact process-RSS bound.
+  Background chats need no UI Feed at all to advance headers/bodies on disk.
+- Replan only changed background scopes. Their content chunks do not redraw the
+  open conversation for every token. Remember successful prefetch versions so
+  disk eviction cannot cause an endless idle redownload loop. Replacements,
+  source/cache resets and explicit viewing/Copy still fetch missing bytes.
 - The selected chat also keeps this small tail fetching while reading scrollback.
   Visible and copy interests take precedence; overlapping body IDs are deduplicated.
 - Background fetching never selects a chat, marks it read, advances activity,
@@ -53,7 +68,39 @@ for selection even though their status was available.
   per chunk. Merely looking up metadata does not protect unread content. No disk
   quota increase, cache TTL change, polling timer, wire-shape or schema change.
 
-## Validation
+## Follow-up: remove chat-count limits
+
+The first implementation's four-chat/eight-recent limits were rejected in QA.
+They are removed rather than merely raised. The follow-up focused nextest run
+passed **6/6** tests (`e1e5dda5-5776-4d45-a72c-eb1b3ad237bb`):
+
+- 13 recent selections plus other never-opened running chats all participate;
+  missing/starter/cold chats are excluded and a settling run remains eligible.
+- 37 chats' 74 root/queue feeds fit in five bounded cross-chat batches, with no
+  skipped feed or duplicate request.
+- Memory pressure evicts only decoded views, not disk data or subscriptions;
+  prefetch completion avoids cache-eviction/redownload loops.
+- The actual daemon and two production controllers synchronize **12 recently
+  active chats and six simultaneous live replies**, with only the selected chat
+  materialized as a UI Feed on the observing client. After restarting that client,
+  all six final replies arrive without selection or unread changes. All 12 chats
+  then reopen offline and remain in RAM because their small views fit the byte
+  budget. Provider calls are gated local fixtures only.
+
+The broader regression run passed 38 checks, including the impaired-link test;
+its many-chat check exposed an intrusive test probe repeatedly reopening the
+writable cache and contending with sync. The probe now inspects SQLite read-only.
+Both real-daemon scenarios then passed (`c3cf786a-3ca9-4bb3-a577-937332490841`).
+The finite-catch-up follow-up passed **6/6** checks
+(`cc46b926-352b-4f09-9faa-14e0281df890`), including both real-daemon scenarios,
+batch/eviction regressions, the existing delayed-plan reuse regression, and an
+actual QUIC test proving that an unsealed background body ends promptly, releases
+its bulk slot, and resumes an appended suffix from its verified offset.
+
+The remaining validation below records the earlier implementation's focused
+coverage; it is not evidence that a four-chat limit remains.
+
+## Initial validation
 
 Managed Cargo workspace/all-target compiler check passed on the final source.
 An initial focused nextest run passed

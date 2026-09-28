@@ -1,8 +1,9 @@
 # Warm transcripts and ongoing-chat prefetch — September 28, 2026 (unreleased)
 
 See [behavior, limits and focused evidence](../docs/transcript-prefetch.md).
-Recent/ongoing chats now receive background native transcript updates, including
-live text, without changing unread state. Navigation retains bounded previews;
+All running and recently used chats receive background native transcript updates,
+including live text, without changing unread state. There is no four-chat cutoff:
+limits apply to concurrent transfers, bytes and decoded views, not subscriptions. Navigation retains bounded previews;
 older pages fetch earlier; revisited disk content gets read-based LRU protection.
 Saved scroll anchors hydrate offline. Hidden tool output and file payloads remain
 on demand. No packages, deployment or physical-device acceptance is claimed.

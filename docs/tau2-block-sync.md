@@ -93,7 +93,8 @@ Replica reset epochs are stored in SQLite and checked inside page/header/range t
 | Disposable download exports | 1 GiB / 4,096 files, seven-day TTL |
 | Viewport body admission / root interests | 128 MiB / 30 |
 | Preview payload | 256 KiB per group; 8 MiB and 128 retained groups per warm chat, plus small labels |
-| Warm chat views / background admission | four chats; eight tail roots / 8 MiB per background chat |
+| Decoded views / background admission | 32 MiB accounted views (selected protected); eight tail roots / 8 MiB per background chat |
+| Background chat eligibility | all running or viewed/active within 24 hours; no chat-count cutoff |
 | Frontend event mailbox | 512 events / 128 MiB, plus one terminal overflow |
 | Control output / health lanes | 32 / 8 frames |
 | Daemon control jobs | 32 global / 8 per socket |

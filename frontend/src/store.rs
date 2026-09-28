@@ -72,9 +72,10 @@ pub struct Account {
     pub last_chat_by_project: BTreeMap<String, String>,
     pub sessions: Vec<SessionSummary>,
     pub selected: Option<String>,
-    /// Most recently opened chats, newest first. Bounded to eight; used only for
-    /// read-only background interests, never for unread state or execution.
+    /// Most recently opened chats, newest first. Recency is time-based, not a
+    /// fixed chat count. This is independent of unread state and execution.
     pub recent_chats: Vec<String>,
+    pub prefetch_at: BTreeMap<String, u64>,
     pub read_at: BTreeMap<String, u64>,
     pub pending_create: Option<ClientRequest>,
     pub pending_controls:BTreeMap<String,PendingControl>,
@@ -83,7 +84,23 @@ pub struct Account {
 impl Default for Account {
     fn default() -> Self {
         Self { missing_chats:BTreeSet::new(),source_lineage:None,create_blocked:false,projects: vec![Project::general()], selected_project: general_project_id(),
-            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, recent_chats: vec![], read_at: BTreeMap::new(), pending_create: None, pending_controls:BTreeMap::new() }
+            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, recent_chats: vec![], prefetch_at: BTreeMap::new(), read_at: BTreeMap::new(), pending_create: None, pending_controls:BTreeMap::new() }
+    }
+}
+pub(crate) const RECENT_CHAT_MS: u64 = 24 * 60 * 60 * 1000;
+impl Account {
+    pub(crate) fn remember_chat(&mut self, id: &str, now: u64) {
+        self.prefetch_at.insert(id.to_owned(), now);
+        self.recent_chats.retain(|old| old != id);
+        self.recent_chats.insert(0,id.to_owned());
+        self.age_recent_chats(now);
+    }
+    pub(crate) fn age_recent_chats(&mut self, now: u64) {
+        // Old account caches have order but not timestamps. Give those visits
+        // one ordinary recency window rather than silently discarding them.
+        for id in &self.recent_chats { self.prefetch_at.entry(id.clone()).or_insert(now); }
+        self.prefetch_at.retain(|_,at| now.saturating_sub(*at) <= RECENT_CHAT_MS);
+        self.recent_chats.retain(|id| self.prefetch_at.contains_key(id));
     }
 }
 /// Complete immutable intent, saved before control or input-upload submission.

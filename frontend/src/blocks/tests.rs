@@ -685,6 +685,8 @@ fn controller_keeps_recent_views_warm_and_reopens_evicted_scrollback_from_disk()
     c.select("b").unwrap();assert_eq!(c.chats["chat"].feed.event("e001").unwrap().text,"body 1");
     c.select("chat").unwrap();assert_eq!(c.selected().unwrap().feed.event("e001").unwrap().text,"body 1");
     for id in ["b","c","d","e"] {c.select(id).unwrap();}
+    assert_eq!(c.chats["chat"].feed.event("e001").unwrap().text,"body 1","small views are not evicted after an arbitrary number of chats");
+    c.trim_chat_views(0); // Simulate memory pressure, not a chat-count limit.
     assert!(c.chats["chat"].feed.events.is_empty(),"cold views leave memory while authored work survives");
     assert_eq!(c.chats["chat"].local.draft,"keep my draft");
     c.select("chat").unwrap();
@@ -706,4 +708,35 @@ fn live_projection_does_not_add_a_ui_thread_recency_write_per_chunk() {
     f.cache.viewport_changed("chat",["text".into()].into_iter());
     f.cache.changes("chat",Some(&BTreeSet::from(["text".into()])),false).unwrap();
     assert!(clock()>before,"an actual visit refreshes eviction recency");
+}
+
+#[test]
+fn background_feed_batches_cover_every_chat_with_bounded_wire_requests() {
+    let f=Fixture::new();
+    let feeds=(0..37).flat_map(|n| [None,Some(QUEUE.into())].map(|parent|(format!("chat-{n:03}"),parent))).collect::<BTreeSet<_>>();
+    let keys=background_batches(&f.cache,feeds.clone()).unwrap();
+    assert_eq!(keys.len(),5,"seventy-four feeds should not occupy thirty-seven streams");
+    let mut seen=BTreeSet::new();
+    for key in keys {
+        let Key::BackgroundFeeds(feeds)=key else {panic!("not a background batch");};
+        let requests=feeds.iter().map(|(scope,parent)|f.cache.feed_request(scope,parent.as_deref(),None).unwrap()).collect::<Vec<_>>();
+        assert!(requests.len()<=16);assert!(serde_json::to_vec(&BlockWatch::Feeds {requests}).unwrap().len()<=MAX_BLOCK_HEADER_BYTES);
+        for key in feeds {assert!(seen.insert(key));}
+    }
+    assert_eq!(seen,feeds);
+}
+
+#[test]
+fn prefetched_bodies_do_not_thrash_after_eviction_but_replacements_and_viewing_still_fetch() {
+    let mut f=Fixture::new();
+    f.put("text",None,1,BlockKind::Text,event("text",1,"text"),b"body");f.page(None,None);f.body("text");
+    f.cache.plan_background("chat").unwrap();
+    {let db=f.cache.db.lock().unwrap();db.execute("DELETE FROM block_parts WHERE scope='chat' AND id='text'",[]).unwrap();}
+    assert!(!f.cache.plan_background("chat").unwrap().blocks.iter().any(|(id,_)|id=="text"),"idle background work must not refill evicted bytes forever");
+    assert!(f.cache.plan_active("chat",&LocalChat::default(),&[],Some(&BTreeSet::from(["text".into()]))).unwrap().blocks.iter().any(|(id,_)|id=="text"),"actual viewing bypasses the prefetch watermark");
+    f.put("text",None,1,BlockKind::Text,event("text",1,"text"),b"replacement");f.page(None,None);
+    assert!(f.cache.plan_background("chat").unwrap().blocks.iter().any(|(id,_)|id=="text"));
+    f.body("text");f.cache.plan_background("chat").unwrap();
+    f.cache.clear().unwrap();f.page(None,None);
+    assert!(f.cache.plan_background("chat").unwrap().blocks.iter().any(|(id,_)|id=="text"),"explicit cache clearing resets prefetch completion");
 }

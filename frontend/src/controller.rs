@@ -77,6 +77,7 @@ pub struct Controller {
     pub codex_usage: UsageView,
     remote: crate::blocks::Cache,
     block_plan: Vec<crate::blocks::Plan>,
+    background_dirty: std::collections::HashSet<String>,
     plan_dirty:std::cell::Cell<bool>,
     viewport:Option<(String,std::collections::BTreeSet<String>)>,
     copy:Option<(String,Vec<String>)>,
@@ -122,7 +123,7 @@ impl Controller {
             transport_error: None,
             codex_usage: UsageView::default(),
             remote,
-            block_plan: vec![],plan_dirty:std::cell::Cell::new(true),
+            block_plan: vec![],background_dirty:Default::default(),plan_dirty:std::cell::Cell::new(true),
             viewport:None,
             copy:None, copied:None,
             network: None,
@@ -135,6 +136,7 @@ impl Controller {
         };
         c.local_activity = c.store.chat_activity(&c.identity)?;
         c.sort_sessions();
+        c.account.age_recent_chats(crate::clock::now_ms().unwrap_or(0));
         if let Some(id) = c.account.selected.clone() {
             c.ensure_chat(&id)?;
         }
@@ -170,6 +172,7 @@ impl Controller {
         self.viewport=None;
         self.copy=None;self.copied=None;
         self.account = self.store.get(&self.identity, "account")?;
+        self.account.age_recent_chats(crate::clock::now_ms().unwrap_or(0));
         self.local_activity = self.store.chat_activity(&self.identity)?;
         self.sort_sessions();
         self.model_preferences = self.store.get(&self.identity, "quick-models")?;
@@ -231,10 +234,8 @@ impl Controller {
         self.plan_dirty.set(true);
         self.ensure_chat(id)?;
         self.account.selected = Some(id.into());
-        self.account.recent_chats.retain(|old| old != id);
-        self.account.recent_chats.insert(0, id.to_owned());
-        self.account.recent_chats.truncate(8);
-        self.trim_chat_views(&self.warm_scopes());
+        self.account.remember_chat(id,crate::clock::now_ms().unwrap_or(0));
+        self.trim_chat_views(32*1024*1024);
         for (old,chat) in &mut self.chats {
             // Selection cancels the old history watch. A retained view must not
             // keep its loading latch when that chat is opened again.
@@ -721,8 +722,7 @@ impl Controller {
         let mut account = self.account.clone();
         account.pending_create = Some(request.clone());account.create_blocked=false;
         account.selected = Some(request.id.clone());
-        account.recent_chats.insert(0,request.id.clone());
-        account.recent_chats.truncate(8);
+        account.remember_chat(&request.id,now);
         account.sessions.insert(0, Self::creating_summary(&request.id, &account.selected_project, now));
         account.last_chat_by_project.insert(account.selected_project.clone(), request.id.clone());
         let local = LocalChat { activity: self.next_local_activity(), ..Default::default() };
@@ -806,6 +806,10 @@ impl Controller {
             if self.account.selected.as_deref() == Some(provisional) { self.account.selected = Some(confirmed.into()); }
             for chat in self.account.last_chat_by_project.values_mut().chain(self.account.recent_chats.iter_mut()) {
                 if chat == provisional { *chat = confirmed.into(); }
+            }
+            if let Some(at) = self.account.prefetch_at.remove(provisional) {
+                let previous=self.account.prefetch_at.entry(confirmed.into()).or_default();
+                *previous=(*previous).max(at);
             }
             if let Some(at) = self.account.read_at.remove(provisional) {
                 let current = self.account.read_at.entry(confirmed.into()).or_default();
@@ -1024,14 +1028,27 @@ impl Controller {
         let mut scopes = std::collections::HashSet::new();
         for _ in 0..256 {
             let Some(notice) = self.network.as_mut().and_then(|n|n.blocks.try_recv().ok()) else { break; };
-            changed = true;
             if let Some((key,path,status))=notice.transfer {
+                changed=true;
                 if let Err(error)=self.network_event(transport::Event::Download {key,path,status}) {self.report_error(error);}
-            } else if let Some(error) = notice.error { if let Some(chat)=self.chats.get_mut(&notice.scope) {chat.feed.loading=false;} self.report_sync_error(error); }
-            else { self.transport_error = None; scopes.insert(notice.scope); }
+            } else if let Some(error) = notice.error {
+                changed=true;if let Some(chat)=self.chats.get_mut(&notice.scope) {chat.feed.loading=false;} self.report_sync_error(error);
+            } else {
+                // An unselected transcript chunk is disk work, not a reason to
+                // redraw the current conversation for every background token.
+                changed |= self.transport_error.take().is_some() || self.account.selected.as_ref()==Some(&notice.scope);
+                scopes.insert(notice.scope);
+            }
         }
         for scope in scopes {
-            if self.chats.contains_key(&scope) && let Err(error) = self.refresh_blocks(&scope) { self.report_error(error); }
+            // Disk-only chats still need their body interests advanced when
+            // headers arrive. Fetching does not require constructing a UI Feed.
+            self.plan_dirty.set(true);
+            self.background_dirty.insert(scope.clone());
+            if self.chats.get(&scope).is_some_and(|chat| !chat.feed.generation.is_empty() || !chat.local.pending.is_empty())
+                || self.account.selected.as_ref()==Some(&scope) {
+                if let Err(error) = self.refresh_blocks(&scope) { self.report_error(error); }
+            }
         }
         if let Err(error) = self.watch_blocks() { self.report_error(error); }
         if let Err(error) = self.reconcile_controls() {self.report_error(error);}
@@ -1088,30 +1105,38 @@ impl Controller {
         self.viewport=Some((scope.into(),ids));self.plan_dirty.set(true);
         if let Err(error)=self.refresh_blocks(scope) {self.report_error(error);}
     }
-    fn warm_scopes(&self) -> Vec<String> {
+    fn sync_scopes(&self) -> Vec<String> {
         let eligible = |id: &str| !self.is_creating(id) && !self.account.missing_chats.contains(id);
-        let present = |id: &str| self.account.sessions.iter().any(|s| s.id == id && !s.starter);
+        let now=crate::clock::now_ms().unwrap_or(0);
+        let recent=|at:u64| at>0 && now.saturating_sub(at)<=crate::store::RECENT_CHAT_MS;
         let mut scopes = Vec::new();
+        let mut seen=std::collections::HashSet::new();
         let mut add = |id: &str| {
-            if scopes.len() < 4 && eligible(id) && !scopes.iter().any(|old| old == id) { scopes.push(id.to_owned()); }
+            if eligible(id) && seen.insert(id.to_owned()) { scopes.push(id.to_owned()); }
         };
         if let Some(id) = &self.account.selected { add(id); }
-        // Prefer ongoing work, with recently used running chats first. Catalogue
-        // activity order supplies a useful cold-start fallback across devices.
-        for id in &self.account.recent_chats {
-            if self.account.sessions.iter().any(|s| s.id == *id && !s.starter && s.status == SessionStatus::Running) { add(id); }
-        }
         for session in &self.account.sessions {
-            if !session.starter && session.status == SessionStatus::Running { add(&session.id); }
+            if !session.starter && (session.status==SessionStatus::Running
+                || recent(session.updated_at_ms)
+                || self.account.prefetch_at.get(&session.id).is_some_and(|at|recent(*at))) {
+                add(&session.id);
+            }
         }
-        for id in &self.account.recent_chats { if present(id) { add(id); } }
-        for session in &self.account.sessions { if !session.starter { add(&session.id); } }
         scopes
     }
-    fn trim_chat_views(&mut self, warm: &[String]) {
-        let cold = self.chats.keys().filter(|old| !warm.contains(old))
-            .filter(|old| self.remote.has_snapshot(old).unwrap_or(false)).cloned().collect::<std::collections::HashSet<_>>();
-        self.chats.retain(|old,chat| !cold.contains(old) || chat.local.has_work());
+    pub(crate) fn trim_chat_views(&mut self, mut budget:usize) {
+        let mut order=self.chats.keys().cloned().collect::<Vec<_>>();
+        order.sort_by_key(|id| (self.account.selected.as_ref()!=Some(id),
+            self.account.recent_chats.iter().position(|recent|recent==id).unwrap_or(usize::MAX),id.clone()));
+        let mut cold=std::collections::HashSet::new();
+        for id in order {
+            let chat=&self.chats[&id];
+            if chat.feed.generation.is_empty() || !self.remote.has_snapshot(&id).unwrap_or(false) {continue;}
+            let bytes=chat.feed.resident_bytes();
+            if self.account.selected.as_ref()==Some(&id) || bytes<=budget {budget=budget.saturating_sub(bytes);}
+            else {cold.insert(id);}
+        }
+        self.chats.retain(|id,chat| !cold.contains(id) || chat.local.has_work());
         for (id,chat) in &mut self.chats {
             if cold.contains(id) { chat.feed=Feed::default();chat.commands.clear();chat.commands_loaded=false; }
         }
@@ -1126,22 +1151,30 @@ impl Controller {
                 Err(error)=>{self.copy=None;return Err(error);}
             }
         }
-        let scopes = self.warm_scopes();
-        self.trim_chat_views(&scopes);
+        let scopes = self.sync_scopes();
+        self.remote.retain_background(&scopes);
+        self.trim_chat_views(32*1024*1024);
         let mut next = Vec::new();
+        let old_plans=self.block_plan.iter().enumerate().filter(|(_,plan)|plan.background)
+            .map(|(index,plan)|(plan.scope.clone(),index)).collect::<HashMap<_,_>>();
         for id in scopes {
-            self.ensure_chat(&id)?;
             let plan = if self.account.selected.as_ref() == Some(&id) {
+                self.ensure_chat(&id)?;
                 self.remote.plan_active(&id, &self.chats[&id].local,
                     self.copy.as_ref().map_or(&[],|(_,ids)|ids.as_slice()),
                     self.viewport.as_ref().filter(|(scope,_)|scope==&id).map(|(_,ids)|ids))?
+            } else if !self.background_dirty.contains(&id) && let Some(index)=old_plans.get(&id) {
+                self.block_plan[*index].clone()
             } else { self.remote.plan_background(&id)? };
             next.push(plan);
         }
         if next != self.block_plan && let Some(network) = &self.network {
-            network.send(transport::Command::Blocks(crate::blocks::Command::Plan(next.clone())))?;
+            if let Err(error)=network.send(transport::Command::Blocks(crate::blocks::Command::Plan(next.clone()))) {
+                self.plan_dirty.set(true);return Err(error);
+            }
             self.block_plan = next;
         }
+        self.background_dirty.clear();
         Ok(())
     }
     fn network_event(&mut self, event: transport::Event) -> Result<()> {
@@ -1413,6 +1446,12 @@ impl Controller {
                     }
                 }
                 self.sort_sessions();
+                let now=crate::clock::now_ms().unwrap_or(0);
+                for s in &self.account.sessions {
+                    if s.status==SessionStatus::Running {self.account.prefetch_at.insert(s.id.clone(),now);}
+                }
+                self.account.age_recent_chats(now);
+                self.account.prefetch_at.retain(|id,_| self.account.sessions.iter().any(|s| &s.id == id));
                 self.account.recent_chats.retain(|id| self.account.sessions.iter().any(|s| &s.id == id));
                 self.account.last_chat_by_project.retain(|project, chat| self.account.sessions.iter()
                     .any(|s| s.project_id == *project && s.id == *chat));
@@ -1494,6 +1533,11 @@ impl Controller {
             } => {
                 if self.state_versions.get(&session_id).is_some_and(|old|old.0>revision) {return Ok(());}
                 self.plan_dirty.set(true);
+                // Keep a settling run subscribed until its final body/queue
+                // catches up, even if it was never opened on this device.
+                if status==SessionStatus::Running || self.state_versions.get(&session_id).is_some_and(|old|old.1==SessionStatus::Running) {
+                    self.account.prefetch_at.insert(session_id.clone(),crate::clock::now_ms().unwrap_or(0));
+                }
                 self.state_versions.insert(session_id.clone(),(revision,status,detail.clone(),context_usage));
                 if let Some(review)=restore_review {if review {self.restore_reviews.insert(session_id.clone());} else {self.restore_reviews.remove(&session_id);}}
                 if let Some(s) = self
@@ -1828,32 +1872,41 @@ fn delayed_catalogue_pages_do_not_overwrite_newer_status_even_before_membership_
 }
 
 #[test]
-fn warm_chat_selection_is_bounded_persistent_and_does_not_mark_background_chats_read() {
+fn all_ongoing_and_recent_chats_sync_without_a_count_cap() {
     let root=tempfile::tempdir().unwrap();
     let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-    let sessions=(0..10).map(|n| {
+    let sessions=(0..20).map(|n| {
         let mut s=Controller::creating_summary(&format!("chat-{n}"),GENERAL_PROJECT_ID,n);
         s.status=SessionStatus::Idle;s.updated_at_ms=n;s
     }).collect();
     c.message(ServerMessage::Sessions {sessions}).unwrap();
-    for n in 0..10 {c.select(&format!("chat-{n}")).unwrap();}
-    assert_eq!(c.account.recent_chats.len(),8);
-    assert_eq!(c.warm_scopes(),["chat-9","chat-8","chat-7","chat-6"]);
+    for n in 0..13 {c.select(&format!("chat-{n}")).unwrap();}
+    assert_eq!(c.account.recent_chats.len(),13,"recent is time-based, not eight chats");
+    assert_eq!(c.sync_scopes().len(),13);
     let read=c.account.read_at.clone();
     c.plan_dirty.set(false);
-    c.message(ServerMessage::SessionState {session_id:"chat-1".into(),revision:1,restore_review:None,
-        status:SessionStatus::Running,context_usage:None,detail:None}).unwrap();
-    assert!(c.plan_dirty.get(),"new ongoing work immediately updates interests");
-    assert_eq!(c.warm_scopes(),["chat-9","chat-1","chat-8","chat-7"]);
+    for n in 14..20 {
+        c.message(ServerMessage::SessionState {session_id:format!("chat-{n}"),revision:1,restore_review:None,
+            status:SessionStatus::Running,context_usage:None,detail:None}).unwrap();
+    }
+    assert!(c.plan_dirty.get());assert_eq!(c.sync_scopes().len(),19,"all ongoing chats participate, including never-opened old chats");
+    assert_eq!(c.sync_scopes()[0],"chat-12");assert!(!c.sync_scopes().contains(&"chat-13".into()),"don't subscribe to cold archives");
+    c.message(ServerMessage::SessionState {session_id:"chat-14".into(),revision:2,restore_review:None,
+        status:SessionStatus::Idle,context_usage:None,detail:None}).unwrap();
+    assert!(c.sync_scopes().contains(&"chat-14".into()),"a final body must catch up after the run settles");
+    c.account.prefetch_at.insert("chat-14".into(),crate::clock::now_ms().unwrap()-2*crate::store::RECENT_CHAT_MS);
+    assert!(!c.sync_scopes().contains(&"chat-14".into()));
+    c.account.sessions.iter_mut().find(|s|s.id=="chat-13").unwrap().updated_at_ms=crate::clock::now_ms().unwrap();
+    assert!(c.sync_scopes().contains(&"chat-13".into()),"recent cross-device activity is eligible too");
     c.account.missing_chats.insert("chat-8".into());
     c.account.sessions.iter_mut().find(|s|s.id=="chat-7").unwrap().starter=true;
-    assert_eq!(c.warm_scopes(),["chat-9","chat-1","chat-6","chat-5"]);
-    assert_eq!(c.account.read_at,read);
+    assert_eq!(c.sync_scopes().len(),17);assert_eq!(c.account.read_at,read);
     c.store.put(&c.identity,"account",&c.account).unwrap();drop(c);
     let c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-    assert_eq!(c.warm_scopes(),["chat-9","chat-1","chat-6","chat-5"]);
-    assert_eq!(c.account.read_at,read);
-    let legacy:Account=serde_json::from_str("{}").unwrap();assert!(legacy.recent_chats.is_empty());
+    assert_eq!(c.sync_scopes().len(),17);assert_eq!(c.account.read_at,read);
+    let mut legacy:Account=serde_json::from_str(r#"{"recent_chats":["old-client-chat"]}"#).unwrap();
+    legacy.age_recent_chats(100);assert_eq!(legacy.prefetch_at["old-client-chat"],100);
+    legacy.age_recent_chats(100+crate::store::RECENT_CHAT_MS+1);assert!(legacy.recent_chats.is_empty());
 }
 
 #[test]
