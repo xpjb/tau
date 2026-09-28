@@ -81,7 +81,7 @@ async fn checkpoint_scheduling_commits_a_slow_metadata_round_instead_of_restarti
     let (notices, _received) = mpsc::channel(32);
     let wake: crate::transport::Wake = Arc::new(|| {});
     let result = tokio::time::timeout(Duration::from_secs(10), watch_once(
-        &Key::Feeds("chat".into(), vec![None, Some("parent".into())]),
+        &Key::Feeds("chat".into(), vec![None, Some("parent".into())], false),
         &client, &f.cache, &f.lineage, &notices, &wake,
     )).await.expect("A slow but completing read must not monopolize its stream").unwrap();
     assert!(!result, "A live feed yields; it does not become permanently complete");

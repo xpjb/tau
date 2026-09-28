@@ -24,6 +24,10 @@ pub struct Feed {
 }
 
 impl Feed {
+    pub(crate) fn retained_roots(&self) -> std::collections::BTreeSet<String> {
+        self.previews.iter().map(|(root,_,_)| root.clone()).collect()
+    }
+
     pub fn event(&self, id: &str) -> Option<&Event> {
         self.by_id.get(id).and_then(|n| self.events.get(n))
     }
@@ -71,7 +75,7 @@ impl Feed {
         }
         self.previews.extend(view.previews.into_iter().filter(|(_,_,bytes)|*bytes>0));
         let mut bytes=self.previews.iter().map(|(_,_,bytes)|bytes).sum::<usize>();
-        while self.previews.len()>32 || bytes>8*1024*1024 {
+        while self.previews.len()>128 || bytes>8*1024*1024 {
             let (_,ids,size)=self.previews.pop_front().unwrap();bytes-=size;self.drop_preview(&ids);
         }
         Ok(delivered)

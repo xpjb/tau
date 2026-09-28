@@ -326,7 +326,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
                     range = backend.read(req.clone()) => range?,
                 };
                 if sent_revision != Some(range.header.revision) {
-                    send.set_priority(if matches!(range.header.kind,BlockKind::File | BlockKind::Image) { -10 } else { 5 })?;
+                    send.set_priority(if matches!(range.header.kind,BlockKind::File | BlockKind::Image) { -10 } else { priority.min(5) })?;
                     send_credited(send,recv,&mut credit,Frame::metadata(Header::Block { block:range.header.clone() }),None).await?;
                     sent_revision = Some(range.header.revision);
                 }
@@ -522,9 +522,11 @@ impl Client {
     /// cancellation of partially received pages/chunks. Reopen from committed
     /// cursors/prefixes after Yield; End still means the interest is complete.
     pub async fn watch_scheduled(&self, request: BlockWatch, bulk:bool) -> Result<Watcher> {
-        let (class,priority) = if matches!(request,BlockWatch::Feed(_) | BlockWatch::Feeds {..}) {
-            (&self.metadata,10)
-        } else if bulk { (&self.bulk,-10) } else { (&self.foreground,5) };
+        // Background feeds share bulk admission: they cannot occupy either of
+        // the selected chat's metadata slots or its foreground body slots.
+        let (class,priority) = if bulk { (&self.bulk,-10) }
+        else if matches!(request,BlockWatch::Feed(_) | BlockWatch::Feeds {..}) { (&self.metadata,10) }
+        else { (&self.foreground,5) };
         self.open_watch(request,Some(class.clone().acquire_owned().await?),priority,true).await
     }
     async fn open_watch(&self, request: BlockWatch, bulk:Option<tokio::sync::OwnedSemaphorePermit>,priority:i32,scheduled:bool) -> Result<Watcher> {

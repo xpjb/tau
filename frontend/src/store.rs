@@ -1,4 +1,5 @@
-//! Local work only. Remote transcripts intentionally never enter SQLite.
+//! Authored local work. Disposable remote transcripts live in a separate,
+//! account-scoped SQLite block replica, never in the authored local table.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -71,6 +72,9 @@ pub struct Account {
     pub last_chat_by_project: BTreeMap<String, String>,
     pub sessions: Vec<SessionSummary>,
     pub selected: Option<String>,
+    /// Most recently opened chats, newest first. Bounded to eight; used only for
+    /// read-only background interests, never for unread state or execution.
+    pub recent_chats: Vec<String>,
     pub read_at: BTreeMap<String, u64>,
     pub pending_create: Option<ClientRequest>,
     pub pending_controls:BTreeMap<String,PendingControl>,
@@ -79,7 +83,7 @@ pub struct Account {
 impl Default for Account {
     fn default() -> Self {
         Self { missing_chats:BTreeSet::new(),source_lineage:None,create_blocked:false,projects: vec![Project::general()], selected_project: general_project_id(),
-            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, read_at: BTreeMap::new(), pending_create: None, pending_controls:BTreeMap::new() }
+            last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, recent_chats: vec![], read_at: BTreeMap::new(), pending_create: None, pending_controls:BTreeMap::new() }
     }
 }
 /// Complete immutable intent, saved before control or input-upload submission.

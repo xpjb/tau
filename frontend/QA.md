@@ -1,3 +1,14 @@
+# Warm transcripts and ongoing-chat prefetch — September 28, 2026 (unreleased)
+
+See [behavior, limits and focused evidence](../docs/transcript-prefetch.md).
+Recent/ongoing chats now receive background native transcript updates, including
+live text, without changing unread state. Navigation retains bounded previews;
+older pages fetch earlier; revisited disk content gets read-based LRU protection.
+Saved scroll anchors hydrate offline. Hidden tool output and file payloads remain
+on demand. No packages, deployment or physical-device acceptance is claimed.
+
+---
+
 # Composer thinking-level indicator
 
 The shared Windows/Android composer status row now reports the saved per-chat
