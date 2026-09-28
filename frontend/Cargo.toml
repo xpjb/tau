@@ -14,6 +14,7 @@ path = "src/main.rs"
 winresource = { version = "0.1", default-features = false }
 
 [dependencies]
+tau-code-viewer = { path = "../code-viewer", features = ["syntax"] }
 libc = "0.2"
 tempfile = "3"
 tau-blocks = { path = "../blocks" }

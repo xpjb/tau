@@ -8,6 +8,8 @@ use iroh::endpoint::{Connection, RecvStream, SendStream, TransportConfig};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::{Ipv6Addr, SocketAddrV4, SocketAddrV6}, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use tau_blocks::*;
+#[path = "files.rs"]
+mod filesystem_stream;
 use std::sync::atomic::{AtomicU64,Ordering};
 use tokio::{sync::{Semaphore, watch}, task::JoinSet};
 
@@ -60,6 +62,9 @@ pub trait Backend: Send + Sync + 'static {
     fn read(&self, request: BlockRequest) -> BoxFuture<'static, Result<ContentRange>>;
     /// Hints only: lag/coalescing cannot lose data, which is read by durable cursor.
     fn changes(&self) -> watch::Receiver<u64>;
+    fn files(&self, _request: tau_protocol::files::FileRequest) -> BoxFuture<'static, Result<tau_protocol::files::FileReply>> {
+        Box::pin(async { bail!("Remote files are not supported") })
+    }
     fn upload_begin(&self, _spec: UploadSpec) -> BoxFuture<'static, Result<UploadStatus>> {
         Box::pin(async { bail!("Uploads are not supported") })
     }
@@ -78,6 +83,8 @@ pub enum Codec { Raw, Zstd }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Header {
+    Browse { request: tau_protocol::files::FileRequest, credit: u32 },
+    Browsed { length: u64, hash: String },
     Watch { request: BlockWatch, credit: u32, #[serde(default)] priority:i32, #[serde(default)] scheduled:bool },
     Upload { spec: UploadSpec },
     Uploaded { status: UploadStatus },
@@ -287,6 +294,9 @@ async fn send_credited(send: &mut SendStream, recv: &mut RecvStream, credit: &mu
 
 async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc<dyn Backend>, grants: &Grants, node: NodeId) -> Result<()> {
     let (frame,_) = tokio::time::timeout(Duration::from_secs(10),receive(recv)).await??;
+    if let Header::Browse { request, credit } = frame.header {
+        return filesystem_stream::serve(send, recv, backend, grants, node, request, credit).await;
+    }
     if let Header::Upload { spec } = frame.header {
         return serve_upload(send, recv, backend, grants, node, spec).await;
     }

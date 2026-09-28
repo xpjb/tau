@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tau-protocol = { path = "../protocol" }
 tau-blocks = { path = "../blocks" }
 futures-util = "0.3"
 zstd = { version = "0.13", default-features = false }

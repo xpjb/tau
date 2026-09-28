@@ -23,6 +23,7 @@ pub struct PromptOutcome { pub disposition: PromptDisposition, pub notice: Optio
 pub struct AgentManager { pub(crate) inner: Arc<ManagerInner> }
 pub(crate) struct ManagerInner {
     pub config: Config,
+    pub files: Arc<tau_code_viewer::filesystem::FileSystem>,
     pub state: StateStore,
     pub settings: SettingsStore,
     pub http: reqwest::Client,
@@ -68,7 +69,8 @@ impl AgentManager {
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
         let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
         let catalog = ModelCatalog::load(config.settings_path.with_file_name("model-catalog.json")).await;
-        Ok(Self { inner: Arc::new(ManagerInner { config, state, settings, http, auth,
+        let files = Arc::new(tau_code_viewer::filesystem::FileSystem::new(config.cwd.clone()));
+        Ok(Self { inner: Arc::new(ManagerInner { files, config, state, settings, http, auth,
             projects: Mutex::new(()), catalog, usage:UsageReader::default(), catalog_requests: Semaphore::new(2), agent_runs:Semaphore::new(8), title_requests:Semaphore::new(2), block_imports: Arc::new(Semaphore::new(2)), upload_finishes:Mutex::new(HashMap::new()),upload_publication:Mutex::new(()),
             runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false),state_clock:std::sync::atomic::AtomicU64::new(0),deleting:std::sync::Mutex::new(HashSet::new()) }) })
     }

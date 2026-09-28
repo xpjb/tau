@@ -290,6 +290,19 @@ impl tau_transfer::blocks::Backend for AgentManager {
             manager.inner.state.read(move |db| tau_blocks::read(db,&request)).await
         }.boxed()
     }
+    fn files(&self, request: tau_protocol::files::FileRequest) -> futures_util::future::BoxFuture<'static, Result<tau_protocol::files::FileReply>> {
+        let manager = self.clone();
+        async move {
+            let session = request.session_id.clone();
+            manager.inner.state.read(move |db| {
+                ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)", [&session], |r| r.get::<_, bool>(0))?, "Chat no longer exists");
+                Ok(())
+            }).await?;
+            // This is the single cwd resolution point. Today's daemon uses one
+            // cwd; future per-chat roots do not alter transport or UI lifetimes.
+            manager.inner.files.request(manager.inner.config.cwd.clone(), request).await
+        }.boxed()
+    }
     fn changes(&self) -> tokio::sync::watch::Receiver<u64> { self.inner.state.block_changes.subscribe() }
     fn upload_begin(&self, spec: tau_blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_blocks::UploadStatus>> {
         let manager = self.clone(); async move {manager.begin_upload(spec).await}.boxed()
