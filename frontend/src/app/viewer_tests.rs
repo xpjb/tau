@@ -109,5 +109,27 @@ fn image_viewer_closes_on_background_tap_but_not_image_controls_or_pan() {
             false,
         );
         assert!(app.root.viewer.is_none(), "Back still closes the viewer");
+
+        open(&mut app);
+        let off_image=background(app.root.viewer.as_ref().unwrap().image.unwrap());
+        app.press(10,off_image,true);
+        let jitter=Vec2::new(off_image.x+1.,off_image.y+1.);
+        app.motion(10,jitter);app.release(10,jitter);
+        assert!(app.root.viewer.is_none(),"Small touch jitter must not disable backdrop dismissal");
+
+        open(&mut app);
+        let image=app.root.viewer.as_ref().unwrap().image.unwrap();
+        let p=Vec2::new(image.x+image.width/2.,image.y+image.height/2.);
+        let back=app.root.viewer.as_ref().unwrap().button("Back");
+        let second=Vec2::new(back.x+back.width/2.,back.y+back.height/2.);
+        app.press(11,p,true);app.press(12,second,true);
+        app.motion(11,Vec2::new(p.x+60.,p.y+60.));
+        app.release(12,second);app.release(11,p);
+        assert!(app.root.viewer.as_ref().is_some_and(|v|v.zoom>1.),"A second finger on a toolbar joins pinch, not Back");
+        app.press(13,p,true);app.cancel_pointer();
+        let pan=app.root.viewer.as_ref().unwrap().pan;
+        app.motion(13,Vec2::new(p.x+70.,p.y));app.release(13,p);
+        let after=app.root.viewer.as_ref().unwrap().pan;
+        assert_eq!((pan.x,pan.y),(after.x,after.y),"Window cancellation reaches the viewer owner");
     }
 }

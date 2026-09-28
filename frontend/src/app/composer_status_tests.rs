@@ -11,7 +11,7 @@ fn composer_thinking_stays_visible_beside_long_models_on_desktop_and_phone() {
         let ctx = HeadlessCtx::new(&Config { size, device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
         let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(|| {}), mobile).unwrap();
         app.back(); crate::demo::populate(&mut app.controller).unwrap();
-        app.resize(size, scale, Vec2::new(0., 0.)); app.tick(0.); app.root.legacy.show_chats = false;
+        app.resize(size, scale, Vec2::new(0., 0.)); app.tick(0.); app.root.workspace.show_chats = false;
         let mut summary = app.controller.account.sessions[0].clone();
         summary.model.as_mut().unwrap().model_id = "a-very-long-model-slug-that-must-not-hide-the-thinking-level".into();
         let row = Rect::new(14. * scale, 10. * scale, size.0 as f32 - 28. * scale, 20. * scale);
@@ -46,7 +46,7 @@ fn composer_thinking_stays_visible_beside_long_models_on_desktop_and_phone() {
         app.controller.account.sessions[0].thinking_level = Some("off".into());
         app.frame(&ctx, ctx.view());
         assert_ne!(xhigh, ctx.read_rgba8().unwrap(), "changing only thinking changes the real composer frame");
-        app.apply(Action::AgentSetting("demo".into(), "thinking".into())).unwrap();
+        app.fixture(FixtureChoice::AgentSetting("demo".into(), "thinking".into())).unwrap();
         assert_eq!(app.root.dialog.as_ref().unwrap().fields()[0].editor.value, "off", "editor reports the selected chat's saved level");
     }
 }

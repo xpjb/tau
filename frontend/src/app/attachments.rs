@@ -314,8 +314,9 @@ impl ui::Context<'_> {
     }
 }
 impl App {
+    #[cfg(test)]
     pub(super) fn attachment_card(&mut self, _gpu: &impl RenderContext, layer: &mut Layer, session: &str, entry: &str, file: &ChatAttachment, surface: &'static str, rect: Rect, clip: Rect) {
-        self.with_ui(|root,cx| root.legacy.cards.paint(session,entry,file,surface,&mut ui::Frame { layer,bounds:rect,clip },cx));
+        self.with_ui(|root,cx| root.test_cards.paint(session,entry,file,surface,&mut ui::Frame { layer,bounds:rect,clip },cx));
     }
 
 

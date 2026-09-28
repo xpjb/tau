@@ -1,57 +1,126 @@
-use super::{Context,Event,Frame,Id,Request,Widget,DialogSpec,TopicEdit};
-use super::{controls::{Controls,button},scroll::ScrollState};
-use crate::{app::Info,icons::Icon,render::color};
+use super::{Context, DialogSpec, Event, Frame, Id, Request, TopicEdit, Widget};
+use super::{
+    controls::{Controls, button},
+    scroll::ScrollState,
+};
+use crate::{app::Info, icons::Icon, render::color};
 use sanscale::Rect;
-use tau_protocol::*;
 use std::time::Instant;
-#[derive(Clone,Debug)]
-pub(in crate::app) enum Choice { Select(String),New,Settings,Info(Info) }
-#[derive(Clone,Debug)]
-pub(in crate::app) enum TopicChoice { Select(String),New }
-pub(in crate::app) struct Sidebar {pub controls:Controls<Choice>,pub projects:ProjectTabs,pub scroll:ScrollState,binding:Option<(String,Option<String>)>}
-pub(in crate::app) struct ProjectTabs {pub controls:Controls<TopicChoice>,pub scroll:ScrollState,pub revealed:String,pub revealed_position:Option<usize>}
-impl Sidebar {pub fn new()->Self{let id=Id::new();Self {controls:Controls::new(id),projects:ProjectTabs::new(),scroll:ScrollState::new(id,false),binding:None}}
-    pub fn hide(&mut self){self.controls.begin();self.scroll.rect=Rect::new(0.,0.,0.,0.);self.projects.controls.begin();self.projects.scroll.rect=self.scroll.rect;}
-    pub fn hints(&self)->impl Iterator<Item=(Rect,&Info)>{self.controls.hints()}
+use tau_protocol::*;
+#[derive(Clone, Debug)]
+pub(in crate::app) enum Choice {
+    Select(String),
+    New,
+    Settings,
+    Info(Info),
 }
-impl ProjectTabs {fn new()->Self{let id=Id::new();Self {controls:Controls::new(id),scroll:ScrollState::new(id,true),revealed:String::new(),revealed_position:None}}}
-impl Widget for Sidebar {
-    fn handle_event(&mut self,event:&Event<'_>,cx:&mut Context<'_>)->bool{
-        if self.binding.as_ref().is_none_or(|(identity,lineage)|identity!=&cx.model.identity||lineage!=&cx.model.account.source_lineage){return false;}
-        if self.scroll.bar_event(event,cx){return true;}
-        if self.projects.handle_event(event,cx){return true;}
-        if let Some((Choice::Select(id),point))=self.controls.context(event,cx){self.scroll.stop();cx.ui.capture=None;cx.chat_menu(&id,point);return true;}
-        let (handled,choice)=self.controls.event(event,cx);
-        match choice {Some(Choice::Select(id))=>cx.ui.requests.push_back(Request::Select(id)),Some(Choice::New)=>cx.ui.requests.push_back(Request::NewChat),
-            Some(Choice::Settings)=>cx.ui.requests.push_back(Request::Open(DialogSpec::Connection)),Some(Choice::Info(info))=>{
-                if let Some((rect,_))=self.hints().find(|(_,hint)| **hint==info){cx.ui.requests.push_back(Request::Tip {info,rect});}
-            },None=>{}}
-        self.scroll.event(event,handled,cx)
+#[derive(Clone, Debug)]
+pub(in crate::app) enum TopicChoice {
+    Select(String),
+    New,
+}
+pub(in crate::app) struct Sidebar {
+    pub controls: Controls<Choice>,
+    pub projects: ProjectTabs,
+    pub scroll: ScrollState,
+    binding: Option<(String, Option<String>)>,
+}
+pub(in crate::app) struct ProjectTabs {
+    pub controls: Controls<TopicChoice>,
+    pub scroll: ScrollState,
+    pub revealed: String,
+    pub revealed_position: Option<usize>,
+}
+impl Sidebar {
+    pub fn new() -> Self {
+        let id = Id::new();
+        Self {
+            controls: Controls::new(id),
+            projects: ProjectTabs::new(),
+            scroll: ScrollState::new(id, false),
+            binding: None,
+        }
     }
-    fn visit_perframe(&mut self,frame:&mut Frame<'_>,cx:&mut Context<'_>){
-
-        let binding=(cx.model.identity.clone(),cx.model.account.source_lineage.clone());
-        if self.binding.as_ref()!=Some(&binding){self.scroll.stop();self.scroll.value=0.;self.projects.scroll.stop();self.projects.scroll.value=0.;self.projects.revealed.clear();self.binding=Some(binding);}
-        let s = cx.ui.scale; self.controls.begin();
-        let b=frame.bounds;let layer=&mut *frame.layer;
+    pub fn hide(&mut self) {
+        self.controls.begin();
+        self.scroll.rect = Rect::new(0., 0., 0., 0.);
+        self.projects.controls.begin();
+        self.projects.scroll.rect = self.scroll.rect;
+    }
+    pub fn hints(&self) -> impl Iterator<Item = (Rect, &Info)> {
+        self.controls.hints()
+    }
+}
+impl ProjectTabs {
+    fn new() -> Self {
+        let id = Id::new();
+        Self {
+            controls: Controls::new(id),
+            scroll: ScrollState::new(id, true),
+            revealed: String::new(),
+            revealed_position: None,
+        }
+    }
+}
+impl Widget for Sidebar {
+    fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
+        if self.binding.as_ref().is_none_or(|(identity, lineage)| {
+            identity != &cx.model.identity || lineage != &cx.model.account.source_lineage
+        }) {
+            return false;
+        }
+        if self.scroll.bar_event(event, cx) {
+            return true;
+        }
+        if self.projects.handle_event(event, cx) {
+            return true;
+        }
+        if let Some((Choice::Select(id), point)) = self.controls.context(event, cx) {
+            self.scroll.stop();
+            cx.ui.capture = None;
+            cx.chat_menu(&id, point);
+            return true;
+        }
+        let (handled, choice) = self.controls.event(event, cx);
+        match choice {
+            Some(Choice::Select(id)) => cx.ui.requests.push_back(Request::Select(id)),
+            Some(Choice::New) => cx.ui.requests.push_back(Request::NewChat),
+            Some(Choice::Settings) => cx.ui.requests.push_back(Request::Open(DialogSpec::Connection)),
+            Some(Choice::Info(info)) => {
+                if let Some((rect, _)) = self.hints().find(|(_, hint)| **hint == info) {
+                    cx.ui.requests.push_back(Request::Tip { info, rect });
+                }
+            }
+            None => {}
+        }
+        self.scroll.event(event, handled, cx)
+    }
+    fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
+        let binding = (cx.model.identity.clone(), cx.model.account.source_lineage.clone());
+        if self.binding.as_ref() != Some(&binding) {
+            self.scroll.stop();
+            self.scroll.value = 0.;
+            self.projects.scroll.stop();
+            self.projects.scroll.value = 0.;
+            self.projects.revealed.clear();
+            self.binding = Some(binding);
+        }
+        let s = cx.ui.scale;
+        self.controls.begin();
+        let b = frame.bounds;
+        let layer = &mut *frame.layer;
         layer.rect(b, color(0x0e141b));
-        layer.rect(
-            Rect::new(b.x + b.width - s, b.y, s, b.height),
-            color(0x2a3541),
-        );
+        layer.rect(Rect::new(b.x + b.width - s, b.y, s, b.height), color(0x2a3541));
         let indicator = Rect::new(b.x + 72. * s, b.y + 22. * s, 28. * s, 34. * s);
 
-        layer.rounded_rect(
-            indicator,
-            8. * s,
-            layer.control_color(indicator, color(0x0e141b)),
-        );
+        layer.rounded_rect(indicator, 8. * s, layer.control_color(indicator, color(0x0e141b)));
         layer.rounded_rect(
             Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s),
             4. * s,
             color(cx.model.health.color(Instant::now())),
         );
-        self.controls.place(Choice::Info(Info::Connection),indicator,frame.clip,false).control.info=Some(Info::Connection);
+        self.controls.place(Choice::Info(Info::Connection), indicator, frame.clip, false).control.info =
+            Some(Info::Connection);
         cx.services.renderer.label(
             layer,
             "Tau",
@@ -61,7 +130,8 @@ impl Widget for Sidebar {
             true,
         );
         super::controls::icon_button(
-            cx, &mut self.controls,
+            cx,
+            &mut self.controls,
             layer,
             Rect::new(b.x + b.width - 56. * s, b.y + 16. * s, 40. * s, 40. * s),
             Icon::Gear,
@@ -82,13 +152,22 @@ impl Widget for Sidebar {
         );
         // Reserve the sidebar's rightmost column for its separator. The
         // scrolling tabs (including the clipped add tab) must not paint over it.
-        self.projects.visit_perframe(&mut Frame {layer,bounds:Rect::new(b.x,b.y+140.*s,b.width-s,34.*s),clip:frame.clip},cx);
+        self.projects.visit_perframe(
+            &mut Frame { layer, bounds: Rect::new(b.x, b.y + 140. * s, b.width - s, 34. * s), clip: frame.clip },
+            cx,
+        );
         let clip = Rect::new(b.x, b.y + 182. * s, b.width, (b.height - 190. * s).max(0.));
         self.scroll.rect = clip;
-        let sessions=cx.model.account.sessions.iter().filter(|c|c.project_id==cx.model.account.selected_project).cloned().collect::<Vec<_>>();
-        let sessions=sessions.iter();
-        self.scroll.max =
-            (sessions.clone().count() as f32 * 90. * s - clip.height).max(0.);
+        let sessions = cx
+            .model
+            .account
+            .sessions
+            .iter()
+            .filter(|c| c.project_id == cx.model.account.selected_project)
+            .cloned()
+            .collect::<Vec<_>>();
+        let sessions = sessions.iter();
+        self.scroll.max = (sessions.clone().count() as f32 * 90. * s - clip.height).max(0.);
         self.scroll.value = self.scroll.value.min(self.scroll.max);
         for (i, session) in sessions.enumerate() {
             let y = clip.y + i as f32 * 90. * s - self.scroll.value;
@@ -97,7 +176,7 @@ impl Widget for Sidebar {
                 continue;
             }
             let selected = cx.model.account.selected.as_ref() == Some(&session.id);
-            let targeted = cx.ui.menu_chat.as_ref()==Some(&session.id);
+            let targeted = cx.ui.menu_chat.as_ref() == Some(&session.id);
             layer.clipped_rounded_rect(
                 rect,
                 12. * s,
@@ -146,65 +225,96 @@ impl Widget for Sidebar {
             let status = format!(
                 "{}{}",
                 if unread { "●  " } else { "" },
-                if cx.model.is_creating(&session.id) { "Creating…" }
-                else if cx.model.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) { "Paused" }
-                else { match session.status {
-                    SessionStatus::Running => "Working",
-                    SessionStatus::Error => "Error",
-                    SessionStatus::Idle => "Ready",
-                    SessionStatus::Sleeping => "Sleeping",
-                }}
+                if cx.model.is_creating(&session.id) {
+                    "Creating…"
+                } else if cx.model.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) {
+                    "Paused"
+                } else {
+                    match session.status {
+                        SessionStatus::Running => "Working",
+                        SessionStatus::Error => "Error",
+                        SessionStatus::Idle => "Ready",
+                        SessionStatus::Sleeping => "Sleeping",
+                    }
+                }
             );
             cx.services.renderer.clipped_label(
                 layer,
                 &status,
                 Rect::new(rect.x + 12. * s, y + 58. * s, rect.width - 24. * s, 18. * s),
                 12. * s,
-                color(if session.status == SessionStatus::Running {
-                    0x67d4ff
-                } else {
-                    0x82909f
-                }),
+                color(if session.status == SessionStatus::Running { 0x67d4ff } else { 0x82909f }),
                 false,
                 clip,
             );
-            self.controls.place(Choice::Select(session.id.clone()),rect,clip,false);
+            self.controls.place(Choice::Select(session.id.clone()), rect, clip, false);
             let ring = Rect::new(rect.x + rect.width - 33. * s, y + 11. * s, 18. * s, 18. * s);
             let (ratio, tint) = cx.model.cache_ttl(session).meter();
-            cx.services.renderer
-                .clipped_icon(&cx.services.gpu, layer, Icon::CacheTtl(ratio), ring, tint, clip);
-            let target = crate::render::intersect(
-                Rect::new(ring.x - 7. * s, ring.y - 7. * s, 32. * s, 32. * s),
-                clip,
-            );
+            cx.services.renderer.clipped_icon(&cx.services.gpu, layer, Icon::CacheTtl(ratio), ring, tint, clip);
+            let target = crate::render::intersect(Rect::new(ring.x - 7. * s, ring.y - 7. * s, 32. * s, 32. * s), clip);
             if target.height > 0. {
                 let info = Info::CacheTtl(session.id.clone());
-                self.controls.place(Choice::Info(info.clone()),target,clip,false).control.info=Some(info.clone());
+                self.controls.place(Choice::Info(info.clone()), target, clip, false).control.info = Some(info.clone());
             }
         }
-        if self.scroll.max == 0. && !cx.model.account.sessions.iter().any(|c| c.project_id == cx.model.account.selected_project) {
-            cx.services.renderer.clipped_label(layer, "No chats in this topic yet", Rect::new(b.x + 20. * s, clip.y + 20. * s, b.width - 40. * s, 40. * s), 13. * s, color(0x82909f), false, clip);
+        if self.scroll.max == 0.
+            && !cx.model.account.sessions.iter().any(|c| c.project_id == cx.model.account.selected_project)
+        {
+            cx.services.renderer.clipped_label(
+                layer,
+                "No chats in this topic yet",
+                Rect::new(b.x + 20. * s, clip.y + 20. * s, b.width - 40. * s, 40. * s),
+                13. * s,
+                color(0x82909f),
+                false,
+                clip,
+            );
         }
-        self.scroll.paint(layer,cx);self.controls.finish(cx);
-        }
+        self.scroll.paint(layer, cx);
+        self.controls.finish(cx);
+    }
 }
 impl Widget for ProjectTabs {
-    fn handle_event(&mut self,event:&Event<'_>,cx:&mut Context<'_>)->bool{
-        if let Some((TopicChoice::Select(id),point))=self.controls.context(event,cx){self.scroll.stop();cx.ui.capture=None;cx.project_menu(&id,point);return true;}
-        let (handled,choice)=self.controls.event(event,cx);
-        match choice {Some(TopicChoice::Select(id))=>cx.ui.requests.push_back(Request::Project(id)),Some(TopicChoice::New)=>cx.ui.requests.push_back(Request::Open(DialogSpec::Topic(TopicEdit::New))),None=>{}}
-        self.scroll.event(event,handled,cx)
+    fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
+        if let Some((TopicChoice::Select(id), point)) = self.controls.context(event, cx) {
+            self.scroll.stop();
+            cx.ui.capture = None;
+            cx.project_menu(&id, point);
+            return true;
+        }
+        let (handled, choice) = self.controls.event(event, cx);
+        match choice {
+            Some(TopicChoice::Select(id)) => cx.ui.requests.push_back(Request::Project(id)),
+            Some(TopicChoice::New) => cx.ui.requests.push_back(Request::Open(DialogSpec::Topic(TopicEdit::New))),
+            None => {}
+        }
+        self.scroll.event(event, handled, cx)
     }
-    fn visit_perframe(&mut self,frame:&mut Frame<'_>,cx:&mut Context<'_>){
-
-        let b=frame.bounds;let layer=&mut *frame.layer;self.scroll.rect=b;self.controls.begin();
+    fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
+        let b = frame.bounds;
+        let layer = &mut *frame.layer;
+        self.scroll.rect = b;
+        self.controls.begin();
         let s = cx.ui.scale;
         let projects = &cx.model.account.projects;
-        let style = sanscale::Style { chain: cx.services.renderer.faces.prose[1], wrap_em: None, align: sanscale::Align::Left, line_spacing: 1. };
-        let widths = projects.iter().map(|p| {
-            let text = cx.services.renderer.text.shape_transient(&p.name, &style).map_or(70. * s, |block| cx.services.renderer.text.measure(block).width_em() * 13. * s);
-            (text + 24. * s).clamp(56. * s, 220. * s)
-        }).collect::<Vec<_>>();
+        let style = sanscale::Style {
+            chain: cx.services.renderer.faces.prose[1],
+            wrap_em: None,
+            align: sanscale::Align::Left,
+            line_spacing: 1.,
+        };
+        let widths = projects
+            .iter()
+            .map(|p| {
+                let text = cx
+                    .services
+                    .renderer
+                    .text
+                    .shape_transient(&p.name, &style)
+                    .map_or(70. * s, |block| cx.services.renderer.text.measure(block).width_em() * 13. * s);
+                (text + 24. * s).clamp(56. * s, 220. * s)
+            })
+            .collect::<Vec<_>>();
         self.scroll.max = (widths.iter().sum::<f32>() + 40. * s - b.width).max(0.);
         let selected_position = projects.iter().position(|p| p.id == cx.model.account.selected_project);
         if self.revealed != cx.model.account.selected_project || self.revealed_position != selected_position {
@@ -215,8 +325,11 @@ impl Widget for ProjectTabs {
             if let Some(i) = selected_position {
                 let left = widths[..i].iter().sum::<f32>();
                 let right = left + widths[i];
-                if left < self.scroll.value { self.scroll.value = left; }
-                else if right > self.scroll.value + b.width { self.scroll.value = right - b.width; }
+                if left < self.scroll.value {
+                    self.scroll.value = left;
+                } else if right > self.scroll.value + b.width {
+                    self.scroll.value = right - b.width;
+                }
             }
         }
         self.scroll.value = self.scroll.value.clamp(0., self.scroll.max);
@@ -228,12 +341,32 @@ impl Widget for ProjectTabs {
                 let selected = p.id == cx.model.account.selected_project;
                 layer.clipped_rounded_rect(r, 4. * s, layer.control_color(r, color(0x0e141b)), b);
                 let label = Rect::new(x + 8. * s, b.y + 8. * s, w - 24. * s, 18. * s);
-                cx.services.renderer.clipped_label(layer, &p.name, label, 13. * s, color(if selected { 0x67d4ff } else { 0xb7c2ce }), selected, crate::render::intersect(label, b));
+                cx.services.renderer.clipped_label(
+                    layer,
+                    &p.name,
+                    label,
+                    13. * s,
+                    color(if selected { 0x67d4ff } else { 0xb7c2ce }),
+                    selected,
+                    crate::render::intersect(label, b),
+                );
                 if cx.model.project_unread(&p.id) {
-                    layer.clipped_rounded_rect(Rect::new(x + w - 12. * s, b.y + 14. * s, 5. * s, 5. * s), 3. * s, color(0x67d4ff), b);
+                    layer.clipped_rounded_rect(
+                        Rect::new(x + w - 12. * s, b.y + 14. * s, 5. * s, 5. * s),
+                        3. * s,
+                        color(0x67d4ff),
+                        b,
+                    );
                 }
-                if selected { layer.clipped_rounded_rect(Rect::new(x + 8. * s, b.y + b.height - 3. * s, w - 16. * s, 3. * s), 1.5 * s, color(0x67d4ff), b); }
-                self.controls.place(TopicChoice::Select(p.id.clone()),r,b,false);
+                if selected {
+                    layer.clipped_rounded_rect(
+                        Rect::new(x + 8. * s, b.y + b.height - 3. * s, w - 16. * s, 3. * s),
+                        1.5 * s,
+                        color(0x67d4ff),
+                        b,
+                    );
+                }
+                self.controls.place(TopicChoice::Select(p.id.clone()), r, b, false);
             }
             x += w;
         }
@@ -241,10 +374,18 @@ impl Widget for ProjectTabs {
         let hit = crate::render::intersect(add, b);
         if hit.width > 0. {
             layer.clipped_rounded_rect(add, 8. * s, layer.control_color(add, color(0x0e141b)), b);
-            cx.services.renderer.clipped_label(layer, "+", Rect::new(x + 10. * s, b.y + 3. * s, 24. * s, 28. * s), 22. * s, color(0x67d4ff), false, b);
-            self.controls.place(TopicChoice::New,add,b,false);
+            cx.services.renderer.clipped_label(
+                layer,
+                "+",
+                Rect::new(x + 10. * s, b.y + 3. * s, 24. * s, 28. * s),
+                22. * s,
+                color(0x67d4ff),
+                false,
+                b,
+            );
+            self.controls.place(TopicChoice::New, add, b, false);
         }
         layer.rect(Rect::new(b.x, b.y + b.height, b.width, s), color(0x2a3541));
-            self.controls.finish(cx);
+        self.controls.finish(cx);
     }
 }

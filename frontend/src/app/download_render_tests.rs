@@ -69,17 +69,17 @@ pub(super) fn save(ctx: &HeadlessCtx, name: &str) {
 
 pub(super) struct CardControl { pub rect: Rect, pub action: ui::CardChoice }
 pub(super) fn controls(app: &App) -> Vec<CardControl> {
-    app.root.legacy.cards.cards.values().flat_map(|card| card.controls.items.iter()).filter_map(|(_,button,choice)| {
+    app.root.test_cards.cards.values().flat_map(|card| card.controls.items.iter()).filter_map(|(_,button,choice)| {
         let control = &button.control;
         control.info.as_ref()?;
         let rect = crate::render::intersect(control.rect?,control.clip);
         (rect.width > 0. && rect.height > 0.).then(|| CardControl { rect, action: choice.clone() })
     }).collect()
 }
-pub(super) fn hints(app: &App) -> Vec<(Rect,Info)> { app.root.legacy.cards.hints().chain(app.root.attachments.cards.hints()).map(|(r,i)|(r,i.clone())).collect() }
+pub(super) fn hints(app: &App) -> Vec<(Rect,Info)> { app.root.test_cards.hints().chain(app.root.workspace.attachments.cards.hints()).map(|(r,i)|(r,i.clone())).collect() }
 pub(super) fn panel(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment, interaction: Interaction, viewport: Rect) -> Layer {
     let s = app.ui.scale;
-    app.root.legacy.cards.begin(); app.test_hits().clear(); app.root.legacy.info_areas.clear();
+    app.root.test_cards.begin();
     let mut layer = Layer::new(interaction);
     layer.rect(Rect::new(0., 0., ctx.size().0 as f32, ctx.size().1 as f32), color(0x0e141b));
     app.services.renderer.label(&mut layer, &case.label,
@@ -87,7 +87,7 @@ pub(super) fn panel(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAt
     let rect = Rect::new(12. * s, 44. * s, ctx.size().0 as f32 - 24. * s, attachments::card_height(file) * s);
     layer.clipped_rounded_rect(rect, 12. * s, color(0x18212b), viewport);
     app.attachment_card(ctx, &mut layer, "demo", &case.id, file, "gallery", rect, viewport);
-    app.with_ui(|root,cx| root.legacy.cards.finish(cx));
+    app.with_ui(|root,cx| root.test_cards.finish(cx));
     layer
 }
 
@@ -168,7 +168,7 @@ fn render_download_state_matrix() {
             let last = *buttons.last().unwrap();
             let viewport = Rect::new(0., last.y + last.height / 2., bounds.width, bounds.height - last.y - last.height / 2.);
             let layer = panel(&mut app, &ctx, &case, &file, Interaction::default(), viewport);
-            assert!(app.test_hits().iter().all(|h| h.rect.y >= viewport.y));
+            assert!(app.placed_controls().iter().all(|h| h.rect.y >= viewport.y));
             assert!(controls(&app).iter().all(|h| h.rect.height <= last.height / 2.));
             app.services.renderer.draw(&ctx, ctx.view(), &[layer]);
             save(&ctx, &format!("{name}-{}-clipped", case.id));

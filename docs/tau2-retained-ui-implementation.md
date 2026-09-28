@@ -271,3 +271,27 @@ All 26 focused composer, code-browser, editor, inline-mobile and retained-dialog
 nextest cases passed after the migration. Workspace/transcript orchestration and
 removal of the remaining global Action/hit adapter are the final implementation
 stage, followed by full and cross-platform validation.
+
+## Final ownership migration (source checkpoint)
+
+Workspace/ChatPane/Header/Transcript/MessageRow now own the remaining live UI.
+The production LegacyWorkspace, global Action/Hit/area tables, Lane switches and
+root navigation reset lists are removed. The existing row projection is one
+adapter, not a new domain model. Retained row controls are bounded to the existing
+overscan plus captured owners; lightweight placements and anchor formulas remain.
+Test selectors are explicitly test-only FixtureChoice/PlacedControl and fixture
+setup delegates to real owners, not a second production dispatcher.
+
+Active focus/capture/native paths include concrete ancestors and are reconciled
+before the next event as well as after structural changes. Six added regressions
+cover streaming/reorder identity, source replacement, hidden content before paint,
+code-search IME insets, nested selection capture, ancestor detachment and visible
+form errors. Existing viewer coverage now checks jitter, pinch over toolbar and
+window cancellation. No backlog-012 restoration tests were added or removed.
+
+Managed all-target workspace compilation passed. Full workspace nextest passed
+**305/305**, zero skipped (`9634ee5e-ecd8-49db-a453-0cccaa7d077f`, 105.837s).
+Windows MSVC compiler check and SDK-35 Java compilation passed. Android compiler
+validation and the final all-file cost ledger follow this checkpoint. New owner
+code is expanded into readable formatting; the cost comparison must normalize
+both revisions, not credit previously condensed source as a simplification.

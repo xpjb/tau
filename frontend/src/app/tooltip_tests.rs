@@ -46,7 +46,7 @@ fn rich_tooltips_fit_desktop_phone_and_scaled_phone_without_clipping() {
         let ctx = HeadlessCtx::new(&Config { size, device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
         let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(|| {}), name != "desktop").unwrap();
         app.back(); crate::demo::populate(&mut app.controller).unwrap();
-        app.resize(size, scale, Vec2::new(0.,0.)); app.tick(0.); app.root.legacy.show_chats = false;
+        app.resize(size, scale, Vec2::new(0.,0.)); app.tick(0.); app.root.workspace.show_chats = false;
         let bounds = Rect::new(0.,0.,size.0 as f32,size.1 as f32);
         app.controller.account.sessions.iter_mut().find(|s|s.id=="demo").unwrap().model.as_mut().unwrap().provider = "openai-codex".into();
         app.controller.epoch = Some(1); // Rendering only: no tick/network in this fixture.
@@ -67,7 +67,7 @@ fn rich_tooltips_fit_desktop_phone_and_scaled_phone_without_clipping() {
         assert!(app.root.tooltips.usage.content.text.contains("**stars**"), "Provider data stays literal");
         preview(&ctx, &format!("quota-wrapped-{name}"));
 
-        app.root.tooltips.usage = Tooltip::default(); app.root.legacy.show_chats = true;
+        app.root.tooltips.usage = Tooltip::default(); app.root.workspace.show_chats = true;
         let session = app.controller.account.sessions.iter_mut().find(|s|s.id=="two").unwrap();
         session.updated_at_ms = clock::now_ms().unwrap() - 52 * 60_000;
         app.root.tooltips.target = Info::CacheTtl("two".into());

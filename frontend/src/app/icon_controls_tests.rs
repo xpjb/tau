@@ -34,12 +34,12 @@ fn settings_gear_stays_in_sidebar_header_and_opens_settings() {
         let (mut app, ctx, _root) = setup(size);
         app.tick(0.);
         if size.0 < 760 {
-            app.root.legacy.show_chats = true;
+            app.root.workspace.show_chats = true;
         }
         app.frame(&ctx, ctx.view());
-        let settings = app.test_hits()
+        let settings = app.placed_controls()
             .iter()
-            .find(|hit| matches!(hit.action, Action::Settings))
+            .find(|hit| matches!(hit.action, FixtureChoice::Settings))
             .unwrap()
             .rect;
         assert_eq!((settings.width, settings.height), (40., 40.));
@@ -74,11 +74,11 @@ fn latest_is_a_circular_chevron_only_when_scrolled_away_from_tail() {
             "A long reply that needs scrolling.\n\n".repeat(120);
         app.tick(0.);
         app.frame(&ctx, ctx.view());
-        assert!(app.root.legacy.max_scroll > 0.);
+        assert!(app.root.workspace.chat.transcript.scroll.max > 0.);
         assert!(
-            !app.test_hits()
+            !app.placed_controls()
                 .iter()
-                .any(|hit| matches!(hit.action, Action::Tail))
+                .any(|hit| matches!(hit.action, FixtureChoice::Tail))
         );
 
         app.controller
@@ -95,27 +95,27 @@ fn latest_is_a_circular_chevron_only_when_scrolled_away_from_tail() {
             .local
             .position
             .key = None;
-        app.root.legacy.scroll = 0.;
+        app.root.workspace.chat.transcript.scroll.value = 0.;
         app.frame(&ctx, ctx.view());
-        let latest = app.test_hits()
+        let latest = app.placed_controls()
             .iter()
-            .find(|hit| matches!(hit.action, Action::Tail))
+            .find(|hit| matches!(hit.action, FixtureChoice::Tail))
             .unwrap()
             .rect;
         assert_eq!((latest.width, latest.height), (40., 40.));
         assert_eq!(
             latest.y + latest.height + 8.,
-            app.root.legacy.transcript.y + app.root.legacy.transcript.height
+            app.root.workspace.chat.transcript.scroll.rect.y + app.root.workspace.chat.transcript.scroll.rect.height
         );
         let point = Vec2::new(latest.x + 20., latest.y + 20.);
         app.press(2, point, false);
         app.release(2, point);
-        assert_eq!(app.root.legacy.scroll, app.root.legacy.max_scroll);
+        assert_eq!(app.root.workspace.chat.transcript.scroll.value, app.root.workspace.chat.transcript.scroll.max);
         app.frame(&ctx, ctx.view());
         assert!(
-            !app.test_hits()
+            !app.placed_controls()
                 .iter()
-                .any(|hit| matches!(hit.action, Action::Tail))
+                .any(|hit| matches!(hit.action, FixtureChoice::Tail))
         );
     }
 }

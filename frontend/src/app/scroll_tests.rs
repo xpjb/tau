@@ -12,9 +12,9 @@ fn switch(app: &mut App, ctx: &HeadlessCtx, id: &str) {
         app.back();
         frame(app, ctx);
     }
-    let rect = app.test_hits()
+    let rect = app.placed_controls()
         .iter()
-        .find(|h| matches!(&h.action, Action::Select(chat) if chat == id))
+        .find(|h| matches!(&h.action, FixtureChoice::Select(chat) if chat == id))
         .unwrap()
         .rect;
     let point = Vec2::new(rect.x + 30., rect.y + rect.height / 2.);
@@ -91,9 +91,9 @@ fn each_chat_restores_its_own_scroll_after_sidebar_switch_and_empty_loading_fram
             })
             .unwrap();
         frame(&mut app, &ctx);
-        assert!(app.root.legacy.max_scroll > 200.);
-        app.set_scroll(Lane::Transcript, app.root.legacy.max_scroll * 0.4);
-        let demo_scroll = app.root.legacy.scroll;
+        assert!(app.root.workspace.chat.transcript.scroll.max > 200.);
+        app.set_transcript_scroll(app.root.workspace.chat.transcript.scroll.max * 0.4);
+        let demo_scroll = app.root.workspace.chat.transcript.scroll.value;
         let demo_key = app.controller.chats["demo"]
             .local
             .position
@@ -103,7 +103,7 @@ fn each_chat_restores_its_own_scroll_after_sidebar_switch_and_empty_loading_fram
         assert!(!app.controller.chats["demo"].local.position.follow);
         switch(&mut app, &ctx, "demo");
         assert!(
-            (app.root.legacy.scroll - demo_scroll).abs() < 2.,
+            (app.root.workspace.chat.transcript.scroll.value - demo_scroll).abs() < 2.,
             "reselecting the active chat keeps its position"
         );
 
@@ -122,9 +122,9 @@ fn each_chat_restores_its_own_scroll_after_sidebar_switch_and_empty_loading_fram
             app.controller.chats["two"].local.position.follow,
             "pointer release must not store the previous chat's layout on the new chat"
         );
-        assert!((app.root.legacy.max_scroll - app.root.legacy.scroll).abs() < 1.);
-        app.set_scroll(Lane::Transcript, app.root.legacy.max_scroll * 0.25);
-        let two_scroll = app.root.legacy.scroll;
+        assert!((app.root.workspace.chat.transcript.scroll.max - app.root.workspace.chat.transcript.scroll.value).abs() < 1.);
+        app.set_transcript_scroll(app.root.workspace.chat.transcript.scroll.max * 0.25);
+        let two_scroll = app.root.workspace.chat.transcript.scroll.value;
         let two_key = app.controller.chats["two"]
             .local
             .position
@@ -144,7 +144,7 @@ fn each_chat_restores_its_own_scroll_after_sidebar_switch_and_empty_loading_fram
             "each chat persists its own position"
         );
         assert!(
-            (app.root.legacy.scroll - demo_scroll).abs() < 2.,
+            (app.root.workspace.chat.transcript.scroll.value - demo_scroll).abs() < 2.,
             "demo returns to its own anchor"
         );
         switch(&mut app, &ctx, "two");
@@ -153,7 +153,7 @@ fn each_chat_restores_its_own_scroll_after_sidebar_switch_and_empty_loading_fram
             Some(two_key.as_str())
         );
         assert!(
-            (app.root.legacy.scroll - two_scroll).abs() < 2.,
+            (app.root.workspace.chat.transcript.scroll.value - two_scroll).abs() < 2.,
             "two keeps its independent position"
         );
         switch(&mut app, &ctx, "demo");
@@ -192,7 +192,7 @@ fn each_chat_restores_its_own_scroll_after_sidebar_switch_and_empty_loading_fram
             .unwrap();
         frame(&mut app, &ctx);
         assert!(
-            (app.root.legacy.scroll - demo_scroll).abs() < 2.,
+            (app.root.workspace.chat.transcript.scroll.value - demo_scroll).abs() < 2.,
             "reloaded history restores its anchor"
         );
     }

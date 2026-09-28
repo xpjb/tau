@@ -20,7 +20,7 @@ impl Harness {
         crate::demo::populate(&mut app.controller).unwrap();
         app.resize(ctx.size(), 1., Vec2::new(0., 0.));
         app.tick(0.);
-        app.ui.focus=Some(app.root.composer.field.control.target);
+        app.ui.focus=Some(app.root.workspace.chat.composer.field.control.target);
         Self { app, ctx, _root: root }
     }
     fn frame(&mut self) -> Vec<u8> {
@@ -57,7 +57,7 @@ fn composer_placeholder_and_single_line_caret_are_vertically_centered() {
     for value in ["", "one line"] {
         if !value.is_empty() { h.app.input(value); }
         h.frame();
-        let rect = h.app.test_hits().iter().find(|hit| matches!(hit.action, Action::Focus(None))).unwrap().rect;
+        let rect = h.app.placed_controls().iter().find(|hit| matches!(hit.action, FixtureChoice::Composer)).unwrap().rect;
         let caret = h.app.ime_rect().unwrap();
         assert!((caret.y + caret.height / 2. - (rect.y + rect.height / 2.)).abs() < 3.,
             "one-line caret in actual composer frame: {value:?}");
@@ -94,7 +94,7 @@ fn composer_navigation_repaints_without_sqlite_draft_writes_or_reshaping() {
     assert_eq!(h.app.controller.selected().unwrap().local.draft, "abcdefghij\nab\nabcdefghj\n👩‍💻");
     assert_eq!(db.query_row("SELECT count(*) FROM editor_writes", [], |r| r.get::<_, u32>(0)).unwrap(), 1);
     h.app.key("z", true, false);
-    assert_eq!(h.app.root.composer.field.editor.value, "abcdefghij\nab\nabcdefghij\n👩‍💻");
+    assert_eq!(h.app.root.workspace.chat.composer.field.editor.value, "abcdefghij\nab\nabcdefghij\n👩‍💻");
 }
 
 #[test]
@@ -138,10 +138,10 @@ fn actual_prompt_settings_reuse_input_geometry_clipboard_ime_and_scrolling() {
     h.frame();
     let field = h.app.root.dialog.as_ref().unwrap().fields()[0].control.rect.unwrap();
     let pointer = Vec2::new(field.x + field.width * 0.5, field.y + field.height * 0.5);
-    let transcript_scroll = h.app.root.legacy.scroll;
+    let transcript_scroll = h.app.root.workspace.chat.transcript.scroll.value;
     h.app.wheel(-100_000., false, pointer);
     let scrolled = h.frame();
-    assert_eq!(h.app.root.legacy.scroll, transcript_scroll, "wheel over settings is not transcript scrolling");
+    assert_eq!(h.app.root.workspace.chat.transcript.scroll.value, transcript_scroll, "wheel over settings is not transcript scrolling");
     assert_eq!(scrolled, h.frame(), "idle render must not undo manual field scrolling");
     h.dump("settings-scrolled.png", &scrolled);
     h.app.key("ArrowLeft", false, false);

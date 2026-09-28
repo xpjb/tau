@@ -127,9 +127,9 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
         app.controller.message(ServerMessage::TranscriptSnapshot {session_id:"demo".into(),snapshot:TranscriptSnapshot {
             generation:"demo".into(),sequence:1,events,queue:QueueState::default(),before:None,delivered:vec![]}}).unwrap();
         app.controller.account.sessions[0].title="Inline file downloads".into();
-        app.root.legacy.show_chats=false; app.tick(0.); app.frame(&ctx,ctx.view());
+        app.root.workspace.show_chats=false; app.tick(0.); app.frame(&ctx,ctx.view());
         save(&ctx,&format!("context-{name}-chat"));
-        app.root.attachments.show=true; app.frame(&ctx,ctx.view());
+        app.root.workspace.attachments.show=true; app.frame(&ctx,ctx.view());
         save(&ctx,&format!("context-{name}-attachments"));
         let (rect,info)=hints(&app).iter().find(|(_,info)| matches!(info,Info::Attachment(key,title,_)
             if key.starts_with("attachments:") && title=="Save to Downloads")).unwrap().clone();
@@ -139,7 +139,7 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
         save(&ctx,&format!("context-{name}-tooltip"));
         assert!(hints(&app).iter().all(|(_,info)| !matches!(info,Info::Attachment(key,_,_)
             if key.ends_with(":details") || key.ends_with(":caption"))), "Card text must not repeat itself in a tooltip");
-        app.root.attachments.show=false; app.frame(&ctx,ctx.view());
+        app.root.workspace.attachments.show=false; app.frame(&ctx,ctx.view());
         assert!(!app.root.tooltips.info.pinned,"hidden attachment pane must dismiss its tooltip");
     }
 }
@@ -169,7 +169,7 @@ fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
         let file = install(&mut app, &case);
         paint(&mut app, &ctx, &case, &file);
         assert!(hints(&app).iter().all(|(_, info)| matches!(info, Info::Attachment(key, ..) if key.contains(":action:"))));
-        assert!(!app.test_hits().iter().any(|hit| matches!(hit.action, Action::Info(Info::Attachment(..)))));
+        assert!(!app.placed_controls().iter().any(|hit| matches!(hit.action, FixtureChoice::Info(Info::Attachment(..)))));
         let card = attachments::control_panel(Rect::new(12., 44., 336., attachments::card_height(&file)), 1.);
         for point in [Vec2::new(card.x + 16., card.y + 20.), Vec2::new(card.x + 16., card.y + 42.),
             Vec2::new(card.x + 16., card.y - 14.)] {
@@ -179,6 +179,6 @@ fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
             assert!(!app.root.tooltips.info.pinned && app.root.tooltips.info.progress == 0.);
             assert!(app.services.platform.is_empty());
         }
-        assert!(!controls(&app).is_empty(), "Action controls and their own descriptions remain available");
+        assert!(!controls(&app).is_empty(), "FixtureChoice controls and their own descriptions remain available");
     }
 }

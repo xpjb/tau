@@ -45,14 +45,14 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         assert!(!rows.iter().any(|r| r.key == "pending:edit" || r.source.contains("Control requested")));
         let chat = app.controller.chats.get_mut("demo").unwrap();
         chat.local.pending.clear(); chat.feed.queue.requests.clear();
-        let stop = app.test_hits()
+        let stop = app.placed_controls()
             .iter()
-            .find(|h| matches!(h.action, Action::Abort))
+            .find(|h| matches!(h.action, FixtureChoice::Abort))
             .unwrap()
             .rect;
         app.controller.notice = Some("Saved for later".into());
         frame(&mut app);
-        let notice = app.test_hits().iter().find(|h| matches!(h.action, Action::DismissNotice)).unwrap().rect;
+        let notice = app.placed_controls().iter().find(|h| matches!(h.action, FixtureChoice::DismissNotice)).unwrap().rect;
         let overlap = crate::render::intersect(stop, notice);
         if overlap.width > 0. && overlap.height > 0. {
             let point = Vec2::new(overlap.x + overlap.width / 2., overlap.y + overlap.height / 2.);
@@ -69,9 +69,9 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         }
         app.controller.notice = None;
         frame(&mut app);
-        let viewport_height = app.root.legacy.transcript.height;
+        let viewport_height = app.root.workspace.chat.transcript.scroll.rect.height;
         assert!(
-            stop.y + stop.height < app.root.legacy.transcript.y,
+            stop.y + stop.height < app.root.workspace.chat.transcript.scroll.rect.y,
             "stop is in the chat header"
         );
 
@@ -86,16 +86,16 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         queue.paused = true;
         queue.run_id = Some("held-run".into());
         frame(&mut app);
-        let resume = app.test_hits().iter().find(|h| matches!(&h.action,
-            Action::Queue(QueueOperation::Resume { run_id }) if run_id.as_deref() == Some("held-run"))).unwrap().rect;
+        let resume = app.placed_controls().iter().find(|h| matches!(&h.action,
+            FixtureChoice::Queue(QueueOperation::Resume { run_id }) if run_id.as_deref() == Some("held-run"))).unwrap().rect;
         assert_eq!(
             (resume.x, resume.y, resume.width, resume.height),
             (stop.x, stop.y, stop.width, stop.height),
             "play uses the exact stop hit target"
         );
-        assert!(!app.test_hits().iter().any(|h| matches!(h.action, Action::Abort)));
+        assert!(!app.placed_controls().iter().any(|h| matches!(h.action, FixtureChoice::Abort)));
         assert_eq!(
-            app.root.legacy.transcript.height, viewport_height,
+            app.root.workspace.chat.transcript.scroll.rect.height, viewport_height,
             "pausing must not add a row under the editor"
         );
         assert_ne!(
@@ -111,11 +111,11 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
             .queue
             .paused = false;
         frame(&mut app);
-        assert!(!app.test_hits().iter().any(|h| matches!(
+        assert!(!app.placed_controls().iter().any(|h| matches!(
             h.action,
-            Action::Abort | Action::Queue(QueueOperation::Resume { .. })
+            FixtureChoice::Abort | FixtureChoice::Queue(QueueOperation::Resume { .. })
         )));
-        assert_eq!(app.root.legacy.transcript.height, viewport_height);
+        assert_eq!(app.root.workspace.chat.transcript.scroll.rect.height, viewport_height);
 
         app.controller
             .chats
@@ -127,9 +127,9 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
         app.controller.epoch = None;
         frame(&mut app);
         assert!(
-            !app.test_hits()
+            !app.placed_controls()
                 .iter()
-                .any(|h| matches!(h.action, Action::Queue(QueueOperation::Resume { .. }))),
+                .any(|h| matches!(h.action, FixtureChoice::Queue(QueueOperation::Resume { .. }))),
             "offline play is visible but not clickable"
         );
 
@@ -150,29 +150,29 @@ fn resume_replaces_stop_in_the_header_without_an_editor_row() {
             detail: None,
         });
         frame(&mut app);
-        let cancel = app.test_hits()
+        let cancel = app.placed_controls()
             .iter()
             .find(|h| {
                 matches!(&h.action,
-            Action::Queue(QueueOperation::Cancel { control_id }) if control_id == "pause-control")
+            FixtureChoice::Queue(QueueOperation::Cancel { control_id }) if control_id == "pause-control")
             })
             .unwrap()
             .rect;
-        let editor = app.test_hits()
+        let editor = app.placed_controls()
             .iter()
-            .find(|h| matches!(h.action, Action::Focus(None)))
+            .find(|h| matches!(h.action, FixtureChoice::Composer))
             .unwrap()
             .rect;
         assert_eq!(cancel.x, editor.x - 40.);
         assert_eq!(
-            app.root.legacy.transcript.height,
+            app.root.workspace.chat.transcript.scroll.rect.height,
             viewport_height - 40.,
             "only pending control occupies a composer row"
         );
         assert!(
-            app.test_hits()
+            app.placed_controls()
                 .iter()
-                .any(|h| matches!(h.action, Action::Queue(QueueOperation::Resume { .. })))
+                .any(|h| matches!(h.action, FixtureChoice::Queue(QueueOperation::Resume { .. })))
         );
     }
 }
@@ -208,14 +208,14 @@ fn middle_click_marker_is_drawn_at_the_autoscroll_anchor_not_text_baseline() {
     app.resize(ctx.size(), 1., Vec2::new(0., 0.));
     app.tick(0.);
     app.frame(&ctx, ctx.view());
-    assert!(app.root.legacy.max_scroll > 0.);
+    assert!(app.root.workspace.chat.transcript.scroll.max > 0.);
     let point = Vec2::new(
-        app.root.legacy.transcript.x + app.root.legacy.transcript.width / 2.,
-        app.root.legacy.transcript.y + app.root.legacy.transcript.height / 2.,
+        app.root.workspace.chat.transcript.scroll.rect.x + app.root.workspace.chat.transcript.scroll.rect.width / 2.,
+        app.root.workspace.chat.transcript.scroll.rect.y + app.root.workspace.chat.transcript.scroll.rect.height / 2.,
     );
     let before = ctx.read_rgba8().unwrap();
     app.middle(true, point);
-    let anchor = app.root.legacy.autoscroll.as_ref().unwrap().anchor;
+    let anchor = app.root.workspace.chat.transcript.autoscroll.as_ref().unwrap().anchor;
     assert_eq!((anchor.x, anchor.y), (point.x, point.y));
     app.frame(&ctx, ctx.view());
     let during = ctx.read_rgba8().unwrap();

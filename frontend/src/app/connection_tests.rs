@@ -101,7 +101,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.frame(&ctx, ctx.view());
     app.root.tooltips.info = Tooltip::default(); // Closed card: no 50ms redraw loop.
     assert!(app.tick(0.)); // One final frame to close the card.
-    assert_eq!(app.root.legacy.counter_bucket, None);
+    assert_eq!(app.services.counter_bucket, None);
     assert!(!app.tick(0.));
 
     // Socket loss does not rewrite the chat's last known Working label or unread marker.
@@ -168,7 +168,7 @@ fn context_hover_and_pinned_card_show_native_codex_account_quota_not_context_cap
     assert!(app.root.tooltips.usage.progress>0.99,"Context hover opens the quota card");
     assert!(app.root.tooltips.usage.content.text.contains("Codex quota · pro · last known\n5-hour · 74% remaining\nResets in 2m"));
     assert!(app.root.tooltips.usage.content.text.contains("Context · ~9% used"),"The context gauge is independent");
-    app.apply(Action::Usage).unwrap();app.hover(None);app.tick(0.);app.frame(&ctx,ctx.view());
+    app.fixture(FixtureChoice::Usage).unwrap();app.hover(None);app.tick(0.);app.frame(&ctx,ctx.view());
     assert!(app.root.tooltips.usage.pinned && app.root.tooltips.usage.progress>0.99,"Pinned cards retain the quota on desktop and touch");
     app.controller.epoch=Some(1);
     app.controller.codex_usage.in_flight=Some(("pending".into(),Instant::now()));
@@ -191,7 +191,7 @@ fn touch_pins_the_quota_card_on_mobile_without_a_model_request() {
     let mut app=App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(|| {}),true).unwrap();
     app.back();crate::demo::populate(&mut app.controller).unwrap();
     app.controller.account.sessions[0].model.as_mut().unwrap().provider="openai-codex".into();
-    app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);app.root.legacy.show_chats=false;
+    app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);app.root.workspace.show_chats=false;
     app.frame(&ctx,ctx.view());
     let r=app.root.tooltips.usage.region;let point=Vec2::new(r.x+r.width/2.,r.y+r.height/2.);
     app.press(1,point,true);app.release(1,point);
@@ -267,10 +267,10 @@ fn hidden_card_wakes_only_when_the_dot_crosses_a_color_boundary() {
         .health
         .sent(Instant::now() - Duration::from_millis(920));
     app.tick(0.);
-    assert_eq!(app.root.legacy.dot_color, 0xfbbf24);
-    assert_eq!(app.root.legacy.counter_bucket, None);
+    assert_eq!(app.services.dot_color, 0xfbbf24);
+    assert_eq!(app.services.counter_bucket, None);
     let deadline = Instant::now() + Duration::from_secs(2);
-    while app.root.legacy.dot_color != 0xfb923c {
+    while app.services.dot_color != 0xfb923c {
         assert!(
             Instant::now() < deadline,
             "hidden color threshold did not wake the UI"
@@ -280,7 +280,7 @@ fn hidden_card_wakes_only_when_the_dot_crosses_a_color_boundary() {
     }
     app.frame(&ctx, ctx.view());
     assert_eq!(
-        app.root.legacy.counter_bucket, None,
+        app.services.counter_bucket, None,
         "hidden card must not start a 50ms loop"
     );
 }
@@ -293,15 +293,15 @@ fn saved_actions_and_restore_warning_fit_mobile_and_preserve_intents() {
         let mut app=App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),size.0<500).unwrap();app.back();app.resize(ctx.size(),1.,Vec2::new(0.,0.));
         for n in 0..12 {let id=format!("saved-{n:02}");app.controller.account.pending_controls.insert(id.clone(),PendingControl {request:ClientRequest {id,command:ClientCommand::RenameSession {session_id:"chat".into(),title:"Owned title".into()}},deleted_chats:vec![],blocked:true,accepted:false});}
         app.controller.store.put(&app.controller.identity,"account",&app.controller.account).unwrap();
-        for action in [Action::Settings,Action::Outbox(0),Action::Outbox(1),Action::InspectControl("saved-00".into()),Action::ReviewRestore("chat".into())] {
-            app.apply(action).unwrap();app.tick(0.);app.frame(&ctx,ctx.view());
+        for action in [FixtureChoice::Settings,FixtureChoice::Outbox(0),FixtureChoice::Outbox(1),FixtureChoice::InspectControl("saved-00".into()),FixtureChoice::ReviewRestore("chat".into())] {
+            app.fixture(action).unwrap();app.tick(0.);app.frame(&ctx,ctx.view());
             let rects = if let Some(dialog) = &app.root.dialog {
                 dialog.buttons().into_iter().map(|(_, rect)| rect).chain(dialog.fields().into_iter().filter_map(|field| field.control.rect)).collect::<Vec<_>>()
-            } else { app.test_hits().iter().map(|hit| hit.rect).collect() };
+            } else { app.placed_controls().iter().map(|hit| hit.rect).collect() };
             for rect in rects { assert!(rect.y >= 0. && rect.y + rect.height <= size.1 as f32, "Unreachable modal action at {rect:?}"); }
         }
         let ui::Dialog::Operation(modal)=app.root.dialog.as_ref().unwrap() else { panic!("operation dialog"); };let width=(size.0 as f32-24.).min(620.)-40.;assert!(app.services.renderer.label_height(&modal.title,width,17.,true)>60.,"Fixture must exercise the complete multi-line warning");
         if size.0<500 {image::save_buffer("/tmp/tau2-restore-mobile.png",&ctx.read_rgba8().unwrap(),size.0,size.1,image::ColorType::Rgba8).unwrap();}
-        assert_eq!(app.controller.account.pending_controls.len(),12);app.apply(Action::ForgetControl("saved-00".into())).unwrap();assert_eq!(app.controller.account.pending_controls.len(),12);app.apply(Action::Confirm).unwrap();assert_eq!(app.controller.account.pending_controls.len(),11);
+        assert_eq!(app.controller.account.pending_controls.len(),12);app.fixture(FixtureChoice::ForgetControl("saved-00".into())).unwrap();assert_eq!(app.controller.account.pending_controls.len(),12);app.fixture(FixtureChoice::Confirm).unwrap();assert_eq!(app.controller.account.pending_controls.len(),11);
     }
 }

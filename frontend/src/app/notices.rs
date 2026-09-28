@@ -76,7 +76,7 @@ mod render_tests {
             let wakes = Arc::new(AtomicUsize::new(0)); let wake = wakes.clone();
             let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(move || {wake.fetch_add(1,Ordering::SeqCst);}), name != "desktop").unwrap();
             app.back(); crate::demo::populate(&mut app.controller).unwrap();
-            app.resize(size,scale,Vec2::new(0.,0.)); app.tick(0.); app.root.legacy.show_chats = false;
+            app.resize(size,scale,Vec2::new(0.,0.)); app.tick(0.); app.root.workspace.show_chats = false;
             let bounds = Rect::new(0.,0.,size.0 as f32,size.1 as f32);
             for (variant, text) in [("short","Settings saved"), ("wrapped","Your changes could not be saved. The saved draft is still here; check the settings and try again.")] {
                 app.controller.notice = Some(text.into()); app.tick(0.); app.frame(&ctx,ctx.view());
@@ -84,7 +84,7 @@ mod render_tests {
                     let root = std::path::PathBuf::from(root); std::fs::create_dir_all(&root).unwrap();
                     image::save_buffer(root.join(format!("notice-{variant}-{name}.png")), &ctx.read_rgba8().unwrap(), size.0,size.1,image::ColorType::Rgba8).unwrap();
                 }
-                app.root.legacy.hits.clear(); let mut layer = Layer::default();
+                 let mut layer = Layer::default();
                 app.notice_frame(&ctx,&mut layer,bounds);
                 let card = app.root.notice.body.rect.unwrap(); let close = app.root.notice.close.rect.unwrap();
                 assert!((card.y + card.height/2. - close.y - close.height/2.).abs() < 0.01);

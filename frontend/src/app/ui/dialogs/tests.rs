@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::{App, Action, PlatformAction};
+use crate::app::{App, FixtureChoice, PlatformAction};
 use crate::store::Store;
 use chad::{Config, HeadlessCtx};
 use sanscale::Vec2;
@@ -15,7 +15,7 @@ impl Harness {
         app.back(); crate::demo::populate(&mut app.controller).unwrap();
         app.controller.account.projects.extend([Project { id: "first".into(), name: "First".into(), prompt: "First prompt".into(), revision: 1 },
             Project { id: "second".into(), name: "Second".into(), prompt: "Second prompt".into(), revision: 2 }]);
-        app.resize(size, 1., Vec2::new(0., 0.)); app.tick(0.); app.root.legacy.show_chats = false;
+        app.resize(size, 1., Vec2::new(0., 0.)); app.tick(0.); app.root.workspace.show_chats = false;
         Self { app, ctx, _dir: dir }
     }
     fn frame(&mut self) { self.app.tick(0.); self.app.frame(&self.ctx, self.ctx.view()); }
@@ -38,32 +38,32 @@ fn forms_bind_focus_and_replacement_before_the_next_input_without_a_frame() {
     for mobile in [false, true] {
         let mut h = Harness::new(mobile);
         let draft = h.app.controller.selected().unwrap().local.draft.clone();
-        h.app.apply(Action::NewProject).unwrap();
+        h.app.fixture(FixtureChoice::NewProject).unwrap();
         h.app.input("New topic"); h.app.key("Tab", false, false); h.app.input("Exact\nprompt\n");
         assert_eq!(h.dialog().fields()[0].editor.value, "New topic");
         assert_eq!(h.dialog().fields()[1].editor.value, "Exact\nprompt\n");
         h.app.key("Tab", false, true); assert_eq!(h.app.ui.focus, Some(h.dialog().fields()[0].control.target));
-        h.app.apply(Action::RenameProject("second".into())).unwrap(); h.app.input(" edited");
+        h.app.fixture(FixtureChoice::RenameProject("second".into())).unwrap(); h.app.input(" edited");
         assert_eq!(h.dialog().fields()[0].editor.value, "Second edited");
         assert_eq!(h.app.controller.selected().unwrap().local.draft, draft);
         h.frame();
-        assert!(!h.app.test_hits().iter().any(|hit| matches!(hit.action, Action::Focus(Some(_)) | Action::Confirm | Action::CancelModal)),
+        assert!(!h.app.placed_controls().iter().any(|hit| matches!(hit.action, FixtureChoice::CodeSearch | FixtureChoice::Confirm | FixtureChoice::CancelModal)),
             "Migrated fields/buttons never register legacy actions");
     }
 }
 
 #[test]
 fn pointer_target_uses_current_coordinates_and_never_retargets_a_replacement() {
-    let mut h = Harness::new(false); h.app.apply(Action::Settings).unwrap(); h.frame();
+    let mut h = Harness::new(false); h.app.fixture(FixtureChoice::Settings).unwrap(); h.frame();
     h.app.hover(Some(h.button("Connect"))); // Deliberately hover a different control.
     h.click(h.button("Cancel")); assert!(h.app.root.dialog.is_none());
-    h.app.apply(Action::Settings).unwrap(); h.frame();
+    h.app.fixture(FixtureChoice::Settings).unwrap(); h.frame();
     let r = h.dialog().button("Cancel").unwrap();
     h.app.press(8, Vec2::new(r.x + 0.1, r.y + 0.1), false); h.app.release(8, center(r));
     assert!(h.app.root.dialog.is_some(), "The rectangular bounding box is not the rounded hit shape");
     let p = h.button("Cancel"); h.app.press(9, p, false);
     let old = h.app.ui.capture.unwrap().target;
-    h.app.apply(Action::RenameProject("first".into())).unwrap(); h.frame();
+    h.app.fixture(FixtureChoice::RenameProject("first".into())).unwrap(); h.frame();
     assert_ne!(h.dialog().id(), old.scope); assert!(h.app.ui.capture.is_none());
     h.app.release(9, h.button("Cancel"));
     assert_eq!(h.dialog().topic_key(), Some(("rename", "first")), "Release is not a new press on the replacement");
@@ -75,27 +75,27 @@ fn pointer_target_uses_current_coordinates_and_never_retargets_a_replacement() {
 fn modal_scope_blocks_legacy_pointer_wheel_middle_and_context_routes() {
     let mut h = Harness::new(false); h.frame();
     let before = h.app.controller.selected().unwrap().local.draft.clone();
-    h.app.apply(Action::ProjectPrompt("first".into())).unwrap(); h.frame();
+    h.app.fixture(FixtureChoice::ProjectPrompt("first".into())).unwrap(); h.frame();
     let point = Vec2::new(8., 300.);
     h.app.press(7, point, true); h.app.motion(7, Vec2::new(8., 150.)); h.app.release(7, point);
     h.app.wheel(300., false, point); h.app.middle(true, point); h.app.context_at(point);
-    assert!(h.app.root.code.pointer.is_none()); assert!(h.app.root.legacy.wheel.is_none());
-    assert!(h.app.root.legacy.autoscroll.is_none()); assert!(h.app.root.menu.is_none());
+    assert!(h.app.root.workspace.chat.code.pointer.is_none()); assert!(h.app.root.workspace.chat.transcript.scroll.wheel.is_none());
+    assert!(h.app.root.workspace.chat.transcript.autoscroll.is_none()); assert!(h.app.root.menu.is_none());
     assert_eq!(h.app.controller.selected().unwrap().local.draft, before);
     assert!(h.app.root.dialog.is_some());
 }
 
 #[test]
 fn native_editor_and_clipboard_callbacks_cannot_write_a_new_field_or_source() {
-    let mut h = Harness::new(true); h.app.apply(Action::NewProject).unwrap(); h.frame();
+    let mut h = Harness::new(true); h.app.fixture(FixtureChoice::NewProject).unwrap(); h.frame();
     h.click(center(h.dialog().fields()[0].control.rect.unwrap()));
     let token = h.app.native_input().unwrap();
     // IME insets and backgrounding cancel gestures, not the inline field binding.
     h.app.ui.window_focused = false; h.app.cancel_pointer(); h.app.resize((360, 740), 1., Vec2::new(0., 1.));
     h.app.native_edit(snapshot(&token, "Native topic")); assert_eq!(h.dialog().fields()[0].editor.value, "Native topic");
-    h.app.apply(Action::RenameProject("second".into())).unwrap();
+    h.app.fixture(FixtureChoice::RenameProject("second".into())).unwrap();
     h.app.native_edit(snapshot(&token, "Stale replacement")); assert_eq!(h.dialog().fields()[0].editor.value, "Second");
-    h.app.apply(Action::NewProject).unwrap();
+    h.app.fixture(FixtureChoice::NewProject).unwrap();
     h.app.key("v", true, false);
     let token = h.app.actions().into_iter().find_map(|action| match action { PlatformAction::Paste { token } => Some(token), _ => None }).unwrap();
     h.app.key("Tab", false, false); h.app.paste(token, "Wrong field".into());
@@ -114,7 +114,7 @@ fn native_editor_and_clipboard_callbacks_cannot_write_a_new_field_or_source() {
 
 #[test]
 fn composition_consumes_enter_escape_and_focus_loss_cancels_capture() {
-    let mut h = Harness::new(false); h.app.apply(Action::Settings).unwrap(); h.frame();
+    let mut h = Harness::new(false); h.app.fixture(FixtureChoice::Settings).unwrap(); h.frame();
     let settings = h.app.controller.settings.server_url.clone();
     h.app.preedit("入力".into(), None); assert!(h.app.composing());
     h.app.key("Enter", false, false);
@@ -131,7 +131,7 @@ fn composition_consumes_enter_escape_and_focus_loss_cancels_capture() {
 
 #[test]
 fn structural_requests_are_fifo_and_a_failed_or_stale_request_does_not_drop_the_tail() {
-    let mut h = Harness::new(false); h.app.apply(Action::Settings).unwrap();
+    let mut h = Harness::new(false); h.app.fixture(FixtureChoice::Settings).unwrap();
     let old = h.dialog().id();
     h.app.ui.requests.extend([Request::Open(DialogSpec::Topic(TopicEdit::New)), Request::Close(old),
         Request::Open(DialogSpec::Topic(TopicEdit::Prompt("second".into())))]);
@@ -147,7 +147,7 @@ fn structural_requests_are_fifo_and_a_failed_or_stale_request_does_not_drop_the_
 
 #[test]
 fn async_topic_results_match_request_scope_and_preserve_edits_after_failure() {
-    let mut h = Harness::new(false); h.app.apply(Action::RenameProject("first".into())).unwrap(); h.app.input(" draft");
+    let mut h = Harness::new(false); h.app.fixture(FixtureChoice::RenameProject("first".into())).unwrap(); h.app.input(" draft");
     // Exercise the UI completion boundary independently of transport delivery;
     // Controller's real request/persistence path has separate integration coverage.
     h.app.controller.epoch = Some(7);
@@ -158,7 +158,7 @@ fn async_topic_results_match_request_scope_and_preserve_edits_after_failure() {
     h.app.controller.project_result = Some(("operation-one".into(), false)); h.app.ui_event(Event::Tick(0.));
     assert_eq!(h.dialog().fields()[0].editor.value, "First draft");
     assert!(matches!(h.dialog(), Dialog::Topic(TopicDialog { request: None, .. })));
-    h.app.apply(Action::RenameProject("second".into())).unwrap();
+    h.app.fixture(FixtureChoice::RenameProject("second".into())).unwrap();
     h.app.controller.project_result = Some(("operation-one".into(), true)); h.app.ui_event(Event::Tick(0.));
     assert_eq!(h.dialog().topic_key(), Some(("rename", "second")));
     let Dialog::Topic(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() }; dialog.request = Some("operation-two".into());
@@ -168,13 +168,13 @@ fn async_topic_results_match_request_scope_and_preserve_edits_after_failure() {
 
 #[test]
 fn connection_completion_and_focus_restoration_validate_their_owner() {
-    let mut h = Harness::new(false); h.app.ui.focus=Some(h.app.root.composer.field.control.target);
-    h.app.apply(Action::Settings).unwrap();
+    let mut h = Harness::new(false); h.app.ui.focus=Some(h.app.root.workspace.chat.composer.field.control.target);
+    h.app.fixture(FixtureChoice::Settings).unwrap();
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() }; dialog.attempt = Some(h.app.controller.identity.clone());
-    h.app.apply(Action::RenameProject("first".into())).unwrap(); h.app.controller.epoch = Some(9); h.app.ui_event(Event::Tick(0.));
+    h.app.fixture(FixtureChoice::RenameProject("first".into())).unwrap(); h.app.controller.epoch = Some(9); h.app.ui_event(Event::Tick(0.));
     assert_eq!(h.dialog().topic_key(), Some(("rename", "first")), "Old connection success cannot close a different dialog");
-    h.app.back(); assert_eq!(h.app.ui.focus, Some(h.app.root.composer.field.control.target));
-    h.app.apply(Action::Settings).unwrap(); h.app.ui_event(Event::Tick(0.)); assert!(h.app.root.dialog.is_some(), "Already connected is not a new submission completion");
+    h.app.back(); assert_eq!(h.app.ui.focus, Some(h.app.root.workspace.chat.composer.field.control.target));
+    h.app.fixture(FixtureChoice::Settings).unwrap(); h.app.ui_event(Event::Tick(0.)); assert!(h.app.root.dialog.is_some(), "Already connected is not a new submission completion");
     h.app.controller.epoch = None; h.app.controller.connection = "Authentication failed".into();
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() };
     dialog.attempt = Some(h.app.controller.identity.clone()); dialog.url.control.enabled = false; dialog.token.control.enabled = false;
@@ -183,20 +183,20 @@ fn connection_completion_and_focus_restoration_validate_their_owner() {
     h.app.controller.epoch = Some(9);
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() }; dialog.attempt = Some(h.app.controller.identity.clone());
     h.app.ui_event(Event::Tick(0.)); assert!(h.app.root.dialog.is_none());
-    h.app.apply(Action::RenameProject("first".into())).unwrap(); h.app.controller.account.selected = Some("two".into());
-    h.app.back(); assert_ne!(h.app.ui.focus, Some(h.app.root.composer.field.control.target), "Do not restore an editor bound to another chat");
+    h.app.fixture(FixtureChoice::RenameProject("first".into())).unwrap(); h.app.controller.account.selected = Some("two".into());
+    h.app.back(); assert_ne!(h.app.ui.focus, Some(h.app.root.workspace.chat.composer.field.control.target), "Do not restore an editor bound to another chat");
 }
 
 #[test]
 fn retained_forms_settle_idle_and_reuse_real_editor_geometry_on_desktop_and_phone() {
     for mobile in [false, true] {
-        let mut h = Harness::new(mobile); h.app.apply(Action::Settings).unwrap(); h.frame();
+        let mut h = Harness::new(mobile); h.app.fixture(FixtureChoice::Settings).unwrap(); h.frame();
         h.dump(if mobile { "connection-phone.png" } else { "connection-desktop.png" });
         h.app.ui.dirty = false; h.app.ui_event(Event::Tick(0.)); assert!(!h.app.ui.dirty, "Idle UI update cannot itself require a paint");
         h.click(h.button("More…")); h.frame(); h.dump(if mobile { "connection-tools-phone.png" } else { "connection-tools-desktop.png" });
         h.click(h.button("Copy connection diagnostics")); assert!(h.app.actions().iter().any(|a| matches!(a, PlatformAction::Copy(text) if text.contains("Native:"))));
         h.click(h.button("Back")); h.frame(); assert!(h.dialog().fields()[0].control.rect.is_some());
-        h.app.apply(Action::ProjectPrompt("first".into())).unwrap(); h.frame();
+        h.app.fixture(FixtureChoice::ProjectPrompt("first".into())).unwrap(); h.frame();
         h.dump(if mobile { "topic-prompt-phone.png" } else { "topic-prompt-desktop.png" });
         assert!(h.app.ime_rect().is_some());
         for (_, rect) in h.dialog().buttons() { assert!(rect.y >= 0. && rect.y + rect.height <= h.app.ui.size.1 as f32); }
@@ -225,7 +225,7 @@ fn shared_control_clip_governs_hover_press_and_paint_with_the_same_bounds() {
 #[test]
 fn native_legacy_composer_session_survives_blur_but_not_a_navigation_round_trip() {
     let mut h = Harness::new(true);
-    h.frame(); h.app.apply(Action::Focus(None)).unwrap();
+    h.frame(); h.app.fixture(FixtureChoice::Composer).unwrap();
     let token = h.app.native_input().unwrap();
     h.app.cancel_pointer(); h.app.native_edit(snapshot(&token, "Owned native draft"));
     assert_eq!(h.app.controller.selected().unwrap().local.draft, "Owned native draft");
