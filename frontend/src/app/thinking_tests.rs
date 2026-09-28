@@ -68,7 +68,7 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
     app.tick(0.);
     app.frame(&ctx, ctx.view());
     let key = "demo/thinking:event-1";
-    let fragment = &app.renderer.messages[key];
+    let fragment = &app.services.renderer.messages[key];
     assert_eq!(fragment.source, thinking.text);
     assert_eq!(
         fragment.doc.blocks().len(),
@@ -104,7 +104,7 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
         2
     );
     assert!(matches!(
-        app.renderer.messages["demo/thinking:thinking-next"]
+        app.services.renderer.messages["demo/thinking:thinking-next"]
             .doc
             .blocks()[0]
             .content,
@@ -130,7 +130,7 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
         .unwrap();
     app.tick(0.);
     app.frame(&ctx, ctx.view());
-    let fragment = &app.renderer.messages[key];
+    let fragment = &app.services.renderer.messages[key];
     let rich = &fragment.doc.blocks()[1].elements().next().unwrap().rich;
     assert_eq!(rich.text, "Second step");
     assert!(rich.runs.iter().any(|run| run.flags & inline::STRONG != 0));
@@ -156,7 +156,7 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
         .unwrap();
     app.tick(0.);
     app.frame(&ctx, ctx.view());
-    let fragment = &app.renderer.messages[key];
+    let fragment = &app.services.renderer.messages[key];
     assert!(matches!(
         fragment.doc.blocks()[2].content,
         Content::Text {
@@ -181,7 +181,7 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
         .unwrap();
     app.tick(0.);
     app.frame(&ctx, ctx.view());
-    let fragment = &app.renderer.messages[key];
+    let fragment = &app.services.renderer.messages[key];
     assert_eq!(fragment.source, thinking.text);
     assert_eq!(
         fragment.doc.blocks()[1]

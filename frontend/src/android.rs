@@ -14,7 +14,7 @@ use chad::{
 use jni::{
     JNIEnv, JavaVM,
     objects::{JClass, JObject, JString, JValue},
-    sys::{jboolean, jint},
+    sys::{jboolean, jint, jlong},
 };
 use sanscale::Vec2;
 use std::{
@@ -27,9 +27,9 @@ use std::{
 
 enum NativeEvent {
     Back,
-    Edit(String),
+    Edit(crate::mobile_input::Edit),
     File(PathBuf, String),
-    Paste(String),
+    Paste(u64, String),
     Saved(String, Result<crate::store::SavedDownload,String>),
     Missing(String,String,String,String),
     Error(String),
@@ -48,8 +48,9 @@ fn queue(event: NativeEvent) {
         && let Some(rt) = guard.as_mut()
     {
         // IME full-text updates are snapshots, not deltas; coalesce a busy keyboard.
-        if matches!(event, NativeEvent::Edit(_))
-            && matches!(rt.events.last(), Some(NativeEvent::Edit(_)))
+        if let NativeEvent::Edit(edit) = &event
+            && let Some(NativeEvent::Edit(previous)) = rt.events.last()
+            && edit.id == previous.id && edit.revision == previous.revision
         {
             rt.events.pop();
         }
@@ -63,34 +64,47 @@ struct Android {
     app: App,
     import_scope: Option<(String, String)>,
     modifiers: ModifiersState,
+    input: Option<crate::mobile_input::Input>,
+    input_menu: bool,
 }
 impl Android {
+    fn java(&mut self, ctx: &Ctx, method: &str, payload: Option<&str>) -> Result<(), String> {
+        let vm = unsafe { JavaVM::from_raw(ctx.app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
+        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        env.with_local_frame(8, |env| {
+            let activity = unsafe { JObject::from_raw(ctx.app.activity_as_ptr().cast()) };
+            if let Some(payload) = payload {
+                let payload = env.new_string(payload)?;
+                env.call_method(&activity, method, "(Ljava/lang/String;)V", &[JValue::Object(&payload)])?;
+            } else { env.call_method(&activity, method, "()V", &[])?; }
+            Ok::<_, jni::errors::Error>(())
+        }).map_err(|_| { let _ = env.exception_clear(); "Android input action failed".into() })
+    }
+    fn sync_input(&mut self, ctx: &Ctx) {
+        let input = self.app.native_input();
+        let same = match (&self.input, &input) {
+            (Some(a), Some(b)) => a.same_configuration(b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            let result = serde_json::to_string(&input).map_err(|e| e.to_string())
+                .and_then(|json| self.java(ctx, "syncInput", Some(&json)));
+            if result.is_ok() { self.input = input; }
+            self.app.report(result.map_err(anyhow::Error::msg));
+        }
+    }
+    fn back(&mut self, ctx: &Ctx) {
+        let result = self.java(ctx, "back", None);
+        self.app.report(result.map_err(anyhow::Error::msg));
+    }
     fn layout(&mut self, ctx: &Ctx) {
         let (width, height) = ctx.size();
         let rect = ctx.app.content_rect();
-        let valid = rect.right > rect.left && rect.bottom > rect.top;
-        let left = LEFT
-            .load(Ordering::Relaxed)
-            .max(if valid { rect.left } else { 0 })
-            .max(0) as u32;
-        let top = TOP
-            .load(Ordering::Relaxed)
-            .max(if valid { rect.top } else { 0 })
-            .max(0) as u32;
-        let right = width
-            .saturating_sub(RIGHT.load(Ordering::Relaxed).max(0) as u32)
-            .min(if valid {
-                rect.right.max(0) as u32
-            } else {
-                width
-            });
-        let bottom = height
-            .saturating_sub(BOTTOM.load(Ordering::Relaxed).max(0) as u32)
-            .min(if valid {
-                rect.bottom.max(0) as u32
-            } else {
-                height
-            });
+        let [left, top, right, bottom] = crate::mobile_input::viewport((width, height),
+            [rect.left, rect.top, rect.right, rect.bottom],
+            [LEFT.load(Ordering::Relaxed), TOP.load(Ordering::Relaxed),
+             RIGHT.load(Ordering::Relaxed), BOTTOM.load(Ordering::Relaxed)]);
         if right > left && bottom > top {
             self.app.resize(
                 (right - left, bottom - top),
@@ -108,8 +122,8 @@ impl Android {
         for event in events {
             match event {
                 NativeEvent::Back => self.app.back(),
-                NativeEvent::Edit(text) => self.app.native_edit(text),
-                NativeEvent::Paste(text) => self.app.input(&text),
+                NativeEvent::Edit(edit) => self.app.native_edit(edit),
+                NativeEvent::Paste(token, text) => self.app.paste(token, text),
                 NativeEvent::File(path, name) => {
                     let result = if let Some((identity, session)) = self.import_scope.take() {
                         self.app
@@ -142,6 +156,7 @@ impl Android {
                 env.with_local_frame(16, |env| {
                     let activity = unsafe { JObject::from_raw(ctx.app.activity_as_ptr().cast()) };
                     match action {
+                        PlatformAction::InputMenu => self.input_menu = true,
                         PlatformAction::Haptic => { env.call_method(&activity, "selectionHaptic", "()V", &[])?; }
                         PlatformAction::Background => {
                             env.call_method(&activity, "background", "()V", &[])?;
@@ -150,8 +165,8 @@ impl Android {
                             self.import_scope = Some((identity, session));
                             env.call_method(&activity, "pickFile", "()V", &[])?;
                         }
-                        PlatformAction::Paste => {
-                            env.call_method(&activity, "paste", "()V", &[])?;
+                        PlatformAction::Paste { token } => {
+                            env.call_method(&activity, "paste", "(J)V", &[JValue::Long(token as i64)])?;
                         }
                         PlatformAction::Copy(text) => {
                             let text = env.new_string(text)?;
@@ -195,26 +210,6 @@ impl Android {
                                 &[JValue::Object(&reference),JValue::Object(&mime),JValue::Object(&identity),
                                   JValue::Object(&lineage),JValue::Object(&session),JValue::Object(&entry)])?;
                         }
-                        PlatformAction::Edit {
-                            title,
-                            value,
-                            secret,
-                            single_line,
-                        } => {
-                            let title = env.new_string(title)?;
-                            let value = env.new_string(value)?;
-                            env.call_method(
-                                &activity,
-                                "edit",
-                                "(Ljava/lang/String;Ljava/lang/String;ZZ)V",
-                                &[
-                                    JValue::Object(&title),
-                                    JValue::Object(&value),
-                                    JValue::Bool(secret as u8),
-                                    JValue::Bool(single_line as u8),
-                                ],
-                            )?;
-                        }
                     }
                     Ok::<_, jni::errors::Error>(())
                 })
@@ -257,6 +252,8 @@ impl chad::android::App for Android {
             app,
             import_scope: None,
             modifiers: ModifiersState::empty(),
+            input: None,
+            input_menu: false,
         };
         android.layout(ctx);
         Ok(android)
@@ -274,18 +271,20 @@ impl chad::android::App for Android {
                     TouchPhase::Cancelled => self.app.cancel_pointer(),
                 }
             }
-            WindowEvent::Focused(false) => {
-                self.app.cancel_pointer();
-                let result = self.app.save();
-                self.app.report(result);
+            WindowEvent::Focused(focused) => {
+                self.app.ui.window_focused = *focused;
+                if !focused {
+                    self.app.cancel_pointer();
+                    let result = self.app.save(); self.app.report(result);
+                } else { self.app.ui.dirty = true; }
             }
-            WindowEvent::CloseRequested => self.app.back(),
+            WindowEvent::CloseRequested => self.back(ctx),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let control = (self.modifiers.control_key() && !self.modifiers.alt_key()) || self.modifiers.super_key();
                 let shift = self.modifiers.shift_key();
                 if matches!(event.logical_key, Key::Named(NamedKey::GoBack | NamedKey::BrowserBack)) {
-                    self.app.back();
+                    self.back(ctx);
                 } else if let Some(key) = crate::keyboard::named(&event.logical_key) {
                     self.app.key(key, control, shift);
                 } else if control {
@@ -320,6 +319,11 @@ impl chad::android::App for Android {
     }
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
         self.app.frame(ctx, view);
+        self.sync_input(ctx);
+        if std::mem::take(&mut self.input_menu) && self.input.is_some() {
+            let result = self.java(ctx, "inputMenu", None);
+            self.app.report(result.map_err(anyhow::Error::msg));
+        }
     }
 }
 #[unsafe(no_mangle)]
@@ -341,9 +345,8 @@ pub extern "system" fn Java_app_tau_rust_MainActivity_nativeResult(
         .map(String::from)
         .unwrap_or_default();
     queue(match kind {
-        0 => NativeEvent::Edit(a),
         1 => NativeEvent::File(a.into(), b),
-        2 => NativeEvent::Paste(a),
+        2 => NativeEvent::Paste(b.parse().unwrap_or(0), a),
         4 => NativeEvent::Saved(a,serde_json::from_str(&b).map_err(|e|e.to_string())),
         5 => NativeEvent::Saved(a,Err(b)),
         6 => match serde_json::from_str::<(String,String,String)>(&b) {
@@ -354,7 +357,17 @@ pub extern "system" fn Java_app_tau_rust_MainActivity_nativeResult(
     });
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_tau_rust_MainActivity_nativeInsets(
+pub extern "system" fn Java_app_tau_rust_MainActivity_nativeEdit(
+    mut env: JNIEnv, _: JClass, id: jlong, revision: jlong, text: JString,
+    start: jint, end: jint, composing_start: jint, composing_end: jint,
+) {
+    if let Ok(text) = env.get_string(&text) {
+        queue(NativeEvent::Edit(crate::mobile_input::Edit { id: id as u64, revision: revision as u64,
+            text: String::from(text), start, end, composing_start, composing_end }));
+    }
+}
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_tau_rust_MainActivity_nativeViewport(
     _: JNIEnv,
     _: JClass,
     left: jint,

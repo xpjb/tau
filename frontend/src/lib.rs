@@ -33,3 +33,5 @@ pub use desktop::run;
 mod disk;
 #[cfg(not(target_os = "android"))]
 mod downloads;
+
+pub mod mobile_input;

@@ -1,7 +1,6 @@
 package app.tau.rust;
 
 import android.app.NativeActivity;
-import android.app.Dialog;
 import android.content.*;
 import android.graphics.Color;
 import android.net.Uri;
@@ -13,10 +12,9 @@ import org.json.JSONObject;
 import android.text.*;
 import android.view.*;
 import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-import android.widget.Button;
-import android.view.inputmethod.InputMethodManager;
+import android.widget.FrameLayout;
+import android.view.inputmethod.*;
+import java.nio.charset.StandardCharsets;
 import java.io.*;
 
 /** OS bridges only: IME, clipboard, document grants, insets, task Back.
@@ -25,90 +23,226 @@ public final class MainActivity extends NativeActivity {
     static { System.loadLibrary("tau_frontend"); }
     private static native boolean nativeBack();
     private static native void nativeResult(int kind, String first, String second);
-    private static native void nativeInsets(int left, int top, int right, int bottom);
-    private Dialog editor;
+    private static native void nativeViewport(int left, int top, int right, int bottom);
+    private static native void nativeEdit(long id, long revision, String text,
+        int start, int end, int composingStart, int composingEnd);
+    private InlineInput input;
+    private long inputId, inputRevision, inputRequest;
+    private int inputLimit;
+    private android.widget.PopupMenu inputMenu;
+    private boolean updatingInput, imeVisible;
+    private final android.graphics.Rect lastViewport = new android.graphics.Rect();
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         View decor = getWindow().getDecorView();
-        decor.getViewTreeObserver().addOnGlobalLayoutListener(this::reportInsets);
-        decor.setOnApplyWindowInsetsListener((view,insets) -> { reportInsets(); return insets; });
-        decor.post(this::reportInsets);
+        decor.getViewTreeObserver().addOnGlobalLayoutListener(this::reportViewport);
+        decor.setOnApplyWindowInsetsListener((view,insets) -> { reportViewport(insets); return insets; });
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setDecorFitsSystemWindows(false);
+            decor.setWindowInsetsAnimationCallback(new WindowInsetsAnimation.Callback(WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                @Override public WindowInsets onProgress(WindowInsets insets,java.util.List<WindowInsetsAnimation> running) {
+                    reportViewport(insets); return insets;
+                }
+            });
+        }
+        decor.post(this::reportViewport);
         getWindow().setStatusBarColor(Color.rgb(9,13,18));
         getWindow().setNavigationBarColor(Color.rgb(9,13,18));
         getWindow().setNavigationBarContrastEnforced(false);
     }
-    @SuppressWarnings("deprecation") private void reportInsets() {
-        WindowInsets i = getWindow().getDecorView().getRootWindowInsets(); if (i == null) return;
-        if (Build.VERSION.SDK_INT >= 30) {
-            android.graphics.Insets s = i.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-            nativeInsets(s.left,s.top,s.right,s.bottom);
-        } else nativeInsets(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());
+    private InputMethodManager keyboard() { return (InputMethodManager)getSystemService(INPUT_METHOD_SERVICE); }
+    private void reportViewport() { reportViewport(getWindow().getDecorView().getRootWindowInsets()); }
+    @SuppressWarnings("deprecation") private void reportViewport(WindowInsets insets) {
+        View decor = getWindow().getDecorView();
+        android.graphics.Rect visible = new android.graphics.Rect();
+        if (Build.VERSION.SDK_INT >= 30 && insets != null) {
+            // Window bounds include system bars/IME even when the native
+            // surface has already resized. Convert once to surface coordinates.
+            visible.set(getWindowManager().getCurrentWindowMetrics().getBounds());
+            android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars()
+                | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+            visible.inset(safe.left,safe.top,safe.right,safe.bottom);
+            imeVisible = insets.isVisible(WindowInsets.Type.ime());
+        } else {
+            decor.getWindowVisibleDisplayFrame(visible);
+            if (insets != null) imeVisible = insets.getSystemWindowInsetBottom() > insets.getStableInsetBottom();
+        }
+        int[] origin = new int[2]; decor.getLocationOnScreen(origin);
+        visible.offset(-origin[0],-origin[1]);
+        if (visible.intersect(0,0,decor.getWidth(),decor.getHeight()) && !lastViewport.equals(visible)) {
+            lastViewport.set(visible);
+            nativeViewport(visible.left,visible.top,visible.right,visible.bottom);
+        }
     }
     public void selectionHaptic() { runOnUiThread(() -> getWindow().getDecorView().performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)); }
     public void background() { runOnUiThread(() -> moveTaskToBack(true)); }
-    public void edit(String title, String value, boolean secret, boolean singleLine) { runOnUiThread(() -> {
-        if (editor != null) return;
-        Dialog dialog = new Dialog(this, android.R.style.Theme_Material_NoActionBar);
-        editor = dialog;
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setBackgroundColor(Color.rgb(9,13,18));
-        int padding = Math.round(16 * getResources().getDisplayMetrics().density);
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(padding,0,padding,0);
-        TextView label = new TextView(this);
-        label.setText(title); label.setTextSize(18); label.setTextColor(Color.WHITE);
-        header.addView(label,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1));
-        Button done = new Button(this);
-        done.setText("Done");
-        header.addView(done);
-        page.addView(header,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));
-        EditText input = new EditText(this);
-        input.setInputType(secret ? 129 : (singleLine ? android.text.InputType.TYPE_CLASS_TEXT : (android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)));
-        input.setSingleLine(singleLine);
-        input.setFilters(new InputFilter[] { new InputFilter.LengthFilter(262144) });
-        input.setGravity(singleLine ? Gravity.CENTER_VERTICAL : Gravity.TOP);
-        input.setTextColor(Color.WHITE); input.setTextSize(18);
-        input.setPadding(padding,padding,padding,padding);
-        input.setText(value); input.setSelection(input.length());
-        input.addTextChangedListener(new TextWatcher() {
-            public void beforeTextChanged(CharSequence s,int st,int c,int a) {}
-            public void onTextChanged(CharSequence s,int st,int before,int count) { nativeResult(0,s.toString(),""); }
-            public void afterTextChanged(Editable e) {}
-        });
-        page.addView(input,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,0,1));
-        dialog.setContentView(page);
-        dialog.setCanceledOnTouchOutside(false);
-        Window window = dialog.getWindow();
-        window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.rgb(9,13,18)));
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(false);
-            page.setOnApplyWindowInsetsListener((view,insets) -> {
-                android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
-                view.setPadding(safe.left,safe.top,safe.right,safe.bottom);
-                return insets;
+    /** The NativeActivity owns this window's drawing surface. This transparent
+     * view supplies ONLY Android's normal Editable/InputConnection; Rust draws
+     * and hit-tests the actual inline field. No editor Dialog or second screen. */
+    public void syncInput(String json) { runOnUiThread(() -> {
+        try {
+            if (json.equals("null")) {
+                inputId = 0;
+                if (inputMenu != null) { inputMenu.dismiss(); inputMenu = null; }
+                if (input != null) {
+                    keyboard().hideSoftInputFromWindow(input.getWindowToken(),0);
+                    input.clearFocus(); input.setVisibility(View.GONE);
+                }
+                return;
+            }
+            JSONObject state = new JSONObject(json);
+            inputLimit = state.getInt("max_bytes");
+            if (input == null) {
+                input = new InlineInput();
+                input.setAlpha(0); input.setBackground(null);
+                input.setShowSoftInputOnFocus(false);
+                input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
+                input.setFilters(new InputFilter[] { (source,start,end,dest,dstart,dend) -> {
+                    String candidate = dest.subSequence(0,dstart).toString()
+                        + source.subSequence(start,end) + dest.subSequence(dend,dest.length());
+                    return candidate.getBytes(StandardCharsets.UTF_8).length <= inputLimit
+                        ? null : dest.subSequence(dstart,dend);
+                }});
+                input.addTextChangedListener(new TextWatcher() {
+                    public void beforeTextChanged(CharSequence s,int start,int count,int after) {}
+                    public void onTextChanged(CharSequence s,int start,int before,int count) {}
+                    public void afterTextChanged(Editable value) { reportEdit(); }
+                });
+                input.setOnEditorActionListener((view,action,event) -> {
+                    if (action == EditorInfo.IME_ACTION_DONE) { hideKeyboard(); return true; }
+                    return false; // Multiline Enter inserts a newline, never sends.
+                });
+                addContentView(input,new FrameLayout.LayoutParams(1,1));
+            }
+            long id = state.getLong("id"), revision = state.getLong("revision"), request = state.getLong("request");
+            boolean changed = id != inputId || revision != inputRevision;
+            boolean show = request != inputRequest;
+            updatingInput = true;
+            if (changed) {
+                if (inputMenu != null) { inputMenu.dismiss(); inputMenu = null; }
+                boolean singleLine = state.getBoolean("single_line"), secret = state.getBoolean("secret");
+                int type = InputType.TYPE_CLASS_TEXT | (secret ? InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    : singleLine ? 0 : InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+                input.setInputType(type); input.setSingleLine(singleLine);
+                input.setImeOptions((singleLine ? EditorInfo.IME_ACTION_DONE : EditorInfo.IME_ACTION_NONE)
+                    | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN
+                    | (secret ? EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING : 0));
+                input.setText(state.getString("text"));
+                input.setSelection(Math.max(0,Math.min(input.length(),state.getInt("start"))),
+                    Math.max(0,Math.min(input.length(),state.getInt("end"))));
+                inputId = id; inputRevision = revision;
+            }
+            inputRequest = request;
+            org.json.JSONArray rect = state.getJSONArray("rect");
+            View content = findViewById(android.R.id.content);
+            int[] at = new int[2], origin = new int[2];
+            content.getLocationInWindow(at); getWindow().getDecorView().getLocationInWindow(origin);
+            FrameLayout.LayoutParams layout = new FrameLayout.LayoutParams(
+                Math.max(1,(int)Math.ceil(rect.getDouble(2))),Math.max(1,(int)Math.ceil(rect.getDouble(3))));
+            layout.leftMargin = (int)Math.round(rect.getDouble(0)) + origin[0] - at[0];
+            layout.topMargin = (int)Math.round(rect.getDouble(1)) + origin[1] - at[1];
+            input.setLayoutParams(layout);
+            input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX,(float)state.getDouble("size"));
+            int padding = Math.round((float)state.getDouble("size") * .75f);
+            input.setPadding(padding,padding,padding,padding);
+            input.setVisibility(View.VISIBLE); input.requestFocus();
+            updatingInput = false;
+            if (changed) keyboard().restartInput(input);
+            if (show) input.post(() -> {
+                if (inputId == id && inputRequest == request && input.hasFocus())
+                    keyboard().showSoftInput(input,InputMethodManager.SHOW_IMPLICIT);
             });
-        } else page.setFitsSystemWindows(true);
-        done.setOnClickListener(view -> {
-            nativeResult(0,input.getText().toString(),"");
-            dialog.dismiss();
+        } catch (Exception e) {
+            updatingInput = false;
+            nativeResult(3,"Cannot focus the text input: " + e.getMessage(),"");
+        }
+    }); }
+    private void reportEdit() {
+        if (updatingInput || inputId == 0 || input == null) return;
+        Editable value = input.getText();
+        nativeEdit(inputId,inputRevision,value.toString(),input.getSelectionStart(),input.getSelectionEnd(),
+            BaseInputConnection.getComposingSpanStart(value),BaseInputConnection.getComposingSpanEnd(value));
+    }
+    private final class InlineInput extends EditText {
+        InlineInput() { super(MainActivity.this); }
+        @Override protected void onSelectionChanged(int start,int end) { super.onSelectionChanged(start,end); reportEdit(); }
+        // Native hit-testing owns touch/caret geometry. Never pan the window to
+        // a second text layout when the IME tries to reveal its cursor.
+        @Override public boolean requestRectangleOnScreen(android.graphics.Rect rectangle,boolean immediate) { return false; }
+        @Override public boolean onTouchEvent(MotionEvent event) { return false; }
+        @Override public InputConnection onCreateInputConnection(EditorInfo info) {
+            InputConnection connection = super.onCreateInputConnection(info);
+            if (connection == null) return null;
+            if (Build.VERSION.SDK_INT >= 34) return new ReplacementConnection(connection);
+            if (Build.VERSION.SDK_INT >= 33) return new AttributedConnection(connection);
+            return new InlineConnection(connection);
+        }
+    }
+    private class InlineConnection extends InputConnectionWrapper {
+        private final long id = inputId, revision = inputRevision;
+        InlineConnection(InputConnection connection) { super(connection,false); }
+        boolean active() { return inputId == id && inputRevision == revision && id != 0; }
+        boolean report(boolean result) { reportEdit(); return result; }
+        @Override public boolean beginBatchEdit() { return active() && super.beginBatchEdit(); }
+        @Override public boolean endBatchEdit() { return active() && report(super.endBatchEdit()); }
+        @Override public boolean setComposingText(CharSequence text,int position) { return active() && report(super.setComposingText(text,position)); }
+        @Override public boolean setComposingRegion(int start,int end) { return active() && report(super.setComposingRegion(start,end)); }
+        @Override public boolean finishComposingText() { return active() && report(super.finishComposingText()); }
+        @Override public boolean commitText(CharSequence text,int position) { return active() && report(super.commitText(text,position)); }
+        @Override public boolean setSelection(int start,int end) { return active() && report(super.setSelection(start,end)); }
+        @Override public boolean deleteSurroundingText(int before,int after) { return active() && report(super.deleteSurroundingText(before,after)); }
+        @Override public boolean deleteSurroundingTextInCodePoints(int before,int after) { return active() && report(super.deleteSurroundingTextInCodePoints(before,after)); }
+        // Handle IME-generated keys synchronously in this revision, not as an
+        // untagged native key that might arrive after Send switched editors.
+        @Override public boolean sendKeyEvent(KeyEvent event) { return active() && report(input.dispatchKeyEvent(event)); }
+        @Override public boolean performContextMenuAction(int action) { return active() && report(super.performContextMenuAction(action)); }
+        @Override public boolean performEditorAction(int action) { return active() && report(super.performEditorAction(action)); }
+        @Override public boolean commitCompletion(CompletionInfo completion) { return active() && report(super.commitCompletion(completion)); }
+        @Override public boolean commitCorrection(CorrectionInfo correction) { return active() && report(super.commitCorrection(correction)); }
+        @Override public void closeConnection() { if (active()) super.closeConnection(); }
+    }
+    // Keep newer parameter types out of the class loaded on Android 10-12.
+    private class AttributedConnection extends InlineConnection {
+        AttributedConnection(InputConnection connection) { super(connection); }
+        @Override public boolean commitText(CharSequence text,int position,TextAttribute attributes) { return active() && report(super.commitText(text,position,attributes)); }
+        @Override public boolean setComposingText(CharSequence text,int position,TextAttribute attributes) { return active() && report(super.setComposingText(text,position,attributes)); }
+        @Override public boolean setComposingRegion(int start,int end,TextAttribute attributes) { return active() && report(super.setComposingRegion(start,end,attributes)); }
+    }
+    private final class ReplacementConnection extends AttributedConnection {
+        ReplacementConnection(InputConnection connection) { super(connection); }
+        @Override public boolean replaceText(int start,int end,CharSequence text,int position,TextAttribute attributes) { return active() && report(super.replaceText(start,end,text,position,attributes)); }
+    }
+    public void inputMenu() { runOnUiThread(() -> {
+        if (inputId == 0 || input == null) return;
+        if (inputMenu != null) inputMenu.dismiss();
+        final long id = inputId, revision = inputRevision;
+        inputMenu = new android.widget.PopupMenu(this,input);
+        boolean selected = input.getSelectionStart() != input.getSelectionEnd();
+        boolean secret = input.getTransformationMethod() instanceof android.text.method.PasswordTransformationMethod;
+        inputMenu.getMenu().add(0,android.R.id.cut,0,android.R.string.cut).setEnabled(selected && !secret);
+        inputMenu.getMenu().add(0,android.R.id.copy,1,android.R.string.copy).setEnabled(selected && !secret);
+        inputMenu.getMenu().add(0,android.R.id.paste,2,android.R.string.paste);
+        inputMenu.getMenu().add(0,android.R.id.selectAll,3,android.R.string.selectAll);
+        inputMenu.setOnMenuItemClickListener(item -> {
+            if (inputId != id || inputRevision != revision) return false;
+            if (item.getItemId() == android.R.id.selectAll) input.setSelection(0,input.length());
+            else input.onTextContextMenuItem(item.getItemId());
+            reportEdit(); return true;
         });
-        dialog.setOnDismissListener(closed -> {
-            ((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(input.getWindowToken(),0);
-            if (editor == dialog) editor = null;
-        });
-        dialog.show();
-        window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT);
-        page.requestApplyInsets();
-        input.requestFocus();
-        input.post(() -> ((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(input,InputMethodManager.SHOW_IMPLICIT));
+        inputMenu.show();
+    }); }
+    public void hideKeyboard() { runOnUiThread(() -> {
+        if (input != null) keyboard().hideSoftInputFromWindow(input.getWindowToken(),0);
+    }); }
+    public void back() { runOnUiThread(() -> {
+        reportViewport(); reportEdit();
+        if (imeVisible) hideKeyboard(); else nativeBack();
     }); }
     public void copy(String text) { runOnUiThread(() -> ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Tau",text))); }
-    public void paste() { runOnUiThread(() -> {
+    public void paste(long token) { runOnUiThread(() -> {
         ClipData data = ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).getPrimaryClip();
-        if (data != null && data.getItemCount() > 0) nativeResult(2,data.getItemAt(0).coerceToText(this).toString(),"");
+        if (data != null && data.getItemCount() > 0) nativeResult(2,data.getItemAt(0).coerceToText(this).toString(),Long.toString(token));
     }); }
     public void openUrl(String url) { runOnUiThread(() -> { try { startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(url))); } catch (Exception e) { nativeResult(3,"No application can open this link",""); } }); }
     public void pickFile() { runOnUiThread(() -> {
@@ -201,11 +335,11 @@ public final class MainActivity extends NativeActivity {
         while ((n = in.read(buffer)) != -1) { total += n; if (total > limit) throw new IOException("File exceeds 50 MB"); out.write(buffer,0,n); }
     }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
-        if (editor != null && editor.isShowing()) return super.dispatchKeyEvent(event);
-        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) { if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) nativeBack(); return true; }
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) back();
+            return true;
+        }
         return super.dispatchKeyEvent(event);
     }
-    @Override @SuppressWarnings("deprecation") public void onBackPressed() {
-        if (editor != null) editor.dismiss(); else nativeBack();
-    }
+    @Override @SuppressWarnings("deprecation") public void onBackPressed() { back(); }
 }

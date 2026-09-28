@@ -55,25 +55,25 @@ fn detail_rows_hover_independently_and_click_ripple_targets_the_inner_row() {
     app.tick(0.);
     app.frame(&ctx, ctx.view());
     let outer = app
-        .message_areas
+        .root.workspace.chat.transcript.rows
         .iter()
-        .find(|a| a.key == "demo/details:event-1")
+        .find(|a| a.row.key == "demo/details:event-1")
         .unwrap()
-        .rect;
+        .control.rect.unwrap();
     let inside = app
-        .detail_areas
-        .iter()
+        .root.workspace.chat.transcript.rows
+        .iter().flat_map(|row|&row.parts)
         .find(|a| a.key == "demo/tool:event-2")
         .unwrap()
-        .rect;
+        .control.rect.unwrap();
     assert!(
-        app.detail_areas
-            .iter()
+        app.root.workspace.chat.transcript.rows
+            .iter().flat_map(|row|&row.parts)
             .any(|a| a.key == "demo/tool:event-2:Input")
     );
     assert!(
-        app.detail_areas
-            .iter()
+        app.root.workspace.chat.transcript.rows
+            .iter().flat_map(|row|&row.parts)
             .any(|a| a.key == "demo/tool:event-2:Input:text")
     );
     let outside_point = Vec2::new(outer.x + 8., outer.y + 20.);
@@ -114,14 +114,14 @@ fn detail_rows_hover_independently_and_click_ripple_targets_the_inner_row() {
     );
 
     app.press(1, inside_point, false);
-    assert_eq!(app.ripple.as_ref().unwrap().key, "demo/tool:event-2");
+    assert_eq!(app.test_ripple().unwrap().key, "demo/tool:event-2");
     app.tick(0.);
     app.frame(&ctx, ctx.view()); // exercises the real GPU circle/rounded-clip shader
     app.motion(1, Vec2::new(inside_point.x + 20., inside_point.y));
     assert!(
-        app.ripple.is_none(),
+        app.test_ripple().is_none(),
         "dragging to scroll must not leave a click ripple"
     );
     app.release(1, inside_point);
-    assert!(app.ripple.is_none());
+    assert!(app.test_ripple().is_none());
 }

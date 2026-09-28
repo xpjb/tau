@@ -32,14 +32,9 @@ fn image_viewer_closes_on_background_tap_but_not_image_controls_or_pan() {
         crate::demo::populate(&mut app.controller).unwrap();
         app.resize(size, 1., Vec2::new(0., 0.));
         let open = |app: &mut App| {
-            app.viewer = Some(Viewer {
-                path: path.clone(),
-                name: "sample.png".into(),
-                session: "demo".into(),
-                entry: "entry-1".into(),
-                zoom: 1.,
-                pan: Vec2::new(0., 0.),
-            });
+            app.root.viewer = Some(ui::ImageViewer::new(ui::ImageSpec {
+                path: path.clone(), name: "sample.png".into(), target: app.export_target("demo", "entry-1"),
+            }));
             app.tick(0.);
             app.frame(&ctx, ctx.view());
         };
@@ -56,49 +51,44 @@ fn image_viewer_closes_on_background_tap_but_not_image_controls_or_pan() {
         };
 
         open(&mut app);
-        let image = app.viewer_image.unwrap();
+        let image = app.root.viewer.as_ref().unwrap().image.unwrap();
         let center = Vec2::new(image.x + image.width / 2., image.y + image.height / 2.);
         tap(&mut app, 1, center, false);
         assert!(
-            app.viewer.is_some(),
+            app.root.viewer.is_some(),
             "clicking the image itself must not close it"
         );
         let off_image = background(image);
         assert!(!contains(image, off_image));
         tap(&mut app, 2, off_image, false);
         assert!(
-            app.viewer.is_none(),
+            app.root.viewer.is_none(),
             "desktop click on dim background closes viewer"
         );
-        assert!(app.context_menu.is_none());
+        assert!(app.root.menu.is_none());
 
         open(&mut app);
-        let off_image = background(app.viewer_image.unwrap());
+        let off_image = background(app.root.viewer.as_ref().unwrap().image.unwrap());
         app.press(3, off_image, true);
         app.motion(3, Vec2::new(off_image.x + 35., off_image.y));
         app.release(3, Vec2::new(off_image.x + 35., off_image.y));
         assert!(
-            app.viewer.as_ref().is_some_and(|v| v.pan.x > 0.),
+            app.root.viewer.as_ref().is_some_and(|v| v.pan.x > 0.),
             "background drag still pans the viewer"
         );
 
         open(&mut app);
-        let off_image = background(app.viewer_image.unwrap());
+        let off_image = background(app.root.viewer.as_ref().unwrap().image.unwrap());
         tap(&mut app, 4, off_image, true);
         assert!(
-            app.viewer.is_none(),
+            app.root.viewer.is_none(),
             "touching the background closes the viewer"
         );
 
         open(&mut app);
-        app.viewer.as_mut().unwrap().zoom = 2.;
+        app.root.viewer.as_mut().unwrap().zoom = 2.;
         app.frame(&ctx, ctx.view());
-        let fit = app
-            .hits
-            .iter()
-            .find(|h| matches!(h.action, Action::Fit))
-            .unwrap()
-            .rect;
+        let fit = app.root.viewer.as_ref().unwrap().button("Fit");
         tap(
             &mut app,
             5,
@@ -106,23 +96,40 @@ fn image_viewer_closes_on_background_tap_but_not_image_controls_or_pan() {
             false,
         );
         assert_eq!(
-            app.viewer.as_ref().unwrap().zoom,
+            app.root.viewer.as_ref().unwrap().zoom,
             1.,
             "viewer controls still work"
         );
         app.frame(&ctx, ctx.view());
-        let back = app
-            .hits
-            .iter()
-            .find(|h| matches!(h.action, Action::Back))
-            .unwrap()
-            .rect;
+        let back = app.root.viewer.as_ref().unwrap().button("Back");
         tap(
             &mut app,
             6,
             Vec2::new(back.x + back.width / 2., back.y + back.height / 2.),
             false,
         );
-        assert!(app.viewer.is_none(), "Back still closes the viewer");
+        assert!(app.root.viewer.is_none(), "Back still closes the viewer");
+
+        open(&mut app);
+        let off_image=background(app.root.viewer.as_ref().unwrap().image.unwrap());
+        app.press(10,off_image,true);
+        let jitter=Vec2::new(off_image.x+1.,off_image.y+1.);
+        app.motion(10,jitter);app.release(10,jitter);
+        assert!(app.root.viewer.is_none(),"Small touch jitter must not disable backdrop dismissal");
+
+        open(&mut app);
+        let image=app.root.viewer.as_ref().unwrap().image.unwrap();
+        let p=Vec2::new(image.x+image.width/2.,image.y+image.height/2.);
+        let back=app.root.viewer.as_ref().unwrap().button("Back");
+        let second=Vec2::new(back.x+back.width/2.,back.y+back.height/2.);
+        app.press(11,p,true);app.press(12,second,true);
+        app.motion(11,Vec2::new(p.x+60.,p.y+60.));
+        app.release(12,second);app.release(11,p);
+        assert!(app.root.viewer.as_ref().is_some_and(|v|v.zoom>1.),"A second finger on a toolbar joins pinch, not Back");
+        app.press(13,p,true);app.cancel_pointer();
+        let pan=app.root.viewer.as_ref().unwrap().pan;
+        app.motion(13,Vec2::new(p.x+70.,p.y));app.release(13,p);
+        let after=app.root.viewer.as_ref().unwrap().pan;
+        assert_eq!((pan.x,pan.y),(after.x,after.y),"Window cancellation reaches the viewer owner");
     }
 }

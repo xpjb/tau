@@ -97,6 +97,16 @@ impl Layer {
             ..Default::default()
         }
     }
+    /// Apply a container clip to the shapes, text and images appended by one
+    /// child visit without changing its layout coordinates or editor geometry.
+    pub fn with_clip<R>(&mut self, clip: Rect, draw: impl FnOnce(&mut Self) -> R) -> R {
+        let (shapes, text, images) = (self.rects.len(), self.draws.len(), self.images.len());
+        let result = draw(self);
+        for shape in &mut self.rects[shapes..] { shape.clip = intersect(shape.clip, clip); }
+        for draw in &mut self.draws[text..] { draw.clip = Some(draw.clip.map_or(clip, |r| intersect(r, clip))); }
+        for (_, _, image_clip) in &mut self.images[images..] { *image_clip = intersect(*image_clip, clip); }
+        result
+    }
     pub fn rect(&mut self, rect: Rect, color: Color) {
         self.rounded_rect(rect, 0., color);
     }
