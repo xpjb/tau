@@ -27,7 +27,6 @@ mod attachments;
 mod notices;
 mod navigation;
 use crate::notice::DownloadTarget;
-mod composer_status;
 mod ui;
 mod ui_owner;
 mod mobile_input;
@@ -220,9 +219,6 @@ pub struct App {
 struct LegacyWorkspace {
     cards: ui::CardDeck,
     hits: Vec<Hit>,
-    composer: Editor,
-    code: Option<code_view::View>,
-    focus: Option<Option<usize>>,
     message_areas: Vec<MessageArea>,
     detail_areas: Vec<DetailArea>,
     ripple: Option<Ripple>,
@@ -252,7 +248,6 @@ struct LegacyWorkspace {
     hover: Option<Vec2>,
     velocity: f32,
     selecting: bool,
-    field_selection: Option<Rect>,
 }
 impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
@@ -285,12 +280,12 @@ impl App {
                 tooltips: ui::TooltipHost::default(),
                 attachments: ui::AttachmentBrowser::new(),
                 sidebar: ui::Sidebar::new(),
+                composer: ui::Composer::new(),
+                code: code_view::CodeBrowser::new(),
+                quick_models: ui::QuickModels::new(),
                 legacy: LegacyWorkspace {
                     cards: ui::CardDeck::new(),
                     hits: vec![],
-                    composer,
-                    code: None,
-                    focus: None,
                     message_areas: vec![],
                     detail_areas: vec![],
                     ripple: None,
@@ -322,7 +317,6 @@ impl App {
                     hover: None,
                     velocity: 0.,
                     selecting: false,
-                    field_selection: None,
                 },
             },
         };
@@ -387,7 +381,7 @@ impl App {
             self.cancel_pointer();
             if self.root.attachments.show && (self.ui.mobile || size.0 as f32 / scale < 1000.) {
                 self.cancel_preedit();
-                self.root.legacy.focus = None;
+                self.ui.focus = None;
             }
             self.root.sidebar.projects.revealed.clear();
             self.ui.size = size;
@@ -509,7 +503,7 @@ impl App {
     pub fn tick(&mut self, dt: f32) -> bool {
         let visible = self.ui.window_focused && (self.ui.size.0 as f32 / self.ui.scale >= 760. || !self.root.legacy.show_chats)
             && (!self.root.attachments.show || !self.ui.mobile && self.ui.size.0 as f32 / self.ui.scale >= 1000.)
-            && self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.legacy.code.is_none();
+            && self.root.dialog.is_none() && self.root.viewer.is_none() && self.root.code.view.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.report_error(error); }
         self.ui.dirty |= self.controller.poll();
         if self.services.transfers.download_identity != self.controller.identity {
@@ -610,13 +604,7 @@ impl App {
                 self.ui.dirty = true;
             }
         }
-        if self.root.legacy.field_selection.is_some()
-            && let Some(point) = self.root.legacy.pointer.as_ref().filter(|p| p.dragged).map(|p| p.last)
-            && let Some((editor, renderer)) = self.editor_and_renderer()
-        {
-            let moved = editor.drag_scroll(&mut renderer.text, renderer.faces.prose[0], point, dt);
-            self.ui.dirty |= moved;
-        }
+
         if self.root.legacy.selecting
             && let Some(p) = &self.root.legacy.pointer
             && p.dragged
@@ -727,9 +715,9 @@ impl App {
             return;
         }
 
-        self.root.legacy.focus = None;
+        self.ui.focus = None;
         self.root.legacy.navigation.download = None;
-        if self.root.legacy.code.is_some() {
+        if self.root.code.view.is_some() {
             self.code_back();
         } else if self.root.attachments.show {
             self.root.attachments.show = false;
@@ -744,7 +732,6 @@ impl App {
     fn scroll_value(&self, lane: Lane) -> (f32, f32) {
         match lane {
             Lane::Transcript => (self.root.legacy.scroll, self.root.legacy.max_scroll),
-            Lane::Files => self.root.legacy.code.as_ref().map_or((0.,0.),|c|(c.scroll,c.max_scroll)),
             Lane::Horizontal => (self.root.legacy.horizontal, self.root.legacy.max_horizontal),
         }
     }
@@ -755,7 +742,6 @@ impl App {
                 self.root.legacy.scroll = value.clamp(0., self.root.legacy.max_scroll);
                 self.remember_scroll();
             }
-            Lane::Files => { if let Some(c)=&mut self.root.legacy.code {c.scroll=value.clamp(0.,c.max_scroll);} },
             Lane::Horizontal => self.root.legacy.horizontal = value.clamp(0., self.root.legacy.max_horizontal),
         }
     }
@@ -811,17 +797,7 @@ impl App {
         self.root.legacy.expansion_pin = None;
         self.root.legacy.history_attempt = None;
         self.root.legacy.velocity = 0.;
-        if self.root.viewer.is_none() && let Some(field) = self.field_at(point) {
-            let editor = match field {
-                None => &mut self.root.legacy.composer,
-                Some(code_view::SEARCH_FIELD) => self.root.legacy.code.as_mut().unwrap().search.as_mut().unwrap(),
-                Some(_) => return,
-            };
-            editor.wheel(&mut self.services.renderer.text, self.services.renderer.faces.prose[0], amount, horizontal);
-            self.ui.dirty = true;
-            return;
-        }
-        if self.root.dialog.is_none() && self.code_wheel(amount, horizontal, point) { return; }
+
         if self.root.dialog.is_none() {
             let lane = if horizontal { Lane::Horizontal } else { Lane::Transcript };
             let (value, max) = self.scroll_value(lane);
@@ -906,7 +882,7 @@ impl App {
             return;
         }
         self.root.legacy.selecting = false;
-        self.root.legacy.field_selection = None;
+
         if self.root.dialog.is_none()
             && self.root.viewer.is_none()
             && self.root.menu.is_none()
@@ -945,25 +921,15 @@ impl App {
             self.ui.dirty = true;
             return;
         }
-        if self.code_press(id, point, touch) { return; }
         if !touch && self.root.viewer.is_none() {
-            if let Some(hit) = self.root.legacy.hits.iter().rev().find(|h| contains(h.rect, point)) {
-                // Controls take priority over transcript selection beneath them.
-                if let Action::Focus(field) = hit.action {
-                    let rect = hit.rect;
-                    self.cancel_preedit();
-                    self.root.legacy.focus = Some(field);
-                    self.root.legacy.field_selection = Some(rect);
-                    self.field_hit(point, false);
-                }
-            } else if self.root.dialog.is_none()
+            if self.root.dialog.is_none()
                 && self.root.menu.is_none()
                 && contains(self.root.legacy.transcript, point)
                 && let Some(caret) = self.services.renderer.nearest_text(point)
             {
                 self.services.renderer.begin_selection(caret);
                 self.root.legacy.selecting = true;
-                self.root.legacy.focus = None;
+                self.ui.focus = None;
             }
         }
         self.root.legacy.pointer = Some(Pointer {
@@ -981,9 +947,7 @@ impl App {
         self.ui.dirty = true;
     }
     pub fn motion(&mut self, id: u64, point: Vec2) {
-        let field = self.root.legacy.pointer.as_ref().and_then(|p| self.field_at(p.start));
         if self.ui_event(ui::Event::Move { pointer: id, point }) { return; }
-        if self.code_motion(id, point) { return; }
         let Some(p) = &mut self.root.legacy.pointer else {
             return;
         };
@@ -1016,24 +980,12 @@ impl App {
             self.ui.dirty = true;
             return;
         }
-        if self.root.legacy.field_selection.is_some() {
-            p.dragged = true;
-            p.last = point;
-            self.field_hit(point, true);
-            self.ui.dirty = true;
-            return;
-        }
+
         let dy = point.y - p.last.y;
         let dx = point.x - p.last.x;
         p.dragged |= (point.x - p.start.x).abs() + (point.y - p.start.y).abs() > 7. * self.ui.scale;
         if p.dragged {
-            if p.touch && field.is_some() && self.root.legacy.focus == field && self.root.menu.is_none() {
-                p.last = point; p.at = Instant::now();
-                if let Some((editor, renderer)) = self.editor_and_renderer() {
-                    editor.wheel(&mut renderer.text, renderer.faces.prose[0], -dy, false);
-                }
-                self.ui.dirty = true; return;
-            }
+
 
             if self.root.dialog.is_none() {
                 if contains(self.root.legacy.transcript, p.start)
@@ -1060,7 +1012,6 @@ impl App {
     }
     pub fn release(&mut self, id: u64, point: Vec2) {
         if self.ui_event(ui::Event::Up { pointer: id, point }) { return; }
-        if self.code_release(id, point) { return; }
 
         if self.root.legacy.pointer.as_ref().is_none_or(|p| p.id != id) {
             return;
@@ -1093,7 +1044,7 @@ impl App {
                 let field = matches!(hit.action, Action::Focus(_));
                 self.activate(hit.action.clone());
                 if p.touch && field {
-                    self.field_hit(point, false);
+
                     if p.started.elapsed().as_millis() >= 450 {
                         if let Some(editor) = self.editor() { editor.select_word(); }
                         self.services.platform.push(PlatformAction::InputMenu);
@@ -1119,7 +1070,7 @@ impl App {
         if p.dragged { self.root.legacy.ripple = None; }
         else if let Some(ripple) = &mut self.root.legacy.ripple { ripple.release(); }
         self.root.legacy.selecting = false;
-        self.root.legacy.field_selection = None;
+
         if p.at.elapsed().as_millis() > 150 {
             self.root.legacy.velocity = 0.;
 
@@ -1131,7 +1082,7 @@ impl App {
     pub fn cancel_pointer(&mut self) {
         self.with_ui(|root, cx| root.handle_event(&ui::Event::Cancel, cx));
         self.ui.cancel();
-        if let Some(code)=&mut self.root.legacy.code { code.drag_anchor=None; }
+        if let Some(code)=&mut self.root.code.view { code.drag_anchor=None; }
         self.root.menu = None;
         self.root.tooltips.usage.dismiss();
         self.root.tooltips.info.dismiss();
@@ -1148,90 +1099,42 @@ impl App {
 
 
         self.root.legacy.selecting = false;
-        self.root.legacy.field_selection = None;
+
     }
-    fn editor_and_renderer(&mut self) -> Option<(&mut Editor, &mut Renderer)> {
-        if self.root.dialog.is_some() {
-            return self.root.editor(self.ui.focus).map(|field| (&mut field.editor, &mut self.services.renderer));
-        }
-        let editor = match self.root.legacy.focus? {
-            None => &mut self.root.legacy.composer,
-            Some(code_view::SEARCH_FIELD) if self.root.dialog.is_none() => self.root.legacy.code.as_mut()?.search.as_mut()?,
-            Some(_) => return None,
-        };
-        Some((editor, &mut self.services.renderer))
-    }
-    fn field_hit(&mut self, point: Vec2, extend: bool) {
-        if let Some((editor, renderer)) = self.editor_and_renderer() {
-            editor.hit(&mut renderer.text, renderer.faces.prose[0], point, extend);
-        }
-    }
-    fn field_at(&self, point: Vec2) -> Option<Option<usize>> {
-        if self.root.legacy.code.as_ref().and_then(|c|c.search.as_ref()).is_some_and(|e|e.contains(point)) { Some(Some(code_view::SEARCH_FIELD)) }
-        else { self.root.legacy.composer.contains(point).then_some(None) }
-    }
-    pub fn ime_rect(&self) -> Option<Rect> {
-        if self.root.dialog.is_some() { return self.root.editor_ref(self.ui.focus)?.editor.ime_rect(&self.services.renderer.text); }
-        let editor = match self.root.legacy.focus? {
-            None => &self.root.legacy.composer,
-            Some(code_view::SEARCH_FIELD) if self.root.dialog.is_none() => self.root.legacy.code.as_ref()?.search.as_ref()?,
-            Some(_) => return None,
-        };
-        editor.ime_rect(&self.services.renderer.text)
-    }
+
+
+
+
     pub fn cancel_preedit(&mut self) {
         if let Some(e) = self.editor() && e.composing() {
             e.preedit(String::new(), None);
             self.ui.dirty = true;
         }
     }
-    pub fn composing(&self) -> bool {
-        if self.root.dialog.is_some() { return self.root.editor_ref(self.ui.focus).is_some_and(|f| f.editor.composing()); }
-        match self.root.legacy.focus {
-            Some(None) => self.root.legacy.composer.composing(),
-            Some(Some(code_view::SEARCH_FIELD)) if self.root.dialog.is_none() => self.root.legacy.code.as_ref().and_then(|c|c.search.as_ref()).is_some_and(|e|e.composing()),
-            Some(Some(_)) => false,
-            None => false,
-        }
-    }
-    fn editor(&mut self) -> Option<&mut Editor> {
-        if self.root.dialog.is_some() { return self.root.editor(self.ui.focus).map(|field| &mut field.editor); }
-        match self.root.legacy.focus? {
-            None => Some(&mut self.root.legacy.composer),
-            Some(code_view::SEARCH_FIELD) if self.root.dialog.is_none() => self.root.legacy.code.as_mut()?.search.as_mut(),
-            Some(_) => None,
-        }
-    }
+
+
+    pub fn ime_rect(&self)->Option<Rect>{self.root.editor_ref(self.ui.focus)?.editor.ime_rect(&self.services.renderer.text)}
+    pub fn composing(&self)->bool{self.root.editor_ref(self.ui.focus).is_some_and(|f|f.editor.composing())}
+    fn editor(&mut self)->Option<&mut Editor>{self.root.editor(self.ui.focus).map(|f|&mut f.editor)}
+    fn edited(&mut self){self.with_ui(|root,cx|{if cx.ui.focus==Some(root.composer.field.control.target){root.composer.edited(cx);}else if root.code.view.as_ref().and_then(|v|v.search.as_ref()).is_some_and(|f|Some(f.control.target)==cx.ui.focus){root.code.code_query(cx);}});}
     pub fn input(&mut self, value: &str) {
         if self.ui_event(ui::Event::Text(value)) { return; }
-        if self.root.legacy.focus.is_none() && self.root.dialog.is_none() && self.root.legacy.code.is_some() && self.code_key(value, false, false) { return; }
         if self.editor().is_some_and(|e| e.replace(value)) { self.edited(); }
         self.ui.dirty = true;
     }
     #[cfg(not(target_os = "android"))]
     pub fn can_paste_files(&mut self, token: u64) -> bool {
         let allowed = self.ui.paste.as_ref().is_some_and(|edit| edit.matches(token, &self.controller)
-            && matches!(edit.target, ui::EditorTarget::Legacy(None)) && self.root.dialog.is_none());
+            && edit.target==self.root.composer.field.control.target && self.root.dialog.is_none());
         if allowed { self.ui.paste = None; }
         allowed
     }
     pub fn paste(&mut self, token: u64, value: String) {
         let Some(edit) = self.ui.paste.as_ref().filter(|edit| edit.matches(token, &self.controller)) else { return; };
         let target = edit.target; self.ui.paste = None;
-        match target {
-            ui::EditorTarget::Widget(target) => { self.ui_event(ui::Event::Paste { target, text: &value }); }
-            ui::EditorTarget::Legacy(field) if self.root.dialog.is_none() && self.root.legacy.focus == Some(field) => self.input(&value),
-            _ => {}
-        }
+        self.ui_event(ui::Event::Paste {target,text:&value});
     }
-    fn edited(&mut self) {
-        if self.root.legacy.focus == Some(Some(code_view::SEARCH_FIELD)) && self.root.dialog.is_none() { self.code_query(); }
-        if self.root.legacy.focus == Some(None) {
-            let result = self.controller.draft(self.root.legacy.composer.value.clone());
-            self.report(result);
-        }
-        self.ui.dirty = true;
-    }
+
     #[cfg(not(target_os = "android"))]
     pub fn preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
         if self.ui_event(ui::Event::Preedit(&text, cursor)) { return; }
@@ -1263,7 +1166,6 @@ impl App {
             self.ui.dirty = true;
             return;
         }
-        if self.root.dialog.is_none() && self.root.viewer.is_none() && self.code_key(key, ctrl, shift) { return; }
         self.root.legacy.expansion_pin = None;
         self.root.legacy.wheel = None;
         if key == "Escape" {
@@ -1274,13 +1176,9 @@ impl App {
             }
             return;
         }
-        if ctrl && key.eq_ignore_ascii_case("v") {
-            let field = self.root.legacy.focus.unwrap_or(None);
-            self.with_ui(|_, cx| cx.paste(ui::EditorTarget::Legacy(field)));
-            return;
-        }
+
         if ctrl && (key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("x")) {
-            if self.root.legacy.focus.is_none() {
+            if self.ui.focus.is_none() {
                 if let Some(text) = self.services.renderer.selected_text() {
                     self.services.platform.push(PlatformAction::Copy(text));
                 }
@@ -1295,14 +1193,10 @@ impl App {
             }
             return;
         }
-        if key == "Enter" && !shift && !self.ui.mobile && self.root.legacy.focus == Some(None) {
+        if key == "Enter" && !shift && !self.ui.mobile && self.ui.focus == Some(self.root.composer.field.control.target) {
             self.activate(Action::Send);
             return;
         }
-        let Some((editor, renderer)) = self.editor_and_renderer() else { return; };
-        let changed = editor.key(&mut renderer.text, renderer.faces.prose[0], key, ctrl, shift);
-        if changed { self.edited(); }
-        self.ui.dirty = true;
     }
     fn activate(&mut self, action: Action) {
         let result = self.apply(action);
@@ -1358,7 +1252,7 @@ impl App {
                 self.save()?;
                 self.controller.new_chat()?;
                 self.root.legacy.show_chats = false;
-                self.root.legacy.focus = Some(None);
+                self.ui.focus=Some(self.root.composer.field.control.target);
             }
             Action::RetryCreate => self.controller.retry_create_manually()?,
             Action::Back => self.back(),
@@ -1367,7 +1261,7 @@ impl App {
                 self.close_code();
                 self.save()?;
                 self.cancel_pointer();
-                self.root.legacy.focus = None;
+                self.ui.focus = None;
                 self.root.attachments.show = !self.root.attachments.show;
                 self.root.legacy.show_chats = false;
                 self.root.legacy.history_attempt = None;
@@ -1390,11 +1284,9 @@ impl App {
             Action::ForgetControl(id) => { self.open_ui(ui::DialogSpec::Operation(ui::Operation::ForgetControl(id)))?; }
             Action::Settings => self.open_ui(ui::DialogSpec::Connection)?,
             Action::Focus(field) => {
-                self.root.legacy.focus = Some(field);
-                if self.ui.mobile && let Some(editor) = self.editor() {
-                    let id = editor.native_id();
-                    self.with_ui(|_, cx| cx.focus_native(ui::EditorTarget::Legacy(field), id));
-                }
+                let target=if field.is_none(){Some(self.root.composer.field.control.target)}else{self.root.code.view.as_ref().and_then(|v|v.search.as_ref()).map(|f|f.control.target)};
+                self.ui.focus=target;
+                if self.ui.mobile && let Some(target)=target && let Some(field)=self.root.editor_ref(Some(target)){let id=field.editor.native_id();self.with_ui(|_,cx|cx.focus_native(target,id));}
             }
             Action::Confirm => { self.ui_event(ui::Event::Submit); }
             Action::CancelModal => { self.ui_event(ui::Event::Back); }
@@ -1412,7 +1304,7 @@ impl App {
                     text,
                 })?;
                 
-                self.root.legacy.focus = None;
+                self.ui.focus = None;
             }
             Action::Rename(id) => { self.open_ui(ui::DialogSpec::Operation(ui::Operation::Rename(id)))?; }
             Action::Delete(id) => { self.open_ui(ui::DialogSpec::Operation(ui::Operation::Delete(id)))?; }
@@ -1433,10 +1325,10 @@ impl App {
                 }
             }
             Action::Send => {
-                if let Some(code)=&self.root.legacy.code {anyhow::ensure!(code.selection.is_some() && code.error.is_none(), "Select current lines again before sending this code comment");}
-                if self.root.legacy.code.is_some() {self.code_reference(false);}
+                if let Some(code)=&self.root.code.view {anyhow::ensure!(code.selection.is_some() && code.error.is_none(), "Select current lines again before sending this code comment");}
+                if self.root.code.view.is_some() {self.code_reference(false);}
                 self.controller.send_prompt()?;
-                if let Some(code)=&mut self.root.legacy.code { code.sent(); }
+                if let Some(code)=&mut self.root.code.view { code.sent(); }
                 self.replace_composer(self.controller.selected().map(|c| c.local.draft.clone()).unwrap_or_default());
             },
             Action::Abort => {
@@ -1557,6 +1449,7 @@ impl App {
         let mut body = Layer::new(background_input);
         let mut chrome = Layer::new(background_input);
         let mut overlay = Layer::new(input);
+        self.root.composer.hide();self.root.quick_models.controls.begin();
         self.root.sidebar.hide();
         self.root.legacy.cards.begin();
         self.root.legacy.hits.clear();
@@ -1572,7 +1465,7 @@ impl App {
         self.root.legacy.info_areas.clear();
         self.root.tooltips.usage.region = Rect::new(0., 0., 0., 0.);
         self.root.tooltips.info.region = Rect::new(0., 0., 0., 0.);
-        self.root.legacy.composer.hide();
+        self.root.composer.field.editor.hide();
 
         self.services.renderer.clear_scenes();
         main.rect(bounds, color(0x0e141b));
@@ -1940,7 +1833,7 @@ impl App {
         rows
     }
     fn chat(&mut self, ctx: &impl RenderContext, layer: &mut Layer, chrome: &mut Layer, b: Rect, interests: &mut std::collections::BTreeSet<String>) {
-        if self.root.legacy.code.is_some() { self.code_frame(ctx, layer, chrome, b); return; }
+        if self.root.code.view.is_some() { self.code_frame(ctx, layer, chrome, b); return; }
         let s = self.ui.scale;
         let paint_at = Instant::now();
         let wide = self.ui.size.0 as f32 / s >= 760.;
@@ -2419,375 +2312,40 @@ impl App {
         self.scrollbar(chrome, Lane::Transcript, viewport);
         self.draw_composer(ctx, chrome, b, &session, false);
     }
-    fn composer_layout(&mut self, b: Rect, session: &str) -> (f32, f32, f32, f32, f32) {
-        let s = self.ui.scale;
-        let files = &self.controller.chats[session].local.files;
-        let width = (b.width - 28. * s).min(900. * s).max(160. * s);
-        let x = b.x + (b.width - width) / 2.;
-        let editor_h = self
-            .root.legacy.composer
-            .height(&mut self.services.renderer, width - 132. * s, 16. * s);
-        let queue = &self.controller.chats[session].feed.queue;
-        let controls = queue
-            .control
-            .as_ref()
-            .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
-        let chrome = (44. + if files.is_empty() { 0. } else { 40. } + if controls { 40. } else { 0. }) * s;
-        let editor_h = if self.ui.mobile { editor_h.min((b.height - 80. * s - chrome).max(16. * s)) } else { editor_h };
-        let composer_h = editor_h + chrome;
-        let bottom = b.y + b.height;
-        let composer_top = (bottom - composer_h).max(b.y + 80. * s);
-        (x, width, editor_h, composer_h, composer_top)
+
+
+
+
+    fn composer_layout(&mut self,b:Rect,session:&str)->(f32,f32,f32,f32,f32){self.with_ui(|root,cx|root.composer.layout(cx,b,session))}
+    fn draw_composer(&mut self,_gpu:&impl RenderContext,layer:&mut Layer,bounds:Rect,_session:&str,in_code:bool){
+        let ready=self.root.code.view.as_ref().is_some_and(|c|c.selection.is_some()&&c.error.is_none());let away=self.root.legacy.scroll+24.*self.ui.scale<self.root.legacy.max_scroll;
+        self.with_ui(|root,cx|{root.composer.in_code=in_code;root.composer.code_ready=ready;root.composer.away_from_tail=away;root.composer.visit_perframe(&mut ui::Frame {layer,bounds,clip:bounds},cx);});
+        self.root.tooltips.usage.region=self.root.composer.usage_rect;self.root.tooltips.usage.content=self.root.composer.usage.clone();
     }
-    fn draw_composer(&mut self, ctx: &impl RenderContext, chrome: &mut Layer, b: Rect, session: &str, in_code: bool) {
-        let s = self.ui.scale;
-        let (x, width, editor_h, composer_h, composer_top) = self.composer_layout(b, session);
-        let files = self.controller.chats[session].local.files.clone();
-        let controls = self.controller.chats[session].feed.queue.control.as_ref().is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
-        let summary = self.controller.account.sessions.iter().find(|s| s.id == session).cloned();
-        chrome.rect(
-            Rect::new(b.x, composer_top, b.width, composer_h),
-            color(0x0e141b),
-        );
-        let creating = self.controller.is_creating(&session);
-        let choosing = self.controller.chats[session].model_request.is_some();
-        let status_rect = Rect::new(x, composer_top + 10. * s,
-            (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s);
-        if creating || choosing {
-            self.services.renderer.label(chrome,
-                if creating { "Creating chat… Sends are saved locally." }
-                    else { "Selecting model… Sends are saved locally." },
-                status_rect, 12. * s, color(0x82909f), false);
-        } else {
-            self.composer_model_status(chrome, summary.as_ref(), status_rect);
-        }
-        if creating && self.controller.epoch.is_some() {
-            button(&mut self.services.renderer, chrome, &mut self.root.legacy.hits,
-                Rect::new(x + width - 88. * s, composer_top + 6. * s, 88. * s, 24. * s),
-                "Retry", Action::RetryCreate, s, false);
-        }
-        chrome.rect(Rect::new(b.x, composer_top, b.width, s), color(0x2a3541));
-        let field = Rect::new(x, composer_top + 32. * s, width, editor_h);
-        let edge = if self.root.legacy.focus == Some(None) { 2. * s } else { s };
-        chrome.rounded_rect(
-            field,
-            4. * s,
-            color(if self.root.legacy.focus == Some(None) {
-                0x67d4ff
-            } else {
-                0x526170
-            }),
-        );
-        chrome.rounded_rect(
-            Rect::new(
-                field.x + edge,
-                field.y + edge,
-                field.width - 2. * edge,
-                field.height - 2. * edge,
-            ),
-            3. * s,
-            color(0x0e141b),
-        );
-        let composer_rect = Rect::new(
-            field.x + 40. * s,
-            field.y,
-            field.width - 132. * s,
-            field.height,
-        );
-        self.root.legacy.composer.draw(
-            &mut self.services.renderer,
-            chrome,
-            composer_rect,
-            16. * s,
-            self.root.legacy.focus == Some(None),
-            false,
-            "Message Tau",
-            false,
-        );
-        self.root.legacy.hits.push(Hit {
-            rect: composer_rect,
-            action: Action::Focus(None),
-        });
-        let iy = field.y + (field.height - 40. * s) / 2.;
-        let connected = self.controller.epoch.is_some();
-        self.icon_button(
-            ctx,
-            chrome,
-            Rect::new(field.x + 4. * s, iy, 36. * s, 40. * s),
-            Icon::Attach,
-            22.,
-            Action::Attach,
-            false,
-            true,
-        );
-        let usage_rect = Rect::new(field.x + field.width - 84. * s, iy, 40. * s, 40. * s);
-        let usage = summary.as_ref().and_then(|s| s.context_usage);
-        let (ratio, usage_text) = context_usage_display(usage);
-        self.icon_button(
-            ctx,
-            chrome,
-            usage_rect,
-            Icon::Context(ratio),
-            20.,
-            Action::Usage,
-            false,
-            true,
-        );
-        self.root.tooltips.usage.region = usage_rect;
-        self.root.tooltips.usage.content = usage_text;
-        if usage.is_some()
-            && (!connected
-                || !self.controller.chats[session].feed.synchronized
-                || summary.as_ref().is_none_or(|s| {
-                    !matches!(s.status, SessionStatus::Idle | SessionStatus::Running)
-                }))
-        {
-            self.root.tooltips.usage.content.line().dim("Last known value");
-        }
-        match summary.as_ref().and_then(|s|s.model.as_ref()).map(|m|m.provider.as_str()) {
-            Some("openai-codex") => {
-                self.root.tooltips.usage.content.line().line();
-                self.root.tooltips.usage.content.append(self.controller.codex_usage.content(connected));
-            }
-            Some(_) => { self.root.tooltips.usage.content.line().line().dim("Account quota unavailable for this provider"); }
-            None => { self.root.tooltips.usage.content.line().line().dim("Account quota unavailable (model unknown)"); }
-        }
-        let can_send = (!self.root.legacy.composer.value.trim().is_empty() || !files.is_empty())
-            && (!in_code || self.root.legacy.code.as_ref().is_some_and(|c|c.selection.is_some() && c.error.is_none()));
-        self.icon_button(
-            ctx,
-            chrome,
-            Rect::new(field.x + field.width - 44. * s, iy, 40. * s, 40. * s),
-            Icon::Send,
-            20.,
-            Action::Send,
-            true,
-            can_send,
-        );
-        let controls_y = field.y + field.height + 4. * s;
-        if !in_code && self.root.legacy.scroll + 24. * s < self.root.legacy.max_scroll {
-            self.icon_button(
-                ctx,
-                chrome,
-                Rect::new(x + width - 40. * s, composer_top - 48. * s, 40. * s, 40. * s),
-                Icon::ChevronDown,
-                20.,
-                Action::Tail,
-                true,
-                true,
-            );
-        }
-        let queue = &self.controller.chats[session].feed.queue;
-        if let Some(control) = &queue.control
-            && matches!(control.status.as_str(), "waiting" | "applying")
-        {
-            button(
-                &mut self.services.renderer,
-                chrome,
-                &mut self.root.legacy.hits,
-                Rect::new(x, controls_y, 100. * s, 30. * s),
-                "Cancel control",
-                Action::Queue(QueueOperation::Cancel {
-                    control_id: control.command_id.clone(),
-                }),
-                s,
-                false,
-            );
-        }
-        let mut fx = x;
-        for file in files {
-            let label = format!("{} ×", file.name);
-            let fw = ((label.chars().count() as f32 * 7. + 20.) * s).min(width);
-            if fx + fw > x + width {
-                break;
-            }
-            button(
-                &mut self.services.renderer,
-                chrome,
-                &mut self.root.legacy.hits,
-                Rect::new(
-                    fx,
-                    controls_y + if controls { 40. * s } else { 0. },
-                    fw,
-                    30. * s,
-                ),
-                &label,
-                Action::RemoveFile(file.id),
-                s,
-                false,
-            );
-            fx += fw + 6. * s;
-        }
-        // Slash completion uses optional arguments advertised by the daemon.
-        if self.root.legacy.composer.value.starts_with('/')
-            && !self.root.legacy.composer.value.contains('\n')
-            && self.root.legacy.focus == Some(None)
-        {
-            let query = &self.root.legacy.composer.value[1..];
-            let mut suggestions = vec![];
-            for command in &self.controller.chats[session].commands {
-                if let Some(arg) = query.strip_prefix(&format!("{} ", command.name)) {
-                    for a in &command.arguments {
-                        if a.value.starts_with(arg) {
-                            suggestions.push(format!("/{} {}", command.name, a.value));
-                        }
-                    }
-                } else if command.name.starts_with(query) {
-                    suggestions.push(format!("/{} ", command.name));
-                }
-            }
-            for (i, text) in suggestions.into_iter().take(5).enumerate() {
-                button(
-                    &mut self.services.renderer,
-                    chrome,
-                    &mut self.root.legacy.hits,
-                    Rect::new(x, composer_top - (i + 1) as f32 * 36. * s, width, 34. * s),
-                    text.trim(),
-                    Action::Suggest(text.clone()),
-                    s,
-                    false,
-                );
-            }
-        }
-    }
-    fn quick_models_height(&self, width: f32) -> f32 {
-        let columns = if width / self.ui.scale >= 520. { 2 } else { 1 };
-        (72. + self
-            .controller
-            .model_preferences
-            .slugs
-            .len()
-            .div_ceil(columns) as f32
-            * 84.
-            + 48.)
-            * self.ui.scale
-    }
-    fn quick_models_frame(&mut self, layer: &mut Layer, session: &str, b: Rect, clip: Rect) {
-        let s = self.ui.scale;
-        let chat = &self.controller.chats[session];
-        let connected = self.controller.epoch.is_some();
-        let busy = chat.model_request.is_some();
-        let hint = if !connected {
-            "Connect to choose a model"
-        } else if busy {
-            "Selecting model… your draft is kept"
-        } else {
-            "Choose before your first message"
-        };
-        self.services.renderer.clipped_label(
-            layer,
-            "Choose a model",
-            Rect::new(b.x, b.y, b.width, 28. * s),
-            20. * s,
-            color(0xe5eaf0),
-            true,
-            clip,
-        );
-        self.services.renderer.clipped_label(
-            layer,
-            hint,
-            Rect::new(b.x, b.y + 32. * s, b.width, 34. * s),
-            12. * s,
-            color(0xb7c2ce),
-            false,
-            clip,
-        );
-        let columns = if b.width / s >= 520. { 2 } else { 1 };
-        let w = (b.width - (columns - 1) as f32 * 8. * s) / columns as f32;
-        let current = self
-            .controller
-            .account
-            .sessions
-            .iter()
-            .find(|c| c.id == session)
-            .and_then(|c| c.model.as_ref())
-            .map(|m| format!("{}/{}", m.provider, m.model_id));
-        for (i, selector) in self.controller.model_preferences.slugs.iter().enumerate() {
-            let r = Rect::new(
-                b.x + (i % columns) as f32 * (w + 8. * s),
-                b.y + (72. + (i / columns) as f32 * 84.) * s,
-                w,
-                76. * s,
-            );
-            let valid = selector.parse::<tau_protocol::SessionModel>().is_ok();
-            let selected = current.as_deref() == Some(selector.as_str());
-            let enabled = connected && !busy && valid;
-            let base = color(if selected { 0x303a66 } else { 0x18212b });
-            layer.clipped_rounded_rect(
-                r,
-                12. * s,
-                if enabled {
-                    layer.control_color(r, base)
-                } else {
-                    base
-                },
-                clip,
-            );
-            self.services.renderer.clipped_label(
-                layer,
-                selector,
-                Rect::new(r.x + 12. * s, r.y + 10. * s, w - 24. * s, 32. * s),
-                12. * s,
-                color(if enabled || selected {
-                    0xe5eaf0
-                } else {
-                    0x82909f
-                }),
-                false,
-                crate::render::intersect(r, clip),
-            );
-            let status = if !connected {
-                "Offline"
-            } else if !valid {
-                "Invalid provider/model ID"
-            } else if chat
-                .model_request
-                .as_ref()
-                .is_some_and(|(_, slug)| slug == selector)
-            {
-                "Selecting…"
-            } else if selected {
-                "Selected"
-            } else {
-                "Select"
-            };
-            self.services.renderer.clipped_label(
-                layer,
-                status,
-                Rect::new(r.x + 12. * s, r.y + 54. * s, w - 24. * s, 16. * s),
-                11. * s,
-                color(if selected { 0x67d4ff } else { 0xb7c2ce }),
-                false,
-                crate::render::intersect(r, clip),
-            );
-            if enabled {
-                self.root.legacy.hits.push(Hit {
-                    rect: crate::render::intersect(r, clip),
-                    action: Action::ChooseModel(session.into(), selector.clone()),
-                });
-            }
-        }
-        let r = Rect::new(b.x, b.y + b.height - 40. * s, b.width, 32. * s);
-        layer.clipped_rounded_rect(r, 16. * s, layer.control_color(r, color(0x18212b)), clip);
-        self.services.renderer.clipped_label(
-            layer,
-            "Configure quick models…",
-            Rect::new(r.x + 12. * s, r.y + 7. * s, r.width - 24. * s, 20. * s),
-            12. * s,
-            color(0x67d4ff),
-            false,
-            crate::render::intersect(r, clip),
-        );
-        self.root.legacy.hits.push(Hit {
-            rect: crate::render::intersect(r, clip),
-            action: Action::ModelSettings,
-        });
-    }
+    fn quick_models_height(&mut self,width:f32)->f32{self.with_ui(|root,cx|root.quick_models.height(cx,width))}
+    fn quick_models_frame(&mut self,layer:&mut Layer,_session:&str,bounds:Rect,clip:Rect){self.with_ui(|root,cx|root.quick_models.visit_perframe(&mut ui::Frame {layer,bounds,clip},cx));}
+    #[cfg(test)]
+    fn composer_model_status(&mut self,layer:&mut Layer,summary:Option<&SessionSummary>,rect:Rect){self.with_ui(|root,cx|root.composer.model_status(cx,layer,summary,rect));}
     #[cfg(test)]
     fn notice_frame(&mut self, _ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
         self.with_ui(|root, cx| root.notice.visit_perframe(&mut ui::Frame { layer, bounds: b, clip: b }, cx));
     }
 
+    pub(super) fn close_code(&mut self){self.with_ui(|root,cx|root.code.close_code(cx));}
+    pub(super) fn code_tick(&mut self,dt:f32){self.ui.covered=self.root.dialog.is_some()||self.root.viewer.is_some();self.ui.composing=self.composing();self.with_ui(|root,cx|{root.code.code_tick(dt,cx);root.composer.bind(cx);});}
+    pub(super) fn code_reference(&mut self,remove:bool){self.with_ui(|root,cx|{root.code.code_reference(remove,cx);root.composer.bind(cx);});}
+    pub(super) fn code_back(&mut self){self.with_ui(|root,cx|root.code.code_back(cx));}
+    fn code_action(&mut self,action:Action)->Result<()>{
+        use code_view::Choice as C;
+        let choice=match action {Action::Files=>C::Files,Action::FileClose=>C::FileClose,Action::FileOpen(p,d)=>C::FileOpen(p,d),Action::FileUp=>C::FileUp,Action::FileFindHere=>C::FileFindHere,Action::FileFind=>C::FileFind,Action::FileClear=>C::FileClear,Action::FileCopy=>C::FileCopy,Action::FilePage(n)=>C::FilePage(n),_=>return Ok(())};
+        self.save()?;let result=self.with_ui(|root,cx|root.code.code_action(choice,cx));if self.root.code.view.is_some(){self.root.legacy.show_chats=false;self.root.attachments.show=false;}result
+    }
+    fn code_frame(&mut self,ctx:&impl RenderContext,body:&mut Layer,chrome:&mut Layer,b:Rect){
+        let Some(view)=&self.root.code.view else{return;};let comments=view.search.is_none()&&view.document.is_some()&&(view.selection.is_some()||self.ui.focus==self.ui.composer);let session=self.controller.account.selected.clone().unwrap();
+        let bottom=comments.then(||self.composer_layout(b,&session).4);
+        self.with_ui(|root,cx|{root.code.composer_bottom=bottom;root.code.visit_perframe(&mut ui::Frame {layer:body,bounds:b,clip:b},cx);});
+        if comments{self.draw_composer(ctx,chrome,b,&session,true);}
+    }
     pub fn context_at(&mut self, point: Vec2) {
         if self.ui_event(ui::Event::Context(point)) { return; }
         if self.root.dialog.is_some() { return; }

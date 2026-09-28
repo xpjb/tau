@@ -5,7 +5,6 @@ use std::time::Instant;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
     Transcript,
-    Files,
     Horizontal,
 }
 pub struct Wheel {

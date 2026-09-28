@@ -8,7 +8,7 @@ use std::{collections::VecDeque, sync::atomic::{AtomicU64, Ordering}};
 pub(super) mod controls;
 mod dialogs;
 mod settings;
-mod scroll;
+pub(super) mod scroll;
 mod viewer;
 mod notice;
 mod tooltips;
@@ -21,6 +21,8 @@ pub(super) use menu::{Menu, Choice as MenuChoice};
 pub(super) use tooltips::TooltipHost;
 pub(super) use notice::NoticeWidget;
 pub(super) use viewer::{ImageSpec, ImageViewer};
+pub(super) mod composer;
+pub(super) use composer::{Composer,QuickModels};
 mod operations;
 pub(super) use operations::Operation;
 pub(super) use dialogs::{Dialog, DialogSpec, TopicEdit};
@@ -41,17 +43,15 @@ pub(super) struct Capture {
     pub target: Target, pub pointer: u64, pub start: Vec2, pub point: Vec2,
     pub touch: bool, pub dragged: bool, pub claimed: bool, pub started: std::time::Instant,
 }
-#[derive(Clone, Copy)]
-pub(super) enum EditorTarget { Widget(Target), Legacy(Option<usize>) }
 pub(super) struct NativeEdit {
-    pub token: u64, pub target: EditorTarget,
-    identity: String, lineage: Option<String>, session: Option<String>,
+    pub token: u64, pub target: Target,
+    identity: String, lineage: Option<String>, session: Option<String>, session_bound: bool,
 }
 impl NativeEdit {
     pub fn matches(&self, token: u64, model: &Controller) -> bool {
         self.token == token && self.identity == model.identity
             && self.lineage == model.account.source_lineage
-            && (matches!(self.target, EditorTarget::Widget(_)) || self.session == model.account.selected)
+            && (!self.session_bound || self.session == model.account.selected)
     }
 }
 
@@ -83,11 +83,11 @@ impl Context<'_> {
         if let Err(error) = result { self.model.report_error(error); }
         self.ui.dirty = true;
     }
-    pub fn focus_native(&mut self, target: EditorTarget, id: u64) {
+    pub fn focus_native(&mut self, target: Target, id: u64) {
         let mut edit = self.ui.edit_target(self.model, target); edit.token = id;
         self.ui.native = Some(edit); self.ui.input_request += 1;
     }
-    pub fn paste(&mut self, target: EditorTarget) {
+    pub fn paste(&mut self, target: Target) {
         let edit = self.ui.edit_target(self.model, target);
         let token = edit.token;
         self.ui.paste = Some(edit);
@@ -118,13 +118,19 @@ pub(super) struct RootWidget {
     pub(super) tooltips: TooltipHost,
     pub(super) attachments: AttachmentBrowser,
     pub(super) sidebar: Sidebar,
+    pub(super) code: super::code_view::CodeBrowser,
+    pub(super) composer: Composer, pub(super) quick_models: QuickModels,
 }
 impl RootWidget {
     pub fn editor(&mut self, focus: Option<Target>) -> Option<&mut TextField> {
-        self.dialog.as_mut()?.field(focus?)
+        if let Some(dialog)=&mut self.dialog{return dialog.field(focus?);}
+        if focus==Some(self.composer.field.control.target){return Some(&mut self.composer.field);}
+        self.code.view.as_mut()?.search.as_mut().filter(|f|Some(f.control.target)==focus)
     }
     pub fn editor_ref(&self, focus: Option<Target>) -> Option<&TextField> {
-        self.dialog.as_ref()?.field_ref(focus?)
+        if let Some(dialog)=&self.dialog{return dialog.field_ref(focus?);}
+        if focus==Some(self.composer.field.control.target){return Some(&self.composer.field);}
+        self.code.view.as_ref()?.search.as_ref().filter(|f|Some(f.control.target)==focus)
     }
 }
 impl Widget for RootWidget {
@@ -134,7 +140,9 @@ impl Widget for RootWidget {
             if let Some(menu) = &mut self.menu { return menu.handle_event(event,cx); }
             if self.notice.handle_event(event, cx) { return true; }
             if self.tooltips.handle_event(event, cx) { return true; }
-            let handled = self.attachments.handle_event(event,cx) || self.sidebar.handle_event(event,cx) || self.legacy.cards.event(event,cx);
+            let handled = self.attachments.handle_event(event,cx) || self.sidebar.handle_event(event,cx) || self.code.handle_event(event,cx) || self.composer.handle_event(event,cx) || self.quick_models.handle_event(event,cx) || self.legacy.cards.event(event,cx);
+            if self.code.view.is_some(){self.legacy.show_chats=false;self.attachments.show=false;}
+            self.composer.bind(cx);
             self.tooltips.hint(cx);
             return handled;
         };
@@ -171,6 +179,8 @@ pub(crate) struct UiState {
     pub(crate) window_focused: bool,
     pub(crate) dirty: bool,
     pub(super) focus: Option<Target>,
+    pub(super) composer: Option<Target>, pub(super) search: Option<Target>,
+    pub(super) covered: bool, pub(super) composing: bool,
     pub(super) capture: Option<Capture>,
     pub(super) hover: Option<Vec2>,
     pub(super) hint: Option<(Rect, super::Info)>,
@@ -185,11 +195,11 @@ pub(crate) struct UiState {
 impl UiState {
     pub fn new(size: (u32, u32), mobile: bool) -> Self {
         Self { size, origin: Vec2::new(0., 0.), scale: 1., mobile, window_focused: true, dirty: true,
-            focus: None, capture: None, hover: None, hint: None, menu_chat: None, menu_section: None, hot: None, requests: VecDeque::new(), return_to: None, native: None, input_request: 0, paste: None }
+            focus: None, composer: None, search: None, covered: false, composing: false, capture: None, hover: None, hint: None, menu_chat: None, menu_section: None, hot: None, requests: VecDeque::new(), return_to: None, native: None, input_request: 0, paste: None }
     }
-    fn edit_target(&self, model: &Controller, target: EditorTarget) -> NativeEdit {
+    fn edit_target(&self, model: &Controller, target: Target) -> NativeEdit {
         NativeEdit { token: Id::new().0, target, identity: model.identity.clone(),
-            lineage: model.account.source_lineage.clone(), session: model.account.selected.clone() }
+            lineage: model.account.source_lineage.clone(), session: model.account.selected.clone(), session_bound: Some(target)==self.composer || Some(target)==self.search }
     }
     pub fn cancel(&mut self) {
         self.capture = None; self.hot = None; self.hover = None; self.dirty = true;
@@ -197,22 +207,22 @@ impl UiState {
         // Scope, buffer revision and source checks own that lifetime.
     }
     pub(super) fn navigation_changed(&mut self) {
-        if self.native.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Legacy(_))) { self.native = None; }
-        if self.paste.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Legacy(_))) { self.paste = None; }
+        if self.native.as_ref().is_some_and(|e| e.session_bound) { self.native = None; }
+        if self.paste.as_ref().is_some_and(|e| e.session_bound) { self.paste = None; }
     }
     pub(super) fn detach_target(&mut self, target: Target) {
         if self.focus == Some(target) { self.focus = None; }
         if self.capture.is_some_and(|c| c.target == target) { self.capture = None; }
         if self.hot.is_some_and(|(t,_)| t == target) { self.hot = None; }
-        if self.native.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Widget(t) if t == target)) { self.native = None; }
-        if self.paste.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Widget(t) if t == target)) { self.paste = None; }
+        if self.native.as_ref().is_some_and(|e| e.target == target) { self.native = None; }
+        if self.paste.as_ref().is_some_and(|e| e.target == target) { self.paste = None; }
     }
     pub(super) fn detach(&mut self, scope: Id) {
         if self.focus.is_some_and(|target| target.scope == scope) { self.focus = None; }
         if self.capture.is_some_and(|capture| capture.target.scope == scope) { self.capture = None; }
         if self.hot.is_some_and(|(target, _)| target.scope == scope) { self.hot = None; }
-        if self.native.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Widget(t) if t.scope == scope)) { self.native = None; }
-        if self.paste.as_ref().is_some_and(|e| matches!(e.target, EditorTarget::Widget(t) if t.scope == scope)) { self.paste = None; }
+        if self.native.as_ref().is_some_and(|e| e.target.scope == scope) { self.native = None; }
+        if self.paste.as_ref().is_some_and(|e| e.target.scope == scope) { self.paste = None; }
         self.dirty = true;
     }
 }

@@ -20,7 +20,7 @@ impl Harness {
         crate::demo::populate(&mut app.controller).unwrap();
         app.resize(ctx.size(), 1., Vec2::new(0., 0.));
         app.tick(0.);
-        app.root.legacy.focus = Some(None);
+        app.ui.focus=Some(app.root.composer.field.control.target);
         Self { app, ctx, _root: root }
     }
     fn frame(&mut self) -> Vec<u8> {
@@ -94,7 +94,7 @@ fn composer_navigation_repaints_without_sqlite_draft_writes_or_reshaping() {
     assert_eq!(h.app.controller.selected().unwrap().local.draft, "abcdefghij\nab\nabcdefghj\n👩‍💻");
     assert_eq!(db.query_row("SELECT count(*) FROM editor_writes", [], |r| r.get::<_, u32>(0)).unwrap(), 1);
     h.app.key("z", true, false);
-    assert_eq!(h.app.root.legacy.composer.value, "abcdefghij\nab\nabcdefghij\n👩‍💻");
+    assert_eq!(h.app.root.composer.field.editor.value, "abcdefghij\nab\nabcdefghij\n👩‍💻");
 }
 
 #[test]

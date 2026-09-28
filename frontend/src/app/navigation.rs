@@ -43,7 +43,7 @@ impl App {
             self.root.legacy.scroll = 0.;
             self.root.legacy.horizontal = 0.;
             self.root.legacy.velocity = 0.;
-            self.root.legacy.composer = Editor::composer(
+            self.root.composer.field.editor = Editor::composer(
                 self.controller
                     .selected()
                     .map(|c| c.local.draft.clone())
@@ -55,11 +55,12 @@ impl App {
             if self.root.legacy.show_chats { self.root.attachments.show = false; }
             self.ui.dirty = true;
         } else if let Some(chat) = self.controller.selected()
-            && self.root.legacy.composer.value != chat.local.draft
+            && self.root.composer.field.editor.value != chat.local.draft
         {
             self.replace_composer(chat.local.draft.clone());
             self.ui.dirty = true;
         }
+        self.with_ui(|root,cx|root.composer.bind(cx));
     }
 
     pub(super) fn navigate_chat(&mut self, id: &str) -> Result<()> {
@@ -75,7 +76,7 @@ impl App {
         self.close_code();
         self.sync_navigation();
         self.root.legacy.show_chats = false;
-        self.root.legacy.focus = Some(None);
+        self.ui.focus=Some(self.root.composer.field.control.target);
         Ok(())
     }
 
@@ -90,7 +91,7 @@ impl App {
         self.sync_navigation();
         self.root.sidebar.scroll.value = 0.;
         self.root.legacy.show_chats = self.controller.account.selected.is_none();
-        self.root.legacy.focus = None;
+        self.ui.focus = None;
         Ok(())
     }
 
@@ -108,7 +109,7 @@ impl App {
         self.close_ui();
         
         self.root.viewer = None;
-        self.root.legacy.focus = None;
+        self.ui.focus = None;
         self.root.legacy.show_chats = false;
         self.root.attachments.show = false;
         self.root.sidebar.scroll.value = 0.;

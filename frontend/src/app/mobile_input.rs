@@ -1,64 +1,29 @@
-//! Same-window IME adapter. The focused retained field (or temporary legacy
-//! editor adapter) remains the rendered and hit-tested editor; no second screen.
+//! Same-window IME adapter. All input destinations are retained, source-bound fields.
 use super::*;
-use crate::mobile_input::{Edit, Input};
-
+use crate::mobile_input::{Edit,Input};
 impl App {
-    fn native_editor(&self) -> Option<&Editor> {
-        if !self.ui.mobile { return None; }
-        let edit = self.ui.native.as_ref()?;
-        if !edit.matches(edit.token, &self.controller) { return None; }
-        let editor = match edit.target {
-            ui::EditorTarget::Widget(target) if self.ui.focus == Some(target) => {
-                let field = self.root.editor_ref(Some(target))?;
-                if !field.control.enabled || field.control.rect.is_none()
-                    || field.control.clip.width <= 0. || field.control.clip.height <= 0. { return None; }
-                &field.editor
-            }
-            ui::EditorTarget::Legacy(field) if self.root.dialog.is_none()
-                && self.root.legacy.focus == Some(field) && self.root.viewer.is_none()
-                && self.root.menu.is_none() => {
-                if !self.root.legacy.hits.iter().any(|hit| matches!(hit.action, Action::Focus(i) if i == field)) { return None; }
-                match field {
-                    None if self.root.dialog.is_none() && self.root.legacy.navigation.session == self.controller.account.selected
-                        && self.root.legacy.navigation.identity == self.controller.identity => &self.root.legacy.composer,
-                    Some(code_view::SEARCH_FIELD) if self.root.dialog.is_none() => self.root.legacy.code.as_ref()?.search.as_ref()?,
-
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        (editor.native_id() == edit.token).then_some(editor)
+    fn native_editor(&self)->Option<&Editor>{
+        if !self.ui.mobile || self.root.viewer.is_some() || self.root.menu.is_some(){return None;}
+        let edit=self.ui.native.as_ref()?;
+        if !edit.matches(edit.token,&self.controller) || self.ui.focus!=Some(edit.target){return None;}
+        let field=self.root.editor_ref(Some(edit.target))?;
+        if !field.control.enabled || field.control.rect.is_none() || field.control.clip.width<=0. || field.control.clip.height<=0. {return None;}
+        (field.editor.native_id()==edit.token).then_some(&field.editor)
     }
-    pub fn native_input(&self) -> Option<Input> {
-        let mut input = self.native_editor()?.native_input(self.ui.input_request)?;
-        if let Some(ui::EditorTarget::Widget(target)) = self.ui.native.as_ref().map(|edit| edit.target) {
-            let field = self.root.editor_ref(Some(target))?;
-            let rect = crate::render::intersect(field.control.rect?, field.control.clip);
-            if rect.width <= 0. || rect.height <= 0. { return None; }
-            input.rect = [rect.x, rect.y, rect.width, rect.height];
-        }
-        Some(input)
+    pub fn native_input(&self)->Option<Input>{
+        let mut input=self.native_editor()?.native_input(self.ui.input_request)?;
+        let field=self.root.editor_ref(Some(self.ui.native.as_ref()?.target))?;
+        let rect=crate::render::intersect(field.control.rect?,field.control.clip);
+        if rect.width<=0.||rect.height<=0.{return None;}
+        input.rect=[rect.x,rect.y,rect.width,rect.height];Some(input)
     }
-    pub fn native_edit(&mut self, edit: Edit) {
-        if !self.native_editor().is_some_and(|editor| editor.accepts_native_edit(&edit)) { return; }
-        match self.ui.native.as_ref().unwrap().target {
-            ui::EditorTarget::Widget(target) => {
-                if let Some(field) = self.root.editor(Some(target)) { field.editor.native_edit(edit); }
-            }
-            ui::EditorTarget::Legacy(_) => {
-                if self.editor().is_some_and(|editor| editor.native_edit(edit)) { self.edited(); }
-            }
-        }
-        self.ui.dirty = true;
+    pub fn native_edit(&mut self,edit:Edit){
+        if !self.native_editor().is_some_and(|e|e.accepts_native_edit(&edit)){return;}
+        let target=self.ui.native.as_ref().unwrap().target;
+        let changed=self.root.editor(Some(target)).is_some_and(|f|f.editor.native_edit(edit));
+        if changed {self.edited();}self.ui.dirty=true;
     }
-    pub(super) fn replace_composer(&mut self, value: String) {
-        let active = self.ui.native.as_ref().is_some_and(|input| input.token == self.root.legacy.composer.native_id()
-            && matches!(input.target, ui::EditorTarget::Legacy(None)));
-        self.root.legacy.composer = Editor::composer(value);
-        if active { self.ui.native.as_mut().unwrap().token = self.root.legacy.composer.native_id(); }
-    }
+    pub(super) fn replace_composer(&mut self,value:String){self.with_ui(|root,cx|root.composer.replace(value,cx));}
 }
 
 #[cfg(test)]
@@ -79,7 +44,7 @@ mod tests {
         }
         fn frame(&mut self) { self.app.tick(0.); self.app.frame(&self.ctx, self.ctx.view()); }
         fn tap(&mut self, field: Option<usize>) {
-            let r = if let Some(d) = self.app.root.dialog.as_ref() { d.fields()[field.unwrap()].control.rect.unwrap() } else { self.app.root.legacy.hits.iter().find(|h| matches!(h.action, Action::Focus(i) if i == field)).unwrap().rect };
+            let r = if let Some(d) = self.app.root.dialog.as_ref() { d.fields()[field.unwrap()].control.rect.unwrap() } else { self.app.test_hits().iter().find(|h| matches!(h.action, Action::Focus(i) if i == field)).unwrap().rect };
             let p = Vec2::new(r.x + r.width / 2., r.y + r.height / 2.);
             self.app.press(1, p, true); self.app.release(1, p); self.frame();
         }
@@ -108,7 +73,7 @@ mod tests {
             assert_eq!(resized.text, text);
             assert!(h.app.root.legacy.transcript.height < full_height);
             assert!(resized.rect[1] + resized.rect[3] <= reduced.1 as f32);
-            let send = h.app.root.legacy.hits.iter().find(|h| matches!(h.action, Action::Send)).unwrap().rect;
+            let send = h.app.test_hits().iter().find(|h| matches!(h.action, Action::Send)).unwrap().rect;
             assert!(send.y + send.height <= reduced.1 as f32, "Send stays above the IME");
             assert!(h.app.ime_rect().unwrap().y < reduced.1 as f32);
             if let Some(dir) = std::env::var_os("TAU_INLINE_INPUT_PREVIEW_DIR") {
@@ -125,7 +90,7 @@ mod tests {
             assert_ne!(cleared.id,input.id);
             assert_eq!(cleared.request,input.request,"Send keeps, rather than reopens, the current keyboard");
             h.edit(&input,"late old draft"); h.frame();
-            assert!(h.app.root.legacy.composer.value.is_empty(),"late IME callbacks cannot resurrect a sent draft");
+            assert!(h.app.root.composer.field.editor.value.is_empty(),"late IME callbacks cannot resurrect a sent draft");
             h.app.resize(size, scale, Vec2::new(0.,0.)); h.frame();
             assert!(h.app.root.legacy.transcript.height > full_height);
         }
@@ -139,8 +104,8 @@ mod tests {
         db.execute_batch("CREATE TABLE edits (key TEXT); CREATE TRIGGER input_write AFTER UPDATE ON local WHEN NEW.key LIKE 'chat:%' BEGIN INSERT INTO edits VALUES (NEW.key); END;").unwrap();
         h.app.native_edit(Edit { id: composer.id, revision: composer.revision, text: "a😀word".into(), start: 3, end: 7,
             composing_start: 3, composing_end: 7 }); h.frame();
-        assert_eq!(h.app.root.legacy.composer.selected(), "word");
-        assert!(h.app.root.legacy.composer.composing());
+        assert_eq!(h.app.root.composer.field.editor.selected(), "word");
+        assert!(h.app.root.composer.field.editor.composing());
         let composing = h.app.native_input().unwrap();
         assert!(composing.same_configuration(&composer),"same-field native snapshots never restart or overwrite the IME");
         assert_eq!(db.query_row("SELECT count(*) FROM edits", [], |r| r.get::<_,u32>(0)).unwrap(),0);
@@ -171,11 +136,11 @@ mod tests {
         let input = h.app.native_input().unwrap();
         h.edit(&input,"one two three"); h.frame();
         h.app.key("Enter",false,false); h.frame();
-        assert_eq!(h.app.root.legacy.composer.value,"one two three\n");
+        assert_eq!(h.app.root.composer.field.editor.value,"one two three\n");
         assert!(h.app.controller.selected().unwrap().local.pending.is_empty(),"Enter is a newline, not Send");
         let input = h.app.native_input().unwrap();
         h.edit(&input,&"one two three\n".repeat(40)); h.frame();
-        let original = h.app.root.legacy.composer.value.clone();
+        let original = h.app.root.composer.field.editor.value.clone();
         let pixels = h.ctx.read_rgba8().unwrap();
         let transcript = h.app.root.legacy.scroll;
         let field = h.app.native_input().unwrap().rect;
@@ -184,7 +149,7 @@ mod tests {
         h.app.press(3,start,true); h.app.motion(3,end); h.app.release(3,end); h.frame();
         assert_ne!(pixels,h.ctx.read_rgba8().unwrap(),"long drafts scroll inside their textarea");
         assert_eq!(h.app.root.legacy.scroll,transcript);
-        assert_eq!(h.app.root.legacy.composer.value,original);
+        assert_eq!(h.app.root.composer.field.editor.value,original);
         let scrolled = h.ctx.read_rgba8().unwrap();
         let duplicate = h.app.native_input().unwrap();
         h.edit(&duplicate,&original); h.frame();
@@ -196,12 +161,12 @@ mod tests {
         let point = Vec2::new(caret.x+0.1,caret.y+caret.height/2.);
         let stale = h.app.native_input().unwrap();
         h.app.press(4,point,true);
-        h.app.root.legacy.pointer.as_mut().unwrap().started = Instant::now()-std::time::Duration::from_millis(600);
+        h.app.ui.capture.as_mut().unwrap().started = Instant::now()-std::time::Duration::from_millis(600);
         h.app.release(4,point); h.frame();
-        assert_eq!(h.app.root.legacy.composer.selected(),"two");
+        assert_eq!(h.app.root.composer.field.editor.selected(),"two");
         assert!(h.app.actions().iter().any(|a| matches!(a,PlatformAction::InputMenu)),"long press requests normal clipboard actions");
         h.edit(&stale,"late text before caret move"); h.frame();
-        assert_eq!(h.app.root.legacy.composer.value,original);
+        assert_eq!(h.app.root.composer.field.editor.value,original);
     }
 
 }

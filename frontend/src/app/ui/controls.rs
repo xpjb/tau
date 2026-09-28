@@ -1,4 +1,4 @@
-use super::{Capture, Context, EditorTarget, Event, Frame, Id, Target, Widget};
+use super::{Capture, Context, Event, Frame, Id, Target, Widget};
 use crate::{editor::Editor, render::{color, contains, contains_rounded, Interaction, Layer, Renderer}};
 use sanscale::{Rect, Vec2};
 
@@ -100,10 +100,11 @@ pub(in crate::app) struct TextField {
     pub secret: bool,
     pub placeholder: String,
     pub size: f32,
+    pub decorated: bool,
 }
 impl TextField {
     pub fn new(scope: Id, label: &str, editor: Editor) -> Self {
-        Self { control: Control::new(scope, false), editor, label: label.into(), secret: false, placeholder: String::new(), size: 15. }
+        Self { control: Control::new(scope, false), editor, label: label.into(), secret: false, placeholder: String::new(), size: 15., decorated: true }
     }
 }
 impl Widget for TextField {
@@ -149,7 +150,7 @@ impl Widget for TextField {
                 if self.editor.composing() {
                     if key == "Escape" { self.editor.preedit(String::new(), None); }
                 } else if ctrl && key.eq_ignore_ascii_case("v") {
-                    cx.paste(EditorTarget::Widget(target));
+                    cx.paste(target);
                 } else if ctrl && (key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("x")) {
                     cx.services.platform.push(super::PlatformAction::Copy(self.editor.selected().into()));
                     if key.eq_ignore_ascii_case("x") { self.editor.replace(""); }
@@ -173,14 +174,14 @@ impl Widget for TextField {
                     self.editor.select_word(); cx.services.platform.push(super::PlatformAction::InputMenu);
                 }
             }
-            cx.focus_native(EditorTarget::Widget(target), self.editor.native_id());
+            cx.focus_native(target, self.editor.native_id());
         }
         handled
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         self.control.rect = Some(frame.bounds); self.control.clip = frame.clip;
         frame.layer.with_clip(frame.clip, |layer| self.editor.draw(&mut cx.services.renderer, layer, frame.bounds, self.size * cx.ui.scale,
-            self.control.enabled && cx.ui.focus == Some(self.control.target), self.secret, &self.placeholder, true));
+            self.control.enabled && cx.ui.focus == Some(self.control.target), self.secret, &self.placeholder, self.decorated));
     }
 }
 

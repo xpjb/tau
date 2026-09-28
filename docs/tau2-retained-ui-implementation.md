@@ -252,3 +252,22 @@ Checks: managed frontend all-target compilation; 6 attachment presentation/actio
 cases; 13 nested/navigation/attachment cases; 15 initial passing sidebar/control/
 scroll cases plus the two corrected ordering cases in the five-case rerun.
 Composer, code browser and transcript ownership still require completion.
+
+## Shared composer and code-browser checkpoint
+
+Composer now owns its retained TextField, controls and slash completion; quick
+models own retained choices. CodeBrowser owns its toolbar, search TextField,
+per-view ScrollStates, source-bound subscription and line-selection gestures.
+The existing Document/Selection/reference-update algorithms remain in place.
+There is still one composer shared with code comments, not a second editor.
+
+Field-index routing and the legacy native-input destination variant are deleted.
+IME and clipboard destinations are now retained Targets with source/chat lifetime
+checks. The root resolves the focused dialog/composer/search field; buffer changes
+rebind the IME revision without reopening the keyboard. New-form focus is installed
+after old-form teardown, and return-focus identity is captured before construction.
+
+All 26 focused composer, code-browser, editor, inline-mobile and retained-dialog
+nextest cases passed after the migration. Workspace/transcript orchestration and
+removal of the remaining global Action/hit adapter are the final implementation
+stage, followed by full and cross-platform validation.

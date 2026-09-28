@@ -92,7 +92,7 @@ fn download_notice_selects_current_topic_chat_and_exact_widget_on_desktop_and_ph
         h.assert_target_visible("entry-20");
         assert_eq!(h.app.controller.account.selected_project, "moved");
         assert!(!h.app.root.legacy.show_chats && !h.app.root.attachments.show && h.app.root.dialog.is_none() && h.app.root.viewer.is_none());
-        assert!(h.app.root.legacy.focus.is_none(), "Locating a widget must not pop up the keyboard");
+        assert!(h.app.ui.focus.is_none(), "Locating a widget must not pop up the keyboard");
         let saved = h.app.controller.store.load_chat(&h.app.controller.identity, "two").unwrap();
         assert_eq!(saved.draft, "Keep my other chat's draft");
         assert_eq!(saved.position.key, position.key); assert!((saved.position.offset - position.offset).abs() < 1.);
@@ -182,15 +182,15 @@ fn ordinary_chat_topic_and_new_chat_navigation_rebind_editor_before_next_input()
         h.app.controller.chats.get_mut("two").unwrap().local.draft = "Draft from two".into();
         h.app.apply(Action::Select("two".into())).unwrap();
         // Deliberately no tick/frame between navigation and the next input event.
-        assert_eq!(h.app.root.legacy.composer.value, "Draft from two");
+        assert_eq!(h.app.root.composer.field.editor.value, "Draft from two");
         assert!(h.app.root.legacy.placed.is_empty());
         h.app.input("!");
         assert_eq!(h.app.controller.chats["demo"].local.draft, "Draft from demo");
         assert!(h.app.controller.chats["two"].local.draft.contains("Draft from two"));
         h.app.apply(Action::SelectProject("files".into())).unwrap();
-        assert_eq!(h.app.root.legacy.composer.value, if mobile { "" } else { "Draft from demo" });
+        assert_eq!(h.app.root.composer.field.editor.value, if mobile { "" } else { "Draft from demo" });
         h.app.apply(Action::New).unwrap();
-        assert!(h.app.root.legacy.composer.value.is_empty());
+        assert!(h.app.root.composer.field.editor.value.is_empty());
         h.app.input("New chat only");
         assert_eq!(h.app.controller.selected().unwrap().local.draft, "New chat only");
         assert_eq!(h.app.controller.chats["demo"].local.draft, "Draft from demo");
@@ -206,7 +206,7 @@ fn account_change_with_same_chat_id_discards_old_layout_and_pending_navigation()
     h.app.sync_navigation();
     assert!(h.app.root.legacy.navigation.download.is_none());
     assert!(h.app.root.legacy.placed.is_empty() && h.app.root.legacy.placed_session.is_none());
-    assert_eq!(h.app.root.legacy.composer.value, "Other account");
+    assert_eq!(h.app.root.composer.field.editor.value, "Other account");
     assert!(h.app.controller.store.load_chat("different-account", "demo").unwrap().draft.is_empty(),
         "Reconciliation must not write an old account's layout into the new account");
 }
@@ -216,10 +216,10 @@ fn remote_browser_yields_to_chat_and_download_navigation_without_retargeting_dra
     for (size,mobile) in [((1000,800),false),((360,720),true)] {
         let mut h=Harness::new(size,1.,mobile);
         h.app.controller.draft("Keep this code comment draft".into()).unwrap();h.frame();
-        h.app.apply(Action::Files).unwrap();h.frame();assert!(h.app.root.legacy.code.is_some());
+        h.app.apply(Action::Files).unwrap();h.frame();assert!(h.app.root.code.view.is_some());
         let browser_generation=h.app.controller.viewer_generation();
         h.app.apply(Action::Select("two".into())).unwrap();
-        assert!(h.app.root.legacy.code.is_none(),"Chat selection cancels the browser before the next input event");
+        assert!(h.app.root.code.view.is_none(),"Chat selection cancels the browser before the next input event");
         assert!(h.app.controller.viewer_generation()>browser_generation);
         h.app.input("New chat text");
         assert_eq!(h.app.controller.chats["demo"].local.draft,"Keep this code comment draft");
@@ -227,9 +227,9 @@ fn remote_browser_yields_to_chat_and_download_navigation_without_retargeting_dra
         assert!(!h.app.controller.chats["two"].local.draft.contains("code comment"));
         for session in ["two","demo"] {
             h.app.apply(Action::Select(session.into())).unwrap();h.frame();
-            h.app.apply(Action::Files).unwrap();h.frame();assert!(h.app.root.legacy.code.is_some());
+            h.app.apply(Action::Files).unwrap();h.frame();assert!(h.app.root.code.view.is_some());
             h.complete("entry-20");h.click_notice(false);
-            assert!(h.app.root.legacy.code.is_none(),"Same-chat and cross-chat notices must reveal the transcript, not the browser");
+            assert!(h.app.root.code.view.is_none(),"Same-chat and cross-chat notices must reveal the transcript, not the browser");
             h.assert_target_visible("entry-20");
             assert_eq!(h.app.controller.chats["demo"].local.draft,"Keep this code comment draft");
         }

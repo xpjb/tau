@@ -79,7 +79,7 @@ fn modal_scope_blocks_legacy_pointer_wheel_middle_and_context_routes() {
     let point = Vec2::new(8., 300.);
     h.app.press(7, point, true); h.app.motion(7, Vec2::new(8., 150.)); h.app.release(7, point);
     h.app.wheel(300., false, point); h.app.middle(true, point); h.app.context_at(point);
-    assert!(h.app.root.legacy.pointer.is_none()); assert!(h.app.root.legacy.wheel.is_none());
+    assert!(h.app.root.code.pointer.is_none()); assert!(h.app.root.legacy.wheel.is_none());
     assert!(h.app.root.legacy.autoscroll.is_none()); assert!(h.app.root.menu.is_none());
     assert_eq!(h.app.controller.selected().unwrap().local.draft, before);
     assert!(h.app.root.dialog.is_some());
@@ -168,12 +168,12 @@ fn async_topic_results_match_request_scope_and_preserve_edits_after_failure() {
 
 #[test]
 fn connection_completion_and_focus_restoration_validate_their_owner() {
-    let mut h = Harness::new(false); h.app.root.legacy.focus = Some(None);
+    let mut h = Harness::new(false); h.app.ui.focus=Some(h.app.root.composer.field.control.target);
     h.app.apply(Action::Settings).unwrap();
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() }; dialog.attempt = Some(h.app.controller.identity.clone());
     h.app.apply(Action::RenameProject("first".into())).unwrap(); h.app.controller.epoch = Some(9); h.app.ui_event(Event::Tick(0.));
     assert_eq!(h.dialog().topic_key(), Some(("rename", "first")), "Old connection success cannot close a different dialog");
-    h.app.back(); assert_eq!(h.app.root.legacy.focus, Some(None));
+    h.app.back(); assert_eq!(h.app.ui.focus, Some(h.app.root.composer.field.control.target));
     h.app.apply(Action::Settings).unwrap(); h.app.ui_event(Event::Tick(0.)); assert!(h.app.root.dialog.is_some(), "Already connected is not a new submission completion");
     h.app.controller.epoch = None; h.app.controller.connection = "Authentication failed".into();
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() };
@@ -184,7 +184,7 @@ fn connection_completion_and_focus_restoration_validate_their_owner() {
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() }; dialog.attempt = Some(h.app.controller.identity.clone());
     h.app.ui_event(Event::Tick(0.)); assert!(h.app.root.dialog.is_none());
     h.app.apply(Action::RenameProject("first".into())).unwrap(); h.app.controller.account.selected = Some("two".into());
-    h.app.back(); assert_ne!(h.app.root.legacy.focus, Some(None), "Do not restore an editor bound to another chat");
+    h.app.back(); assert_ne!(h.app.ui.focus, Some(h.app.root.composer.field.control.target), "Do not restore an editor bound to another chat");
 }
 
 #[test]
