@@ -72,7 +72,7 @@ pub struct Controller {
     pub health: crate::connection::Health,
     pub native_metrics:tau_transfer::blocks::Stats,
     pub epoch: Option<u64>,
-    pub notice: Option<String>,
+    pub notice: Option<crate::notice::Notice>,
     pub transport_error: Option<String>,
     pub codex_usage: UsageView,
     remote: crate::blocks::Cache,
@@ -506,13 +506,13 @@ impl Controller {
     }
     pub fn report_error(&mut self, error: anyhow::Error) {
         if error.is::<transport::ConnectionUnavailable>() { self.transport_error = Some(error.to_string()); }
-        else { self.notice = Some(error.to_string()); }
+        else { self.notice = Some(error.to_string().into()); }
     }
     fn report_sync_error(&mut self, error: anyhow::Error) {
         // Connection loss is status, not a failed content read. Preserve typed
         // errors so corruption/storage/unknown-block failures stay actionable.
         if tau_transfer::blocks::is_connection_error(&error) { self.transport_error = Some(format!("{error:#}")); }
-        else { self.notice = Some(format!("{error:#}")); }
+        else { self.notice = Some(format!("{error:#}").into()); }
     }
     pub fn diagnostics(&self)->String {
         let n=&self.native_metrics;
@@ -1031,7 +1031,7 @@ impl Controller {
         // intent in Sending or prevent ordinary canonical body fetching.
         if let (Some(chat), Some(lineage)) = (self.chats.get(scope), self.account.source_lineage.as_deref()) {
             if let Err(error) = self.remote.remember_local(scope, &chat.local, lineage) {
-                self.notice = Some(format!("Local content reuse unavailable: {error}"));
+                self.notice = Some(format!("Local content reuse unavailable: {error}").into());
             }
         }
     }
@@ -1263,7 +1263,7 @@ impl Controller {
                 self.ensure_chat(&session_id)?;
                 let chat = self.chats.get_mut(&session_id).unwrap();
                 for report in reports {
-                    if let Some(notice)=&report.notice {self.notice=Some(notice.clone());}
+                    if let Some(notice)=&report.notice {self.notice=Some(notice.clone().into());}
                     if let Some(pending) = chat.local.pending.iter_mut().find(|p|p.request.id == report.id) {
                         if let Some(error) = report.error { pending.status = Delivery::Rejected; pending.detail = Some(error); }
                         else if !report.accepted && pending.status == Delivery::Checking {
@@ -1469,7 +1469,7 @@ impl Controller {
             } => {
                 if self.daemon_settings.as_ref().is_none_or(|old|old.revision<=settings.revision) {self.daemon_settings = Some(*settings);}
             }
-            ServerMessage::Notice { message, .. } => self.notice = Some(message),
+            ServerMessage::Notice { message, .. } => self.notice = Some(message.into()),
             ServerMessage::ResyncRequired { session_id } => {
                 if self.epoch.is_some() {
                     if let Some(id) = session_id {
@@ -1495,7 +1495,7 @@ impl Controller {
             } => {
                 if self.codex_usage.complete(&request_id,None,Some(error.clone().unwrap_or_else(||"Codex quota unavailable".into()))) {return Ok(());}
                 if let Some(notice) = notice {
-                    self.notice = Some(notice);
+                    self.notice = Some(notice.into());
                 }
                 let mut matched = false;
                 let mut model_changed = false;
@@ -1572,7 +1572,7 @@ impl Controller {
                 if !ok {
                     if create_reply || matches!(command, Some(ClientCommand::CreateSession { .. })) {
                         self.create_failed_epoch = self.epoch;
-                        self.notice = Some(error.clone().unwrap_or_else(|| "New chat is saved locally but was not confirmed; retry when connected".into()));
+                        self.notice = Some(error.clone().unwrap_or_else(|| "New chat is saved locally but was not confirmed; retry when connected".into()).into());
                     }
                     if matches!(&command, Some(ClientCommand::Prompt {text,..}) if text.starts_with("/model "))
                         && let Some(id) = session_id.as_deref() && let Some(chat) = self.chats.get_mut(id)
@@ -1591,7 +1591,7 @@ impl Controller {
                         chat.feed.loading = false;
                     }
                     if !matched {
-                        self.notice = Some(error.unwrap_or_else(|| "Request failed".into()));
+                        self.notice = Some(error.unwrap_or_else(|| "Request failed".into()).into());
                     }
                 } else {
                     match command {

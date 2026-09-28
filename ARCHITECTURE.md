@@ -95,6 +95,15 @@ activity, so device clock skew cannot pin a draft above future replies. Refreshe
 restarts and provisional-chat aliases preserve those keys without altering unread
 or provider-cache timestamps. Merely opening a chat does not bump it.
 
+UI navigation is reconciled in `frontend/src/app/navigation.rs`. The controller
+owns the selected chat/topic; the view tracks which account/chat its editor and
+measured layout belong to. Explicit navigation rebinds those immediately, using
+the same reconciliation as asynchronous selection changes. Download-complete
+notices carry a typed account/source/chat/entry destination and use this route,
+then resolve the attachment against measured layout and existing history paging.
+See [the navigation review and validation](docs/client-navigation.md), including
+the remaining event/render coupling in `App`.
+
 Client settings include server/token and quick favorites; daemon settings are fetched
 and saved as one typed, revisioned document. Cache TTL gauges are explicitly estimated
 provider cache age from existing timestamps. Runtime idle eviction is independent: idle runtimes can be released with paused

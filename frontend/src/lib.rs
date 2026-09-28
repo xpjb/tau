@@ -22,6 +22,7 @@ mod keyboard;
 mod fonts;
 mod icons;
 mod models;
+pub mod notice;
 mod render;
 mod scroll;
 mod tooltip;

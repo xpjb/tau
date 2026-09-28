@@ -182,6 +182,13 @@ pub(super) fn card_height(file: &ChatAttachment) -> f32 {
         + if file.kind == AttachmentKind::Image { 224. } else { 0. }
 }
 
+/// Shared by painting and attachment navigation, so changing the widget's
+/// geometry cannot leave notification clicks targeting an unrelated row offset.
+pub(super) fn control_panel(rect: Rect, scale: f32) -> Rect {
+    Rect::new(rect.x + 14. * scale, rect.y + rect.height - 76. * scale,
+        (rect.width - 28. * scale).max(1.), 68. * scale)
+}
+
 /// File saves are bound to the exact cache path of the requested transfer.
 /// An old completion, a failed transfer or a changed account cannot start an export.
 fn completed_exports(
@@ -217,16 +224,8 @@ impl App {
         let actions = completed_exports(&mut self.pending_exports, &self.controller.downloads);
         for action in actions {
             if let PlatformAction::SaveDownload { key, .. } = &action {
-                if self.export_targets.get(key).is_some_and(|t| {
-                    t.identity == self.controller.identity
-                        && t.lineage
-                            == self
-                                .controller
-                                .account
-                                .source_lineage
-                                .as_deref()
-                                .unwrap_or_default()
-                }) {
+                if self.export_targets.get(key).is_some_and(|target|
+                    target.matches_source(&self.controller.identity, self.controller.account.source_lineage.as_deref())) {
                     self.saving_downloads.insert(key.clone());
                     self.platform.push(action);
                 } else {
@@ -238,8 +237,8 @@ impl App {
             self.pending_exports.contains_key(key) || self.saving_downloads.contains(key)
         });
     }
-    pub(super) fn export_target(&self, session: &str, entry: &str) -> ExportTarget {
-        ExportTarget {
+    pub(super) fn export_target(&self, session: &str, entry: &str) -> DownloadTarget {
+        DownloadTarget {
             identity: self.controller.identity.clone(),
             lineage: self
                 .controller
@@ -291,30 +290,14 @@ impl App {
         match result {
             Ok(saved) => {
                 self.export_errors.remove(key);
-                if target.identity == self.controller.identity
-                    && target.lineage
-                        == self
-                            .controller
-                            .account
-                            .source_lineage
-                            .as_deref()
-                            .unwrap_or_default()
-                {
-                    self.controller.notice = Some(format!("Saved to {}", saved.location));
+                if target.matches_source(&self.controller.identity, self.controller.account.source_lineage.as_deref()) {
+                    self.controller.notice = Some(crate::notice::Notice::download(format!("Saved to {}", saved.location), target));
                 }
             }
             Err(error) => {
-                if target.identity == self.controller.identity
-                    && target.lineage
-                        == self
-                            .controller
-                            .account
-                            .source_lineage
-                            .as_deref()
-                            .unwrap_or_default()
-                {
+                if target.matches_source(&self.controller.identity, self.controller.account.source_lineage.as_deref()) {
                     self.export_errors.insert(key.into(), error.clone());
-                    self.controller.notice = Some(error);
+                    self.controller.notice = Some(error.into());
                 }
             }
         }
@@ -348,7 +331,7 @@ impl App {
             .is_some_and(|saved| !std::path::Path::new(&saved.reference).is_file())
         {
             if let Err(error) = self.controller.forget_download(session, entry) {
-                self.controller.notice = Some(error.to_string());
+                self.controller.notice = Some(error.to_string().into());
             }
             None
         } else {
@@ -358,7 +341,7 @@ impl App {
         let info_key = format!("{surface}:{key}");
         let x = rect.x + 14. * s;
         let width = (rect.width - 28. * s).max(1.);
-        let panel = Rect::new(x, rect.y + rect.height - 76. * s, width, 68. * s);
+        let panel = control_panel(rect, s);
         let caption = attachment.caption.as_deref().filter(|text| !text.is_empty());
         let mut preview_available = false;
         if image {
@@ -392,7 +375,7 @@ impl App {
             }
             if !cached && self.controller.content_authorized() && !self.controller.downloads.contains_key(&key)
                 && let Err(error) = self.controller.download(session, entry, 10_000_000) {
-                self.controller.notice = Some(error.to_string());
+                self.controller.notice = Some(error.to_string().into());
             }
         }
         let mut display = AttachmentDisplay::new(attachment, cached, self.controller.downloads.get(&key),
@@ -447,13 +430,9 @@ impl App {
         self.renderer.ellipsized_label(layer, &display.status, status, 11. * s,
             color(if display.failed { 0xffb4ab } else if exported.is_some() { 0x93cbb4 } else { 0x9eaebd }),
             false, false, viewport);
-        let detail = format!("{}{}", display.status, caption.map(|c| format!("\n{c}")).unwrap_or_default());
-        self.attachment_info(Rect::new(text.x, text.y, text.width, 42. * s), viewport,
-            format!("{info_key}:details"), &attachment.file_name, &detail, true);
         if let Some(caption) = caption {
             let area = Rect::new(x, panel.y - 24. * s, width, 20. * s);
             self.renderer.ellipsized_label(layer, caption, area, 12. * s, color(0xb7c2ce), false, false, viewport);
-            self.attachment_info(area, viewport, format!("{info_key}:caption"), &attachment.file_name, caption, true);
         }
         if let Some(progress) = display.progress {
             let track = Rect::new(panel.x + 12. * s, panel.y + panel.height - 7. * s, panel.width - 24. * s, 3. * s);
@@ -482,16 +461,15 @@ impl App {
                 Rect::new(r.x + (width - label_width) / 2., r.y + (target - label_height) / 2.,
                     label_width.ceil() + 1., label_height),
                 14. * s, color(if enabled { 0x67d4ff } else { 0x687e8f }), false, false, viewport);
-            self.attachment_info(r, viewport, format!("{info_key}:action:{index}"), description, &attachment.file_name, false);
+            self.attachment_info(r, viewport, format!("{info_key}:action:{index}"), description, &attachment.file_name);
             self.hits.push(Hit { rect: clip, action: action.unwrap_or(Action::Noop) });
         }
     }
-    fn attachment_info(&mut self, rect: Rect, viewport: Rect, key: String, title: &str, detail: &str, tappable: bool) {
+    fn attachment_info(&mut self, rect: Rect, viewport: Rect, key: String, title: &str, detail: &str) {
         let rect = crate::render::intersect(rect, viewport);
         if rect.width > 0. && rect.height > 0. {
             let info = Info::Attachment(key, title.into(), detail.into());
-            self.info_areas.push((rect, info.clone()));
-            if tappable { self.hits.push(Hit { rect, action: Action::Info(info) }); }
+            self.info_areas.push((rect, info));
         }
 
     }
