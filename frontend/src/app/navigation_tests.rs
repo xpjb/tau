@@ -84,11 +84,15 @@ fn download_notice_selects_current_topic_chat_and_exact_widget_on_desktop_and_ph
         h.app.controller.account.projects.push(Project { id: "moved".into(), name: "Moved files".into(), prompt: String::new(), revision: 1 });
         h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().project_id = "moved".into();
         h.app.root.legacy.show_attachments = true;
-        h.app.apply(Action::Delete("two".into())).unwrap();
+        h.app.apply(Action::Delete("two".into())).unwrap(); h.frame();
+        assert!(!h.app.root.legacy.hits.iter().any(|h| matches!(h.action, Action::OpenDownloadNotice(_))),
+            "A download notification must not navigate away from an open form");
+        assert!(h.app.controller.notice.as_ref().is_some_and(|n| n.download.is_some()));
+        h.app.back();
         h.click_notice(false);
         h.assert_target_visible("entry-20");
         assert_eq!(h.app.controller.account.selected_project, "moved");
-        assert!(!h.app.root.legacy.show_chats && !h.app.root.legacy.show_attachments && h.app.root.legacy.modal.is_none() && h.app.root.legacy.viewer.is_none());
+        assert!(!h.app.root.legacy.show_chats && !h.app.root.legacy.show_attachments && h.app.root.dialog.is_none() && h.app.root.legacy.viewer.is_none());
         assert!(h.app.root.legacy.focus.is_none(), "Locating a widget must not pop up the keyboard");
         let saved = h.app.controller.store.load_chat(&h.app.controller.identity, "two").unwrap();
         assert_eq!(saved.draft, "Keep my other chat's draft");

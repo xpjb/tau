@@ -33,7 +33,7 @@ impl App {
             self.ui.detach(dialog.id());
             if let Some((identity, lineage, session)) = self.ui.return_to.take()
                 && identity == self.controller.identity && lineage == self.controller.account.source_lineage
-                && session == self.controller.account.selected && self.root.legacy.modal.is_none() {
+                && session == self.controller.account.selected && self.root.dialog.is_none() {
                 self.root.legacy.focus = Some(None);
             }
         }
@@ -46,13 +46,13 @@ impl App {
             let result = match request {
                 ui::Request::Open(spec) => self.with_ui(|_, cx| ui::Dialog::new(spec, cx)).map(|dialog| {
                     let return_to = self.ui.return_to.take().or_else(|| {
-                        (self.root.legacy.modal.is_none() && self.root.legacy.focus == Some(None))
+                        (self.root.dialog.is_none() && self.root.legacy.focus == Some(None))
                             .then(|| (self.controller.identity.clone(), self.controller.account.source_lineage.clone(), self.controller.account.selected.clone()))
                     });
                     self.cancel_pointer();
                     self.close_ui();
                     self.ui.return_to = return_to;
-                    self.root.legacy.modal = None;
+                    
                     self.root.legacy.focus = None;
                     self.root.dialog = Some(dialog);
                     self.ui.dirty = true;
@@ -64,18 +64,11 @@ impl App {
                     }
                     Ok(())
                 }
-                ui::Request::Legacy { owner, dialog } => {
+                ui::Request::Replace { owner, spec } => {
                     if self.root.dialog.as_ref().is_some_and(|dialog| dialog.id() == owner) {
-                        let old = self.root.dialog.take();
-                        let action = match dialog { ui::LegacyDialog::Models => Action::ModelSettings,
-                            ui::LegacyDialog::Daemon => Action::DaemonSettings,
-                            ui::LegacyDialog::RefreshCatalog => Action::RefreshCatalog,
-                            ui::LegacyDialog::Outbox => Action::Outbox(0) };
-                        match self.apply(action) {
-                            Ok(()) => { self.ui.detach(owner); self.ui.return_to = None; Ok(()) }
-                            Err(error) => { self.root.dialog = old; Err(error) }
-                        }
-                    } else { Ok(()) }
+                        self.ui.requests.push_front(ui::Request::Open(spec));
+                    }
+                    Ok(())
                 }
             };
             // One failed request must not drop the remainder of a taken queue.

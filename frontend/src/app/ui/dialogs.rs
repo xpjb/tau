@@ -1,4 +1,4 @@
-use super::{Context, Event, Frame, Id, LegacyDialog, Request, Target, Widget};
+use super::{Context, Event, Frame, Id, Request, Target, Widget};
 use super::controls::{Form, TextField};
 use crate::{editor::Editor, render::color, store::Settings};
 use sanscale::Rect;
@@ -6,32 +6,41 @@ use tau_protocol::*;
 use anyhow::Result;
 
 pub(in crate::app) enum TopicEdit { New, Rename(String), Prompt(String), Delete(String) }
-pub(in crate::app) enum DialogSpec { Connection, Topic(TopicEdit) }
-pub(in crate::app) enum Dialog { Connection(ConnectionDialog), Topic(TopicDialog) }
+pub(in crate::app) enum DialogSpec { Connection, Topic(TopicEdit), Models, Daemon, Operation(super::Operation) }
+pub(in crate::app) enum Dialog { Connection(ConnectionDialog), Topic(TopicDialog), Models(super::settings::ModelsDialog), Daemon(super::settings::DaemonDialog), Operation(super::operations::OperationDialog) }
 impl Dialog {
     pub fn new(spec: DialogSpec, cx: &mut Context<'_>) -> Result<Self> {
-        cx.model.notice = None;
+        if cx.model.notice.as_ref().is_none_or(|notice| notice.download.is_none()) { cx.model.notice = None; }
         Ok(match spec {
             DialogSpec::Connection => Self::Connection(ConnectionDialog::new(cx)),
             DialogSpec::Topic(edit) => Self::Topic(TopicDialog::new(edit, cx)?),
+            DialogSpec::Models => Self::Models(super::settings::ModelsDialog::new(cx)?),
+            DialogSpec::Daemon => Self::Daemon(super::settings::DaemonDialog::new(cx)?),
+            DialogSpec::Operation(operation) => Self::Operation(super::operations::OperationDialog::new(operation, cx)?),
         })
     }
-    pub fn id(&self) -> Id { match self { Self::Connection(d) => d.form.id, Self::Topic(d) => d.form.id } }
+    pub fn id(&self) -> Id { match self { Self::Connection(d) => d.form.id, Self::Topic(d) => d.form.id, Self::Models(d) => d.id, Self::Daemon(d) => d.id, Self::Operation(d) => d.id } }
     pub fn field(&mut self, target: Target) -> Option<&mut TextField> {
         match self {
             Self::Connection(d) => [&mut d.url, &mut d.token].into_iter().find(|f| f.control.target == target),
             Self::Topic(d) => d.fields().into_iter().find(|f| f.control.target == target),
+            Self::Models(d) => [&mut d.models, &mut d.search].into_iter().find(|f| f.control.target == target),
+            Self::Daemon(d) => d.value.iter_mut().find(|f| f.control.target == target),
+            Self::Operation(d) => d.value.iter_mut().find(|f| f.control.target == target),
         }
     }
     pub fn field_ref(&self, target: Target) -> Option<&TextField> {
         match self {
             Self::Connection(d) => [&d.url, &d.token].into_iter().find(|f| f.control.target == target),
             Self::Topic(d) => d.name.iter().chain(d.prompt.iter()).find(|f| f.control.target == target),
+            Self::Models(d) => [&d.models, &d.search].into_iter().find(|f| f.control.target == target),
+            Self::Daemon(d) => d.value.iter().find(|f| f.control.target == target),
+            Self::Operation(d) => d.value.iter().find(|f| f.control.target == target),
         }
     }
     #[cfg(test)]
     pub fn fields(&self) -> Vec<&TextField> {
-        match self { Self::Connection(d) => vec![&d.url, &d.token], Self::Topic(d) => d.name.iter().chain(d.prompt.iter()).collect() }
+        match self { Self::Connection(d) => vec![&d.url, &d.token], Self::Topic(d) => d.name.iter().chain(d.prompt.iter()).collect(), Self::Models(d) => vec![&d.models, &d.search], Self::Daemon(d) => d.value.iter().collect(), Self::Operation(d) => d.value.iter().collect() }
     }
     #[cfg(test)]
     pub fn topic_key(&self) -> Option<(&str, &str)> {
@@ -47,22 +56,20 @@ impl Dialog {
         match self {
             Self::Connection(d) => d.form.buttons.iter().filter_map(|(_, b)| b.control.rect.map(|r| (b.label.as_str(), r))).collect(),
             Self::Topic(d) => d.form.buttons.iter().filter_map(|(_, b)| b.control.rect.map(|r| (b.label.as_str(), r))).collect(),
+            Self::Models(d) => d.buttons(), Self::Daemon(d) => d.buttons(), Self::Operation(d) => d.buttons(),
         }
     }
     #[cfg(test)]
     pub fn button(&self, label: &str) -> Option<Rect> {
-        match self {
-            Self::Connection(d) => d.form.buttons.iter().find_map(|(_, b)| (b.label == label).then_some(b.control.rect).flatten()),
-            Self::Topic(d) => d.form.buttons.iter().find_map(|(_, b)| (b.label == label).then_some(b.control.rect).flatten()),
-        }
+        self.buttons().into_iter().find_map(|(name, rect)| (name == label).then_some(rect))
     }
 }
 impl Widget for Dialog {
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        match self { Self::Connection(d) => d.handle_event(event, cx), Self::Topic(d) => d.handle_event(event, cx) }
+        match self { Self::Connection(d) => d.handle_event(event, cx), Self::Topic(d) => d.handle_event(event, cx), Self::Models(d) => d.handle_event(event, cx), Self::Daemon(d) => d.handle_event(event, cx), Self::Operation(d) => d.handle_event(event, cx) }
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
-        match self { Self::Connection(d) => d.visit_perframe(frame, cx), Self::Topic(d) => d.visit_perframe(frame, cx) }
+        match self { Self::Connection(d) => d.visit_perframe(frame, cx), Self::Topic(d) => d.visit_perframe(frame, cx), Self::Models(d) => d.visit_perframe(frame, cx), Self::Daemon(d) => d.visit_perframe(frame, cx), Self::Operation(d) => d.visit_perframe(frame, cx) }
     }
 }
 
@@ -138,11 +145,11 @@ impl Widget for ConnectionDialog {
                 }
                 cx.report(result);
             }
-            Some(choice) => cx.ui.requests.push_back(Request::Legacy { owner: self.form.id, dialog: match choice {
-                ConnectionChoice::Models => LegacyDialog::Models,
-                ConnectionChoice::Daemon => LegacyDialog::Daemon,
-                ConnectionChoice::Refresh => LegacyDialog::RefreshCatalog,
-                ConnectionChoice::Outbox => LegacyDialog::Outbox,
+            Some(choice) => cx.ui.requests.push_back(Request::Replace { owner: self.form.id, spec: match choice {
+                ConnectionChoice::Models => DialogSpec::Models,
+                ConnectionChoice::Daemon => DialogSpec::Daemon,
+                ConnectionChoice::Refresh => DialogSpec::Operation(super::Operation::Refresh),
+                ConnectionChoice::Outbox => DialogSpec::Operation(super::Operation::Outbox(0)),
                 _ => unreachable!(),
             } }),
             None => {}

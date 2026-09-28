@@ -106,7 +106,7 @@ impl App {
         self.navigate_chat(&target.session)?;
         self.cancel_pointer();
         self.close_ui();
-        self.root.legacy.modal = None;
+        
         self.root.legacy.viewer = None;
         self.root.legacy.viewer_image = None;
         self.root.legacy.focus = None;

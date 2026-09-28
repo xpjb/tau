@@ -20,10 +20,10 @@ impl App {
                 && self.root.legacy.context_menu.is_none() => {
                 if !self.root.legacy.hits.iter().any(|hit| matches!(hit.action, Action::Focus(i) if i == field)) { return None; }
                 match field {
-                    None if self.root.legacy.modal.is_none() && self.root.legacy.navigation.session == self.controller.account.selected
+                    None if self.root.dialog.is_none() && self.root.legacy.navigation.session == self.controller.account.selected
                         && self.root.legacy.navigation.identity == self.controller.identity => &self.root.legacy.composer,
-                    Some(code_view::SEARCH_FIELD) if self.root.legacy.modal.is_none() => self.root.legacy.code.as_ref()?.search.as_ref()?,
-                    Some(i) => &self.root.legacy.modal.as_ref()?.fields.get(i)?.1,
+                    Some(code_view::SEARCH_FIELD) if self.root.dialog.is_none() => self.root.legacy.code.as_ref()?.search.as_ref()?,
+
                     _ => return None,
                 }
             }
@@ -99,7 +99,7 @@ mod tests {
             let text = "An inline draft with 😀 emoji and 世界\n".repeat(8);
             h.edit(&input, &text); h.frame();
             assert_eq!(h.app.controller.selected().unwrap().local.draft, text);
-            assert!(h.app.root.legacy.modal.is_none());
+            assert!(h.app.root.dialog.is_none());
             let full_height = h.app.root.legacy.transcript.height;
             let reduced = (size.0, if size.1 > size.0 { (380. * scale) as u32 } else { 250 });
             h.app.resize(reduced, scale, Vec2::new(0.,0.)); h.frame();

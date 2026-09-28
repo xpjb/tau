@@ -183,7 +183,7 @@ impl App {
         if code.identity!=self.controller.identity || code.session!=self.controller.account.selected.as_deref().unwrap_or("") || code.lineage!=self.controller.account.source_lineage {
             self.close_code();self.ui.dirty=true;return;
         }
-        let active=self.ui.window_focused && self.root.dialog.is_none() && self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none();
+        let active=self.ui.window_focused && self.root.dialog.is_none() && self.root.legacy.viewer.is_none();
         if !active && code.subscribed {
             let _=self.controller.view_files(None);self.root.legacy.code.as_mut().unwrap().subscribed=false;
         } else if active && (!code.subscribed || code.generation!=self.controller.viewer_generation()) && self.controller.epoch.is_some() {self.code_request();}
@@ -257,14 +257,14 @@ impl App {
         code.selection=Some(Selection::new(doc,anchor,end));code.cursor=end;self.ui.dirty=true;
     }
     pub(super) fn code_press(&mut self, id:u64, point:Vec2, touch:bool)->bool {
-        if self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.context_menu.is_some() {return false;}
+        if self.root.dialog.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.context_menu.is_some() {return false;}
         let Some(code)=&self.root.legacy.code else{return false;};
         if code.error.is_some() || code.document.is_none() || code.search.is_some() || !contains(code.viewport,point) || touch && point.x>code.viewport.x+code.gutter {return false;}
         self.root.legacy.pointer=Some(Pointer {id,start:point,last:point,at:Instant::now(),started:Instant::now(),dragged:false,touch});
         self.code_begin(point);true
     }
     pub(super) fn code_motion(&mut self,id:u64,point:Vec2)->bool {
-        if self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.context_menu.is_some() || self.root.legacy.scroll_drag.is_some() {return false;}
+        if self.root.dialog.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.context_menu.is_some() || self.root.legacy.scroll_drag.is_some() {return false;}
         let (Some(code),Some(p))=(&mut self.root.legacy.code,&mut self.root.legacy.pointer) else{return false;};
         if p.id!=id || !contains(code.viewport,p.start) {return false;}
         let selecting=code.drag_anchor.is_some();

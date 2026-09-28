@@ -181,9 +181,9 @@ impl Widget for TextField {
 /// A small shared form controller; dialog fields remain named/typed on their owner.
 /// This is not a schema engine and knows nothing about model commands.
 pub(in crate::app) struct Form<A> { pub id: Id, pub buttons: Vec<(A, Button)> }
-impl<A: Copy + PartialEq> Form<A> {
+impl<A: Clone + PartialEq> Form<A> {
     pub fn new(id: Id, buttons: &[(A, &str)]) -> Self {
-        Self { id, buttons: buttons.iter().map(|(action, label)| (*action, Button::new(id, label))).collect() }
+        Self { id, buttons: buttons.iter().map(|(action, label)| (action.clone(), Button::new(id, label))).collect() }
     }
     pub fn event(&mut self, event: &Event<'_>, fields: &mut [&mut TextField], cx: &mut Context<'_>) -> Option<A> {
         if let Event::Key { key: "Tab", ctrl: false, shift } = event
@@ -201,7 +201,7 @@ impl<A: Copy + PartialEq> Form<A> {
         // list is reconstructed from last frame's semantic hit registrations.
         for (action, button) in self.buttons.iter_mut().rev() {
             let handled = button.handle_event(event, cx);
-            if button.control.take_click() { return Some(*action); }
+            if button.control.take_click() { return Some(action.clone()); }
             if handled { return None; }
         }
         for field in fields.iter_mut().rev() {

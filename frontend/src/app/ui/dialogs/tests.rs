@@ -240,3 +240,35 @@ fn snapshot(input: &crate::mobile_input::Input, text: &str) -> crate::mobile_inp
     crate::mobile_input::Edit { id: input.id, revision: input.revision, text: text.into(),
         start: text.encode_utf16().count() as i32, end: text.encode_utf16().count() as i32, composing_start: -1, composing_end: -1 }
 }
+
+#[test]
+fn remaining_forms_own_fields_and_reject_detached_callbacks() {
+    let mut h = Harness::new(true);
+    h.app.open_ui(DialogSpec::Models).unwrap(); h.frame();
+    let target = h.dialog().fields()[0].control.target;
+    h.click(center(h.dialog().fields()[0].control.rect.unwrap()));
+    let native = h.app.native_input().unwrap();
+    h.app.open_ui(DialogSpec::Operation(super::super::Operation::Rename("demo".into()))).unwrap();
+    assert_ne!(h.dialog().fields()[0].control.target, target);
+    let title = h.dialog().fields()[0].editor.value.clone();
+    h.app.native_edit(snapshot(&native, "unrelated models"));
+    assert_eq!(h.dialog().fields()[0].editor.value, title);
+    h.app.key("a", true, false); h.app.input("inline title");
+    assert_eq!(h.dialog().fields()[0].editor.value, "inline title");
+    h.app.controller.identity = "other source".into(); h.app.input(" late");
+    assert!(h.app.root.dialog.is_none());
+}
+
+#[test]
+fn daemon_completion_is_owned_by_the_submitting_instance() {
+    let mut h = Harness::new(false); h.app.open_ui(DialogSpec::Daemon).unwrap();
+    let Dialog::Daemon(first) = h.app.root.dialog.as_mut().unwrap() else { panic!() };
+    let old = first.id;
+    h.app.open_ui(DialogSpec::Daemon).unwrap();
+    h.app.controller.settings_result = Some(("old-save".into(), true));
+    h.app.controller.notice = None; h.app.tick(0.);
+    assert_ne!(h.dialog().id(), old); assert!(h.app.controller.notice.is_none());
+    assert_eq!(h.app.controller.settings_result.as_ref().map(|(id, _)| id.as_str()), Some("old-save"));
+    h.app.ui.requests.push_back(Request::Close(old)); h.app.finish_ui_requests().unwrap();
+    assert!(h.app.root.dialog.is_some());
+}

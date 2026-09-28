@@ -195,3 +195,21 @@ Validation: 21 focused nextest cases passed (existing code-view tests plus adapt
 inline-input and retained-dialog tests), Android Rust check and SDK-35 Java compile
 passed. This remains host/headless validation, not physical-device acceptance.
 Stages 2–4 are actively continuing; this checkpoint is not the end of the task.
+
+## Remaining dialogs
+
+Model preferences/suggestions, staged daemon settings, catalogue refresh, chat
+rename/delete, agent controls, queue edits, link confirmation, recovery and saved
+intent inspection now own retained forms. `Modal`, `ModalKind`, root daemon-draft /
+save-completion state, modal editor indices and the retained-to-legacy dialog bridge
+are deleted. Captured queue/agent destinations are explicit, not whichever chat is
+selected when Submit runs. Replacement requests validate their originating owner.
+
+Deliberate UX choice: download notifications do not navigate away from an open
+form. Their typed destination remains intact; close the form to follow it. The
+navigation regression now checks that boundary and still verifies the real target,
+outgoing draft, source/topic binding and measured destination.
+
+Validation: frontend suite initially 170/172; fixed the offline settings fixture
+and revised notification precedence, then both regressions passed. All 13 retained
+dialog tests passed, including two new replacement/completion lifetime tests.

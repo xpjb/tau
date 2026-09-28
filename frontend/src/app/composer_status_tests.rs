@@ -47,6 +47,6 @@ fn composer_thinking_stays_visible_beside_long_models_on_desktop_and_phone() {
         app.frame(&ctx, ctx.view());
         assert_ne!(xhigh, ctx.read_rgba8().unwrap(), "changing only thinking changes the real composer frame");
         app.apply(Action::AgentSetting("demo".into(), "thinking".into())).unwrap();
-        assert_eq!(app.root.legacy.modal.as_ref().unwrap().fields[0].1.value, "off", "editor reports the selected chat's saved level");
+        assert_eq!(app.root.dialog.as_ref().unwrap().fields()[0].editor.value, "off", "editor reports the selected chat's saved level");
     }
 }

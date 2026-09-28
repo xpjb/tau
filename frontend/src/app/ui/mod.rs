@@ -7,6 +7,9 @@ use std::{collections::VecDeque, sync::atomic::{AtomicU64, Ordering}};
 
 pub(super) mod controls;
 mod dialogs;
+mod settings;
+mod operations;
+pub(super) use operations::Operation;
 pub(super) use dialogs::{Dialog, DialogSpec, TopicEdit};
 use controls::TextField;
 
@@ -83,12 +86,10 @@ pub(super) trait Widget {
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>);
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum LegacyDialog { Models, Daemon, RefreshCatalog, Outbox }
 pub(super) enum Request {
     Open(DialogSpec),
     Close(Id),
-    Legacy { owner: Id, dialog: LegacyDialog },
+    Replace { owner: Id, spec: DialogSpec },
 }
 pub(super) struct RootWidget {
     pub(super) legacy: LegacyWorkspace,
