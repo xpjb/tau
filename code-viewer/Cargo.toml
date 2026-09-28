@@ -13,6 +13,7 @@ tau-protocol = { path = "../protocol" }
 anyhow = "1"
 blake3 = "1.8"
 similar = "2.7"
+nucleo-matcher = "0.3.1"
 ignore = { version = "0.4", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time"], optional = true }
 libc = { version = "0.2", optional = true }
