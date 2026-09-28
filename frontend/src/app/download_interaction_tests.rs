@@ -137,15 +137,8 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
         app.frame(&ctx,ctx.view());
         assert_eq!(app.info_tip.region,rect,"duplicate file in chat must not steal sidebar tooltip anchor");
         save(&ctx,&format!("context-{name}-tooltip"));
-        // A changing byte count keeps the same pinned details card alive and updates its content.
-        app.info_tip=Tooltip::default();
-        let (rect,info)=app.info_areas.iter().find(|(_,info)| matches!(info,Info::Attachment(key,_,_)
-            if key.starts_with("attachments:") && key.contains("07-progress") && key.ends_with(":details"))).unwrap().clone();
-        app.info_target=info; app.info_tip.region=rect; app.info_tip.pinned=true; app.info_tip.progress=1.;
-        let key=Controller::download_key("demo","07-progress");
-        app.controller.downloads.get_mut(&key).unwrap().status.transferred=6*1024*1024;
-        app.frame(&ctx,ctx.view());
-        assert!(app.info_tip.pinned && app.info_tip.content.text.contains("50%"));
+        assert!(app.info_areas.iter().all(|(_,info)| !matches!(info,Info::Attachment(key,_,_)
+            if key.ends_with(":details") || key.ends_with(":caption"))), "Card text must not repeat itself in a tooltip");
         app.show_attachments=false; app.frame(&ctx,ctx.view());
         assert!(!app.info_tip.pinned,"hidden attachment pane must dismiss its tooltip");
     }
@@ -164,5 +157,28 @@ fn saved_zip_text_actions_dispatch_open_show_extract_to_the_correct_file() {
         let PlatformAction::UseDownload(saved,_,target)=action else {panic!("unexpected action")};
         assert_eq!(target.session,"demo"); assert_eq!(target.entry,case.id);
         assert!(saved.reference.ends_with(&format!("saved-{}",case.id)));
+    }
+}
+
+#[test]
+fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
+    for mobile in [false, true] {
+        let (mut app, ctx, _root) = fixture((360, 720), mobile);
+        let mut case = cases().into_iter().find(|c| c.id == "14-cached").unwrap();
+        case.caption = Some("This caption stays on the card".into());
+        let file = install(&mut app, &case);
+        paint(&mut app, &ctx, &case, &file);
+        assert!(app.info_areas.iter().all(|(_, info)| matches!(info, Info::Attachment(key, ..) if key.contains(":action:"))));
+        assert!(!app.hits.iter().any(|hit| matches!(hit.action, Action::Info(Info::Attachment(..)))));
+        let card = attachments::control_panel(Rect::new(12., 44., 336., attachments::card_height(&file)), 1.);
+        for point in [Vec2::new(card.x + 16., card.y + 20.), Vec2::new(card.x + 16., card.y + 42.),
+            Vec2::new(card.x + 16., card.y - 14.)] {
+            assert!(!app.info_areas.iter().any(|(r, _)| contains(*r, point)));
+            app.hover(Some(point)); app.tick(0.);
+            app.press(3, point, mobile); app.release(3, point);
+            assert!(!app.info_tip.pinned && app.info_tip.progress == 0.);
+            assert!(app.platform.is_empty());
+        }
+        assert!(!controls(&app).is_empty(), "Action controls and their own descriptions remain available");
     }
 }

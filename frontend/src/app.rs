@@ -26,6 +26,8 @@ use tau_protocol::*;
 mod projects;
 mod attachments;
 mod notices;
+mod navigation;
+use crate::notice::DownloadTarget;
 mod composer_status;
 
 #[derive(Clone)]
@@ -55,6 +57,7 @@ enum Action {
     Abort,
     Tail,
     DismissNotice,
+    OpenDownloadNotice(DownloadTarget),
     CopyDiagnostics,
     ClearReplica,
     CopyRecoveredDraft(String),
@@ -225,7 +228,7 @@ pub enum PlatformAction {
     },
     OpenUrl(String),
     SaveDownload { key: String, source: PathBuf, name: String },
-    UseDownload(crate::store::SavedDownload, SavedAction, ExportTarget),
+    UseDownload(crate::store::SavedDownload, SavedAction, DownloadTarget),
     Edit {
         title: String,
         value: String,
@@ -236,8 +239,6 @@ pub enum PlatformAction {
 }
 #[derive(Clone, Copy)]
 pub enum SavedAction { Open, #[cfg(not(target_os = "android"))] Show, #[cfg(not(target_os = "android"))] Extract }
-#[derive(Clone)]
-pub struct ExportTarget { pub(crate) identity:String, pub(crate) lineage:String, pub(crate) session:String, pub(crate) entry:String }
 struct Viewer {
     path: PathBuf,
     name: String,
@@ -288,7 +289,7 @@ pub struct App {
     counter_bucket: Option<u128>,
     dot_color: u32,
     connection_visible: bool,
-    composer_session: Option<String>,
+    navigation: navigation::Navigation,
     show_chats: bool,
     show_attachments: bool,
     attachments_rect: Rect,
@@ -296,7 +297,7 @@ pub struct App {
     max_attachment_scroll: f32,
     attachment_velocity: f32,
     pending_exports: HashMap<String, (PathBuf, String)>,
-    export_targets: HashMap<String, ExportTarget>,
+    export_targets: HashMap<String, DownloadTarget>,
     saving_downloads: HashSet<String>,
     export_errors: HashMap<String, String>,
     download_identity: String,
@@ -341,14 +342,14 @@ impl App {
         let controller = Controller::new(store, wake.clone())?;
         let dot_color = controller.health.color(Instant::now());
         let download_identity = controller.identity.clone();
-        let composer_session = controller.account.selected.clone();
+        let navigation = navigation::Navigation::new(&controller);
         let composer = Editor::composer(
             controller
                 .selected()
                 .map(|c| c.local.draft.clone())
                 .unwrap_or_default(),
         );
-        let show_chats = composer_session.is_none();
+        let show_chats = controller.account.selected.is_none();
         let needs_setup = controller.settings.url().is_err();
         let mut app = Self {
             controller,
@@ -385,7 +386,7 @@ impl App {
             counter_bucket: None,
             dot_color,
             connection_visible: true,
-            composer_session,
+            navigation,
             show_chats,
             show_attachments: false,
             attachments_rect: Rect::new(0., 0., 0., 0.),
@@ -632,42 +633,7 @@ impl App {
             self.dirty = true;
         }
         self.project_result();
-        let selected = self.controller.account.selected.clone();
-        if selected != self.composer_session {
-            // A selection changed outside the click path (e.g. a server reply).
-            // Persist the old chat's last measured anchor before discarding it.
-            if let Some(previous) = &self.composer_session
-                && self.placed_session.as_deref() == Some(previous.as_str())
-                && let Err(error) = self.controller.save_chat(previous) {
-                self.controller.report_error(error);
-            }
-            self.placed.clear();
-            self.placed_session = None;
-            self.cancel_pointer();
-            self.history_attempt = None;
-            self.context_menu = None;
-            self.usage = Tooltip::default();
-            self.composer_session = selected;
-            self.scroll = 0.;
-            self.horizontal = 0.;
-            self.velocity = 0.;
-            self.composer = Editor::composer(
-                self.controller
-                    .selected()
-                    .map(|c| c.local.draft.clone())
-                    .unwrap_or_default(),
-            );
-            self.show_chats = self.composer_session.is_none();
-            self.attachment_scroll = 0.;
-            self.max_attachment_scroll = 0.;
-            if self.show_chats { self.show_attachments = false; }
-            self.dirty = true;
-        } else if let Some(chat) = self.controller.selected()
-            && self.composer.value != chat.local.draft
-        {
-            self.composer = Editor::composer(chat.local.draft.clone());
-            self.dirty = true;
-        }
+        self.sync_navigation();
         // Refresh the selected Codex account periodically, even with its card closed.
         // The account view bounds requests to five minutes (30s after failure).
         if visible && self.connection_visible {
@@ -771,7 +737,7 @@ impl App {
                 || self.info_tip.progress > 0. && self.info_tip.region.width > 0. && matches!(self.info_target, Info::CacheTtl(_)));
         let next_wake = if timed_tooltip { Some(next_wake.map_or(std::time::Duration::from_secs(1),
             |duration| duration.min(std::time::Duration::from_secs(1)))) } else { next_wake };
-        self.dirty |= self.notice_popup.observe(self.controller.notice.as_deref(), now);
+        self.dirty |= self.notice_popup.observe(self.controller.notice.as_ref(), now);
         let next_wake = match (next_wake, self.notice_popup.remaining(now)) {
             (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b),
         };
@@ -892,6 +858,7 @@ impl App {
         Ok(())
     }
     fn remember_scroll(&mut self) {
+        if self.navigation.download.is_some() || self.navigation.identity != self.controller.identity { return; }
         if let Some(id) = self.controller.account.selected.clone()
             && self.placed_session.as_deref() == Some(id.as_str())
             && let Some(anchor) = self.placed.iter().find(|r| r.top + r.height >= self.scroll)
@@ -929,6 +896,7 @@ impl App {
             return;
         }
         self.focus = None;
+        self.navigation.download = None;
         if self.viewer.take().is_some() {
             self.viewer_image = None;
         } else if self.modal.is_some() {
@@ -955,6 +923,7 @@ impl App {
     fn set_scroll(&mut self, lane: Lane, value: f32) {
         match lane {
             Lane::Transcript => {
+                self.navigation.download = None;
                 self.scroll = value.clamp(0., self.max_scroll);
                 self.remember_scroll();
             }
@@ -1095,10 +1064,11 @@ impl App {
         }
     }
     pub fn press(&mut self, id: u64, point: Vec2, touch: bool) {
-        if self.hits.iter().rev().find(|hit| contains(hit.rect, point))
-            .is_some_and(|hit| matches!(hit.action, Action::DismissNotice)) {
+        if let Some(hit) = self.hits.iter().rev().find(|hit| contains(hit.rect, point))
+            && matches!(hit.action, Action::DismissNotice | Action::OpenDownloadNotice(_)) {
+            let action = hit.action.clone();
             self.cancel_pointer();
-            self.activate(Action::DismissNotice);
+            self.activate(action);
             return;
         }
         if self.context_menu.is_some() && !contains(self.context_rect, point) {
@@ -1299,6 +1269,7 @@ impl App {
                     self.horizontal = (self.horizontal - dx).clamp(0., self.max_horizontal);
                     self.velocity = 0.;
                 } else if contains(self.transcript, p.start) {
+                    self.navigation.download = None;
                     self.scroll = (self.scroll - dy).clamp(0., self.max_scroll);
                     if p.touch {
                         self.velocity = (-dy / p.at.elapsed().as_secs_f32().max(0.008))
@@ -1584,6 +1555,7 @@ impl App {
     }
     fn activate(&mut self, action: Action) {
         let result = self.apply(action);
+        self.sync_navigation();
         self.report(result);
     }
     fn apply(&mut self, action: Action) -> Result<()> {
@@ -1595,34 +1567,18 @@ impl App {
         }
         if matches!(action, Action::Noop) { return Ok(()); }
         self.context_menu = None;
+        if matches!(action, Action::Select(_) | Action::SelectProject(_) | Action::New | Action::Tail | Action::Attachments) {
+            self.navigation.download = None;
+        }
         let selected = self.controller.account.selected.clone();
         match action {
-            Action::SelectProject(id) => {
-                if self.controller.account.selected_project == id
-                    && self.controller.account.selected.as_ref().is_some_and(|chat|
-                        self.controller.account.sessions.iter().any(|s| s.id == chat.as_str() && s.project_id == id)) {
-                    return Ok(());
-                }
-                self.save()?;
-                self.controller.select_project(&id, self.size.0 as f32 / self.scale >= 760.)?;
-                self.list_scroll = 0.;
-                self.show_chats = self.controller.account.selected.is_none();
-                self.focus = None;
-            }
+            Action::SelectProject(id) => self.navigate_project(&id)?,
             Action::NewProject | Action::RenameProject(_) | Action::ProjectPrompt(_) | Action::DeleteProject(_) | Action::RemoveProject(_) => self.project_action(action)?,
             Action::MoveChat(session_id, project_id) => {
                 self.controller.request(ClientCommand::MoveSession { session_id, project_id })?;
             }
             Action::MoveMenu(_) | Action::ContextBack | Action::Noop => {}
-            Action::Select(id) => {
-                if selected.as_deref() != Some(id.as_str()) {
-                    self.save()?;
-                    self.controller.select(&id)?;
-                    self.scroll = 0.;
-                }
-                self.show_chats = false;
-                self.focus = Some(None);
-            }
+            Action::Select(id) => self.navigate_chat(&id)?,
             Action::Info(target) => {
                 self.usage.dismiss();
                 if !self.info_target.same_anchor(&target) { self.info_tip = Tooltip::default(); }
@@ -1643,6 +1599,7 @@ impl App {
                 self.usage.suppressed = !self.usage.pinned;
             }
             Action::New => {
+                self.save()?;
                 self.controller.new_chat()?;
                 self.show_chats = false;
                 self.focus = Some(None);
@@ -1863,7 +1820,7 @@ impl App {
                         let provider = values[0].trim();
                         anyhow::ensure!(!provider.is_empty() && provider.len() <= 120 && !provider.chars().any(char::is_whitespace),
                             "Enter a configured provider name");
-                        self.controller.notice = Some(format!("Refreshing {provider} model catalog…"));
+                        self.controller.notice = Some(format!("Refreshing {provider} model catalog…").into());
                         self.controller.request(ClientCommand::RefreshModelCatalog { provider: provider.into() })?;
                     }
                     ModalKind::AgentCommand(session, command) => {
@@ -2055,6 +2012,10 @@ impl App {
                 self.remember_scroll();
             }
             Action::DismissNotice => self.controller.notice = None,
+            Action::OpenDownloadNotice(target) => {
+                self.controller.notice = None;
+                self.open_download_notice(target)?;
+            }
             Action::CopyDiagnostics => {self.platform.push(PlatformAction::Copy(self.controller.diagnostics()));}
             Action::Copy(text) => {self.controller.cancel_copy();self.platform.push(PlatformAction::Copy(text));}
             Action::CopyDetails(session, ids) => self.controller.copy_details(&session,ids)?,
@@ -2139,7 +2100,7 @@ impl App {
                 let path = match self.controller.download(&session,&entry,if image {10_000_000} else {50_000_000}) {
                     Ok(path)=>path,
                     Err(error)=>{let text=error.to_string();self.export_errors.insert(key.clone(),text.clone());
-                        self.controller.notice=Some(text);return Ok(());}
+                        self.controller.notice=Some(text.into());return Ok(());}
                 };
                 let in_progress = self.controller.downloads.get(&key).is_some_and(|d| !d.status.done);
                 if image {
@@ -2169,7 +2130,7 @@ impl App {
                 let path=match self.controller.download(&session,&entry,if file {50_000_000} else {10_000_000}) {
                     Ok(path)=>path,
                     Err(error)=>{let text=error.to_string();self.export_errors.insert(key.clone(),text.clone());
-                        self.controller.notice=Some(text);return Ok(());}
+                        self.controller.notice=Some(text.into());return Ok(());}
                 };
                 if path.is_file() && !self.controller.downloads.get(&key).is_some_and(|d|!d.status.done) {
                     self.begin_save(&session,&entry,path,name);
@@ -2205,6 +2166,7 @@ impl App {
                 self.controller.draft(text)?;
             }
         }
+        self.sync_navigation();
         Ok(())
     }
     pub fn frame(&mut self, ctx: &impl RenderContext, view: &wgpu::TextureView) {
@@ -3180,6 +3142,7 @@ impl App {
         {
             self.scroll = (top - screen_y).clamp(0., self.max_scroll);
         }
+        let locating_download = self.locate_download(&rows, &placements, viewport);
         if let Some(wheel) = &mut self.wheel
             && wheel.lane == Lane::Transcript
         {
@@ -3213,10 +3176,10 @@ impl App {
         }
         self.placed = placements;
         self.placed_session = Some(session.clone());
-        if can_remember {
+        if can_remember || locating_download {
             self.remember_scroll();
         }
-        self.history_near_edge(&session, self.scroll <= 180. * s);
+        self.history_near_edge(&session, self.navigation.download.is_some() || self.scroll <= 180. * s);
         if quick_models {
             self.quick_models_frame(
                 layer,
@@ -3749,7 +3712,7 @@ impl App {
         });
     }
     fn notice_frame(&mut self, ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
-        self.notice_popup.observe(self.controller.notice.as_deref(), Instant::now());
+        self.notice_popup.observe(self.controller.notice.as_ref(), Instant::now());
         if !self.notice_popup.visible() { return; }
         let Some(notice) = self.controller.notice.as_deref() else { return; };
         let s = self.scale;
@@ -3764,7 +3727,9 @@ impl App {
         let text_height = self.renderer.label_height(notice, text_width, size, false);
         let height = (text_height + 24. * s).max(48. * s).min((b.height - 32. * s).max(1.));
         let rect = Rect::new(b.x + (b.width - width) / 2., b.y + 16. * s, width, height);
-        self.hits.push(Hit { rect, action: Action::DismissNotice });
+        let action = self.controller.notice.as_ref().and_then(|notice| notice.download.clone())
+            .map_or(Action::DismissNotice, Action::OpenDownloadNotice);
+        self.hits.push(Hit { rect, action });
         layer.rounded_rect(rect, 12. * s, color(0x263340));
         self.renderer.clipped_label(layer, notice,
             Rect::new(rect.x + 16. * s, rect.y + ((height - text_height) / 2.).max(12. * s), text_width, text_height),
@@ -3779,7 +3744,7 @@ impl App {
     }
     pub fn context_at(&mut self, point: Vec2) {
         if self.hits.iter().rev().find(|hit| contains(hit.rect, point))
-                .is_some_and(|hit| matches!(hit.action, Action::DismissNotice))
+                .is_some_and(|hit| matches!(hit.action, Action::DismissNotice | Action::OpenDownloadNotice(_)))
             || self.modal.is_some()
             || self.viewer.is_some()
             || self.usage.contains_card(point)
@@ -4807,6 +4772,8 @@ mod hover_tests;
 mod viewer_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod scroll_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod navigation_tests;
 
 #[cfg(test)]
 mod usage_tests {
