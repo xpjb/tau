@@ -69,7 +69,10 @@ impl RootWidget {
                 path.extend([chat.code.controls.id, view.id]);
                 return Some(path);
             }
-            if view.search.is_some() || view.document.is_none() {
+            if view.search.is_some()
+                || view.document.is_none()
+                || (view.selection.is_none() && ui.focus != Some(chat.composer.field.control.target))
+            {
                 return None;
             }
         } else {

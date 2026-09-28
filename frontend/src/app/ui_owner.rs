@@ -10,6 +10,11 @@ impl App {
     pub(super) fn ui_event(&mut self, event: ui::Event<'_>) -> bool {
         self.sync_navigation();
         self.reconcile_routes();
+        if let ui::Event::Down { pointer, .. } | ui::Event::Move { pointer, .. } | ui::Event::Up { pointer, .. } = event
+            && self.ui.capture.is_some_and(|capture| capture.pointer != pointer)
+        {
+            return true;
+        }
         self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
         self.ui.composing = self.composing();
         let old_focus = self.ui.focus;

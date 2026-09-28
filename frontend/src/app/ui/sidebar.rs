@@ -72,7 +72,7 @@ impl Widget for Sidebar {
         if self.scroll.bar_event(event, cx) {
             return true;
         }
-        if self.projects.handle_event(event, cx) {
+        if cx.ui.routes_pointer_to(event, self.projects.controls.id) && self.projects.handle_event(event, cx) {
             return true;
         }
         if let Some((Choice::Select(id), point)) = self.controls.context(event, cx) {
@@ -98,11 +98,9 @@ impl Widget for Sidebar {
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let binding = (cx.model.identity.clone(), cx.model.account.source_lineage.clone());
         if self.binding.as_ref() != Some(&binding) {
-            self.scroll.stop();
-            self.scroll.value = 0.;
-            self.projects.scroll.stop();
-            self.projects.scroll.value = 0.;
-            self.projects.revealed.clear();
+            cx.ui.detach(self.controls.id);
+            cx.ui.detach(self.projects.controls.id);
+            *self = Self::new();
             self.binding = Some(binding);
         }
         let s = cx.ui.scale;

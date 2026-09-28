@@ -25,7 +25,7 @@ pub(in crate::app) struct Transcript {
     pub autoscroll: Option<Autoscroll>,
     pub interests: BTreeSet<String>,
     selection: Target,
-    selecting: bool,
+    pub(super) selecting: bool,
     hovered: Option<String>,
     binding: Option<(String, Option<String>, Option<String>)>,
 }
@@ -516,10 +516,10 @@ impl Transcript {
             self.remember_scroll(cx);
             return true;
         }
-        let mut child = self.models.handle_event(event, cx);
+        let mut child = cx.ui.routes_pointer_to(event, self.models.controls.id) && self.models.handle_event(event, cx);
         let mut toggle = None;
         for row in self.rows.iter_mut().rev() {
-            if !child || matches!(event, Event::Tick(_)) {
+            if (!child && cx.ui.routes_pointer_to(event, row.control.target.scope)) || matches!(event, Event::Tick(_)) {
                 child |= row.handle_event(event, cx);
             }
             if let Some(choice) = row.toggle.take() {

@@ -189,3 +189,30 @@ fn operation_validation_feedback_is_painted_inside_the_opaque_form() {
     assert!(h.app.root.notice.body.rect.is_none(), "No click-through popup under the form");
     assert_ne!(before, h.ctx.read_rgba8().unwrap(), "Validation is visibly painted, not just stored");
 }
+
+#[test]
+fn captured_transcript_release_crosses_a_sibling_attachment_backdrop() {
+    let mut h = Harness::new(false);
+    h.app.root.workspace.attachments.show = true;
+    h.frame();
+    let row = h
+        .app
+        .root
+        .workspace
+        .chat
+        .transcript
+        .rows
+        .iter()
+        .find(|r| r.row.details.is_empty() && r.control.rect.is_some())
+        .unwrap();
+    let point = center(crate::render::intersect(row.control.rect.unwrap(), row.control.clip));
+    h.app.press(30, point, false);
+    assert!(h.app.root.workspace.chat.transcript.selecting);
+    let other = center(h.app.root.workspace.attachments.scroll.rect);
+    h.app.motion(30, other);
+    h.app.release(31, other);
+    assert_eq!(h.app.ui.capture.unwrap().pointer, 30, "Another contact cannot end the gesture");
+    h.app.release(30, other);
+    assert!(!h.app.root.workspace.chat.transcript.selecting, "The owning leaf receives release outside its pane");
+    assert!(h.app.ui.capture.is_none());
+}

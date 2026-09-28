@@ -408,7 +408,9 @@ impl CardDeck {
         card.visit_perframe(frame, cx);
     }
     pub fn event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        self.cards.values_mut().any(|card| card.handle_event(event, cx))
+        self.cards
+            .values_mut()
+            .any(|card| cx.ui.routes_pointer_to(event, card.controls.id) && card.handle_event(event, cx))
     }
     pub fn hints(&self) -> impl Iterator<Item = (Rect, &Info)> {
         self.cards

@@ -258,11 +258,16 @@ impl Widget for Workspace {
         }
         let width = cx.ui.size.0 as f32 / cx.ui.scale;
         let screen = self.attachments.show && (cx.ui.mobile || width < 1000.);
-        let mut handled = self.attachments.handle_event(event, cx);
-        if !handled && !screen && (width >= 760. || self.show_chats) {
+        let mut handled = cx.ui.routes_pointer_to(event, self.attachments.scroll.target.scope)
+            && self.attachments.handle_event(event, cx);
+        if !handled
+            && !screen
+            && (width >= 760. || self.show_chats)
+            && cx.ui.routes_pointer_to(event, self.sidebar.controls.id)
+        {
             handled = self.sidebar.handle_event(event, cx);
         }
-        if !handled && !screen && (width >= 760. || !self.show_chats) {
+        if !handled && !screen && (width >= 760. || !self.show_chats) && cx.ui.routes_pointer_to(event, self.chat.id) {
             handled = self.chat.handle_event(event, cx);
         }
         if self.chat.code.view.is_some() {
@@ -348,15 +353,19 @@ impl Widget for Workspace {
 }
 impl Widget for ChatPane {
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if self.code.handle_event(event, cx) {
+        if cx.ui.routes_pointer_to(event, self.code.controls.id) && self.code.handle_event(event, cx) {
             return true;
         }
         if let Some(view) = &self.code.view {
-            return view.search.is_none() && view.document.is_some() && self.composer.handle_event(event, cx);
+            return view.search.is_none()
+                && view.document.is_some()
+                && (view.selection.is_some() || cx.ui.focus == Some(self.composer.field.control.target))
+                && self.composer.handle_event(event, cx);
         }
-        self.header.handle_event(event, cx)
-            || self.composer.handle_event(event, cx)
-            || self.transcript.handle_event(event, cx)
+        cx.ui.routes_pointer_to(event, self.header.controls.id) && self.header.handle_event(event, cx)
+            || cx.ui.routes_pointer_to(event, self.composer.controls.id) && self.composer.handle_event(event, cx)
+            || cx.ui.routes_pointer_to(event, self.transcript.scroll.target.scope)
+                && self.transcript.handle_event(event, cx)
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let Some(session) = cx.model.account.selected.clone().filter(|s| cx.model.chats.contains_key(s)) else {

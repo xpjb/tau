@@ -359,6 +359,13 @@ impl UiState {
             route: vec![],
         }
     }
+    /// Captured movement/release visits its ancestor path before geometric hit
+    /// traversal. Another pane must not swallow the release over its backdrop.
+    pub fn routes_pointer_to(&self, event: &Event<'_>, owner: Id) -> bool {
+        !matches!(event, Event::Move { .. } | Event::Up { .. })
+            || self.capture.is_none()
+            || self.capture_route.contains(&owner)
+    }
     pub fn cancel(&mut self) {
         self.capture = None;
         self.capture_route.clear();
