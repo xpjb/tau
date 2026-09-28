@@ -66,11 +66,16 @@ impl Widget for AttachmentCard {
             }
             Some(CardChoice::UseSaved(session, entry, action)) => {
                 if let Some(saved) = cx.model.saved_download(&session, &entry) {
-                    cx.services.platform.push(PlatformAction::UseDownload(
-                        saved,
-                        action,
-                        cx.export_target(&session, &entry),
-                    ));
+                    let target = cx.export_target(&session, &entry);
+                    // Claim before queueing, not on repaint or in the OS worker:
+                    // another click/card can arrive before either of those runs.
+                    #[cfg(not(target_os = "android"))]
+                    if matches!(action, SavedAction::Extract)
+                        && !cx.services.transfers.extracting_downloads.insert(target.clone())
+                    {
+                        return handled;
+                    }
+                    cx.services.platform.push(PlatformAction::UseDownload(saved, action, target));
                 }
                 Ok(())
             }
@@ -215,12 +220,12 @@ impl Widget for AttachmentCard {
             Control::Cancel => Some(CardChoice::CancelDownload(key.clone())),
             Control::Busy => None,
         };
-        let mut actions = vec![(control.label(), control.description(), action)];
+        let mut actions = vec![(control.label(), Some(control.description()), action)];
         if exported.is_some() {
             if image && preview_available {
                 actions.push((
                     "View",
-                    "View image",
+                    Some("View image"),
                     Some(CardChoice::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true)),
                 ));
             }
@@ -228,28 +233,29 @@ impl Widget for AttachmentCard {
             if !cx.ui.mobile {
                 actions.push((
                     "Show",
-                    "Show in folder",
+                    Some("Show in folder"),
                     Some(CardChoice::UseSaved(session.into(), entry.into(), SavedAction::Show)),
                 ));
                 if attachment.file_name.to_ascii_lowercase().ends_with(".zip") {
+                    let extracting = cx.services.transfers.extracting_downloads.contains(&self.target);
                     actions.push((
-                        "Extract",
-                        "Extract ZIP and open folder",
-                        Some(CardChoice::UseSaved(session.into(), entry.into(), SavedAction::Extract)),
+                        if extracting { "Extracting…" } else { "Extract" },
+                        None,
+                        (!extracting).then(|| CardChoice::UseSaved(session.into(), entry.into(), SavedAction::Extract)),
                     ));
                 }
             }
         } else if image && preview_available && control == Control::View {
             actions.push((
                 "Save",
-                "Save to Downloads",
+                Some("Save to Downloads"),
                 Some(CardChoice::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone())),
             ));
         } else if image && preview_available && control == Control::Retry {
             // Retrying an OS save must not hide or discard a perfectly good preview.
             actions.push((
                 "View",
-                "View image",
+                Some("View image"),
                 Some(CardChoice::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true)),
             ));
         }
@@ -355,7 +361,7 @@ impl Widget for AttachmentCard {
                 .place_key(&format!("action:{index}"), action.unwrap_or(CardChoice::Noop), r, viewport, true)
                 .control;
             control.enabled = enabled;
-            control.info = Some(Info::Attachment(
+            control.info = description.map(|description| Info::Attachment(
                 format!("{info_key}:action:{index}"),
                 description.into(),
                 attachment.file_name.clone(),

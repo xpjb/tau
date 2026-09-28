@@ -46,13 +46,16 @@ pub(super) fn install(app: &mut App, case: &Case) -> ChatAttachment {
     }
     if case.state == "saving" { app.services.transfers.saving_downloads.insert(key.clone()); }
     if case.state == "save-failed" { app.services.transfers.export_errors.insert(key, case.error.clone().unwrap()); }
-    if matches!(case.state.as_str(), "saved" | "saved-no-cache" | "missing") {
+    if matches!(case.state.as_str(), "saved" | "saved-no-cache" | "missing" | "extracting") {
         let saved_path = app.controller.store.root.join(format!("saved-{entry}"));
         if case.state != "missing" { std::fs::write(&saved_path, b"saved fixture").unwrap(); }
         let identity = app.controller.identity.clone();
         app.controller.record_download(&identity, "", "demo", entry, crate::store::SavedDownload {
             reference: saved_path.to_string_lossy().into(), location: "Downloads/Tau".into(), mime_type: "application/octet-stream".into(),
         }).unwrap();
+    }
+    if case.state == "extracting" {
+        app.services.transfers.extracting_downloads.insert(app.export_target("demo", entry));
     }
     ChatAttachment { source_path: None, kind: if case.image { AttachmentKind::Image } else { AttachmentKind::File },
         file_name: case.name.clone().unwrap_or_else(|| if case.image { "preview.png" } else { "release-notes.pdf" }.into()),
@@ -69,9 +72,9 @@ pub(super) fn save(ctx: &HeadlessCtx, name: &str) {
 
 pub(super) struct CardControl { pub rect: Rect, pub action: ui::CardChoice }
 pub(super) fn controls(app: &App) -> Vec<CardControl> {
-    app.root.test_cards.cards.values().flat_map(|card| card.controls.items.iter()).filter_map(|(_,button,choice)| {
+    app.root.test_cards.cards.values().flat_map(|card| card.controls.items.iter()).filter_map(|(key,button,choice)| {
+        if !key.starts_with("action:") { return None; }
         let control = &button.control;
-        control.info.as_ref()?;
         let rect = crate::render::intersect(control.rect?,control.clip);
         (rect.width > 0. && rect.height > 0.).then(|| CardControl { rect, action: choice.clone() })
     }).collect()
@@ -108,7 +111,7 @@ fn render_download_state_matrix() {
             let buttons = controls(&app).iter().map(|h| h.rect).collect::<Vec<_>>();
             let expected = match case.state.as_str() {
                 "cached" | "save-failed" if case.image => 2,
-                "saved" => 1 + usize::from(case.image) + if mobile { 0 } else { 1 + usize::from(file.file_name.ends_with(".zip")) },
+                "saved" | "extracting" => 1 + usize::from(case.image) + if mobile { 0 } else { 1 + usize::from(file.file_name.ends_with(".zip")) },
                 "saved-no-cache" => if mobile { 1 } else { 2 },
                 _ => 1,
             };
@@ -155,7 +158,12 @@ fn render_download_state_matrix() {
                     save(&ctx, &format!("{name}-{}-{state}-{i}", case.id));
                 }
                 let mut layer = panel(&mut app, &ctx, &case, &file, Interaction::default(), bounds);
-                let (rect, info) = hints(&app).iter().find(|(r, _)| contains(*r, point)).unwrap().clone();
+                let hint = hints(&app).into_iter().find(|(r, _)| contains(*r, point));
+                if !mobile && file.file_name.ends_with(".zip") && i == buttons.len() - 1 && matches!(case.state.as_str(), "saved" | "extracting") {
+                    assert!(hint.is_none(), "Extract must not show a redundant tooltip");
+                    continue;
+                }
+                let (rect, info) = hint.expect("Other download actions keep their descriptions");
                 app.root.tooltips.target = info;
                 app.root.tooltips.info.region = rect; app.root.tooltips.info.progress = 1.;
                 app.with_ui(|root, cx| root.tooltips.info_frame(cx, &mut layer, bounds));

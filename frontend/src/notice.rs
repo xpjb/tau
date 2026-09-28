@@ -2,7 +2,7 @@
 //! also replaces its action; display text is never used as a navigation key.
 use std::ops::Deref;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DownloadTarget {
     pub(crate) identity: String,
     pub(crate) lineage: String,

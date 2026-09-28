@@ -218,5 +218,12 @@
     "label": "Saved · empty file",
     "state": "saved",
     "size": 0
+  },
+  {
+    "id": "33-extracting-zip",
+    "label": "Extracting ZIP · busy, no duplicate action or tooltip",
+    "state": "extracting",
+    "size": 12582912,
+    "name": "source-code.zip"
   }
 ]

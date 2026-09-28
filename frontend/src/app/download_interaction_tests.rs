@@ -182,3 +182,125 @@ fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
         assert!(!controls(&app).is_empty(), "FixtureChoice controls and their own descriptions remain available");
     }
 }
+
+#[test]
+fn extract_button_has_no_hover_or_context_tooltip() {
+    let (mut app, ctx, _root) = fixture((552, 420), false);
+    let case = cases().into_iter().find(|c| c.id == "18-saved-zip").unwrap();
+    let file = install(&mut app, &case);
+    paint(&mut app, &ctx, &case, &file);
+    let r = controls(&app)[2].rect;
+    let point = Vec2::new(r.x + r.width / 2., r.y + r.height / 2.);
+    assert!(!hints(&app).iter().any(|(r, _)| contains(*r, point)));
+    app.hover(Some(point)); app.tick(1.);
+    app.context_at(point);
+    assert!(app.ui.hint.is_none());
+    assert!(!app.root.tooltips.info.pinned && app.root.tooltips.info.progress == 0.);
+    assert!(app.actions().is_empty());
+}
+
+#[test]
+fn extract_clicks_queue_only_one_operation_even_before_repaint() {
+    let (mut app, ctx, _root) = fixture((552, 420), false);
+    let case = cases().into_iter().find(|c| c.id == "18-saved-zip").unwrap();
+    let file = install(&mut app, &case);
+    paint(&mut app, &ctx, &case, &file);
+    for _ in 0..4 { tap(&mut app, 2, false); }
+    assert_eq!(app.actions().len(), 1, "Rapid clicks cannot start multiple extraction/open workers");
+    // Draining the platform queue does not end the asynchronous operation.
+    tap(&mut app, 2, false);
+    assert!(app.actions().is_empty());
+}
+
+#[test]
+fn extract_busy_state_clears_on_failure_and_success_and_allows_retry() {
+    let (mut app, ctx, _root) = fixture((320, 420), false);
+    let case = cases().into_iter().find(|c| c.id == "18-saved-zip").unwrap();
+    let file = install(&mut app, &case);
+    let target = app.export_target("demo", &case.id);
+    for result in [Err("Disk full".into()), Ok(())] {
+        paint(&mut app, &ctx, &case, &file);
+        assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(_, _, SavedAction::Extract)));
+        tap(&mut app, 2, false);
+        assert!(matches!(&app.actions()[..], [PlatformAction::UseDownload(_, SavedAction::Extract, t)] if t == &target));
+        paint(&mut app, &ctx, &case, &file);
+        assert!(matches!(controls(&app)[2].action, ui::CardChoice::Noop));
+        for _ in 0..3 { tap(&mut app, 2, false); }
+        assert!(app.actions().is_empty());
+        save(&ctx, "extract-busy-sidebar");
+        app.complete_extraction(&target, result.clone());
+        assert!(!app.services.transfers.extracting_downloads.contains(&target));
+        assert_eq!(app.controller.notice.as_deref(), result.as_ref().err().map(String::as_str));
+        app.controller.notice = None;
+    }
+    paint(&mut app, &ctx, &case, &file);
+    assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(_, _, SavedAction::Extract)));
+}
+
+#[test]
+fn extraction_busy_state_is_shared_by_chat_and_sidebar_and_survives_navigation() {
+    let (mut app, ctx, _root) = fixture((1280, 900), false);
+    let case = cases().into_iter().find(|c| c.id == "18-saved-zip").unwrap();
+    let file = install(&mut app, &case);
+    let item = event(&app, &case, file, 0);
+    app.controller.message(ServerMessage::TranscriptSnapshot { session_id: "demo".into(), snapshot: TranscriptSnapshot {
+        generation: "demo".into(), sequence: 1, events: vec![item], queue: QueueState::default(), before: None, delivered: vec![],
+    }}).unwrap();
+    app.root.workspace.attachments.show = true;
+    app.tick(0.); app.frame(&ctx, ctx.view());
+    let extract_controls = |app: &App| {
+        app.root.workspace.chat.transcript.rows.iter().filter_map(|r| r.attachment.as_ref())
+            .chain(app.root.workspace.attachments.cards.cards.values())
+            .flat_map(|c| c.controls.items.iter())
+            .filter(|(key, _, _)| key.starts_with("action:2:"))
+            .filter_map(|(_, b, _)| b.control.rect.map(|r| (r, b.control.enabled, b.control.info.is_some())))
+            .collect::<Vec<_>>()
+    };
+    let buttons = extract_controls(&app);
+    assert_eq!(buttons.len(), 2, "The ZIP is visible in both surfaces");
+    for (r, enabled, tooltip) in buttons {
+        assert!(enabled && !tooltip);
+        let point = Vec2::new(r.x + r.width / 2., r.y + r.height / 2.);
+        app.press(1, point, false); app.release(1, point);
+    }
+    assert_eq!(app.actions().len(), 1, "Even stale controls on different surfaces share the same claim");
+    app.frame(&ctx, ctx.view());
+    assert!(extract_controls(&app).iter().all(|(_, enabled, tooltip)| !enabled && !tooltip));
+    save(&ctx, "extract-busy-chat-and-sidebar");
+    // Destroy/rebuild the attachment pane while the worker is still running.
+    app.root.workspace.attachments.show = false; app.frame(&ctx, ctx.view());
+    app.root.workspace.attachments.show = true; app.frame(&ctx, ctx.view());
+    assert_eq!(extract_controls(&app).len(), 2);
+    assert!(extract_controls(&app).iter().all(|(_, enabled, _)| !enabled));
+    app.complete_extraction(&app.export_target("demo", &case.id), Ok(()));
+    app.frame(&ctx, ctx.view());
+    assert!(extract_controls(&app).iter().all(|(_, enabled, tooltip)| *enabled && !tooltip));
+}
+
+#[test]
+fn extraction_completion_cannot_clear_another_accounts_or_sources_busy_state() {
+    let (mut app, ctx, _root) = fixture((552, 420), false);
+    let case = cases().into_iter().find(|c| c.id == "18-saved-zip").unwrap();
+    let file = install(&mut app, &case);
+    let saved = app.controller.saved_download("demo", &case.id).unwrap();
+    let mut targets = vec![];
+    for (identity, lineage) in [(app.controller.identity.clone(), ""), ("other-account".into(), ""), ("other-account".into(), "other-source")] {
+        app.controller.identity = identity.clone();
+        app.controller.account.source_lineage = Some(lineage.into());
+        app.controller.record_download(&identity, lineage, "demo", &case.id, saved.clone()).unwrap();
+        paint(&mut app, &ctx, &case, &file);
+        tap(&mut app, 2, false);
+        assert_eq!(app.actions().len(), 1, "A distinct account/source is not blocked by an old job");
+        targets.push(app.export_target("demo", &case.id));
+    }
+    assert_eq!(app.services.transfers.extracting_downloads.len(), 3);
+    app.controller.notice = None;
+    for target in &targets[..2] {
+        app.complete_extraction(target, Err("Old source failure".into()));
+        assert!(app.controller.notice.is_none(), "Old failures must not surface in another account/source");
+    }
+    assert!(app.services.transfers.extracting_downloads.contains(&targets[2]));
+    app.complete_extraction(&targets[2], Err("Current source failure".into()));
+    assert!(app.services.transfers.extracting_downloads.is_empty());
+    assert_eq!(app.controller.notice.as_deref(), Some("Current source failure"));
+}

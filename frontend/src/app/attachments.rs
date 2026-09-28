@@ -221,6 +221,10 @@ pub(in crate::app) struct Transfers {
     pub(in crate::app) pending_exports: HashMap<String, (PathBuf, String)>,
     pub(in crate::app) export_targets: HashMap<String, DownloadTarget>,
     pub(in crate::app) saving_downloads: HashSet<String>,
+    // Shared by all card surfaces; keep operations bound to their original
+    // account/source even while navigating away and back during extraction.
+    #[cfg(not(target_os = "android"))]
+    pub(in crate::app) extracting_downloads: HashSet<DownloadTarget>,
     pub(in crate::app) export_errors: HashMap<String, String>,
     pub(in crate::app) download_identity: String,
     pub(in crate::app) progress_clock: Instant,
@@ -330,6 +334,17 @@ impl App {
     }
     pub(super) fn begin_save(&mut self, session: &str, entry: &str, path: PathBuf, name: String) { self.with_ui(|_, cx| cx.begin_save(session, entry, path, name)); }
     pub fn complete_save(&mut self, key: &str, result: Result<crate::store::SavedDownload, String>) { self.with_ui(|_, cx| cx.complete_save(key, result)); }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn complete_extraction(&mut self, target: &DownloadTarget, result: Result<(), String>) {
+        if !self.services.transfers.extracting_downloads.remove(target) {
+            return;
+        }
+        if target.matches_source(&self.controller.identity, self.controller.account.source_lineage.as_deref()) {
+            self.report(result.map_err(anyhow::Error::msg));
+        }
+        self.ui.dirty = true;
+    }
 }
 
 #[cfg(test)]

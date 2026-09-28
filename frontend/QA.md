@@ -1,3 +1,19 @@
+# ZIP Extract follow-up — feature branch, not deployed
+
+Removed Extract's remaining hover/context tooltip, made its operation single-flight
+across chat and Attachments (disabled **Extracting…** until the folder is opened),
+and restored Tau1's single-root ZIP handling without a redundant outer folder.
+Existing-name suffixes and archive safety checks remain; failure releases the
+button for retry. Other download actions and Android behavior are unchanged.
+
+Managed frontend all-target, Windows x64 and Android ARM64 checks passed;
+**159/159 frontend library nextest tests**, zero skipped, passed. The 33-case GPU
+matrix and actual busy chat/sidebar previews were inspected. No package, release,
+service restart or physical Windows acceptance is claimed.
+See [behavior, scope and exact evidence](../docs/zip-extraction.md).
+
+---
+
 # Remote code viewer — integration source only, September 28, 2026
 
 Folder button beside attachments; read-only directory/code views, Ctrl+Space/Find,
