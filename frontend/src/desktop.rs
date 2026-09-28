@@ -1,5 +1,6 @@
 use crate::{
-    app::{App, ConnectionPreview, PlatformAction},
+    app::{App, ConnectionPreview, PlatformAction, SavedAction},
+    notice::DownloadTarget,
     store::{SavedDownload, Settings, Store},
 };
 use chad::winit::{
@@ -21,7 +22,7 @@ use tau_protocol::SessionStatus;
 enum DesktopEvent {
     Pick(Result<(String, String, Vec<PathBuf>), String>),
     Saved(String, Result<SavedDownload, String>),
-    Used(Result<(), String>),
+    Extracted(DownloadTarget, Result<(), String>),
 }
 struct Desktop {
     app: App,
@@ -211,7 +212,7 @@ impl ChadApp for Desktop {
                 }
                 DesktopEvent::Pick(Err(error)) => self.app.report(Err(anyhow::anyhow!(error))),
                 DesktopEvent::Saved(key, result) => self.app.complete_save(&key,result),
-                DesktopEvent::Used(result) => self.app.report(result.map_err(anyhow::Error::msg)),
+                DesktopEvent::Extracted(target, result) => self.app.complete_extraction(&target, result),
             }
         }
         if self.app.tick(ctx.dt) {
@@ -316,14 +317,27 @@ impl Desktop {
                 PlatformAction::UseDownload(saved, action, target) => {
                     let path=PathBuf::from(saved.reference);
                     if !path.is_file() {
-                        let result=self.app.controller.forget_download_for(&target.identity,&target.lineage,&target.session,&target.entry);
-                        self.app.report(result.and_then(|_|Err(anyhow::anyhow!("The downloaded file no longer exists. Download it again."))));
-                    } else if matches!(action,crate::app::SavedAction::Extract) {
-                        let tx=self.tx.clone();let waker=ctx.waker();
-                        std::thread::spawn(move || {
-                            let result=crate::downloads::use_saved(&path,action).map_err(|e|e.to_string());
-                            let _=tx.send(DesktopEvent::Used(result));waker.wake();
+                        let result = self.app.controller.forget_download_for(
+                            &target.identity, &target.lineage, &target.session, &target.entry,
+                        ).and_then(|_| Err(anyhow::anyhow!("The downloaded file no longer exists. Download it again.")));
+                        if matches!(action, SavedAction::Extract) {
+                            self.app.complete_extraction(&target, result.map_err(|e| e.to_string()));
+                        } else {
+                            self.app.report(result);
+                        }
+                    } else if matches!(action, SavedAction::Extract) {
+                        let tx = self.tx.clone();
+                        let waker = ctx.waker();
+                        let completion_target = target.clone();
+                        let worker = std::thread::Builder::new().name("tau-extract".into()).spawn(move || {
+                            // Busy includes opening the folder, not only writing its files.
+                            let result = crate::downloads::use_saved(&path, action).map_err(|e| e.to_string());
+                            let _ = tx.send(DesktopEvent::Extracted(target, result));
+                            waker.wake();
                         });
+                        if let Err(error) = worker {
+                            self.app.complete_extraction(&completion_target, Err(error.to_string()));
+                        }
                     } else {
                         self.app.report(crate::downloads::use_saved(&path,action));
                     }

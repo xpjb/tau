@@ -144,6 +144,8 @@ impl App {
                 pending_exports: HashMap::new(),
                 export_targets: HashMap::new(),
                 saving_downloads: HashSet::new(),
+                #[cfg(not(target_os = "android"))]
+                extracting_downloads: HashSet::new(),
                 export_errors: HashMap::new(),
                 download_identity: controller.identity.clone(),
                 progress_clock: Instant::now(),
