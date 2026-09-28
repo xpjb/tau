@@ -4,15 +4,29 @@
 `feat/tau2-retained-ui`. Release acceptance is not complete.** All production
 legacy routing is removed; Android uses the adapted same-window inline editor.
 The line-count reduction target was **not met**, including under identical
-formatting. The proposal's no-growth rollout gate therefore remains closed unless
-the user explicitly accepts the additional code. Physical Android/Windows QA is
-also still required. Nothing has been merged into integration, deployed, restarted
-or packaged by this work.
+formatting. After reviewing that increase, the user explicitly directed integration.
+The UI merge is `7ab80f3`; the independent pause-race fix is merged separately as
+`b52f80e`. This accepts the size tradeoff for source integration, not a claim that
+the reduction goal was met or permission to deploy. Physical Android/Windows QA
+is still required. Nothing was deployed, restarted or packaged by these merges.
 
 Source checkpoint and final validation numbers are recorded below. Earlier
 milestone notes after the horizontal rule are historical, not outstanding stage
 lists. Integration baseline remains `415aeff`; no concurrent model/tool-projection
 work or independent pause-removal work is included or credited.
+
+## Integration acceptance
+
+Validation worktree: `/root/tau2-retained-ui-merge`, branch
+`merge/tau2-retained-ui`, starting from freshly fetched `origin/tau2` at `415aeff`.
+Both merges were conflict-free. The merged frontend is byte-for-byte identical
+to `186ad23`; daemon/protocol/block/transfer source matches the independently
+validated pause-fix tree at `0b7c2ae`.
+
+Merged-tree workspace/all-target check passed. Full nextest: **308/308 passed**,
+zero skipped, 19 binaries, run `ac0efec3-a0dc-4d7b-b238-3e371e7d693d`, 108.550s.
+Windows MSVC, Android aarch64/API-29, SDK-35 Java and workspace rustdoc checks also
+passed. These are compiler/headless checks, not physical-device acceptance.
 
 ## Final ownership and deletion gates
 
@@ -167,8 +181,9 @@ those costs did not disappear when the old global branches were deleted. Inline
 IME support also adds real Java/Rust interop. This is an architectural ownership
 change with a **net production increase**, not a LOC simplification. No extra
 formatting/minification, deleted tests, domain rewrite, or relocated code is used
-to hide the increase. Further broad rollout requires a budget decision, not a
-claim that these results meet the old reduction target.
+to hide the increase. The user subsequently accepted source integration despite
+this cost; that does not retroactively satisfy the reduction target. A matched
+release/deployment still requires its own authorization and device acceptance.
 
 ## Separate repeated-pause fix
 
@@ -179,7 +194,8 @@ retains the newer explicit intent until cleanup finishes; later stops still win,
 immutable-ID retries remain idempotent, and failures do not auto-retry paid work.
 All **58 daemon tests passed** on that branch. Historical provider-stream failures
 were also found, so this is not a claim that every reported pause has that cause.
-It is pushed but not deployed and can be reviewed/integrated without the UI patch.
+It is now integrated as its own merge (`b52f80e`), not buried in the UI feature
+branch. It remains undeployed and independently reviewable.
 
 ---
 

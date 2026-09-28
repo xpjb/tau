@@ -28,3 +28,8 @@ Validation: regression fails before the fix (run
 idempotent retries, interrupted tools, recovery safety and real socket controls.
 Full daemon nextest: 58/58 passed, zero skipped
 (`77d8c66d-0404-4769-a8e9-fe0d3f358a1f`).
+
+Integration follow-up: merged independently as `b52f80e` alongside the retained UI
+merge `7ab80f3`, after the user's integration request. The combined workspace
+passes 308/308 nextest cases (`ac0efec3-a0dc-4d7b-b238-3e371e7d693d`). No deployment,
+restart, package build, production data changes or automatic live Resume occurred.

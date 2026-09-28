@@ -8,8 +8,9 @@ The original review branch, `review/tau2-retained-ui`, changed documentation onl
 `feat/tau2-retained-ui`; the global action/hit/lane/modal routing is removed and the
 existing inline Android input implementation is adapted. See
 `tau2-retained-ui-implementation.md` for validation and actual costs. **The code
-exceeds the no-growth budget; the LOC reduction hypothesis failed.** Broad rollout
-still requires an explicit budget decision and physical-device acceptance. The
+exceeds the no-growth budget; the LOC reduction hypothesis failed.** The user
+subsequently accepted source integration despite that increase. A release still
+requires separate authorization and physical-device acceptance. The
 first-checkpoint separate-window adapter is historical, not the final Android UX.
 
 **Currentness follow-up:** reviewed `review/tau2-client-structure` at `24b8323`

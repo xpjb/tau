@@ -406,3 +406,35 @@ change or stable deployment was done. The new clients need the pending matching
 protocol-20 daemon; after explicit download confirmation only, resume with
 `scripts/release-beta.sh --version 0.7.8 --push --deploy` from the integration
 worktree. Documentation-only commits do not invalidate the verified build receipts.
+
+
+## Retained UI and repeated-pause fix — integrated source, not deployed
+
+The user reviewed the retained UI's +3,050 same-format production-line increase
+and explicitly requested the merge. Source integration accepts that tradeoff; it
+is not a claim that the size-reduction target was met or that physical-device QA
+has passed.
+
+- Retained UI `186ad23` merged as **`7ab80f3`**. All four migration stages are in;
+  old global actions/hits/lanes/modal indices are removed. Android edits inline in
+  the existing window using the adapted `46618b9` InputConnection implementation.
+- Independent resume-after-stop fix `0b7c2ae` merged separately as **`b52f80e`**.
+  An accepted Resume is not overwritten by a cancelled run's cleanup; later stops
+  still win. Provider failures are not automatically retried.
+- Validated in `/root/tau2-retained-ui-merge` on `merge/tau2-retained-ui`, based on
+  freshly fetched `origin/tau2` at `415aeff`. Both merges were conflict-free.
+- Merged-tree managed workspace/all-target check and **308/308 nextest tests**
+  passed, zero skipped (`ac0efec3-a0dc-4d7b-b238-3e371e7d693d`, 108.550s).
+  Windows MSVC, Android aarch64/API-29, SDK-35 Java and workspace rustdoc passed.
+- **No deployment, service restart, version bump, release package or stable/master
+  change.** Running beta behavior is unchanged. Protocol 21 still requires a
+  versioned, matched daemon/client release when explicitly requested; Java and
+  Rust inline-editor components must ship together. Do not use older rollout
+  instructions against this source.
+- Physical Android keyboard/IME/touch/pinch and interactive Windows QA remain
+  open. Automated/headless checks do not prove those experiences.
+
+See `docs/tau2-retained-ui-implementation.md` for the complete ownership, deletion,
+validation and reproducible size ledger; `docs/tau2-resume-during-stop.md` records
+that bug's failing-before/passing-after evidence. Feature/worktree histories,
+including the unrelated `tau2-remove-pause` WIP, remain preserved.
