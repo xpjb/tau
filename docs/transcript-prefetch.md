@@ -48,13 +48,15 @@ for selection even though their status was available.
 - Fetch history two viewport heights ahead of its boundary, and request bodies
   with two-screen overscan. Existing in-flight/cursor guards prevent duplicate
   page requests; history still uses the existing scroll anchor.
-- Actual disk body reads refresh LRU recency in one batch per projection. Merely
-  looking up metadata does not protect unread content. No disk quota increase,
-  cache TTL change, polling timer, wire-shape or database-schema change.
+- Navigation, initial hydration and Copy refresh disk-read recency in one batch.
+  Stream reprojection reuses write recency rather than adding UI-thread fsyncs
+  per chunk. Merely looking up metadata does not protect unread content. No disk
+  quota increase, cache TTL change, polling timer, wire-shape or schema change.
 
 ## Validation
 
-Managed Cargo compiler check passed. An initial focused nextest run passed
+Managed Cargo workspace/all-target compiler check passed on the final source.
+An initial focused nextest run passed
 **65/65** tests (`9410d8d9-0a4b-4aff-a7e4-e2187c2b2215`), covering native cache and
 transport, quotas, queue/body reuse, reset fencing and existing GPU scroll tests.
 An additional **7/7** passed (`52355a49-8314-4ee5-9fe6-6cc5481afc21`) covering
@@ -64,6 +66,15 @@ scenario receives a **live streaming prefix and completed reply in an unselected
 chat**, preserves unread state, reconnects a restarted client, receives another
 unselected reply and reopens both transcripts after the daemon is stopped.
 Provider calls are explicitly gated local fixtures, never paid requests.
+
+A final **15/15** passed (`a67bb5a5-b8bf-4dca-a37b-0b765f2d71b3`), including the
+selected-chat tail while reading scrollback, the streaming/restart scenario,
+existing recovery tests and the real two-client loss/delay/bandwidth regression.
+A further **6/6** passed (`3053dc28-2aee-4494-bc9d-64e0f63b05a3`) after restricting
+recency writes to actual navigation/hydration/copy rather than every streamed
+projection. It checks read-based eviction, both memory bounds, retained views,
+offline anchors and zero extra recency writes during ordinary live projection.
+These are focused runs with overlapping coverage, not a repeated full suite.
 
 One earlier test invocation timed out on the managed build lock without running
 checks; it was not bypassed. No Clippy or built-in Cargo test runner was invoked.

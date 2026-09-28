@@ -692,3 +692,18 @@ fn controller_keeps_recent_views_warm_and_reopens_evicted_scrollback_from_disk()
     assert_eq!(c.selected().unwrap().local.position.offset,5.);
     assert!(c.epoch.is_none(),"all return visits worked offline");
 }
+
+#[test]
+fn live_projection_does_not_add_a_ui_thread_recency_write_per_chunk() {
+    let mut f=Fixture::new();
+    f.put("text",None,1,BlockKind::Text,event("text",1,"text"),b"body");f.page(None,None);f.body("text");
+    f.cache.changes("chat",None,true).unwrap();
+    let clock=||f.cache.db.lock().unwrap().query_row("SELECT clock FROM block_usage",[],|r|r.get::<_,u64>(0)).unwrap();
+    let before=clock();
+    f.cache.changed("chat","text",false);
+    f.cache.changes("chat",Some(&BTreeSet::from(["text".into()])),false).unwrap();
+    assert_eq!(clock(),before,"network-driven projection already has download recency");
+    f.cache.viewport_changed("chat",["text".into()].into_iter());
+    f.cache.changes("chat",Some(&BTreeSet::from(["text".into()])),false).unwrap();
+    assert!(clock()>before,"an actual visit refreshes eviction recency");
+}

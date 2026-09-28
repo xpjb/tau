@@ -16,7 +16,7 @@ use crate::store::LocalChat;
 pub const QUEUE: &str = "@queue";
 pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub lengths:HashMap<String,u64>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,String> }
 #[derive(Default)]
-struct Dirty {full:bool,ids:BTreeSet<String>}
+struct Dirty {full:bool,viewing:bool,ids:BTreeSet<String>}
 #[derive(Clone)]
 pub struct Cache { exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
 impl Cache {
@@ -45,13 +45,16 @@ impl Cache {
     fn changed(&self,scope:&str,id:&str,full:bool) {
         let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();d.full|=full;d.ids.insert(id.into());
     }
-    pub fn viewport_changed(&self,scope:&str,ids:impl Iterator<Item=String>) {for id in ids {self.changed(scope,&id,false);}}
+    pub fn viewport_changed(&self,scope:&str,ids:impl Iterator<Item=String>) {
+        let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();
+        d.viewing=true;d.ids.extend(ids);
+    }
     pub fn changes(&self,scope:&str,visible:Option<&BTreeSet<String>>,full:bool)->Result<Option<View>> {
         self.changes_retaining(scope, visible, &BTreeSet::new(), full)
     }
     pub(crate) fn changes_retaining(&self, scope: &str, visible: Option<&BTreeSet<String>>, retained: &BTreeSet<String>, full: bool) -> Result<Option<View>> {
         let dirty=self.dirty.lock().unwrap().remove(scope).unwrap_or_default();
-        if full || dirty.full {return self.snapshot_inner(scope,visible,retained,true,None,true);}
+        if full || dirty.full {return self.snapshot_inner(scope,visible,retained,true,None,true,full || dirty.viewing);}
         if dirty.ids.is_empty() {return Ok(None);}
         let (ids,queue)={let db=self.db.lock().unwrap();let mut ids=BTreeSet::new();let mut queue=false;
             for id in dirty.ids {
@@ -60,7 +63,7 @@ impl Cache {
                     ids.insert(h.parent.filter(|p|p!=QUEUE).unwrap_or(h.id));
                 }
             }(ids.into_iter().collect::<Vec<_>>(),queue)};
-        self.snapshot_inner(scope,visible,retained,true,Some(&ids),queue)
+        self.snapshot_inner(scope,visible,retained,true,Some(&ids),queue,dirty.viewing)
     }
     fn epoch(&self)->u64 {replica_epoch(&self.db.lock().unwrap()).unwrap_or(u64::MAX)}
     pub fn clear(&self)->Result<()> {
@@ -136,7 +139,7 @@ impl Cache {
         if let Some(current) = tau_blocks::header(&tx,scope,&header.id)? { echoes::adopt(&tx,scope,&current)?; }
         tx.commit()?;self.changed(scope,&header.id,false); Ok(())
     }
-    #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,&BTreeSet::new(),false,None,true)}
+    #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,&BTreeSet::new(),false,None,true,true)}
     pub(crate) fn resume_viewport(&self, scope: &str, local: &LocalChat) -> Result<Option<BTreeSet<String>>> {
         if local.position.follow { return Ok(None); }
         let Some(key) = &local.position.key else { return Ok(None); };
@@ -150,9 +153,9 @@ impl Cache {
         Ok(anchor.map(|index| roots.iter().skip(index.saturating_sub(14)).take(30)
             .filter(|h|h.id!=QUEUE).map(|h|h.id.clone()).collect()))
     }
-    pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,&BTreeSet::new(),true,None,true)}
+    pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,&BTreeSet::new(),true,None,true,true)}
     pub fn has_snapshot(&self,scope:&str)->Result<bool> {Ok(tau_blocks::cached_feed(&self.db.lock().unwrap(),scope,None)?.is_some())}
-    fn snapshot_inner(&self, scope: &str, visible:Option<&BTreeSet<String>>,retained:&BTreeSet<String>,preview:bool,only:Option<&[String]>,include_queue:bool) -> Result<Option<View>> {
+    fn snapshot_inner(&self, scope: &str, visible:Option<&BTreeSet<String>>,retained:&BTreeSet<String>,preview:bool,only:Option<&[String]>,include_queue:bool,touch:bool) -> Result<Option<View>> {
         let db = self.db.lock().unwrap();
         let Some(page) = tau_blocks::cached_feed(&db,scope,None)? else { return Ok(None); };
         let mut body_budget=8*1024*1024usize;let mut group_budgets=HashMap::new();let mut preview_ids=HashMap::<String,Vec<String>>::new();
@@ -249,7 +252,10 @@ impl Cache {
                 .collect::<rusqlite::Result<HashMap<String,u64>>>()?
         } else { HashMap::new() };
         events.sort_by_key(|e|e.order);
-        if !accessed.is_empty() {
+        // Navigation, initial hydration and Copy refresh disk recency. Ordinary
+        // streaming projections already have write recency from range_at; don't
+        // add another synchronous UI-thread fsync for every arriving chunk.
+        if touch && !accessed.is_empty() {
             let tx = db.unchecked_transaction()?;
             tau_blocks::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
             tx.commit()?;
@@ -266,7 +272,7 @@ impl Cache {
         ensure!(ids.len()<=4096,"Copy fewer than 4097 sections at a time");
         let mut seen=BTreeSet::new();let ids=ids.iter().filter(|id|seen.insert(*id)).cloned().collect::<Vec<_>>();let ids=ids.as_slice();
         if !copy_complete(&self.db.lock().unwrap(),scope,ids)? {return Ok(None);}
-        let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false)?.context("Details are not cached")?;
+        let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false,true)?.context("Details are not cached")?;
         let tools=crate::details::Tools::new(view.snapshot.events.iter());
         let group=ids.iter().filter_map(|id|view.snapshot.events.iter().find(|e|&e.id==id)).collect::<Vec<_>>();
         let text=tools.copy(&group);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
@@ -529,7 +535,9 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
             result=configuration.changed()=>{if result.is_err() {break;}let Some((offer,host))=configuration.borrow_and_update().clone() else {continue;};Command::Configure(offer,host)}
         };
         match command {
-            Command::Reset=>{for job in jobs.values() {job.abort();}jobs.clear();plan.clear();}
+            // Reset and the coalesced plan wake may be observed in either order.
+            // Restart the current interests; never erase a just-received plan.
+            Command::Reset=>{for job in jobs.values() {job.abort();}jobs.clear();}
             Command::Configure(offer,host) => {
                 if let Err(error) = client.configure(&offer,&host).await {
                     let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)();
