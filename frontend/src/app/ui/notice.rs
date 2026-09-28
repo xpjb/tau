@@ -22,6 +22,13 @@ impl NoticeWidget {
         self.body.rect = None;
         self.close.rect = None;
     }
+    pub fn suspend(&mut self, cx: &mut Context<'_>) {
+        if self.popup.visible() || self.body.rect.is_some() {
+            cx.ui.detach(self.body.target.scope);
+            self.popup = NoticePopup::default();
+            self.hide();
+        }
+    }
     fn sync(&mut self, cx: &mut Context<'_>) {
         let changed = self.popup.observe(cx.model.notice.as_ref(), Instant::now());
         if changed {

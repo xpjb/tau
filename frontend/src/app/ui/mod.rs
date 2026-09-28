@@ -191,6 +191,11 @@ impl Widget for RootWidget {
         let dt = if let Event::Tick(dt) = event { *dt } else { 0. };
         self.workspace.chat.code.code_tick(dt, cx);
         self.workspace.chat.composer.bind(cx);
+        if self.dialog.is_some() || self.viewer.is_some() || self.menu.is_some() {
+            // Hidden notices do not run an expired wake deadline. Their model
+            // destination is unchanged and receives a fresh display on return.
+            self.notice.suspend(cx);
+        }
         if let Some(dialog) = &mut self.dialog {
             dialog.handle_event(event, cx);
             return true;

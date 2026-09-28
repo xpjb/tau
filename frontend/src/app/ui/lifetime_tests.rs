@@ -216,3 +216,24 @@ fn captured_transcript_release_crosses_a_sibling_attachment_backdrop() {
     assert!(!h.app.root.workspace.chat.transcript.selecting, "The owning leaf receives release outside its pane");
     assert!(h.app.ui.capture.is_none());
 }
+
+#[test]
+fn a_download_notice_waits_for_the_form_without_an_expired_wake_loop() {
+    let mut h = Harness::new(false);
+    h.frame();
+    let notice = crate::notice::Notice::download("Saved download".into(), h.app.export_target("demo", "entry-1"));
+    h.app.controller.notice = Some(notice.clone());
+    h.frame();
+    assert!(h.app.root.notice.popup.visible());
+    h.app.open_ui(DialogSpec::Topic(TopicEdit::New)).unwrap();
+    h.frame();
+    h.app.input("Unsaved topic");
+    assert!(
+        h.app.root.notice.popup.remaining(std::time::Instant::now() + std::time::Duration::from_secs(60)).is_none()
+    );
+    assert_eq!(h.app.controller.notice, Some(notice.clone()));
+    h.app.back();
+    h.frame();
+    assert!(h.app.root.notice.popup.visible(), "The destination can still be followed when the form closes");
+    assert_eq!(h.app.controller.notice, Some(notice));
+}
