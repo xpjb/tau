@@ -1,9 +1,15 @@
 # Tau 2 retained UI: concrete replacement proposal
 
-September 28, 2026. **Proposal, not an implemented refactor.** Source and counts
-are pinned to `cafef7f7ad57e1c5bae6e3e9c89c66beebade80e` on
-`tau2-integration`. The review branch is `review/tau2-retained-ui`.
-Only this document is changed; no application behavior is changed.
+Original proposal: September 28, 2026. Historical source and counts below are
+pinned to `cafef7f7ad57e1c5bae6e3e9c89c66beebade80e` on `tau2-integration`.
+The original review branch, `review/tau2-retained-ui`, changed documentation only.
+
+**Implementation follow-up:** the foundational slice is now on
+`feat/tau2-retained-ui`. See `tau2-retained-ui-implementation.md` for actual code,
+deletions, measured growth, checks and remaining work. The full proposal is not
+implemented. Existing UX is not automatically a compatibility requirement:
+Android's separate editing window was explicitly rejected; inline editing is the
+target, and the old window adapter in the first checkpoint is temporary.
 
 **Currentness follow-up:** reviewed `review/tau2-client-structure` at `24b8323`
 and fetched integration / `origin/tau2` at `415aeff` on September 28, 2026.
@@ -377,10 +383,10 @@ Native mobile editing also needs a target identity. At this baseline,
 `PlatformAction::Edit`/`NativeEvent::Edit` carries text but no editor token
 (`android.rs:197–215,343`, Java `MainActivity.java:48–96`). Carry the originating
 editor token through that existing bridge and ignore results for a detached
-editor, rather than applying late text to whatever currently has focus. This is
-a small, counted bridge adaptation, not a replacement Android input system. If
-the parallel inline-input work has landed first, preserve its path and apply the
-same ownership rule instead of restoring the old fullscreen editor.
+editor, rather than applying late text to whatever currently has focus. The ownership fence is required; the existing window UX is not. The user's
+implementation-stage decision is inline editing in the existing window. Review
+and adapt the parallel inline-input work even if it has not landed first, rather
+than enshrining the fullscreen editor as behavior to preserve.
 
 ## 6. Exact replacement ledger
 
@@ -503,7 +509,7 @@ Move Sidebar/ProjectTabs/ChatList, Composer/QuickModelPicker and AttachmentBrows
 Share AttachmentCard with the transcript path. Also migrate CodeBrowser's existing
 View into the alternative ChatPane surface, sharing the one Composer and keeping
 the file client/code-buffer library intact. Bind editors and gestures to their
-source/view identity; adapt native edit tokens without replacing platform UX.
+source/view identity; adapt native edit tokens to the intended inline Android UX.
 
 **Deletion gate:** remove the global Lane selector, pane scroll-value switches,
 composer-versus-modal editor dispatch and migrated global Action variants. Keep
