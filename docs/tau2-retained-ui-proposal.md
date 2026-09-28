@@ -3,7 +3,14 @@
 September 28, 2026. **Proposal, not an implemented refactor.** Source and counts
 are pinned to `cafef7f7ad57e1c5bae6e3e9c89c66beebade80e` on
 `tau2-integration`. The review branch is `review/tau2-retained-ui`.
-Only this document is being added; no application behavior is changed.
+Only this document is changed; no application behavior is changed.
+
+**Currentness follow-up:** reviewed `review/tau2-client-structure` at `24b8323`
+and fetched integration / `origin/tau2` at `415aeff` on September 28, 2026.
+The architecture still applies. The merged remote code browser expands the measured
+UI scope to **6,620 production lines / 82 actions**. Original source references and
+LOC tables below remain explicitly historical; section 11 records the added scope,
+review decisions and limits of carrying the original budget forward.
 
 ## 1. Recommendation and what must get simpler
 
@@ -16,7 +23,8 @@ Keep concrete child fields wherever the composition is known. Keep one coherent
 finished implementation must retire these mechanisms, not reproduce them behind
 new names:
 
-1. The application-wide, 73-variant `Action` enum and its central dispatcher.
+1. The application-wide `Action` enum and its central dispatcher (73 variants at
+   the original baseline, 82 at the integration follow-up).
    A button's owning component handles its activation next to its state.
 2. Root-owned, parallel hit/action tables and separate interpretations of those
    tables in hover, press, release, keyboard focus and context-menu code.
@@ -29,11 +37,13 @@ new names:
 The model's real behavior, layout formulas and platform interop do not magically
 vanish. Moving them is **relocation**, not a line-count saving.
 
-The measured production scope is **6,100 physical lines**. The design budget is
-**5,200–5,750 replacement production lines, including new infrastructure and small
-interop changes**: a target of **350–900 fewer lines, roughly 6–15%**. These are
-planning targets, not measured savings or a claim that the refactor is certain to
-shrink. Section 9 gives the complete accounting and stop conditions.
+The original measured production scope is **6,100 physical lines**. Its design
+budget is **5,200–5,750 replacement production lines, including new infrastructure
+and small interop changes**: a target of **350–900 fewer lines, roughly 6–15%**.
+These are planning targets, not measured savings or a claim that the refactor is
+certain to shrink. Section 9 preserves that accounting; section 11 updates the
+baseline for the new browser. **The old replacement total is not a current budget
+for the enlarged feature set.**
 
 ## 2. Keep these things; do not build competing versions
 
@@ -54,6 +64,15 @@ shrink. Section 9 gives the complete accounting and stop conditions.
 - **Existing presentation and platform behavior:** responsive panes, touch,
   long-press, pinch, mouse selection, IME, copy/paste, file/export actions, menu
   keyboard controls, tooltips, scroll restoration and download-notice navigation.
+- **Merged remote code browsing:** reuse `tau-code-viewer`'s document/line identity,
+  selection, diff/syntax work and the existing native file client. Preserve its
+  shared composer, live draft-marker reconciliation and source/generation fencing.
+  Section 11 defines its UI owner; this is not a second image viewer or editor.
+
+Preserving existing scroll restoration during this UI migration is not an
+endorsement of its architecture. Backlog 012 explicitly defers its redesign and
+associated test removal. Do not reopen that work, add to its restoration test
+suite, or delete those tests as an incidental widget/ScrollState cleanup.
 
 The separate client-state/tool-projection work may simplify `rows`, tool grouping
 and copy/content-interest semantics. **Do not claim those deletions here.** Consume
@@ -107,6 +126,9 @@ RootWidget
 │  │  └─ ConnectionIndicator
 │  ├─ ChatPane
 │  │  ├─ Transcript                      retained row/section interaction state
+│  │  ├─ CodeBrowser                     alternative content surface, not a modal
+│  │  │  ├─ directory/path picker        existing Editor via TextField
+│  │  │  └─ CodeViewport                 existing code Document/Selection
 │  │  └─ Composer
 │  │     ├─ TextField<existing Editor>
 │  │     ├─ attachment controls
@@ -127,6 +149,11 @@ pane need not destroy its remembered state, but it removes its active input rout
 flows choose explicit open, replace or close operations; merely introducing a
 stack must not change Back behavior or make every settings transition a push.
 Menu submenu history stays local to `Menu`, not a separate application scene.
+
+ChatPane owns the shared Composer and chooses Transcript or CodeBrowser as its
+content surface. The browser does not own a second composer/draft. Its comment
+mode makes that same composer visible under the code selection; closing the
+browser returns to the ordinary draft. CodeBrowser is distinct from ImageViewer.
 
 Use concrete fields for fixed controls, `Vec<T>`/keyed collections for homogeneous
 rows, and small enums for the closed dialog/overlay families. A dialog enum with
@@ -248,7 +275,7 @@ A custom widget can instead implement its behavior directly. Do not introduce a
 callback framework merely to shorten these few lines.
 
 Small local enums remain useful for menu choices or parameterized confirmations.
-They are not an excuse to move all 73 application actions into a new central enum.
+They are not an excuse to move all application actions into a new central enum.
 
 ### 4.4 Structural requests: keep a small buffer
 
@@ -267,6 +294,7 @@ Back
 Navigate(Chat | Project | NewChat)
 RevealAttachment(DownloadTarget)
 SetAttachmentPaneVisible(bool)
+SetChatSurface(Transcript | CodeBrowser)
 ```
 
 Navigation belongs here because the owner must coordinate the outgoing view,
@@ -375,14 +403,16 @@ they are not assertions that every line in a span can simply be deleted.
 | `context_at` `3745–3842`; menu code in `projects.rs` | Shared Menu with local typed choice handlers | One implementation of selection, submenu, keyboard, scrolling and outside dismissal. Feature-specific menu contents remain data. |
 | `icon_button` `3843–3898`; free `button` `4650–4693`; repeated field chrome | ButtonControl/Button and TextField/FormRows chrome | Share interaction and chrome, not only drawing. Parent code states label/style/placement and activation behavior; no `hits` parameter. |
 | `usage_frame/info_frame` `3899–3950`; `tooltip.rs` and `tooltip/text.rs` | TooltipHost with owner-bound content and existing Tooltip | Remove separate root target lookup/pinning paths; reuse the rich text, timing, hover bridge and placement code. |
-| Settings/model/daemon forms `3951–4577`; `modal_frame` `4578–4649`; project forms | Typed dialog widgets with shared field/button-row drawing and focus policy | Replace root `ModalKind` branches and repeated form plumbing. Keep field validation, connection handshake wait, daemon revision/save and recovery semantics. |
+| Settings/model/daemon forms `3951–4577`; `modal_frame` `4578–4649`; project forms | Typed dialog widgets with shared field/button-row drawing and focus policy | Replace root `ModalKind` branches and repeated form plumbing. Keep field validation, connection handshake wait, daemon revision/save and recovery semantics. Match UI completion by operation/connection-attempt identity, account/source and dialog generation; a late result cannot close a replacement dialog. Durable results still update the model after the submitting widget closes. |
 | `attachments.rs` card/export workflow; viewer branch in `frame/apply` | Shared AttachmentCard, ImageViewer, export coordinator | Card controls behave identically on both surfaces. Viewer owns zoom/pan/pinch; OS export completion survives widget removal. |
 | `app/navigation.rs` and scattered navigation resets | Workspace binding/reveal logic called from the owner boundary | Keep one reconciliation route, replace manual unrelated-field resets with subtree rebinding/cancellation. Do not create another selected-chat field. |
 
 ### Destination of every existing Action variant
 
 This inventory prevents removing a switch while losing one of its less visible
-behaviors. A name below describes the old action, not a required new command type.
+behaviors. It covers the original 73 variants; section 11 maps the nine added by
+the integration follow-up. A name below describes the old action, not a required
+new command type.
 
 | Old variants | New activation owner |
 |---|---|
@@ -459,13 +489,20 @@ NoticeWidget and ImageViewer. Keep operation logic and user-visible flow intact.
 
 **Deletion gate:** remove `Modal`, root modal/editor-index routing, root menu
 keyboard/scroll branches, viewer input branches and separate tooltip target paths.
-A legacy composer can participate through one explicit focus adapter temporarily;
-do not retain the global modal-index scheme for it.
+The legacy composer and code-search editor can participate through explicit focus
+adapters temporarily; do not retain the global modal-index scheme for them.
+Before expanding workspace
+pointer routing, pilot one nested attachment card with its controls inside a
+scrollable parent: the two forms establish focus/lifecycle reuse, but do not alone
+prove touch-scroll versus child activation, clipping and capture cancellation.
+This exercises the same widget/control path, not a second interaction framework.
 
 ### Stage 3 — workspace, composer and owned scrolling
 
 Move Sidebar/ProjectTabs/ChatList, Composer/QuickModelPicker and AttachmentBrowser.
-Share AttachmentCard with the transcript path. Bind editors and gestures to their
+Share AttachmentCard with the transcript path. Also migrate CodeBrowser's existing
+View into the alternative ChatPane surface, sharing the one Composer and keeping
+the file client/code-buffer library intact. Bind editors and gestures to their
 source/view identity; adapt native edit tokens without replacing platform UX.
 
 **Deletion gate:** remove the global Lane selector, pane scroll-value switches,
@@ -637,7 +674,13 @@ Before removing each legacy path, carry forward its existing tests. In addition:
   waits until traversal returns but not until an arbitrary later input.
 - Scrolling: wheel easing, scrollbar dragging, middle autoscroll, touch handoff,
   horizontal content, prepend/expansion anchoring and follow-tail remain intact.
-  Test the attachment browser as both desktop side pane and phone screen.
+  Test the attachment browser as both desktop side pane and phone screen. New
+  coverage here is for interaction/mechanics, not the deferred backlog-012
+  restoration redesign or its test-removal task.
+- Code browsing: preserve line selection across unchanged live text, invalidate
+  changed selections, preserve authored prose and composition during reference
+  updates, and cancel file interest on same-chat/download navigation before the
+  next input. Carry forward the code-browser and merge navigation regressions.
 - Content: retain bounded preview interests, ongoing-chat prefetch, incomplete
   history handling, incremental Markdown, shared transfer state and delayed OS
   export completion when the originating card is gone.
@@ -667,7 +710,140 @@ covers all 73 variants exactly once, and the destination budget sums were checke
   Its document-content `Widget` trait is a different abstraction, not the UI
   interface proposed here.
 
-**Bottom line:** keep Burrito's straightforward programming model, preserve Tau's
-working editor/render/model machinery, and earn the refactor by deleting global
-routing and duplicated interaction policy. The trait and the number of files are
-not the simplification; the explicit removals and measured replacement cost are.
+## 11. September 28 follow-up: review backlog and integration merge
+
+### What was actually compared
+
+- Original proposal baseline: `cafef7f7ad57e1c5bae6e3e9c89c66beebade80e`.
+- Client-structure review: `24b83232f27f7f68bb36fefe37b7058f8a2700b9`.
+  Its changes from its integration merge-base are **all Markdown**, not runtime
+  implementations. Its two newest commits organize backlog items 015–035; they
+  do not implement a competing UI or require those items to be scheduled together.
+- Integration and freshly fetched `origin/tau2`:
+  `415aeff6d27554ca0d594fd305eaaa9090e4bb45`. The one first-parent merge since our
+  baseline integrates the remote code browser. Existing Editor/Renderer source
+  and Chad/Sanscale dependency pins are unchanged in that comparison.
+
+These are source-level checks, not a fresh behavioral certification. The merged
+feature's recorded test results remain its authors' validation; this review did
+not rerun them. A source-only reproduction also reconfirmed the review's tool-body
+key mismatch in current `details.rs:190` / `app.rs:3229–3235`: `:Input:text` does not
+round-trip through the inverse parser. That supports the separate explicit-source
+projection work, but does not prove its GUI/network consequence or its LOC estimate.
+
+### How the review's scope relates to this proposal
+
+| Review record | Decision for this proposal |
+|---|---|
+| 028 Interaction/capture | Same problem and overlapping work. Absorb its clipping, lifetime and nested-surface acceptance checks; do not build a separate permanent interaction scene alongside the widget tree. The nested-card pilot above supplements the form pilot. |
+| 029 Layout context | Recurring form/chrome helpers are already included. Its short-lived drawing context/hit sink is a possible smaller immediate-mode alternative, not another mandatory layer beneath this design. |
+| 030 Scroll mechanics | Included in ScrollState/ScrollView. Keep lane-specific policy; in particular, the new code browser's direct wheel/pan behavior must not acquire inertia merely because another pane has it. Backlog 012 remains deferred. |
+| 031 Feature-owned App state | Agree about ownership/lifecycle and relocation earning no LOC credit. Do not adopt a blanket requirement for narrow model access or interfaces only after multiple generic consumers exist. Broad disjoint injection and an interface-enforcing Widget trait remain deliberate choices. |
+| 032 Dialog lifecycle | Included, with a useful explicit requirement: UI completions match operation/connection attempt, account/source and dialog generation. A closed widget does not erase a durable operation; late UI callbacks cannot close/rewrite its replacement. |
+| 033 Acquisition/export | Same feature boundary as AttachmentCard plus export coordinator. Preserve preview versus export intent and source/path checks. A new typed export-job representation is conditional on simplifying the existing maps, not a prerequisite or extra credited saving. |
+| 034 Test fixtures | Optional test-only cleanup; reuse existing fixtures when migrating tests. No runtime abstraction or production saving, and no incidental removal of deferred scroll tests. |
+| 015–019 Transcript/client state | Separate domain work, already excluded from UI savings. Prefer consuming explicit source references/projections when available before Stage 4; they are not prerequisites for the forms or routing pilot. |
+| 020–027 Operation/replication work | Outside this UI proposal. No operation-store migration, universal replica framework or crate merger becomes an implicit dependency. |
+| 035 Legacy fixture adapters | Separate cleanup. Do not delete live native snapshot support or credit its possible savings to retained widgets. |
+
+"Do not borrow the whole App" is compatible with this proposal's sibling borrows:
+`&mut root` cannot alias the owner containing it. It does **not** imply that model,
+UI state and services must be split into restrictive per-button capabilities.
+Typed local menu/confirmation actions are also compatible; keeping the global
+Action dispatcher as the final architecture is not our chosen design.
+
+The backlog's usefulness/confidence scores and LOC ranges are judgments, not
+measurements. Its UI entries substantially overlap each other and this proposal;
+none of their estimated savings should be added to section 9. Its preference to
+start its own investigation with tool projection does not impose that work as a
+prerequisite for this UI pilot.
+
+### CodeBrowser: concrete additions to the migration
+
+The existing `app/code_view.rs::View` is already retained feature state. **Move its
+behavior onto that owner; do not replace its working document/selection machinery.**
+
+- ChatPane owns Transcript, CodeBrowser and the shared Composer. CodeBrowser owns
+  directory/picker state, its search TextField, CodeViewport geometry/scroll,
+  line-selection gesture state and the relationship between a selection and its
+  generated comment reference. It is a content surface, not an image-viewer modal.
+- Keep `tau-code-viewer` Document/Selection, stable source-line IDs, bounded diff
+  and syntax work. Do not allocate a general widget for every source line or copy
+  document text into another UI model. Keep the coalesced file interest, verified
+  snapshots and request generations in the existing file-client/controller path.
+- `code_tick`, `code_press/motion/release/wheel/key`, path-picker focus and the
+  relevant `impl App` methods move to that owner and the common input contract.
+  Remove the root's `SEARCH_FIELD = usize::MAX` exceptions and `Lane::Files`
+  switches when this surface migrates. The repeated sentinel branches are
+  additional concrete consumers for the already proposed focus route.
+- `composer_layout` / `draw_composer` are **already shared** by the merge. Reuse
+  them while creating Composer; do not reintroduce a separate comment editor or
+  claim their extraction as a future deletion.
+- Closing, same-chat selection, topic/account/source changes and download-notice
+  navigation must cancel the file interest at the owner boundary before the next
+  input. Preserve pause/resume on overlays, window focus and reconnect. Do not
+  make cancellation wait for a paint or only discover a stale binding in tick.
+- Preserve `code_reference` / `code_native_value` semantics: only the generated
+  marker may be rewritten, live insertions move references to unchanged selected
+  lines, changed selections disable Send, user prose survives, and IME/native
+  snapshots are reconciled. A stable WidgetId alone does not solve these live
+  document/draft transitions; they remain real feature logic.
+
+The nine additional actions have these destinations; combined with section 6,
+this accounts for all **82** variants at `415aeff`:
+
+| Added old action variants | Proposed owner |
+|---|---|
+| `Files`, `FileClose` | ChatPane surface change through the owner boundary; close file interest |
+| `FileOpen`, `FileUp`, `FilePage` | CodeBrowser's directory/file navigation methods |
+| `FileFind`, `FileFindHere` | CodeBrowser's path-picker state and existing file search API |
+| `FileClear`, `FileCopy` | CodeViewport selection/comment handling and platform Copy |
+
+Stage 3 now includes CodeBrowser; the remaining stages and two-method Widget
+contract do not change. Carry forward `app/code_view/tests.rs` and the integration
+navigation regression, including search-versus-draft isolation, live reference
+updates during composition, hold/haptic/drag selection, source generations and
+same-chat download navigation. File-service/protocol/worker algorithms are reused,
+not part of the UI rewrite or its deletion budget.
+
+### Updated measurement, not a newly asserted saving
+
+Using exactly section 9's production-line convention, and adding the new UI module:
+
+| Production source | Original | Integration `415aeff` | Change |
+|---|---:|---:|---:|
+| `app.rs`, before test modules | 4,754 | 4,815 | +61 |
+| `app/code_view.rs`, before test module | 0 | 452 | +452 |
+| `app/navigation.rs` | 153 | 159 | +6 |
+| `scroll.rs` | 86 | 87 | +1 |
+| Other original UI-scope files | 1,107 | 1,107 | 0 |
+| **Production UI scope** | **6,100** | **6,620** | **+520** |
+| **Nonblank production UI lines** | **6,064** | **6,582** | **+518** |
+| **Global Action variants** | **73** | **82** | **+9** |
+
+Reproduce the updated count with section 9's script using revision
+`415aeff6d27554ca0d594fd305eaaa9090e4bb45`, changing the ends for `app.rs` to 4815,
+`app/navigation.rs` to 159, `scroll.rs` to 87, and adding `app/code_view.rs: 452`.
+The output is `6620 6582`. The new file service/code-buffer library and small host
+changes are preserved dependencies outside this replacement baseline, not hidden
+UI deletions; any subsequent modifications to them for this refactor still count.
+
+Carrying the extra 520 lines forward without claiming any new browser saving would
+mechanically change the old replacement scenario to **5,720–6,270**, retaining the
+old **350–900** reduction target. **That is arithmetic, not a re-estimate or an
+approved current implementation budget.** The new owner/focus/selection integration
+may cost more or share more; measure the pilots and allocate that work explicitly.
+For the enlarged scope, the no-growth stop gate compares against **6,620**, with
+all additional interop changes charged as before. Section 9's 5,750/6,100 limits
+apply to its original feature scope, not to features subsequently added by others.
+
+The review's cautious, often zero-crossing estimates reinforce the existing stop
+gate rather than validate our more ambitious reduction target. Confidence in the
+ownership/routing direction is higher than confidence in a particular LOC saving.
+Do not promise net shrinkage until the pilot actually removes its predecessor.
+
+**Bottom line:** the review mostly corroborates or overlaps the selected work;
+the integration merge expands it with a concrete browser/composer consumer. Keep
+the architecture, update the scope and acceptance cases, and re-estimate before
+broad migration. Neither is a reason to import an additional framework or abandon
+broad injection and the small Widget interface.
