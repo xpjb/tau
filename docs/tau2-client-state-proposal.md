@@ -4,6 +4,11 @@ September 28, 2026. Proposal against `origin/tau2` at `40a3698`, fetched again
 for this pass. This describes a replacement state model; it is not implemented.
 The UI architecture is outside this proposal.
 
+The follow-up `tau2-shared-replication-proposal.md` extends the replicated portion
+of this model into a common client/daemon implementation. The ownership tree below
+still describes the client host; public record semantics and replication machinery
+should be shared underneath it, alongside the client's local intent/view state.
+
 ## State now
 
 Selected fields from the actual types:

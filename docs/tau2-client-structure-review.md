@@ -8,6 +8,8 @@ proposal, not a runtime change or an instruction to deploy.
 
 The concrete current-to-proposed state structures and message lifecycle are in
 [tau2-client-state-proposal.md](tau2-client-state-proposal.md).
+The client/daemon sharing and Quake III comparison are evaluated in
+`tau2-shared-replication-proposal.md`.
 
 ## Diagnosis
 
