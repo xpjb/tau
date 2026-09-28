@@ -1,6 +1,7 @@
 pub mod blocks;
 pub mod feed;
 pub mod file_client;
+pub mod file_index;
 pub mod store;
 pub mod transport;
 

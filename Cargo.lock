@@ -5313,6 +5313,7 @@ dependencies = [
  "tree-sitter-json",
  "tree-sitter-python",
  "tree-sitter-rust",
+ "unicode-segmentation",
 ]
 
 [[package]]

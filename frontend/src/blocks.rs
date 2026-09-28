@@ -523,29 +523,31 @@ fn text_prefix(bytes: &[u8]) -> Result<String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan { pub background: bool, pub scope: String, pub parents: BTreeSet<Option<String>>, pub blocks: Vec<(String,Option<(u64,u64,bool,u64)>)>, pub older:Vec<(String,FeedPosition)>, pub foreground:BTreeSet<String> }
-pub enum Command { Files(Option<crate::file_client::Interest>), Reset, Configure(BulkOffer,String), Plan(Vec<Plan>), History { scope:String,before:FeedPosition } }
+pub enum Command { FileIndex(Option<crate::file_index::Interest>), Files(Option<crate::file_client::Interest>), Reset, Configure(BulkOffer,String), Plan(Vec<Plan>), History { scope:String,before:FeedPosition } }
 pub struct Notice { pub scope: String, pub error: Option<anyhow::Error>, pub transfer:Option<(String,std::path::PathBuf,tau_transfer::TransferStatus)> }
-pub struct Service { viewer:crate::file_client::Service, tx: mpsc::Sender<Command>, plans:watch::Sender<Vec<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
+pub struct Service { file_index:crate::file_index::Service, viewer:crate::file_client::Service, tx: mpsc::Sender<Command>, plans:watch::Sender<Vec<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
 impl Service {
     pub fn start(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>) -> Self {
-        Self::start_with_files(cache, wake, notices, watch::channel(None).0)
+        Self::start_with_files(cache, wake, notices, watch::channel(None).0, watch::channel(None).0)
     }
-    pub fn start_with_files(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>, updates:watch::Sender<Option<Arc<crate::file_client::Update>>>) -> Self {
+    pub fn start_with_files(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>, updates:watch::Sender<Option<Arc<crate::file_client::Update>>>, index_updates:watch::Sender<Option<Arc<crate::file_index::Update>>>) -> Self {
         // Only coalesced plans/configuration and explicit history requests enter
         // this queue; content never passes through it or the control event queue.
         let (tx,rx) = mpsc::channel(8);
         let (plans,plan_rx)=watch::channel(vec![]);let (configuration,config_rx)=watch::channel(None);
         let (node,identity) = watch::channel(None);
         let (endpoint,client)=watch::channel(None); let (ready,lineage)=watch::channel(None);
+        let file_index=crate::file_index::Service::start(client.clone(),lineage.clone(),index_updates,wake.clone());
         let viewer=crate::file_client::Service::start(client.clone(),lineage.clone(),updates,wake.clone());
         let downloads=files::Downloads {cache:cache.clone(),client,ready:lineage,notices:notices.clone(),wake:wake.clone()};
         let task = tokio::spawn(run(cache,wake,rx,plan_rx,config_rx,notices,node,endpoint,ready));
-        Self { viewer,tx,plans,configuration,node:identity,downloads,task }
+        Self { file_index,viewer,tx,plans,configuration,node:identity,downloads,task }
     }
     pub fn stats(&self)->Option<tau_transfer::blocks::Stats> {self.downloads.client.borrow().as_ref().map(|client|client.stats())}
     pub(crate) fn downloads(&self) -> files::Downloads { self.downloads.clone() }
     pub fn send(&self, command: Command) {
         match command {
+            Command::FileIndex(interest)=>self.file_index.set(interest),
             Command::Files(interest)=>self.viewer.set(interest),
             Command::Plan(plan)=>{self.plans.send_replace(plan);}
             Command::Configure(offer,host)=>{self.configuration.send_replace(Some((offer,host)));}
@@ -595,7 +597,7 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
             result=configuration.changed()=>{if result.is_err() {break;}let Some((offer,host))=configuration.borrow_and_update().clone() else {continue;};Command::Configure(offer,host)}
         };
         match command {
-            Command::Files(_) => unreachable!("viewer has its own coalesced interest"),
+            Command::Files(_) | Command::FileIndex(_) => unreachable!("viewer has its own coalesced interest"),
             // Reset and the coalesced plan wake may be observed in either order.
             // Restart the current interests; never erase a just-received plan.
             Command::Reset=>{for job in jobs.values() {job.abort();}jobs.clear();}

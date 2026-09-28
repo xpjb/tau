@@ -6,7 +6,6 @@ pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_FILE_REPLY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_PATH_BYTES: usize = 2048;
 pub const DIRECTORY_PAGE: usize = 256;
-pub const SEARCH_RESULTS: usize = 100;
 pub const MAX_INDEX_PATHS: usize = 200_000;
 /// Leave room for JSON framing/escaping within MAX_FILE_REPLY_BYTES.
 pub const MAX_INDEX_BYTES: usize = 24 * 1024 * 1024;
@@ -24,7 +23,6 @@ pub struct FileRequest {
 pub enum FileOperation {
     List { after: Option<String> },
     Open { revision: Option<String> },
-    Search { query: String },
     /// Sync names independently of the query. Known revisions receive a delta,
     /// or no names at all when unchanged; unknown revisions receive a snapshot.
     Index { revision: Option<String> },
@@ -41,18 +39,19 @@ pub struct IndexedPath {
 }
 impl IndexedPath {
     pub fn hidden(&self) -> bool { self.path.split('/').any(|part| part.starts_with('.')) }
+    /// Conservative JSON record size for paths without control characters.
+    pub fn wire_bytes(&self) -> usize { self.path.len() + self.path.bytes().filter(|b| matches!(b, b'"' | b'\\')).count() + 32 }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum FileReply {
     Directory { path: String, parent: Option<String>, entries: Vec<FileEntry>, next: Option<String> },
-    Search { path: String, entries: Vec<FileEntry>, indexing: bool, limited: bool },
     Index { path: String, revision: String, base: Option<String>, entries: Vec<IndexedPath>, removed: Vec<String>, indexing: bool, limited: bool },
     Text { path: String, revision: String, text: String },
     Unchanged { path: String, revision: String },
 }
 impl FileReply {
     pub fn path(&self) -> &str { match self {
-        Self::Index { path, .. } | Self::Directory { path, .. } | Self::Search { path, .. } | Self::Text { path, .. } | Self::Unchanged { path, .. } => path,
+        Self::Index { path, .. } | Self::Directory { path, .. } | Self::Text { path, .. } | Self::Unchanged { path, .. } => path,
     } }
 }

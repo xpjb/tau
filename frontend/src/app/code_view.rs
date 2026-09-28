@@ -1,6 +1,7 @@
 //! Directory/code surface, shared by desktop and Android. The renderer owns only
 //! visible line paint; the worker owns parsing, and selections use source line IDs.
 use super::*;
+mod paint;
 use sanscale::{Align, BlockKey, Draw, PaintHandle, PaintSpan, ParagraphKey, ParagraphSource, Style};
 use std::{borrow::Cow, sync::Arc};
 use tau_code_viewer::{Document, Selection};
@@ -24,6 +25,25 @@ pub(super) struct View {
     search_root: Option<String>,
     operation: FileOperation,
     pub(super) search: Option<TextField>,
+    index_root: Option<String>,
+    index_seen: Option<Arc<crate::file_index::Update>>,
+    matcher: crate::file_index::Matcher,
+    matches: Option<Arc<crate::file_index::Matches>>,
+    match_generation: u64,
+    retained_row: Option<(String, f32)>,
+    highlighter: tau_code_viewer::finder::Finder,
+    show_hidden: bool,
+    search_from_chat: bool,
+    preview: Option<Arc<Document>>,
+    preview_target: Option<String>,
+    preview_error: Option<String>,
+    preview_loading: bool,
+    preview_scroll: ScrollState,
+    preview_horizontal: ScrollState,
+    preview_viewport: Rect,
+    preview_paints: HashMap<u64, (Vec<PaintSpan>, Option<PaintHandle>)>,
+    previews: std::collections::VecDeque<(String, Arc<Document>)>,
+    last_click: Option<(String, Instant)>,
     entries: Vec<FileEntry>,
     next: Option<String>,
     pages: Vec<Option<String>>,
@@ -63,6 +83,25 @@ impl View {
             search_root: None,
             operation: FileOperation::List { after: None },
             search: None,
+            index_root: None,
+            index_seen: None,
+            matcher: crate::file_index::Matcher::new(model.file_wake()),
+            matches: None,
+            match_generation: 0,
+            retained_row: None,
+            highlighter: tau_code_viewer::finder::Finder::new(""),
+            show_hidden: false,
+            search_from_chat: false,
+            preview: None,
+            preview_target: None,
+            preview_error: None,
+            preview_loading: false,
+            preview_scroll: ScrollState::new(id, false),
+            preview_horizontal: ScrollState::new(id, true),
+            preview_viewport: Rect::new(0., 0., 0., 0.),
+            preview_paints: HashMap::new(),
+            previews: Default::default(),
+            last_click: None,
             entries: vec![],
             next: None,
             pages: vec![None],
@@ -84,6 +123,35 @@ impl View {
             paints: HashMap::new(),
         }
     }
+    fn len(&self) -> usize {
+        if self.search.is_some() { self.matches.as_ref().filter(|m| m.generation == self.match_generation).map_or(0, |m| m.rows.len()) }
+        else { self.entries.iter().filter(|e| self.show_hidden || !e.name.starts_with('.')).count() }
+    }
+    fn entry(&self, row: usize) -> Option<FileEntry> {
+        if self.search.is_some() {
+            let matches = self.matches.as_ref().filter(|m| m.generation == self.match_generation)?;
+            let index = *matches.rows.get(row)?;
+            let entry = &matches.index.entries[index];
+            Some(FileEntry { path: matches.index.absolute(index), name: entry.path.rsplit('/').next()?.into(), directory: false, symlink: entry.symlink })
+        } else { self.entries.iter().filter(|e| self.show_hidden || !e.name.starts_with('.')).nth(row).cloned() }
+    }
+    fn search_status(&self) -> String {
+        let Some(update) = &self.index_seen else { return "Syncing file names…".into(); };
+        let Some(index) = &update.index else { return update.error.clone().unwrap_or_else(|| "Syncing file names…".into()); };
+        let eligible = if self.show_hidden { index.entries.len() } else { index.visible };
+        let matching = self.matches.as_ref().is_none_or(|m| m.generation != self.match_generation);
+        let state = if update.error.is_some() { " · cached, sync unavailable" }
+            else if update.indexing { " · indexing…" } else if update.limited { " · PARTIAL index; narrow with Here" }
+            else if matching { " · matching…" } else { "" };
+        format!("{} / {} files{} · .gitignore{}", self.len(), eligible, state, if self.show_hidden { "" } else { " · hidden off" })
+    }
+    fn remember_preview(&mut self, path: String, doc: Arc<Document>) {
+        self.previews.retain(|(p, _)| p != &path);
+        self.previews.push_front((path, doc));
+        while self.previews.len() > 8 || self.previews.iter().map(|(_, d)| d.text.len()).sum::<usize>() > 8*1024*1024 {
+            self.previews.pop_back();
+        }
+    }
     pub(super) fn sent(&mut self) {
         self.selection = None;
         self.reference = None;
@@ -98,7 +166,7 @@ impl View {
             .map(|n| n.min(doc.lines.len() - 1))
     }
     fn clear_paint(&mut self, renderer: &mut Renderer) {
-        for (_, (_, paint)) in self.paints.drain() {
+        for (_, (_, paint)) in self.paints.drain().chain(self.preview_paints.drain()) {
             if let Some(paint) = paint {
                 renderer.text.drop_paint(paint);
             }
@@ -123,6 +191,10 @@ impl ParagraphSource for Source<'_> {
 pub(in crate::app) enum Choice {
     Files,
     FileClose,
+    FileChat,
+    FileHidden,
+    FileSelect(String),
+    FileAccept,
     FileOpen(String, bool),
     FileUp,
     FileFindHere,
@@ -160,6 +232,8 @@ impl CodeBrowser {
             code.drag_anchor = None;
             code.scroll.stop();
             code.horizontal.stop();
+            code.preview_scroll.stop();
+            code.preview_horizontal.stop();
         }
     }
     fn activate(&mut self, action: Choice, cx: &mut Context<'_>) {
@@ -185,23 +259,27 @@ impl CodeBrowser {
         let Some(code) = &mut self.view else {
             return;
         };
-        let request = FileRequest {
-            session_id: code.session.clone(),
-            path: code.path.clone(),
-            operation: code.operation.clone(),
-        };
+        let preview = code.search.is_some();
+        let previous = if preview { code.preview.clone() } else { code.document.clone() };
+        let path = if preview {
+            let Some(path) = code.preview_target.clone() else { return; };
+            Some(path)
+        } else { code.path.clone() };
+        let operation = if preview || matches!(code.operation, FileOperation::Open {..}) {
+            FileOperation::Open { revision: previous.as_ref().map(|d| d.revision.clone()) }
+        } else { code.operation.clone() };
+        let request = FileRequest { session_id: code.session.clone(), path, operation };
         code.seen = None;
-        code.loading = true;
-        let previous = matches!(code.operation, FileOperation::Open { .. }).then(|| code.document.clone()).flatten();
-        match cx.model.view_files_document(Some(request), previous) {
+        if preview { code.preview_loading = true; } else { code.loading = true; }
+        match cx.model.view_files_preview(Some(request), previous, preview) {
             Ok(generation) => {
                 code.generation = generation;
                 code.subscribed = true;
-                code.error = None;
+                if preview { code.preview_error = None; } else { code.error = None; }
             }
             Err(error) => {
-                code.error = Some(error.to_string());
-                code.loading = false;
+                if preview { code.preview_error = Some(error.to_string()); code.preview_loading = false; }
+                else { code.error = Some(error.to_string()); code.loading = false; }
                 code.subscribed = false;
             }
         }
@@ -223,8 +301,31 @@ impl CodeBrowser {
                 self.view = Some(View::new(cx.model, session));
                 self.code_request(cx);
             }
-            Choice::FileClose => {
+            Choice::FileClose | Choice::FileChat => {
                 self.close_code(cx);
+            }
+            Choice::FileHidden => {
+                if let Some(code) = &mut self.view {
+                    code.show_hidden = !code.show_hidden;
+                    code.scroll.value = 0.; code.row = 0;
+                }
+                self.code_query(cx);
+            }
+            Choice::FileSelect(path) => {
+                let Some(code) = &mut self.view else { return Ok(()); };
+                let double = code.last_click.as_ref().is_some_and(|(p, at)| p == &path && at.elapsed().as_millis() < 350);
+                code.last_click = Some((path.clone(), Instant::now()));
+                if let Some(matches) = &code.matches && matches.generation == code.match_generation
+                    && let Some(row) = matches.rows.iter().position(|&i| matches.index.absolute(i) == path) {
+                    code.row = row;
+                }
+                if double { self.code_action(Choice::FileOpen(path, false), cx)?; }
+                else { self.select_preview(cx); }
+            }
+            Choice::FileAccept => {
+                if let Some(entry) = self.view.as_ref().and_then(|c| c.entry(c.row)) {
+                    self.code_action(Choice::FileOpen(entry.path, entry.directory), cx)?;
+                }
             }
             Choice::FileOpen(path, directory) => {
                 self.cancel_pointer(cx);
@@ -234,6 +335,7 @@ impl CodeBrowser {
                 code.clear_paint(&mut cx.services.renderer);
                 cx.ui.detach(code.id);
                 cx.ui.search = None;
+                let cached = code.previews.iter().find(|(p, _)| p == &path).map(|(_, doc)| doc.clone());
                 code.path = Some(path);
                 code.operation = if directory {
                     FileOperation::List { after: None }
@@ -241,7 +343,10 @@ impl CodeBrowser {
                     FileOperation::Open { revision: None }
                 };
                 code.search = None;
-                code.document = None;
+                code.match_generation = code.matcher.cancel();
+                code.document = if directory { None } else { cached };
+                code.preview = None;
+                code.preview_target = None;
                 code.selection = None;
                 code.reference = None;
                 code.reference_sync = None;
@@ -264,44 +369,38 @@ impl CodeBrowser {
                 }
             }
             Choice::FileFindHere => {
-                if let Some(code) = &mut self.view
-                    && let Some(search) = &code.search
-                {
-                    code.path = code.directory.clone();
-                    code.operation = FileOperation::Search { query: search.editor.value.clone() };
-                    code.entries.clear();
-                    code.scroll.value = 0.;
-                    code.row = 0;
-                    self.code_request(cx);
+                if let Some(code) = &mut self.view && code.search.is_some() {
+                    code.index_root = code.directory.clone();
+                    code.path = code.index_root.clone();
+                    code.index_seen = None;
+                    code.matches = None;
+                    code.match_generation = code.matcher.cancel();
+                    code.retained_row = None;
+                    code.row = 0; code.scroll.value = 0.;
+                    self.cancel_preview(cx);
                 }
             }
             Choice::FileFind => {
                 self.cancel_pointer(cx);
-                if self.view.is_none() {
-                    self.code_action(Choice::Files, cx)?;
-                }
-                let Some(code) = &mut self.view else {
-                    return Ok(());
-                };
-                if code.search.is_some() {
-                    self.code_back(cx);
-                    return Ok(());
-                }
+                let from_chat = self.view.is_none();
+                if from_chat { self.code_action(Choice::Files, cx)?; }
+                let Some(code) = &mut self.view else { return Ok(()); };
+                if code.search.is_some() { code.search_from_chat = false; self.code_back(cx); return Ok(()); }
+                code.search_from_chat = from_chat;
+                code.clear_paint(&mut cx.services.renderer);
                 code.search = Some(TextField::new(code.id, "", Editor::line(String::new())));
                 let field = code.search.as_mut().unwrap();
                 field.size = 16.;
-                field.placeholder = "Fuzzy find paths…".into();
+                field.placeholder = "Find files…".into();
                 code.path = code.search_root.clone();
-                code.operation = FileOperation::Search { query: String::new() };
-                code.entries.clear();
-                code.row = 0;
-                code.scroll.value = 0.;
-                cx.ui.focus = Some(code.search.as_ref().unwrap().control.target);
+                if code.index_root.take().is_some() { code.index_seen = None; code.matches = None; }
+                code.loading = false; code.error = None;
+                code.row = 0; code.scroll.value = 0.;
+                cx.ui.focus = Some(field.control.target);
                 cx.ui.search = cx.ui.focus;
-                self.code_request(cx);
-                if cx.ui.mobile
-                    && let Some(field) = self.view.as_ref().and_then(|c| c.search.as_ref())
-                {
+                self.cancel_preview(cx);
+                self.code_query(cx);
+                if cx.ui.mobile && let Some(field) = self.view.as_ref().and_then(|c| c.search.as_ref()) {
                     cx.focus_native(field.control.target, field.editor.native_id());
                 }
             }
@@ -349,11 +448,17 @@ impl CodeBrowser {
     }
     pub(super) fn code_back(&mut self, cx: &mut Context<'_>) {
         self.cancel_pointer(cx);
+        if self.view.as_ref().is_some_and(|c| c.search.is_some() && c.search_from_chat) {
+            self.close_code(cx); return;
+        }
         if let Some(code) = &mut self.view
             && code.search.take().is_some()
         {
             cx.ui.detach(code.id);
             cx.ui.search = None;
+            code.preview = None; code.preview_target = None;
+            code.match_generation = code.matcher.cancel();
+            code.clear_paint(&mut cx.services.renderer);
             code.path = code.document.as_ref().map(|d| d.path.clone()).or_else(|| code.directory.clone());
             code.operation = if code.document.is_some() {
                 FileOperation::Open { revision: None }
@@ -374,16 +479,38 @@ impl CodeBrowser {
             self.close_code(cx);
         }
     }
-    pub(super) fn code_query(&mut self, cx: &mut Context<'_>) {
-        if let Some(code) = &mut self.view
-            && let Some(search) = &code.search
-        {
-            code.operation = FileOperation::Search { query: search.editor.value.chars().take(128).collect() };
-            code.entries.clear();
-            code.scroll.value = 0.;
-            code.row = 0;
-            self.code_request(cx);
+    fn cancel_preview(&mut self, cx: &mut Context<'_>) {
+        if let Some(code) = &mut self.view {
+            if code.subscribed { let _ = cx.model.view_files(None); }
+            code.subscribed = false;
+            code.preview = None; code.preview_target = None; code.preview_error = None; code.preview_loading = false;
         }
+    }
+    fn select_preview(&mut self, cx: &mut Context<'_>) {
+        let Some(code) = &mut self.view else { return; };
+        if code.search.is_none() { return; }
+        let path = code.entry(code.row).map(|e| e.path);
+        if code.preview_target == path { return; }
+        code.clear_paint(&mut cx.services.renderer);
+        code.preview_scroll.value = 0.; code.preview_horizontal.value = 0.;
+        if let Some(path) = path {
+            code.preview = code.previews.iter().find(|(p, _)| p == &path).map(|(_, d)| d.clone());
+            code.preview_target = Some(path);
+            if cx.ui.window_focused && cx.ui.visible && !cx.ui.covered { self.code_request(cx); }
+        } else { self.cancel_preview(cx); }
+        cx.ui.dirty = true;
+    }
+    pub(super) fn code_query(&mut self, cx: &mut Context<'_>) {
+        let Some(code) = &mut self.view else { return; };
+        let Some(search) = &code.search else { return; };
+        let query: String = search.editor.value.chars().take(256).collect();
+        code.highlighter.query(&query);
+        let index = code.index_seen.as_ref().and_then(|u| u.index.clone());
+        code.match_generation = if let Some(index) = index { code.matcher.query(index, query, code.show_hidden) }
+            else { code.matcher.cancel() };
+        code.scroll.value = 0.; code.row = 0; code.retained_row = None;
+        self.cancel_preview(cx);
+        cx.ui.dirty = true;
     }
     /// Persist once per completed gesture/live revision, not on every pointer
     /// motion. Keep a user's draft and only replace our own still-intact marker.
@@ -441,6 +568,12 @@ impl CodeBrowser {
         }
     }
     pub(super) fn code_tick(&mut self, dt: f32, cx: &mut Context<'_>) {
+        let active = cx.ui.window_focused && cx.ui.visible && !cx.ui.covered;
+        let plan = if active {
+            cx.model.account.selected.clone().map(|session| (session, self.view.as_ref().and_then(|c| c.index_root.clone())))
+        } else { None };
+        let result = cx.model.sync_file_index(plan);
+        cx.report(result);
         let Some(code) = &self.view else {
             return;
         };
@@ -452,15 +585,48 @@ impl CodeBrowser {
             cx.ui.dirty = true;
             return;
         }
-        let active = cx.ui.window_focused && !cx.ui.covered;
+        let active = cx.ui.window_focused && cx.ui.visible && !cx.ui.covered;
         if !active && code.subscribed {
             let _ = cx.model.view_files(None);
             self.view.as_mut().unwrap().subscribed = false;
         } else if active
             && (!code.subscribed || code.generation != cx.model.viewer_generation())
             && cx.model.epoch.is_some()
+            && (code.search.is_none() || code.preview_target.is_some())
         {
             self.code_request(cx);
+        }
+        if let Some(update) = cx.model.file_index.clone()
+            && self.view.as_ref().is_some_and(|c| update.session == c.session
+                && update.lineage == c.lineage.as_deref().unwrap_or("")
+                && c.index_seen.as_ref().is_none_or(|old| !Arc::ptr_eq(old, &update))) {
+            let code = self.view.as_mut().unwrap();
+            let changed = code.index_seen.as_ref().and_then(|u| u.index.as_ref()).zip(update.index.as_ref())
+                .is_none_or(|(a, b)| !Arc::ptr_eq(a, b));
+            if let Some(index) = &update.index {
+                if code.search_root.is_none() && code.index_root.is_none() { code.search_root = Some(index.root.clone()); }
+                if code.directory.is_none() && code.document.is_none() { code.directory = Some(index.root.clone()); }
+                if code.search.is_some() { code.path = Some(index.root.clone()); }
+            }
+            code.index_seen = Some(update);
+            if changed && code.search.is_some() {
+                let selected = code.entry(code.row).map(|e| (e.path, code.scroll.value));
+                self.code_query(cx);
+                self.view.as_mut().unwrap().retained_row = selected;
+            }
+            cx.ui.dirty = true;
+        }
+        if let Some(code) = &mut self.view
+            && let Some(matches) = code.matcher.take()
+            && code.search.is_some() && matches.generation == code.match_generation {
+            if let Some((path, scroll)) = code.retained_row.take()
+                && let Some(row) = matches.rows.iter().position(|&i| matches.index.absolute(i) == path) {
+                code.row = row; code.scroll.value = scroll;
+            }
+            code.matches = Some(matches);
+            code.row = code.row.min(code.len().saturating_sub(1));
+            self.select_preview(cx);
+            cx.ui.dirty = true;
         }
         let update = cx.model.file_update.clone();
         if let Some(update) = update
@@ -474,9 +640,25 @@ impl CodeBrowser {
             let code = self.view.as_mut().unwrap();
             code.seen = Some(update.clone());
             code.loading = false;
+            let previewing = code.search.is_some();
+            if previewing {
+                code.preview_loading = false;
+                match &update.response {
+                    Err(error) => code.preview_error = Some(error.clone()),
+                    Ok(FileReply::Text {..} | FileReply::Unchanged {..}) => {
+                        code.preview_error = None;
+                        if let Some(doc) = &update.document {
+                            if code.preview.as_ref().is_some_and(|old| old.namespace != doc.namespace) { code.clear_paint(&mut cx.services.renderer); }
+                            code.preview = Some(doc.clone());
+                            if let Some(path) = code.preview_target.clone() { code.remember_preview(path, doc.clone()); }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let mut invalidated = false;
             let mut moved = false;
-            match &update.response {
+            if !previewing { match &update.response {
                 Err(error) => {
                     code.error = Some(error.clone());
                     code.status = "Preview unavailable · retrying".into();
@@ -496,21 +678,7 @@ impl CodeBrowser {
                             code.next = next.clone();
                             code.status = "Read only · ignored files remain browsable".into();
                         }
-                        FileReply::Search { path, entries, indexing, limited } => {
-                            if code.search_root.is_none() {
-                                code.search_root = Some(path.clone());
-                            }
-                            code.path = Some(path.clone());
-                            code.entries = entries.clone();
-                            code.status = if *indexing {
-                                "Indexing paths…"
-                            } else if *limited {
-                                "Partial index · Here searches this folder"
-                            } else {
-                                "Fuzzy paths · respects .gitignore"
-                            }
-                            .into();
-                        }
+                        FileReply::Index { .. } => {},
                         FileReply::Text { path, .. } | FileReply::Unchanged { path, .. } => {
                             if let Some(doc) = &update.document {
                                 let cursor =
@@ -558,7 +726,8 @@ impl CodeBrowser {
                     }
                 }
             }
-            code.row = code.row.min(code.entries.len().saturating_sub(1));
+            }
+            code.row = code.row.min(code.len().saturating_sub(1));
             if invalidated {
                 self.view.as_mut().unwrap().reference_sync = Some(true);
             } else if moved && self.view.as_ref().is_some_and(|c| c.reference.is_some()) {
@@ -725,6 +894,11 @@ impl CodeBrowser {
         let Some(code) = &mut self.view else {
             return false;
         };
+        if code.search.is_some() && contains(code.preview_viewport, point) {
+            let scroll = if horizontal { &mut code.preview_horizontal } else { &mut code.preview_scroll };
+            scroll.value = (scroll.value + amount).clamp(0., scroll.max);
+            cx.ui.dirty = true; return true;
+        }
         if !contains(code.viewport, point) {
             return false;
         }
@@ -763,13 +937,24 @@ impl CodeBrowser {
             return true;
         }
         if code.document.is_none() || code.search.is_some() {
+            let key = if code.search.is_some() {
+                if ctrl && matches!(key, "n" | "N" | "j" | "J") || key == "Tab" && !shift { "ArrowDown" }
+                else if ctrl && matches!(key, "p" | "P" | "k" | "K") || key == "Tab" && shift { "ArrowUp" }
+                else { key }
+            } else { key };
+            let row_height = if code.search.is_some() { 36. } else { 44. } * cx.ui.scale;
+            let page = (code.viewport.height / row_height).floor().max(1.) as usize;
             match key {
                 "ArrowUp" | "k" if code.search.is_none() || key == "ArrowUp" => code.row = code.row.saturating_sub(1),
                 "ArrowDown" | "j" if code.search.is_none() || key == "ArrowDown" => {
-                    code.row = (code.row + 1).min(code.entries.len().saturating_sub(1))
+                    code.row = (code.row + 1).min(code.len().saturating_sub(1))
                 }
+                "PageUp" => code.row = code.row.saturating_sub(page),
+                "PageDown" => code.row = (code.row + page).min(code.len().saturating_sub(1)),
+                "Home" if code.search.is_none() || ctrl => code.row = 0,
+                "End" if code.search.is_none() || ctrl => code.row = code.len().saturating_sub(1),
                 "Enter" | "l" if code.search.is_none() || key == "Enter" => {
-                    if let Some(entry) = code.entries.get(code.row) {
+                    if let Some(entry) = code.entry(code.row) {
                         let action = Choice::FileOpen(entry.path.clone(), entry.directory);
                         self.activate(action, cx);
                     }
@@ -781,12 +966,13 @@ impl CodeBrowser {
                 }
                 _ => return false,
             }
-            let top = code.row as f32 * 44. * cx.ui.scale;
+            let top = code.row as f32 * row_height;
             if top < code.scroll.value {
                 code.scroll.value = top;
-            } else if top + 44. * cx.ui.scale > code.scroll.value + code.viewport.height {
-                code.scroll.value = (top + 44. * cx.ui.scale - code.viewport.height).min(code.scroll.max);
+            } else if top + row_height > code.scroll.value + code.viewport.height {
+                code.scroll.value = (top + row_height - code.viewport.height).min(code.scroll.max);
             }
+            self.select_preview(cx);
         } else {
             if code.error.is_some() && (shift || key == "v") {
                 return true;
@@ -888,6 +1074,7 @@ impl Widget for CodeBrowser {
                 return true;
             }
         }
+        if self.view.as_mut().is_some_and(|v| v.search.is_some() && v.preview_scroll.bar_event(event, cx)) { return true; }
         if self.view.as_mut().is_some_and(|v| v.scroll.bar_event(event, cx)) {
             return true;
         }
@@ -940,6 +1127,10 @@ impl Widget for CodeBrowser {
         let Some(code) = &mut self.view else {
             return child;
         };
+        if code.search.is_some() {
+            let preview_handled = code.preview_scroll.event(event, child, cx);
+            if preview_handled { return true; }
+        }
         let horizontal = match event {
             InputEvent::Move { point, .. } => {
                 self.pointer.as_ref().is_some_and(|p| (point.x - p.start.x).abs() > 1.5 * (point.y - p.start.y).abs())
@@ -975,7 +1166,7 @@ impl Widget for CodeBrowser {
             &mut self.controls,
             Rect::new(b.x + 8. * s, b.y + 6. * s, 64. * s, 40. * s),
             "‹ Chat",
-            Choice::FileClose,
+            Choice::FileChat,
             s,
             false,
         );
@@ -1004,7 +1195,7 @@ impl Widget for CodeBrowser {
         }
         cx.services.renderer.label(
             layer,
-            "Files",
+            if code.search.is_some() { "Find files" } else { "Files" },
             Rect::new(b.x + 130. * s, b.y + 15. * s, (b.width - 240. * s).max(1.), 24. * s),
             16. * s,
             color(0xe5eaf0),
@@ -1015,7 +1206,7 @@ impl Widget for CodeBrowser {
             layer,
             &mut self.controls,
             Rect::new(b.x + b.width - 104. * s, b.y + 6. * s, 60. * s, 40. * s),
-            if code.search.is_some() { "Done" } else { "Find" },
+            if code.search.is_some() { "Browse" } else { "Find" },
             Choice::FileFind,
             s,
             code.search.is_some(),
@@ -1044,13 +1235,18 @@ impl Widget for CodeBrowser {
             search.visit_perframe(&mut Frame { layer, bounds: rect, clip: frame.clip }, cx);
             cx.services.renderer.label(
                 layer,
-                code.error.as_deref().unwrap_or(if code.loading { "Searching…" } else { &code.status }),
+                &code.search_status(),
                 Rect::new(b.x + 14. * s, b.y + 139. * s, b.width - 28. * s, 18. * s),
                 11. * s,
                 color(0x82909f),
                 false,
             );
-            b.y + 160. * s
+            retained_button(&mut cx.services.renderer, layer, &mut self.controls,
+                Rect::new(b.x + 12.*s, b.y + 162.*s, 128.*s, 32.*s),
+                if code.show_hidden { "✓ Show hidden" } else { "Show hidden" }, Choice::FileHidden, s, code.show_hidden);
+            cx.services.renderer.label(layer, if cx.ui.mobile { "Tap to preview · Open" } else { "↑↓ / Ctrl-N/P · Enter open · Esc back" },
+                Rect::new(b.x + 150.*s, b.y + 170.*s, (b.width - 164.*s).max(1.), 20.*s), 11.*s, color(0x82909f), false);
+            b.y + 200. * s
         } else {
             let status = code.error.as_deref().unwrap_or(if code.loading { "Loading…" } else { &code.status });
             let label = code
@@ -1070,7 +1266,7 @@ impl Widget for CodeBrowser {
                 Rect::new(
                     b.x + 14. * s,
                     b.y + 94. * s,
-                    (b.width - if comments { 158. * s } else { 28. * s }).max(1.),
+                    (b.width - if comments || code.document.is_none() { 158. * s } else { 28. * s }).max(1.),
                     24. * s,
                 ),
                 12. * s,
@@ -1099,121 +1295,35 @@ impl Widget for CodeBrowser {
                     false,
                 );
             }
+            if code.document.is_none() {
+                retained_button(&mut cx.services.renderer, layer, &mut self.controls,
+                    Rect::new(b.x + b.width - 140.*s, b.y + 84.*s, 128.*s, 32.*s),
+                    if code.show_hidden { "✓ Show hidden" } else { "Show hidden" }, Choice::FileHidden, s, code.show_hidden);
+            }
             b.y + 124. * s
         };
         let paging = code.search.is_none() && code.document.is_none() && (code.next.is_some() || code.pages.len() > 1);
-        code.viewport = Rect::new(b.x, top, b.width, (bottom - top - if paging { 48. * s } else { 0. }).max(1.));
+        let available = (bottom - top - if paging { 48. * s } else { 0. }).max(1.);
+        let row_height = if code.search.is_some() { 36.*s } else { 44.*s };
+        let list_height = if code.search.is_some() { (available * 0.45).min(8.*row_height).max(1.) } else { available };
+        code.viewport = Rect::new(b.x, top, b.width, list_height);
         let viewport = code.viewport;
         layer.rect(viewport, color(0x0b1118));
         layer.rect(Rect::new(b.x, top - s, b.width, s), color(0x2a3541));
         if let Some(doc) = &code.document
             && code.search.is_none()
         {
-            code.line_height = if cx.ui.mobile { 28. } else { 24. } * s;
-            code.gutter = (44. + doc.lines.len().to_string().len().saturating_sub(3) as f32 * 8.) * s;
-            code.scroll.max = (doc.lines.len() as f32 * code.line_height + 16. * s - viewport.height).max(0.);
-            code.scroll.value = code.scroll.value.clamp(0., code.scroll.max);
-            let first = (code.scroll.value / code.line_height).floor() as usize;
-            let end = (first + (viewport.height / code.line_height).ceil() as usize + 2).min(doc.lines.len());
             let selection = code.selection.as_ref().and_then(|s| s.range(doc));
-            let mut visible = HashSet::new();
-            let mut widest = viewport.width;
-            layer.rect(Rect::new(viewport.x, viewport.y, code.gutter, viewport.height), color(0x111923));
-            for i in first..end {
-                let line = &doc.lines[i];
-                visible.insert(line.id);
-                let y = viewport.y + i as f32 * code.line_height - code.scroll.value;
-                if selection.as_ref().is_some_and(|r| r.contains(&i)) {
-                    layer.clipped_rect(
-                        Rect::new(viewport.x, y, viewport.width, code.line_height),
-                        color(0x213c57),
-                        viewport,
-                    );
-                }
-                cx.services.renderer.clipped_label(
-                    layer,
-                    &(i + 1).to_string(),
-                    Rect::new(viewport.x + 8. * s, y + 5. * s, code.gutter - 14. * s, code.line_height),
-                    12. * s,
-                    color(if selection.as_ref().is_some_and(|r| r.contains(&i)) { 0x8bd6ff } else { 0x6c7d90 }),
-                    false,
-                    viewport,
-                );
-                // Cap a single pathological/minified line's shaping work while
-                // retaining its original full text for selection and copying.
-                let mut stop = line.text.len().min(16 * 1024);
-                while !line.text.is_char_boundary(stop) {
-                    stop -= 1;
-                }
-                let mut text = line.text[..stop].replace('\t', "    ");
-                if stop < line.text.len() {
-                    text.push_str(" … [long line preview limited; Copy keeps full text]");
-                }
-                let tabs = line.text[..stop].contains('\t');
-                let byte = |n: usize| {
-                    let n = n.min(stop);
-                    n + if tabs { line.text[..n].bytes().filter(|&b| b == b'\t').count() * 3 } else { 0 }
-                };
-                let spans = line
-                    .paint
-                    .iter()
-                    .filter(|p| p.range.start < stop)
-                    .map(|p| PaintSpan { range: byte(p.range.start)..byte(p.range.end), color: color(p.color) })
-                    .collect::<Vec<_>>();
-                let cached = code.paints.entry(line.id).or_insert_with(|| (vec![], None));
-                if cached.0 != spans {
-                    if let Some(p) = cached.1.take() {
-                        cx.services.renderer.text.drop_paint(p);
-                    }
-                    cached.1 =
-                        if spans.is_empty() { None } else { cx.services.renderer.text.register_paint(&spans).ok() };
-                    cached.0 = spans;
-                }
-                let namespace = 0x5441_5546_0000_0000 | doc.namespace;
-                let key = ParagraphKey { namespace, slot: line.id as u32, generation: 1 };
-                let style = Style {
-                    chain: cx.services.renderer.faces.mono[0],
-                    wrap_em: None,
-                    align: Align::Left,
-                    line_spacing: 1.2,
-                };
-                let key_id = 0xe000_0000_0000_0000 | (doc.namespace << 32) | line.id;
-                if let Some(block) = cx.services.renderer.text.shape(BlockKey(key_id), &style, &[key], &Source(&text)) {
-                    let size = 14. * s;
-                    widest =
-                        widest.max(cx.services.renderer.text.measure(block).width_em() * size + code.gutter + 24. * s);
-                    layer.draws.push(Draw {
-                        block,
-                        at: Vec2::new(viewport.x + code.gutter + 8. * s - code.horizontal.value, y + 4. * s),
-                        size,
-                        color: color(0xd8dee9),
-                        clip: Some(Rect::new(
-                            viewport.x + code.gutter,
-                            viewport.y,
-                            viewport.width - code.gutter,
-                            viewport.height,
-                        )),
-                        paint: cached.1,
-                    });
-                }
-            }
-            code.horizontal.max = (widest - viewport.width).max(code.horizontal.value);
-            code.paints.retain(|id, (_, paint)| {
-                let keep = visible.contains(id);
-                if !keep && let Some(p) = paint.take() {
-                    cx.services.renderer.text.drop_paint(p);
-                }
-                keep
-            });
+            (code.line_height, code.gutter) = paint::document(doc, selection, &mut code.paints, &mut code.scroll, &mut code.horizontal, viewport, layer, cx);
         } else {
-            code.scroll.max = (code.entries.len() as f32 * 44. * s - viewport.height).max(0.);
+            code.scroll.max = (code.len() as f32 * row_height - viewport.height).max(0.);
             code.scroll.value = code.scroll.value.clamp(0., code.scroll.max);
-            let first = (code.scroll.value / (44. * s)) as usize;
-            let end = (first + (viewport.height / (44. * s)).ceil() as usize + 1).min(code.entries.len());
+            let first = (code.scroll.value / row_height) as usize;
+            let end = (first + (viewport.height / row_height).ceil() as usize + 1).min(code.len());
             for i in first..end {
-                let entry = &code.entries[i];
-                let y = viewport.y + i as f32 * 44. * s - code.scroll.value;
-                let rect = Rect::new(viewport.x + 8. * s, y, viewport.width - 20. * s, 44. * s);
+                let Some(entry) = code.entry(i) else { continue; };
+                let y = viewport.y + i as f32 * row_height - code.scroll.value;
+                let rect = Rect::new(viewport.x + 8. * s, y, viewport.width - 20. * s, row_height);
                 let hit = crate::render::intersect(rect, viewport);
                 if i == code.row {
                     layer.clipped_rect(rect, color(0x172330), viewport);
@@ -1233,7 +1343,10 @@ impl Widget for CodeBrowser {
                     display_path(name),
                     if entry.directory { "/" } else { "" }
                 );
-                cx.services.renderer.clipped_label(
+                if code.search.is_some() {
+                    let name = name.to_owned();
+                    paint::matched_label(&mut code, i, &name, Rect::new(rect.x + 10.*s, y + 9.*s, rect.width - 20.*s, row_height), viewport, layer, cx);
+                } else { cx.services.renderer.clipped_label(
                     layer,
                     &label,
                     Rect::new(rect.x + 10. * s, y + 11. * s, rect.width - 20. * s, 24. * s),
@@ -1242,17 +1355,28 @@ impl Widget for CodeBrowser {
                     false,
                     viewport,
                 );
+                }
                 if hit.height > 0. {
-                    self.controls.place(Choice::FileOpen(entry.path.clone(), entry.directory), rect, viewport, false);
+                    let action = if code.search.is_some() { Choice::FileSelect(entry.path.clone()) } else { Choice::FileOpen(entry.path.clone(), entry.directory) };
+                    self.controls.place(action, rect, viewport, false);
                 }
             }
-            if code.entries.is_empty() {
+            code.paints.retain(|id, (_, paint)| {
+                let keep = (first..end).contains(&(*id as usize));
+                if !keep && let Some(p) = paint.take() { cx.services.renderer.text.drop_paint(p); }
+                keep
+            });
+            if code.len() == 0 {
                 let text = code.error.as_deref().unwrap_or(if code.loading {
                     "Loading remote files…"
+                } else if code.search.is_some() && code.index_seen.as_ref().is_none_or(|u| u.index.is_none() || u.indexing) {
+                    "Syncing file names…"
+                } else if code.search.is_some() && code.matches.as_ref().is_none_or(|m| m.generation != code.match_generation) {
+                    "Matching…"
                 } else if code.search.is_some() {
-                    "No matching paths"
+                    "No matching files"
                 } else {
-                    "Empty directory"
+                    "No visible entries on this page"
                 });
                 cx.services.renderer.label(
                     layer,
@@ -1263,6 +1387,30 @@ impl Widget for CodeBrowser {
                     false,
                 );
             }
+        }
+        code.preview_viewport = Rect::new(0., 0., 0., 0.);
+        if code.search.is_some() {
+            let header_y = viewport.y + viewport.height;
+            layer.rect(Rect::new(b.x, header_y, b.width, 36.*s), color(0x111923));
+            let selected = code.entry(code.row);
+            let title = selected.as_ref().map(|e| e.path.strip_prefix(code.path.as_deref().unwrap_or("")).unwrap_or(&e.path).trim_start_matches('/')).unwrap_or("Preview");
+            cx.services.renderer.label(layer, title, Rect::new(b.x + 14.*s, header_y + 9.*s, (b.width - 100.*s).max(1.), 24.*s), 12.*s, color(0xb7c2ce), false);
+            if selected.is_some() {
+                retained_button(&mut cx.services.renderer, layer, &mut self.controls, Rect::new(b.x + b.width - 76.*s, header_y + 2.*s, 64.*s, 32.*s), "Open", Choice::FileAccept, s, false);
+            }
+            let preview = Rect::new(b.x, header_y + 36.*s, b.width, (bottom - header_y - 36.*s).max(1.));
+            code.preview_viewport = preview;
+            layer.rect(preview, color(0x0b1118));
+            if let Some(doc) = &code.preview {
+                paint::document(doc, None, &mut code.preview_paints, &mut code.preview_scroll, &mut code.preview_horizontal, preview, layer, cx);
+            }
+            if code.preview.is_none() || code.preview_error.is_some() {
+                let text = code.preview_error.as_deref().unwrap_or(if code.preview_loading { "Loading preview…" } else { "Select a file to preview" });
+                layer.rect(Rect::new(preview.x, preview.y, preview.width, 50.*s), color(0x0b1118));
+                cx.services.renderer.clipped_label(layer, text, Rect::new(preview.x + 14.*s, preview.y + 14.*s, (preview.width - 28.*s).max(1.), 36.*s), 13.*s, color(0x82909f), false, preview);
+            }
+            code.preview_scroll.rect = preview; code.preview_horizontal.rect = preview;
+            code.preview_scroll.paint(layer, cx);
         }
         if paging {
             let y = bottom - 44. * s;

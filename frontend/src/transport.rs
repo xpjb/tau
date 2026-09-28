@@ -85,6 +85,7 @@ pub struct Network {
     tx: mpsc::Sender<Command>,
     pub events: EventReceiver,
     pub blocks: mpsc::Receiver<crate::blocks::Notice>,
+    pub file_index: tokio::sync::watch::Receiver<Option<Arc<crate::file_index::Update>>>,
     pub files: tokio::sync::watch::Receiver<Option<Arc<crate::file_client::Update>>>,
 }
 impl Network {
@@ -93,6 +94,7 @@ impl Network {
     fn start_inner(settings: Settings, wake: Wake, cache: Option<crate::blocks::Cache>) -> Self {
         let (block_notices,blocks) = mpsc::channel(32);
         let (file_updates,files) = tokio::sync::watch::channel(None);
+        let (index_updates,file_index) = tokio::sync::watch::channel(None);
         let (tx, rx) = mpsc::channel(64);
         let (sink, incoming) = event_queue::channel(wake);
         std::thread::Builder::new()
@@ -103,7 +105,7 @@ impl Network {
                     .enable_all()
                     .build()
                 {
-                    Ok(rt) => rt.block_on(run(settings, rx, sink, cache, block_notices, file_updates)),
+                    Ok(rt) => rt.block_on(run(settings, rx, sink, cache, block_notices, file_updates, index_updates)),
                     Err(_) => {
                         sink.send_now(Event::Fatal("Cannot start network runtime".into()));
                     }
@@ -113,7 +115,7 @@ impl Network {
         Self {
             tx,
             events: incoming,
-            blocks, files,
+            blocks, files, file_index,
         }
     }
     pub fn send(&self, command: Command) -> Result<()> {
@@ -140,8 +142,8 @@ impl std::fmt::Display for HeartbeatTimeout {
 }
 impl std::error::Error for HeartbeatTimeout {}
 
-async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: Events, cache: Option<crate::blocks::Cache>, block_notices:mpsc::Sender<crate::blocks::Notice>, file_updates:tokio::sync::watch::Sender<Option<Arc<crate::file_client::Update>>>) {
-    let block_service = cache.map(|cache|crate::blocks::Service::start_with_files(cache,events.wake.clone(),block_notices,file_updates));
+async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: Events, cache: Option<crate::blocks::Cache>, block_notices:mpsc::Sender<crate::blocks::Notice>, file_updates:tokio::sync::watch::Sender<Option<Arc<crate::file_client::Update>>>, index_updates:tokio::sync::watch::Sender<Option<Arc<crate::file_index::Update>>>) {
+    let block_service = cache.map(|cache|crate::blocks::Service::start_with_files(cache,events.wake.clone(),block_notices,file_updates,index_updates));
     let mut block_identity = block_service.as_ref().map(|s|s.node.clone());
     let setup = (|| -> Result<_> {
         let mut url = endpoint(&settings, &["v1", "ws"])?;

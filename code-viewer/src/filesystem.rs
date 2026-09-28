@@ -46,29 +46,6 @@ impl FileSystem {
                     };
                     Ok(index_reply(absolute, &snapshot, previous.as_ref(), revision, indexing))
                 }
-                FileOperation::Search { query } => {
-                    ensure!(query.len() <= 256, "Search query is too long");
-                    ensure!(path.is_dir(), "Search root is not a directory");
-                    want_index(&shared, &path);
-                    let (items, indexing, limited) = {
-                        let mut roots = shared.roots.lock().unwrap();
-                        let index = roots.get_mut(&path).context("Index was evicted; retry")?;
-                        index.used = Instant::now();
-                        (index.snapshot.items.clone(), index.scanning || index.refreshed.is_none(), index.snapshot.limited)
-                    };
-                    let mut best = BTreeMap::new();
-                    let mut finder = crate::finder::Finder::new(&query);
-                    for item in items.iter() {
-                        if let Some(score) = finder.score(&item.path) {
-                            best.insert((std::cmp::Reverse(score), item.path.as_str()), item);
-                            if best.len() > SEARCH_RESULTS { best.pop_last(); }
-                        }
-                    }
-                    Ok(FileReply::Search { path: absolute.clone(), entries: best.into_values().map(|item| FileEntry {
-                        path: format!("{}/{}", absolute.trim_end_matches('/'), item.path),
-                        name: item.path.rsplit('/').next().unwrap_or(&item.path).into(), directory: false, symlink: item.symlink,
-                    }).collect(), indexing, limited })
-                }
             }
         }).await?
     }
@@ -158,13 +135,13 @@ fn index_worker(shared: Arc<Shared>) {
                 let Some(kind) = found.file_type() else { limited = true; continue; };
                 if !(kind.is_file() || kind.is_symlink()) { continue; }
                 if kind.is_symlink() && !fs::metadata(found.path()).is_ok_and(|m| m.is_file()) { continue; }
+                if wire_path(found.path()).is_err() { limited = true; continue; }
                 let Ok(relative) = found.path().strip_prefix(&path) else { limited = true; continue; };
                 let Ok(relative) = wire_path(relative) else { limited = true; continue; };
                 let item = IndexedPath { path: relative, symlink: kind.is_symlink() };
                 if item.hidden() != hidden { continue; }
-                // JSON escaping is at most 2x (control paths are rejected). A
-                // conservative per-record allowance also bounds a full reply.
-                let size = item.path.len()*2 + 64;
+                // Count escaping and framing without allocating serialized names.
+                let size = item.wire_bytes();
                 if items.len() >= INDEX_PATHS || bytes + size > INDEX_BYTES { limited = true; break 'scan; }
                 bytes += size; items.push(item);
             }
@@ -199,7 +176,7 @@ fn index_reply(path: String, current: &Snapshot, previous: Option<&Snapshot>, re
             let entries: Vec<_> = after.iter().filter(|(key, value)| before.get(*key) != Some(*value)).map(|(_, p)| (*p).clone()).collect();
             let removed: Vec<_> = before.keys().filter(|key| !after.contains_key(*key)).map(|p| (*p).to_owned()).collect();
             // A replacement storm can make a delta larger than a snapshot.
-            let delta_bytes: usize = entries.iter().map(|p| p.path.len()*2+64).chain(removed.iter().map(|p| p.len()*2+4)).sum();
+            let delta_bytes: usize = entries.iter().map(IndexedPath::wire_bytes).chain(removed.iter().map(|p| p.len()*2+4)).sum();
             if delta_bytes > MAX_INDEX_BYTES { (None, current.items.as_ref().clone(), vec![]) }
             else { (revision, entries, removed) }
         }
@@ -249,6 +226,32 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn refreshed_filesystem_sync_sends_renames_and_removals_without_replaying_names() {
+        let root = tempfile::tempdir().unwrap(); let cwd = root.path().to_owned();
+        fs::write(cwd.join("before.rs"), "fn main() {}\n").unwrap();
+        let service = FileSystem::new(cwd.clone());
+        let end = Instant::now() + Duration::from_secs(5);
+        let first = loop {
+            let reply = service.request(cwd.clone(), request(None, FileOperation::Index {revision:None})).await.unwrap();
+            if matches!(&reply, FileReply::Index {indexing:false,..}) { break crate::finder::PathIndex::apply(None, &reply).unwrap(); }
+            assert!(Instant::now()<end); tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        fs::rename(cwd.join("before.rs"), cwd.join("after.rs")).unwrap();
+        // Advance only this owned fixture's refresh clock, without a 10s sleep.
+        service.shared.roots.lock().unwrap().get_mut(&cwd).unwrap().refreshed = Some(Instant::now()-REFRESH);
+        service.shared.wake.notify_one();
+        loop {
+            let reply = service.request(cwd.clone(), request(None, FileOperation::Index {revision:Some(first.revision.clone())})).await.unwrap();
+            if let FileReply::Index {revision,base,entries,removed,..} = &reply && revision != &first.revision {
+                assert_eq!(base.as_ref(),Some(&first.revision));assert_eq!(removed,&["before.rs"]);
+                assert_eq!(entries.len(),1);assert_eq!(entries[0].path,"after.rs");
+                let current=crate::finder::PathIndex::apply(Some(&first),&reply).unwrap();assert_eq!(current.entries.len(),1);
+                break;
+            }
+            assert!(Instant::now()<end); tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    #[tokio::test]
     async fn index_ignores_gitignored_paths_but_explicit_browsing_is_not_a_jail() {
         let root = tempfile::tempdir().unwrap(); let cwd = root.path().join("cwd"); fs::create_dir(&cwd).unwrap();
         fs::write(cwd.join(".gitignore"), "ignored/\n").unwrap(); fs::create_dir(cwd.join("ignored")).unwrap();
@@ -256,15 +259,15 @@ mod tests {
         fs::create_dir(cwd.join("src")).unwrap(); fs::write(cwd.join("src/main.rs"), "fn main() {}\n").unwrap();
         fs::write(root.path().join("outside.txt"), "outside\n").unwrap();
         let service = FileSystem::new(cwd.clone());
-        let query = || request(None, FileOperation::Search { query: "srcmain".into() });
+        let query = || request(None, FileOperation::Index { revision: None });
         let end = Instant::now()+Duration::from_secs(5);
         loop {
-            let FileReply::Search { entries, indexing, .. } = service.request(cwd.clone(), query()).await.unwrap() else { panic!() };
-            if !indexing { assert_eq!(entries.len(), 1); break; }
+            let FileReply::Index { entries, indexing, .. } = service.request(cwd.clone(), query()).await.unwrap() else { panic!() };
+            if !indexing { assert_eq!(entries.iter().filter(|p| crate::fuzzy_score("srcmain", &p.path).is_some()).count(), 1); break; }
             assert!(Instant::now() < end); tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let FileReply::Search { entries, .. } = service.request(cwd.clone(), request(None, FileOperation::Search { query: "secret".into() })).await.unwrap() else { panic!() };
-        assert!(entries.is_empty());
+        let FileReply::Index { entries, .. } = service.request(cwd.clone(), query()).await.unwrap() else { panic!() };
+        assert!(!entries.iter().any(|p| p.path.contains("secret")));
         for path in [cwd.join("ignored/secret.rs"), cwd.join("../outside.txt")] {
             let FileReply::Text { path: returned, text, revision } = service.request(cwd.clone(), request(Some(&path), FileOperation::Open { revision: None })).await.unwrap() else { panic!() };
             assert!(!text.is_empty()); assert!(Path::new(&returned).is_absolute());

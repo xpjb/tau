@@ -37,6 +37,10 @@ pub(super) enum FixtureChoice {
     FileOpen(String, bool),
     FileUp,
     FileClose,
+    FileChat,
+    FileHidden,
+    FileSelect(String),
+    FileAccept,
     FileFind,
     FileFindHere,
     FileClear,
@@ -157,6 +161,10 @@ impl App {
                 let action = match choice {
                     C::Files => FixtureChoice::Files,
                     C::FileClose => FixtureChoice::FileClose,
+                    C::FileChat => FixtureChoice::FileChat,
+                    C::FileHidden => FixtureChoice::FileHidden,
+                    C::FileSelect(path) => FixtureChoice::FileSelect(path.clone()),
+                    C::FileAccept => FixtureChoice::FileAccept,
                     C::FileOpen(p, d) => FixtureChoice::FileOpen(p.clone(), *d),
                     C::FileUp => FixtureChoice::FileUp,
                     C::FileFindHere => FixtureChoice::FileFindHere,
@@ -248,6 +256,10 @@ impl App {
             C::FileOpen(..)
             | C::FileUp
             | C::FileClose
+            | C::FileChat
+            | C::FileHidden
+            | C::FileSelect(_)
+            | C::FileAccept
             | C::FileFind
             | C::FileFindHere
             | C::FileClear
@@ -280,6 +292,10 @@ impl App {
         let choice = match action {
             FixtureChoice::Files => C::Files,
             FixtureChoice::FileClose => C::FileClose,
+            FixtureChoice::FileChat => C::FileChat,
+            FixtureChoice::FileHidden => C::FileHidden,
+            FixtureChoice::FileSelect(path) => C::FileSelect(path),
+            FixtureChoice::FileAccept => C::FileAccept,
             FixtureChoice::FileOpen(p, d) => C::FileOpen(p, d),
             FixtureChoice::FileUp => C::FileUp,
             FixtureChoice::FileFindHere => C::FileFindHere,
