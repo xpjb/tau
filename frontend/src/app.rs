@@ -2316,7 +2316,7 @@ impl App {
                             "Load older files", Action::History, s, false);
                     }
                 }
-                self.history_near_edge(&session, self.max_attachment_scroll - self.attachment_scroll <= 180. * s);
+                self.history_near_edge(&session, self.max_attachment_scroll - self.attachment_scroll <= 2. * viewport.height);
             }
             self.scrollbar(&mut chrome, Lane::Attachments, viewport);
         }
@@ -3155,7 +3155,7 @@ impl App {
                 else {tool_roots.entry(call).or_insert(&event.id);}
             }
         }
-        let top=self.scroll-viewport.height;let bottom=self.scroll+2.*viewport.height;
+        let top=self.scroll-2.*viewport.height;let bottom=self.scroll+3.*viewport.height;
         for (row,p) in rows.iter().zip(&placements).filter(|(_,p)|p.top+p.height>=top && p.top<=bottom) {
             if row.details.is_empty() {
                 if let Some(id) = &row.block { interests.insert(id.clone()); }
@@ -3179,7 +3179,7 @@ impl App {
         if can_remember || locating_download {
             self.remember_scroll();
         }
-        self.history_near_edge(&session, self.navigation.download.is_some() || self.scroll <= 180. * s);
+        self.history_near_edge(&session, self.navigation.download.is_some() || self.scroll <= 2. * viewport.height);
         if quick_models {
             self.quick_models_frame(
                 layer,

@@ -292,3 +292,20 @@ async fn scheduled_finite_history_and_sealed_content_end_instead_of_rescheduling
     assert_eq!(client.stats().cancelled_streams,0);
     client.shutdown().await; server.shutdown().await;
 }
+
+#[tokio::test]
+async fn background_metadata_cannot_occupy_selected_chat_stream_reservations() {
+    let (backend,server,client)=fixture().await;
+    backend.put("answer",None,BlockKind::Text,b"foreground",true);
+    let mut background=Vec::new();
+    for _ in 0..6 { background.push(client.watch_scheduled(feed_request(None),true).await.unwrap()); }
+    assert_eq!(client.stats().bulk_slots,6);
+    assert_eq!(client.stats().metadata_slots,0);
+    assert_eq!(client.stats().foreground_slots,0);
+    assert!(tokio::time::timeout(Duration::from_millis(30),client.watch_scheduled(feed_request(None),true)).await.is_err());
+    let mut metadata=tokio::time::timeout(Duration::from_secs(2),client.watch_scheduled(feed_request(None),false)).await.unwrap().unwrap();
+    assert!(matches!(frame(&mut metadata).await.header,Header::Record {..}));
+    let body=tokio::time::timeout(Duration::from_secs(2),client.watch_scheduled(block_request("answer",0,0,false),false)).await.unwrap().unwrap();
+    assert_eq!(collect(body).await.0,b"foreground");
+    drop(metadata);drop(background);client.shutdown().await;server.shutdown().await;
+}

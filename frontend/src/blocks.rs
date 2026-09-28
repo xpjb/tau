@@ -16,9 +16,14 @@ use crate::store::LocalChat;
 pub const QUEUE: &str = "@queue";
 pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub lengths:HashMap<String,u64>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,String> }
 #[derive(Default)]
-struct Dirty {full:bool,ids:BTreeSet<String>}
+struct Dirty {full:bool,viewing:bool,ids:BTreeSet<String>}
+#[derive(Default)]
+struct Prefetched {
+    binding: Option<(String,u64)>,
+    bodies: HashMap<(String,String),(u64,u64)>,
+}
 #[derive(Clone)]
-pub struct Cache { exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
+pub struct Cache { prefetched:Arc<Mutex<Prefetched>>,exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
 impl Cache {
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path.parent().context("Cache path has no parent")?)?;
@@ -40,15 +45,25 @@ impl Cache {
         let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;
         db.pragma_update(None,"max_page_count",1024u64*1024*1024/page_size)?;
         let exports=path.parent().filter(|p|p.file_name().is_some_and(|n|n=="blocks")).and_then(Path::parent).map(|root|root.join("downloads"));
-        Ok(Self { exports,dirty:Default::default(),db:Arc::new(Mutex::new(db)),bound:Arc::new(std::sync::atomic::AtomicBool::new(false)),_lease:Arc::new(lease) })
+        Ok(Self { prefetched:Default::default(),exports,dirty:Default::default(),db:Arc::new(Mutex::new(db)),bound:Arc::new(std::sync::atomic::AtomicBool::new(false)),_lease:Arc::new(lease) })
     }
     fn changed(&self,scope:&str,id:&str,full:bool) {
-        let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();d.full|=full;d.ids.insert(id.into());
+        let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();d.full|=full;
+        if !d.full {d.ids.insert(id.into());d.full=d.ids.len()>128;}
+        if d.full {d.ids.clear();}
     }
-    pub fn viewport_changed(&self,scope:&str,ids:impl Iterator<Item=String>) {for id in ids {self.changed(scope,&id,false);}}
+    pub fn viewport_changed(&self,scope:&str,ids:impl Iterator<Item=String>) {
+        let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();
+        d.viewing=true;
+        if !d.full {d.ids.extend(ids);d.full=d.ids.len()>128;}
+        if d.full {d.ids.clear();}
+    }
     pub fn changes(&self,scope:&str,visible:Option<&BTreeSet<String>>,full:bool)->Result<Option<View>> {
+        self.changes_retaining(scope, visible, &BTreeSet::new(), full)
+    }
+    pub(crate) fn changes_retaining(&self, scope: &str, visible: Option<&BTreeSet<String>>, retained: &BTreeSet<String>, full: bool) -> Result<Option<View>> {
         let dirty=self.dirty.lock().unwrap().remove(scope).unwrap_or_default();
-        if full || dirty.full {return self.preview(scope,visible);}
+        if full || dirty.full {return self.snapshot_inner(scope,visible,retained,true,None,true,full || dirty.viewing);}
         if dirty.ids.is_empty() {return Ok(None);}
         let (ids,queue)={let db=self.db.lock().unwrap();let mut ids=BTreeSet::new();let mut queue=false;
             for id in dirty.ids {
@@ -57,7 +72,7 @@ impl Cache {
                     ids.insert(h.parent.filter(|p|p!=QUEUE).unwrap_or(h.id));
                 }
             }(ids.into_iter().collect::<Vec<_>>(),queue)};
-        self.snapshot_inner(scope,visible,true,Some(&ids),queue)
+        self.snapshot_inner(scope,visible,retained,true,Some(&ids),queue,dirty.viewing)
     }
     fn epoch(&self)->u64 {replica_epoch(&self.db.lock().unwrap()).unwrap_or(u64::MAX)}
     pub fn clear(&self)->Result<()> {
@@ -133,19 +148,46 @@ impl Cache {
         if let Some(current) = tau_blocks::header(&tx,scope,&header.id)? { echoes::adopt(&tx,scope,&current)?; }
         tx.commit()?;self.changed(scope,&header.id,false); Ok(())
     }
-    #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,false,None,true)}
-    pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,true,None,true)}
+    #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,&BTreeSet::new(),false,None,true,true)}
+    pub(crate) fn resume_viewport(&self, scope: &str, local: &LocalChat) -> Result<Option<BTreeSet<String>>> {
+        if local.position.follow { return Ok(None); }
+        let Some(key) = &local.position.key else { return Ok(None); };
+        let db = self.db.lock().unwrap();
+        let roots = tau_blocks::children(&db, scope, None)?;
+        let anchor = roots.iter().position(|h| {
+            key == &format!("{scope}/{}",h.id) || key == &format!("{scope}/details:{}",h.id)
+                || h.meta.pointer("/event/origin/requestId").and_then(|v|v.as_str())
+                    .is_some_and(|request| key == &format!("message:{scope}:{request}"))
+        });
+        Ok(anchor.map(|index| roots.iter().skip(index.saturating_sub(14)).take(30)
+            .filter(|h|h.id!=QUEUE).map(|h|h.id.clone()).collect()))
+    }
+    pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,&BTreeSet::new(),true,None,true,true)}
     pub fn has_snapshot(&self,scope:&str)->Result<bool> {Ok(tau_blocks::cached_feed(&self.db.lock().unwrap(),scope,None)?.is_some())}
-    fn snapshot_inner(&self, scope: &str, visible:Option<&BTreeSet<String>>,preview:bool,only:Option<&[String]>,include_queue:bool) -> Result<Option<View>> {
+    fn snapshot_inner(&self, scope: &str, visible:Option<&BTreeSet<String>>,retained:&BTreeSet<String>,preview:bool,only:Option<&[String]>,include_queue:bool,touch:bool) -> Result<Option<View>> {
         let db = self.db.lock().unwrap();
         let Some(page) = tau_blocks::cached_feed(&db,scope,None)? else { return Ok(None); };
         let mut body_budget=8*1024*1024usize;let mut group_budgets=HashMap::new();let mut preview_ids=HashMap::<String,Vec<String>>::new();
-        let roots = if let Some(ids)=only {ids.iter().filter_map(|id|tau_blocks::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?} else {tau_blocks::children(&db,scope,None)?};
+        let mut roots = if let Some(ids)=only {ids.iter().filter_map(|id|tau_blocks::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?} else {tau_blocks::children(&db,scope,None)?};
         let recent=roots.iter().rev().filter(|h|h.id!=QUEUE).take(30).map(|h|h.id.clone()).collect::<BTreeSet<_>>();
         let visible=visible.unwrap_or(&recent);
-        let wanted=|h:&BlockHeader|!preview || visible.contains(&h.id) || h.parent.as_ref().is_some_and(|id|visible.contains(id));
-        let mut all = roots.clone();
-        for root in &roots {if wanted(root) || only.is_some() {all.extend(tau_blocks::children(&db,scope,Some(&root.id))?);}}
+        let resident = |id: &String| visible.contains(id) || retained.contains(id);
+        let wanted=|h:&BlockHeader|!preview || resident(&h.id) || h.parent.as_ref().is_some_and(resident);
+        // Hydrate the current viewport first, then already-read scrollback. A
+        // history page/metadata refresh must not blank the previous screen, but
+        // retained bytes must never consume the foreground projection budget.
+        roots.sort_by_key(|h| (!visible.contains(&h.id), !retained.contains(&h.id), std::cmp::Reverse(h.order)));
+        let mut accessed = BTreeSet::new();
+        let mut read = |id: &str, limit: usize| -> Result<Vec<u8>> {
+            let bytes = tau_blocks::cached_preview(&db, scope, id, limit)?;
+            if !bytes.is_empty() { accessed.insert(id.to_owned()); }
+            Ok(bytes)
+        };
+        let mut all = Vec::new();
+        for root in &roots {
+            all.push(root.clone());
+            if wanted(root) || only.is_some() { all.extend(tau_blocks::children(&db,scope,Some(&root.id))?); }
+        }
         let mut delivered = Vec::new();
         let mut events = vec![]; let mut sizes = HashMap::new(); let mut queue = QueueState::default();
         let mut incomplete=std::collections::HashSet::new(); let mut states=HashMap::new();
@@ -160,7 +202,7 @@ impl Cache {
                     let id=reference["id"].as_str().context("Invalid metadata reference")?;
                     let length=metadata_length(&db,scope,reference)?.unwrap_or(u64::MAX);
                     let limit=if preview {(*allowance).min(body_budget)} else {MAX_BLOCK_BYTES as usize};
-                    let bytes=if wanted(h) && length<=limit as u64 {tau_blocks::cached_preview(&db,scope,id,limit)?} else {vec![]};
+                    let bytes=if wanted(h) && length<=limit as u64 {read(id,limit)?} else {vec![]};
                     if !bytes.is_empty() && blake3::hash(&bytes).to_hex().as_str()==reference["hash"].as_str().unwrap_or("") {
                         let mut full:Event=serde_json::from_slice(&bytes)?;
                         full.phase=event.phase;full.is_error=event.is_error;full.order=event.order;
@@ -171,7 +213,7 @@ impl Cache {
                     event.tool_call_id=call_key;
                 }
                 let body = if h.kind == BlockKind::Tool { format!("{}/input",h.id) } else { h.id.clone() };
-                let bytes = if wanted(h) {tau_blocks::cached_preview(&db,scope,&body,if preview {(*allowance).min(body_budget)} else {MAX_BLOCK_BYTES as usize})?} else {vec![]};
+                let bytes = if wanted(h) {read(&body,if preview {(*allowance).min(body_budget)} else {MAX_BLOCK_BYTES as usize})?} else {vec![]};
                 if preview {body_budget=body_budget.saturating_sub(bytes.len());*allowance=allowance.saturating_sub(bytes.len());}
                 event.text = text_prefix(&bytes)?;
                 let length = tau_blocks::header(&db,scope,&body)?.map_or(0,|b|b.length);
@@ -197,13 +239,13 @@ impl Cache {
             }
         }
         if include_queue && let Some(h)=tau_blocks::header(&db,scope,QUEUE)? {
-            let bytes=tau_blocks::cached_content(&db,scope,QUEUE)?;
+            let bytes=read(QUEUE,MAX_BLOCK_BYTES as usize)?;
             if bytes.len() as u64==h.length && !bytes.is_empty() {queue=serde_json::from_slice(&bytes)?;}
         }
         for h in if include_queue {tau_blocks::children(&db,scope,Some(QUEUE))?} else {vec![]} {
             if let Some(value) = h.meta.get("request") {
                 let mut request: tau_protocol::QueuedRequest = serde_json::from_value(value.clone())?;
-                let bytes=tau_blocks::cached_content(&db,scope,&h.id)?;
+                let bytes=read(&h.id,MAX_BLOCK_BYTES as usize)?;
                 if bytes.len() as u64 != h.length {incomplete.insert(h.id.clone());}
                 request.text = text_prefix(&bytes)?;
                 if request.text.is_empty() && h.length > 0 { request.text = "Loading…".into(); }
@@ -219,14 +261,27 @@ impl Cache {
                 .collect::<rusqlite::Result<HashMap<String,u64>>>()?
         } else { HashMap::new() };
         events.sort_by_key(|e|e.order);
-        Ok(Some(View { queue_removals,previews:preview_ids.into_iter().map(|(root,ids)| {let used=256*1024-group_budgets[root.as_str()];(root,ids,used)}).collect(),partial:only.is_some(),queue_changed:include_queue,snapshot:TranscriptSnapshot { generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
+        // Navigation, initial hydration and Copy refresh disk recency. Ordinary
+        // streaming projections already have write recency from range_at; don't
+        // add another synchronous UI-thread fsync for every arriving chunk.
+        if touch && !accessed.is_empty() {
+            let tx = db.unchecked_transaction()?;
+            tau_blocks::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
+            tx.commit()?;
+        }
+        let mut previews = preview_ids.into_iter().map(|(root,ids)| {
+            let used=256*1024-group_budgets[root.as_str()]; (root,ids,used)
+        }).collect::<Vec<_>>();
+        // Feed's bounded LRU evicts retained/offscreen groups before the viewport.
+        previews.sort_by_key(|(root,_,_)| (visible.contains(root), root.clone()));
+        Ok(Some(View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,snapshot:TranscriptSnapshot { generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
             events,queue,before:page.before.as_ref().map(|p|p.order),delivered },lengths:sizes,incomplete,states }))
     }
     pub fn copy_ready(&self, scope:&str, ids:&[String]) -> Result<Option<String>> {
         ensure!(ids.len()<=4096,"Copy fewer than 4097 sections at a time");
         let mut seen=BTreeSet::new();let ids=ids.iter().filter(|id|seen.insert(*id)).cloned().collect::<Vec<_>>();let ids=ids.as_slice();
         if !copy_complete(&self.db.lock().unwrap(),scope,ids)? {return Ok(None);}
-        let view=self.snapshot_inner(scope,None,false,Some(ids),false)?.context("Details are not cached")?;
+        let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false,true)?.context("Details are not cached")?;
         let tools=crate::details::Tools::new(view.snapshot.events.iter());
         let group=ids.iter().filter_map(|id|view.snapshot.events.iter().find(|e|&e.id==id)).collect::<Vec<_>>();
         let text=tools.copy(&group);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
@@ -236,7 +291,78 @@ impl Cache {
     }
     #[cfg(test)]
     pub fn plan(&self,scope:&str,local:&LocalChat,copy:&[String])->Result<Plan> {self.plan_visible(scope,local,copy,None)}
+    pub(crate) fn plan_active(&self, scope: &str, local: &LocalChat, copy: &[String], viewport: Option<&BTreeSet<String>>) -> Result<Plan> {
+        let mut plan = self.plan_visible(scope,local,copy,viewport)?;
+        // Scrolling back must not stop the ongoing reply from reaching disk.
+        // Tail-only interests remain bulk; visible/copy interests win overlaps.
+        if viewport.is_some() || !local.position.follow {
+            for head in self.plan_background(scope)?.blocks {
+                if !plan.blocks.iter().any(|(id,_)| id == &head.0) { plan.blocks.push(head); }
+            }
+        }
+        Ok(plan)
+    }
+    pub(crate) fn retain_background(&self, scopes:&[String]) {
+        let scopes=scopes.iter().collect::<BTreeSet<_>>();
+        self.prefetched.lock().unwrap().bodies.retain(|(scope,_),_|scopes.contains(scope));
+    }
+    pub(crate) fn plan_background(&self, scope: &str) -> Result<Plan> {
+        // A small tail only. Do not inherit open Details/tool preferences from
+        // the foreground, walk old history, or download attachment payloads.
+        let viewport = {
+            let db = self.db.lock().unwrap();
+            let mut query = db.prepare("SELECT header FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 ORDER BY position DESC,id DESC LIMIT 32")?;
+            let roots = query.query_map(rusqlite::params![scope,QUEUE], |r| r.get::<_,String>(0))?
+                .map(|raw| Ok(serde_json::from_str::<BlockHeader>(&raw?)?)).collect::<Result<Vec<_>>>()?;
+            roots.into_iter().filter(|h|
+                h.kind == BlockKind::Text && h.meta.pointer("/event/role").and_then(|v|v.as_str()) != Some("tool")
+                || h.meta.pointer("/event/attachment").is_some_and(|v|v.is_object()))
+                .take(8).map(|h| h.id).collect()
+        };
+        let mut plan = self.plan_visible(scope, &LocalChat::default(), &[], Some(&viewport))?;
+        plan.background = true;
+        plan.foreground.clear();
+        // A byte-bounded disk cache is not an instruction to download the same
+        // cold bodies forever. Remember successful prefetches for this native
+        // version/prefix; explicit viewing/copy still fetches evicted bytes.
+        let mut candidates=viewport.clone();
+        candidates.extend(plan.blocks.iter().map(|(id,_)|id.clone()));
+        let db=self.db.lock().unwrap();
+        for id in &viewport {
+            if let Some(h)=tau_blocks::header(&db,scope,id)?
+                && let Some(id)=h.meta.pointer("/fullEvent/id").and_then(|v|v.as_str()) {candidates.insert(id.into());}
+        }
+        let binding=(tau_blocks::cursor(&db)?.lineage,replica_epoch(&db)?);
+        let mut fetched=self.prefetched.lock().unwrap();
+        if fetched.binding.as_ref()!=Some(&binding) {fetched.bodies.clear();fetched.binding=Some(binding);}
+        fetched.bodies.retain(|(old,id),_|old!=scope || candidates.contains(id));
+        let required=|id:&str,length:u64| if id==QUEUE || id.starts_with("queued:") {length} else {length.min(256*1024)};
+        for id in candidates {
+            if let Some(h)=tau_blocks::header(&db,scope,&id)? {
+                let length=required(&id,h.length);
+                if length>0 && tau_blocks::cache_budget::stored_bytes(&db,scope,&id)? >= length {
+                    fetched.bodies.insert((scope.into(),id),(h.version,length));
+                }
+            }
+        }
+        plan.blocks.retain(|(id,head)|head.is_none_or(|(version,length,_,stored)| {
+            let length=required(id,length);
+            stored>=length || fetched.bodies.get(&(scope.into(),id.clone()))!=Some(&(version,length))
+        }));
+        let mut budget = 8 * 1024 * 1024u64;
+        plan.blocks.retain(|(id, head)| {
+            let length = head.map_or(0, |(_,length,_,_)|
+                if id == QUEUE || id.starts_with("queued:") { length } else { length.min(256*1024) });
+            if length > budget { return false; }
+            budget -= length;
+            true
+        });
+        Ok(plan)
+    }
     pub fn plan_visible(&self, scope: &str, local: &LocalChat, copy:&[String], viewport:Option<&BTreeSet<String>>) -> Result<Plan> {
+        let rendered = viewport.is_some();
+        let resume = if !rendered { self.resume_viewport(scope,local)? } else { None };
+        let viewport = viewport.or(resume.as_ref());
         let db = self.db.lock().unwrap();
         let roots = if let Some(viewport)=viewport {
             let ids=viewport.iter().chain(copy.iter()).collect::<BTreeSet<_>>();
@@ -258,11 +384,11 @@ impl Cache {
             Ok(event)
         }).collect::<Result<Vec<_>>>()?;
         events.sort_by_key(|e|e.order);
-        let visible = viewport.map(|ids|ids.iter().cloned().collect()).unwrap_or_else(||crate::details::open_items(events.iter(),local));
+        let visible = viewport.filter(|_|rendered).map(|ids|ids.iter().cloned().collect()).unwrap_or_else(||crate::details::open_items(events.iter(),local));
         let recent=roots.iter().rev().filter(|h|h.kind==BlockKind::Text && h.meta.pointer("/event/role").and_then(|v|v.as_str())!=Some("tool") && h.length>0)
             .take(2).map(|h|h.id.clone()).collect::<BTreeSet<_>>();
         // Bootstrap without a renderer is a bounded recent window. Once the
-        // renderer owns interests, only viewport + one-screen overscan is read.
+        // renderer owns interests, only viewport + two-screen overscan is read.
         let window=viewport.cloned().unwrap_or_else(||roots.iter().rev().filter(|h|h.id!=QUEUE).take(32).map(|h|h.id.clone()).collect());
         let pending_copy=copy.iter().filter(|id|!copy_complete(&db,scope,std::slice::from_ref(*id)).unwrap_or(false)).cloned().collect::<BTreeSet<_>>();
         let mut roots=roots;
@@ -335,7 +461,7 @@ impl Cache {
         }
         let foreground=blocks.iter().filter(|id|*id==QUEUE || recent.contains(*id) || tau_blocks::header(&db,scope,id).ok().flatten().is_some_and(|h|!h.sealed && h.kind!=BlockKind::Code))
             .cloned().collect();
-        Ok(Plan { scope:scope.into(),parents,blocks:heads,older,foreground })
+        Ok(Plan { scope:scope.into(),parents,blocks:heads,older,foreground,background:false })
     }
 }
 fn native_event(h:&BlockHeader,value:&serde_json::Value)->Result<Event> {
@@ -396,16 +522,16 @@ fn text_prefix(bytes: &[u8]) -> Result<String> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Plan { pub scope: String, pub parents: BTreeSet<Option<String>>, pub blocks: Vec<(String,Option<(u64,u64,bool,u64)>)>, pub older:Vec<(String,FeedPosition)>, pub foreground:BTreeSet<String> }
-pub enum Command { Reset, Configure(BulkOffer,String), Plan(Option<Plan>), History { scope:String,before:FeedPosition } }
+pub struct Plan { pub background: bool, pub scope: String, pub parents: BTreeSet<Option<String>>, pub blocks: Vec<(String,Option<(u64,u64,bool,u64)>)>, pub older:Vec<(String,FeedPosition)>, pub foreground:BTreeSet<String> }
+pub enum Command { Reset, Configure(BulkOffer,String), Plan(Vec<Plan>), History { scope:String,before:FeedPosition } }
 pub struct Notice { pub scope: String, pub error: Option<anyhow::Error>, pub transfer:Option<(String,std::path::PathBuf,tau_transfer::TransferStatus)> }
-pub struct Service { tx: mpsc::Sender<Command>, plans:watch::Sender<Option<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
+pub struct Service { tx: mpsc::Sender<Command>, plans:watch::Sender<Vec<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
 impl Service {
     pub fn start(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>) -> Self {
         // Only coalesced plans/configuration and explicit history requests enter
         // this queue; content never passes through it or the control event queue.
         let (tx,rx) = mpsc::channel(8);
-        let (plans,plan_rx)=watch::channel(None);let (configuration,config_rx)=watch::channel(None);
+        let (plans,plan_rx)=watch::channel(vec![]);let (configuration,config_rx)=watch::channel(None);
         let (node,identity) = watch::channel(None);
         let (endpoint,client)=watch::channel(None); let (ready,lineage)=watch::channel(None);
         let downloads=files::Downloads {cache:cache.clone(),client,ready:lineage,notices:notices.clone(),wake:wake.clone()};
@@ -429,19 +555,34 @@ impl Service {
 impl Drop for Service { fn drop(&mut self) { self.task.abort(); } }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Key { Feeds(String,Vec<Option<String>>), Block(String,String,bool), History(String,Option<String>,FeedPosition) }
+enum Key { Feeds(String,Vec<Option<String>>,bool), BackgroundFeeds(Vec<(String,Option<String>)>), BackgroundBlock(String,String), Block(String,String,bool), History(String,Option<String>,FeedPosition,bool) }
+
+fn background_batches(cache:&Cache, feeds:BTreeSet<(String,Option<String>)>) -> Result<Vec<Key>> {
+    let mut batches=Vec::new();let mut keys=Vec::new();let mut requests=Vec::new();
+    for (scope,parent) in feeds {
+        let request=cache.feed_request(&scope,parent.as_deref(),None)?;
+        let mut proposed=requests.clone();proposed.push(request.clone());
+        if proposed.len()>16 || serde_json::to_vec(&BlockWatch::Feeds {requests:proposed})?.len()>MAX_BLOCK_HEADER_BYTES {
+            ensure!(!keys.is_empty(),"Background feed exceeds request budget");
+            batches.push(Key::BackgroundFeeds(std::mem::take(&mut keys)));requests.clear();
+        }
+        keys.push((scope,parent));requests.push(request);
+    }
+    if !keys.is_empty() {batches.push(Key::BackgroundFeeds(keys));}
+    Ok(batches)
+}
 struct Watches(HashMap<Key,tokio::task::JoinHandle<()>>);
 impl std::ops::Deref for Watches { type Target = HashMap<Key,tokio::task::JoinHandle<()>>; fn deref(&self) -> &Self::Target { &self.0 } }
 impl std::ops::DerefMut for Watches { fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 } }
 impl Drop for Watches { fn drop(&mut self) { for task in self.0.values() { task.abort(); } } }
-async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Receiver<Command>, mut plans:watch::Receiver<Option<Plan>>, mut configuration:watch::Receiver<Option<(BulkOffer,String)>>, notices:mpsc::Sender<Notice>, identity:watch::Sender<Option<String>>, endpoint:watch::Sender<Option<Arc<Client>>>, ready:watch::Sender<Option<String>>) {
+async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Receiver<Command>, mut plans:watch::Receiver<Vec<Plan>>, mut configuration:watch::Receiver<Option<(BulkOffer,String)>>, notices:mpsc::Sender<Notice>, identity:watch::Sender<Option<String>>, endpoint:watch::Sender<Option<Arc<Client>>>, ready:watch::Sender<Option<String>>) {
     let client = match Client::bind().await { Ok(client) => Arc::new(client), Err(error) => {
         let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)(); return;
     }};
     endpoint.send_replace(Some(client.clone()));
     identity.send_replace(Some(client.node_id())); (wake)();
     let mut jobs = Watches(HashMap::new());
-    let mut plan = None;
+    let mut plan = Vec::<Plan>::new();
     loop {
         let command=tokio::select! {
             command=commands.recv()=>{let Some(command)=command else {break;};command}
@@ -449,6 +590,8 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
             result=configuration.changed()=>{if result.is_err() {break;}let Some((offer,host))=configuration.borrow_and_update().clone() else {continue;};Command::Configure(offer,host)}
         };
         match command {
+            // Reset and the coalesced plan wake may be observed in either order.
+            // Restart the current interests; never erase a just-received plan.
             Command::Reset=>{for job in jobs.values() {job.abort();}jobs.clear();}
             Command::Configure(offer,host) => {
                 if let Err(error) = client.configure(&offer,&host).await {
@@ -462,46 +605,63 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
             }
             Command::Plan(next) => { plan = next; }
             Command::History { scope,before } => {
-                let key = Key::History(scope,None,before);
+                let key = Key::History(scope,None,before,false);
                 if jobs.get(&key).is_some_and(|task|task.is_finished()) {jobs.remove(&key);}
                 if !jobs.contains_key(&key) { jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone())); }
             }
         }
         let mut desired=std::collections::HashSet::new();
-        if let Some(p)=&plan {
+        let mut background_feeds=BTreeSet::new();
+        for p in &plan {
             // Batch headers, with a hard encoded request budget. Many expanded
             // cards must not consume every stream and starve their own bytes.
             let mut parents=vec![]; let mut requests=vec![];
             for parent in &p.parents {
+                if p.background {background_feeds.insert((p.scope.clone(),parent.clone()));continue;}
                 let Ok(request)=cache.feed_request(&p.scope,parent.as_deref(),None) else {continue;};
                 let mut proposed=requests.clone();proposed.push(request.clone());
                 if proposed.len()>16 || serde_json::to_vec(&BlockWatch::Feeds {requests:proposed}).map_or(true,|b|b.len()>MAX_BLOCK_HEADER_BYTES) {
-                    desired.insert(Key::Feeds(p.scope.clone(),std::mem::take(&mut parents)));requests.clear();
+                    desired.insert(Key::Feeds(p.scope.clone(),std::mem::take(&mut parents),p.background));requests.clear();
                 }
                 parents.push(parent.clone());requests.push(request);
             }
-            if !parents.is_empty() {desired.insert(Key::Feeds(p.scope.clone(),parents));}
+            if !parents.is_empty() {desired.insert(Key::Feeds(p.scope.clone(),parents,p.background));}
             for (id,head) in &p.blocks {
                 // A complete body is not a download interest. In particular, a
                 // delayed plan must not turn already-held text into a fetch of
                 // its former queue ID after consumption. A changed/evicted
                 // body gets a fresh plan from its metadata/cache update.
-                if head.is_some_and(|(_,length,sealed,stored)|sealed && length==stored) {continue;}
-                desired.insert(Key::Block(p.scope.clone(),id.clone(),p.foreground.contains(id)));
+                if head.is_some_and(|(_,length,sealed,stored)|(p.background || sealed) && length==stored) {continue;}
+                desired.insert(if p.background {Key::BackgroundBlock(p.scope.clone(),id.clone())}
+                    else {Key::Block(p.scope.clone(),id.clone(),p.foreground.contains(id))});
             }
-            for (parent,before) in &p.older {desired.insert(Key::History(p.scope.clone(),Some(parent.clone()),before.clone()));}
+            for (parent,before) in &p.older {desired.insert(Key::History(p.scope.clone(),Some(parent.clone()),before.clone(),p.background));}
+        }
+        // Root/queue subscriptions are cheap. Batch them across chats instead
+        // of occupying one long-lived stream per chat before any body can run.
+        match background_batches(&cache,background_feeds) {
+            Ok(batches)=>desired.extend(batches),
+            Err(error)=>{let _=notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await;(wake)();}
         }
         jobs.retain(|key,task| {
-            let keep=if let Key::History(scope,None,_)=key {!task.is_finished() && plan.as_ref().is_some_and(|p|&p.scope==scope)} else {desired.contains(key)};
+            let keep=if let Key::History(scope,None,_,_)=key {!task.is_finished() && plan.iter().any(|p|!p.background && &p.scope==scope)} else {desired.contains(key)};
             if !keep {task.abort();}keep
         });
         for key in desired {
             let completed=jobs.get(&key).is_some_and(|t|t.is_finished());
-            let needed=if let Key::Block(scope,id,_)=&key {
-                let db=cache.db.lock().unwrap();
-                tau_blocks::header(&db,scope,id).ok().flatten().is_none_or(|h|!h.sealed ||
-                    tau_blocks::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length))
-            } else {true};
+            let needed=match &key {
+                Key::Block(scope,id,_)=>{
+                    let db=cache.db.lock().unwrap();
+                    tau_blocks::header(&db,scope,id).ok().flatten().is_none_or(|h|!h.sealed ||
+                        tau_blocks::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length))
+                }
+                Key::BackgroundBlock(scope,id)=>{
+                    let db=cache.db.lock().unwrap();
+                    tau_blocks::header(&db,scope,id).ok().flatten().is_none_or(|h|
+                        tau_blocks::cache_budget::stored_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length))
+                }
+                _=>true,
+            };
             if (!jobs.contains_key(&key) || completed) && needed {
                 jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone()));
             }
@@ -513,7 +673,10 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
 
 fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Receiver<Option<String>>, notices:mpsc::Sender<Notice>, wake:crate::transport::Wake) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let scope = match &key { Key::Feeds(scope,_) | Key::Block(scope,_,_) | Key::History(scope,_,_) => scope.clone() };
+        let scope = match &key {
+            Key::Feeds(scope,_,_) | Key::Block(scope,_,_) | Key::BackgroundBlock(scope,_) | Key::History(scope,_,_,_) => scope.clone(),
+            Key::BackgroundFeeds(_)=>String::new(),
+        };
         while ready.borrow().is_none() { if ready.changed().await.is_err() { return; } }
         let mut delay = 100;
         loop {
@@ -536,12 +699,21 @@ fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Re
 async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, notices: &mpsc::Sender<Notice>, wake: &crate::transport::Wake) -> Result<bool> {
     let epoch=cache.epoch();
     let (scope,request) = match key {
-        Key::Feeds(scope,parents) => (scope.clone(),BlockWatch::Feeds {requests:parents.iter().map(|parent|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
-        Key::History(scope,parent,before) => (scope.clone(),BlockWatch::Feed(cache.feed_request(scope,parent.as_deref(),Some(before.clone()))?)),
+        Key::Feeds(scope,parents,_) => (scope.clone(),BlockWatch::Feeds {requests:parents.iter().map(|parent|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
+        Key::BackgroundFeeds(feeds)=>(String::new(),BlockWatch::Feeds {requests:feeds.iter().map(|(scope,parent)|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
+        Key::History(scope,parent,before,_) => (scope.clone(),BlockWatch::Feed(cache.feed_request(scope,parent.as_deref(),Some(before.clone()))?)),
         Key::Block(scope,id,_) => (scope.clone(),BlockWatch::Block(cache.block_request(scope,id)?)),
+        Key::BackgroundBlock(scope,id)=>{
+            let mut request=cache.block_request(scope,id)?;
+            // Catch up and release the slot, even for a live body. The shared
+            // metadata feed announces further appends. Quiet background chats
+            // must not hoard bulk slots waiting out a five-second watch slice.
+            request.follow=false;
+            (scope.clone(),BlockWatch::Block(request))
+        }
     };
     let feeds=match &request {BlockWatch::Feed(req)=>vec![req.clone()],BlockWatch::Feeds {requests}=>requests.clone(),BlockWatch::Block(_)=>vec![]};
-    let bulk=matches!(key,Key::Block(_,_,false));
+    let bulk=matches!(key,Key::Block(_,_,false) | Key::Feeds(_,_,true) | Key::History(_,_,_,true) | Key::BackgroundFeeds(_) | Key::BackgroundBlock(..));
     let mut watcher = client.watch_scheduled(request.clone(),bulk).await?;
     let mut records = vec![vec![];feeds.len()]; let mut head = None;
     loop {
@@ -554,9 +726,10 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
             Header::Page {watch,reset,cursor,floor,before,more} => {
                 let req=feeds.get(*watch).context("Unrequested feed")?;
                 let page = FeedPage {reset:*reset,records:std::mem::take(&mut records[*watch]),cursor:cursor.clone(),floor:*floor,before:before.clone(),more:*more};
+                let notice_scope=req.scope.clone();
                 let cache = cache.clone(); let req = req.clone(); let lineage = lineage.to_owned();
                 tokio::task::spawn_blocking(move ||cache.page_at(&lineage,&req,&page,epoch)).await??;
-                notices.send(Notice {transfer:None,scope:scope.clone(),error:None}).await?; (wake)();
+                notices.send(Notice {transfer:None,scope:notice_scope,error:None}).await?; (wake)();
             }
             Header::Block {block} => {
                 let BlockWatch::Block(req) = &request else { anyhow::bail!("Unexpected block header"); };

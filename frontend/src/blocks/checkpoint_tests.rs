@@ -81,7 +81,7 @@ async fn checkpoint_scheduling_commits_a_slow_metadata_round_instead_of_restarti
     let (notices, _received) = mpsc::channel(32);
     let wake: crate::transport::Wake = Arc::new(|| {});
     let result = tokio::time::timeout(Duration::from_secs(10), watch_once(
-        &Key::Feeds("chat".into(), vec![None, Some("parent".into())]),
+        &Key::Feeds("chat".into(), vec![None, Some("parent".into())], false),
         &client, &f.cache, &f.lineage, &notices, &wake,
     )).await.expect("A slow but completing read must not monopolize its stream").unwrap();
     assert!(!result, "A live feed yields; it does not become permanently complete");
@@ -120,4 +120,30 @@ async fn checkpoint_scheduling_resumes_after_a_slow_chunk_without_replaying_its_
     assert_eq!(client.stats().cancelled_streams, 0);
     client.shutdown().await;
     server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_live_body_releases_its_slot_after_catching_up_and_resumes_new_bytes() {
+    let f=Fixture::new();f.put("live",None,b"prefix");
+    {
+        let mut db=f.source.lock().unwrap();let tx=db.transaction().unwrap();
+        // Publish a genuinely unsealed body through the normal source path.
+        let mut h=tau_blocks::header(&tx,"chat","live").unwrap().unwrap();h.sealed=false;
+        tau_blocks::put(&tx,"chat",h,b"prefix").unwrap();tx.commit().unwrap();
+    }
+    let (server,client,_changes)=f.connect(true).await; // Only the unused feed path is slow.
+    let (notices,_received)=mpsc::channel(32);let wake:crate::transport::Wake=Arc::new(||{});
+    let key=Key::BackgroundBlock("chat".into(),"live".into());
+    assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake)).await.unwrap().unwrap(),
+        "a background catch-up must End, not wait five seconds for more live bytes");
+    assert_eq!(client.stats().bulk_slots,0);
+    {
+        let mut db=f.source.lock().unwrap();let tx=db.transaction().unwrap();
+        let h=tau_blocks::header(&tx,"chat","live").unwrap().unwrap();
+        tau_blocks::append(&tx,"chat","live",h.version,h.length,b" suffix",false).unwrap();tx.commit().unwrap();
+    }
+    assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake)).await.unwrap().unwrap());
+    assert_eq!(tau_blocks::cached_content(&f.cache.db.lock().unwrap(),"chat","live").unwrap(),b"prefix suffix");
+    let reads=f.reads.lock().unwrap().clone();assert_eq!(reads.len(),2);assert_eq!(reads[1].offset,6);
+    assert_eq!(client.stats().bulk_slots,0);client.shutdown().await;server.shutdown().await;
 }
