@@ -55,15 +55,15 @@ impl ParagraphSource for Source<'_> {
 }
 impl App {
     pub(super) fn close_code(&mut self) {
-        if self.code.is_some() {self.cancel_pointer();}
-        if let Some(mut view) = self.code.take() {
-            view.clear_paint(&mut self.renderer);
+        if self.root.legacy.code.is_some() {self.cancel_pointer();}
+        if let Some(mut view) = self.root.legacy.code.take() {
+            view.clear_paint(&mut self.services.renderer);
             let _ = self.controller.view_files(None);
-            self.focus = None;
+            self.root.legacy.focus = None;
         }
     }
     fn code_request(&mut self) {
-        let Some(code)=&mut self.code else { return; };
+        let Some(code)=&mut self.root.legacy.code else { return; };
         let request=FileRequest { session_id:code.session.clone(), path:code.path.clone(), operation:code.operation.clone() };
         code.seen=None; code.loading=true;
         let previous=matches!(code.operation,FileOperation::Open {..}).then(||code.document.clone()).flatten();
@@ -71,76 +71,76 @@ impl App {
             Ok(generation)=>{code.generation=generation;code.subscribed=true;code.error=None;}
             Err(error)=>{code.error=Some(error.to_string());code.loading=false;code.subscribed=false;}
         }
-        self.dirty=true;
+        self.ui.dirty=true;
     }
     pub(super) fn code_action(&mut self, action: Action) -> Result<()> {
         match action {
             Action::Files => {
-                if self.code.is_some() { self.close_code(); return Ok(()); }
+                if self.root.legacy.code.is_some() { self.close_code(); return Ok(()); }
                 let Some(session)=self.controller.account.selected.clone() else { return Ok(()); };
-                self.save()?; self.cancel_pointer(); self.focus=None; self.show_attachments=false; self.show_chats=false;
-                self.code=Some(View::new(self,session)); self.code_request();
+                self.save()?; self.cancel_pointer(); self.root.legacy.focus=None; self.root.legacy.show_attachments=false; self.root.legacy.show_chats=false;
+                self.root.legacy.code=Some(View::new(self,session)); self.code_request();
             }
             Action::FileClose => { self.close_code(); }
             Action::FileOpen(path, directory) => {
                 self.cancel_pointer();
-                let Some(code)=&mut self.code else { return Ok(()); };
-                code.clear_paint(&mut self.renderer);
+                let Some(code)=&mut self.root.legacy.code else { return Ok(()); };
+                code.clear_paint(&mut self.services.renderer);
                 code.path=Some(path); code.operation=if directory {FileOperation::List {after:None}} else {FileOperation::Open {revision:None}};
                 code.search=None;code.document=None;code.selection=None;code.reference=None;code.reference_aliases.clear();code.reference_sync=None;code.drag_anchor=None;
                 code.entries.clear();code.pages=vec![None];code.next=None;code.scroll=0.;code.horizontal=0.;code.row=0;code.cursor=0;
-                self.focus=None;self.code_request();
+                self.root.legacy.focus=None;self.code_request();
             }
             Action::FileUp => {
-                if let Some(path)=self.code.as_ref().and_then(|c| if c.document.is_some() {c.path.as_deref().and_then(parent)} else {c.parent.clone()}) {
+                if let Some(path)=self.root.legacy.code.as_ref().and_then(|c| if c.document.is_some() {c.path.as_deref().and_then(parent)} else {c.parent.clone()}) {
                     self.code_action(Action::FileOpen(path,true))?;
                 }
             }
             Action::FileFindHere => {
-                if let Some(code)=&mut self.code && let Some(search)=&code.search {
+                if let Some(code)=&mut self.root.legacy.code && let Some(search)=&code.search {
                     code.path=code.directory.clone();code.operation=FileOperation::Search {query:search.value.clone()};
                     code.entries.clear();code.scroll=0.;code.row=0;self.code_request();
                 }
             }
             Action::FileFind => {
                 self.cancel_pointer();
-                if self.code.is_none() { self.code_action(Action::Files)?; }
-                let Some(code)=&mut self.code else { return Ok(()); };
+                if self.root.legacy.code.is_none() { self.code_action(Action::Files)?; }
+                let Some(code)=&mut self.root.legacy.code else { return Ok(()); };
                 if code.search.is_some() { self.code_back(); return Ok(()); }
                 code.search=Some(Editor::new(String::new()));
                 code.search.as_mut().unwrap().single_line=true;
                 code.path=code.search_root.clone();
                 code.operation=FileOperation::Search {query:String::new()};code.entries.clear();code.row=0;code.scroll=0.;
-                self.focus=Some(Some(SEARCH_FIELD));self.code_request();
-                if self.mobile { self.apply(Action::Focus(Some(SEARCH_FIELD)))?; }
+                self.root.legacy.focus=Some(Some(SEARCH_FIELD));self.code_request();
+                if self.ui.mobile { self.apply(Action::Focus(Some(SEARCH_FIELD)))?; }
             }
-            Action::FileClear => { if let Some(code)=&mut self.code {code.selection=None;code.reference=None;code.reference_aliases.clear();code.reference_sync=None;code.drag_anchor=None;}self.focus=None; }
+            Action::FileClear => { if let Some(code)=&mut self.root.legacy.code {code.selection=None;code.reference=None;code.reference_aliases.clear();code.reference_sync=None;code.drag_anchor=None;}self.root.legacy.focus=None; }
             Action::FileCopy => {
-                if let Some(code)=&self.code && let (Some(doc),Some(selection))=(&code.document,&code.selection)
-                    && let Some(text)=doc.selected_text(selection) {self.platform.push(PlatformAction::Copy(text));}
+                if let Some(code)=&self.root.legacy.code && let (Some(doc),Some(selection))=(&code.document,&code.selection)
+                    && let Some(text)=doc.selected_text(selection) {self.services.platform.push(PlatformAction::Copy(text));}
             }
             Action::FilePage(next) => {
-                let Some(code)=&mut self.code else {return Ok(());};
+                let Some(code)=&mut self.root.legacy.code else {return Ok(());};
                 if next {if let Some(next)=code.next.clone() {code.pages.push(Some(next));}else{return Ok(());}}
                 else if code.pages.len()>1 {code.pages.pop();}else{return Ok(());}
                 code.operation=FileOperation::List {after:code.pages.last().cloned().flatten()};code.scroll=0.;code.row=0;code.entries.clear();self.code_request();
             }
             _ => {}
         }
-        self.dirty=true;Ok(())
+        self.ui.dirty=true;Ok(())
     }
     pub(super) fn code_back(&mut self) {
         self.cancel_pointer();
-        if let Some(code)=&mut self.code && code.search.take().is_some() {
+        if let Some(code)=&mut self.root.legacy.code && code.search.take().is_some() {
             code.path=code.document.as_ref().map(|d|d.path.clone()).or_else(||code.directory.clone());
             code.operation=if code.document.is_some(){FileOperation::Open {revision:None}}else{FileOperation::List {after:None}};
-            code.entries.clear();code.pages=vec![None];code.next=None;code.scroll=0.;code.row=0;self.focus=None;self.code_request();
-        } else if self.code.as_ref().is_some_and(|c|c.document.is_some()) {
+            code.entries.clear();code.pages=vec![None];code.next=None;code.scroll=0.;code.row=0;self.root.legacy.focus=None;self.code_request();
+        } else if self.root.legacy.code.as_ref().is_some_and(|c|c.document.is_some()) {
             let result=self.code_action(Action::FileUp);self.report(result);
         } else {self.close_code();}
     }
     pub(super) fn code_query(&mut self) {
-        if let Some(code)=&mut self.code && let Some(search)=&code.search {
+        if let Some(code)=&mut self.root.legacy.code && let Some(search)=&code.search {
             code.operation=FileOperation::Search {query:search.value.chars().take(128).collect()};
             code.entries.clear();code.scroll=0.;code.row=0;self.code_request();
         }
@@ -148,7 +148,7 @@ impl App {
     /// Persist once per completed gesture/live revision, not on every pointer
     /// motion. Keep a user's draft and only replace our own still-intact marker.
     pub(super) fn code_reference(&mut self, remove: bool) {
-        let Some(code)=&mut self.code else {return;};
+        let Some(code)=&mut self.root.legacy.code else {return;};
         if self.controller.account.selected.as_ref()!=Some(&code.session) || self.controller.identity!=code.identity {return;}
         if !remove && code.error.is_some() {return;}
         let next=if remove {None} else {code.document.as_ref().zip(code.selection.as_ref()).and_then(|(d,s)|s.reference(d)).map(|r| {let fence="`".repeat(r.split(|c|c!='`').map(str::len).max().unwrap_or(0)+1);format!("{fence}{r}{fence}\n")})};
@@ -175,17 +175,17 @@ impl App {
         // Keep the original marker while Android's current text dialog is open,
         // plus a bounded recent history for subsequent edits of that same draft.
         if code.reference_aliases.len()>64 {code.reference_aliases.remove(1);}
-        if draft!=self.composer.value || draft!=self.controller.chats[&code.session].local.draft {
+        if draft!=self.root.legacy.composer.value || draft!=self.controller.chats[&code.session].local.draft {
             match self.controller.draft(draft.clone()) {
-                Ok(())=>self.composer=Editor::composer(draft),
+                Ok(())=>self.root.legacy.composer=Editor::composer(draft),
                 Err(error)=>self.controller.report_error(error),
             }
         }
     }
     #[cfg(any(target_os="android",test))]
     pub(super) fn code_native_value(&self, mut value: String) -> String {
-        if self.focus!=Some(None) {return value;}
-        let Some(code)=&self.code else {return value;};
+        if self.root.legacy.focus!=Some(None) {return value;}
+        let Some(code)=&self.root.legacy.code else {return value;};
         if self.controller.account.selected.as_ref()!=Some(&code.session) || self.controller.identity!=code.identity || self.controller.account.source_lineage!=code.lineage {return value;}
         let replacement=code.reference.as_ref().map(|(_,text)|text.as_str()).unwrap_or("");
         for old in code.reference_aliases.iter().rev() {
@@ -197,17 +197,17 @@ impl App {
         value
     }
     pub(super) fn code_tick(&mut self, dt: f32) {
-        let Some(code)=&self.code else {return;};
+        let Some(code)=&self.root.legacy.code else {return;};
         if code.identity!=self.controller.identity || code.session!=self.controller.account.selected.as_deref().unwrap_or("") || code.lineage!=self.controller.account.source_lineage {
-            self.close_code();self.dirty=true;return;
+            self.close_code();self.ui.dirty=true;return;
         }
-        let active=self.window_focused && self.modal.is_none() && self.viewer.is_none();
+        let active=self.ui.window_focused && self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none();
         if !active && code.subscribed {
-            let _=self.controller.view_files(None);self.code.as_mut().unwrap().subscribed=false;
+            let _=self.controller.view_files(None);self.root.legacy.code.as_mut().unwrap().subscribed=false;
         } else if active && (!code.subscribed || code.generation!=self.controller.viewer_generation()) && self.controller.epoch.is_some() {self.code_request();}
         let update=self.controller.file_update.clone();
-        if let Some(update)=update && self.code.as_ref().is_some_and(|c|update.generation==c.generation && update.session==c.session && update.lineage==c.lineage.as_deref().unwrap_or("") && c.seen.as_ref().is_none_or(|old|!Arc::ptr_eq(old,&update))) {
-            let code=self.code.as_mut().unwrap();code.seen=Some(update.clone());code.loading=false;
+        if let Some(update)=update && self.root.legacy.code.as_ref().is_some_and(|c|update.generation==c.generation && update.session==c.session && update.lineage==c.lineage.as_deref().unwrap_or("") && c.seen.as_ref().is_none_or(|old|!Arc::ptr_eq(old,&update))) {
+            let code=self.root.legacy.code.as_mut().unwrap();code.seen=Some(update.clone());code.loading=false;
             let mut invalidated=false;let mut moved=false;
             match &update.response {
                 Err(error)=>{code.error=Some(error.clone());code.status="Preview unavailable · retrying".into();code.drag_anchor=None;}
@@ -233,7 +233,7 @@ impl App {
                                     if selection.range(doc).is_none() {invalidated=true;code.selection=None;code.drag_anchor=None;}
                                     else {moved=true;}
                                 }
-                                if code.document.as_ref().is_some_and(|old|old.namespace!=doc.namespace) {code.clear_paint(&mut self.renderer);}
+                                if code.document.as_ref().is_some_and(|old|old.namespace!=doc.namespace) {code.clear_paint(&mut self.services.renderer);}
                                 code.document=Some(doc.clone());code.cursor=code.cursor.min(doc.lines.len()-1);
                             }
                             code.path=Some(path.clone());code.directory=parent(path);
@@ -243,79 +243,79 @@ impl App {
                 }
             }
             code.row=code.row.min(code.entries.len().saturating_sub(1));
-            if invalidated {self.code.as_mut().unwrap().reference_sync=Some(true);}
-            else if moved && self.code.as_ref().is_some_and(|c|c.reference.is_some()) {self.code.as_mut().unwrap().reference_sync=Some(false);}
-            self.dirty=true;
+            if invalidated {self.root.legacy.code.as_mut().unwrap().reference_sync=Some(true);}
+            else if moved && self.root.legacy.code.as_ref().is_some_and(|c|c.reference.is_some()) {self.root.legacy.code.as_mut().unwrap().reference_sync=Some(false);}
+            self.ui.dirty=true;
         }
-        if !self.composing() && let Some(remove)=self.code.as_mut().and_then(|c|c.reference_sync.take()) {self.code_reference(remove);self.dirty=true;}
+        if !self.composing() && let Some(remove)=self.root.legacy.code.as_mut().and_then(|c|c.reference_sync.take()) {self.code_reference(remove);self.ui.dirty=true;}
         // Hold in the code body promotes scrolling to line-range selection. A
         // gutter press selects immediately, and dragging back shrinks the range.
-        if active && let Some(p)=&self.pointer && p.touch && !p.dragged && p.started.elapsed().as_millis()>=450
-            && self.code.as_ref().is_some_and(|c|c.error.is_none() && c.search.is_none() && c.document.is_some() && contains(c.viewport,p.start) && c.drag_anchor.is_none()) {
-            let point=p.start;self.code_begin(point);self.platform.push(PlatformAction::Haptic);
+        if active && let Some(p)=&self.root.legacy.pointer && p.touch && !p.dragged && p.started.elapsed().as_millis()>=450
+            && self.root.legacy.code.as_ref().is_some_and(|c|c.error.is_none() && c.search.is_none() && c.document.is_some() && contains(c.viewport,p.start) && c.drag_anchor.is_none()) {
+            let point=p.start;self.code_begin(point);self.services.platform.push(PlatformAction::Haptic);
         }
-        if let Some(code)=&mut self.code && code.drag_anchor.is_some() && let Some(p)=&self.pointer {
-            let margin=16.*self.scale;
+        if let Some(code)=&mut self.root.legacy.code && code.drag_anchor.is_some() && let Some(p)=&self.root.legacy.pointer {
+            let margin=16.*self.ui.scale;
             let delta=if p.last.y<code.viewport.y+margin {p.last.y-code.viewport.y-margin}
                 else {(p.last.y-code.viewport.y-code.viewport.height+margin).max(0.)};
-            let next=(code.scroll+delta.clamp(-90.*self.scale,90.*self.scale)*12.*dt.min(0.05)).clamp(0.,code.max_scroll);
-            if next!=code.scroll {code.scroll=next;let point=p.last;self.code_extend(point);self.dirty=true;}
+            let next=(code.scroll+delta.clamp(-90.*self.ui.scale,90.*self.ui.scale)*12.*dt.min(0.05)).clamp(0.,code.max_scroll);
+            if next!=code.scroll {code.scroll=next;let point=p.last;self.code_extend(point);self.ui.dirty=true;}
         }
     }
     fn code_begin(&mut self, point: Vec2) {
-        let Some(code)=&mut self.code else{return;};
+        let Some(code)=&mut self.root.legacy.code else{return;};
         let Some(line)=code.line_at(point) else{return;};let doc=code.document.as_ref().unwrap();
         code.cursor=line;code.selection=Some(Selection::new(doc,line,line));code.drag_anchor=Some(doc.lines[line].id);
-        self.focus=None;self.dirty=true;
+        self.root.legacy.focus=None;self.ui.dirty=true;
     }
     fn code_extend(&mut self, point: Vec2) {
-        let Some(code)=&mut self.code else{return;};
+        let Some(code)=&mut self.root.legacy.code else{return;};
         let Some(end)=code.line_at(point) else{return;};let doc=code.document.as_ref().unwrap();
         let Some(anchor)=code.drag_anchor.and_then(|id|doc.position(id)) else{return;};
-        code.selection=Some(Selection::new(doc,anchor,end));code.cursor=end;self.dirty=true;
+        code.selection=Some(Selection::new(doc,anchor,end));code.cursor=end;self.ui.dirty=true;
     }
     pub(super) fn code_press(&mut self, id:u64, point:Vec2, touch:bool)->bool {
-        if self.modal.is_some() || self.viewer.is_some() || self.context_menu.is_some() {return false;}
-        let Some(code)=&self.code else{return false;};
+        if self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.context_menu.is_some() {return false;}
+        let Some(code)=&self.root.legacy.code else{return false;};
         if code.error.is_some() || code.document.is_none() || code.search.is_some() || !contains(code.viewport,point) || touch && point.x>code.viewport.x+code.gutter {return false;}
-        self.pointer=Some(Pointer {id,start:point,last:point,at:Instant::now(),started:Instant::now(),dragged:false,touch});
+        self.root.legacy.pointer=Some(Pointer {id,start:point,last:point,at:Instant::now(),started:Instant::now(),dragged:false,touch});
         self.code_begin(point);true
     }
     pub(super) fn code_motion(&mut self,id:u64,point:Vec2)->bool {
-        if self.modal.is_some() || self.viewer.is_some() || self.context_menu.is_some() || self.scroll_drag.is_some() {return false;}
-        let (Some(code),Some(p))=(&mut self.code,&mut self.pointer) else{return false;};
+        if self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.context_menu.is_some() || self.root.legacy.scroll_drag.is_some() {return false;}
+        let (Some(code),Some(p))=(&mut self.root.legacy.code,&mut self.root.legacy.pointer) else{return false;};
         if p.id!=id || !contains(code.viewport,p.start) {return false;}
         let selecting=code.drag_anchor.is_some();
-        p.dragged|=(point.x-p.start.x).abs()+(point.y-p.start.y).abs()>7.*self.scale;
+        p.dragged|=(point.x-p.start.x).abs()+(point.y-p.start.y).abs()>7.*self.ui.scale;
         if !selecting && p.dragged {
             if code.document.is_some() && code.search.is_none() && (point.x-p.start.x).abs()>1.5*(point.y-p.start.y).abs() {
                 code.horizontal=(code.horizontal+ p.last.x-point.x).clamp(0.,code.max_horizontal);
             } else {code.scroll=(code.scroll+p.last.y-point.y).clamp(0.,code.max_scroll);}
         }
-        p.last=point;p.at=Instant::now();if selecting {self.code_extend(point);}self.dirty=true;true
+        p.last=point;p.at=Instant::now();if selecting {self.code_extend(point);}self.ui.dirty=true;true
     }
     pub(super) fn code_release(&mut self,id:u64,point:Vec2)->bool {
-        if self.code.as_ref().is_none_or(|c|c.drag_anchor.is_none()) || self.pointer.as_ref().is_none_or(|p|p.id!=id) {return false;}
-        self.code_extend(point);self.code.as_mut().unwrap().drag_anchor=None;self.pointer=None;
+        if self.root.legacy.code.as_ref().is_none_or(|c|c.drag_anchor.is_none()) || self.root.legacy.pointer.as_ref().is_none_or(|p|p.id!=id) {return false;}
+        self.code_extend(point);self.root.legacy.code.as_mut().unwrap().drag_anchor=None;self.root.legacy.pointer=None;
         self.code_reference(false);
-        if !self.mobile {self.focus=Some(None);}self.dirty=true;true
+        if !self.ui.mobile {self.root.legacy.focus=Some(None);}self.ui.dirty=true;true
     }
     #[cfg(not(target_os="android"))]
     pub(super) fn code_wheel(&mut self,amount:f32,horizontal:bool,point:Vec2)->bool {
-        let Some(code)=&mut self.code else{return false;};if !contains(code.viewport,point){return false;}
+        let Some(code)=&mut self.root.legacy.code else{return false;};if !contains(code.viewport,point){return false;}
         if horizontal {code.horizontal=(code.horizontal+amount).clamp(0.,code.max_horizontal);}
         else {code.scroll=(code.scroll+amount).clamp(0.,code.max_scroll);}
-        self.dirty=true;true
+        self.ui.dirty=true;true
     }
     pub(super) fn code_key(&mut self,key:&str,ctrl:bool,shift:bool)->bool {
         if ctrl && matches!(key,"Space"|" ") {self.activate(Action::FileFind);return true;}
-        let Some(code)=&mut self.code else{return false;};
+        let Some(code)=&mut self.root.legacy.code else{return false;};
         if key=="Escape" {
             if code.search.is_some() {self.code_back();}
             else if code.selection.is_some() {self.activate(Action::FileClear);}
-            else {self.code_back();}self.dirty=true;return true;
+            else {self.code_back();}self.ui.dirty=true;return true;
         }
-        if self.focus==Some(None) {return false;}
+        if self.root.legacy.focus==Some(None) {return false;}
         if ctrl && key.eq_ignore_ascii_case("c") && code.search.is_none() {self.activate(Action::FileCopy);return true;}
         if code.document.is_none() || code.search.is_some() {
             match key {
@@ -325,8 +325,8 @@ impl App {
                 "Backspace"|"h" if code.search.is_none()=>{self.activate(Action::FileUp);return true;}
                 _=>return false,
             }
-            let top=code.row as f32*44.*self.scale;
-            if top<code.scroll {code.scroll=top;}else if top+44.*self.scale>code.scroll+code.viewport.height {code.scroll=(top+44.*self.scale-code.viewport.height).min(code.max_scroll);}
+            let top=code.row as f32*44.*self.ui.scale;
+            if top<code.scroll {code.scroll=top;}else if top+44.*self.ui.scale>code.scroll+code.viewport.height {code.scroll=(top+44.*self.ui.scale-code.viewport.height).min(code.max_scroll);}
         } else {
             if code.error.is_some() && (shift || key=="v") {return true;}
             let doc=code.document.as_ref().unwrap();let old=code.cursor;
@@ -338,10 +338,10 @@ impl App {
                 "PageDown"=>code.cursor=(old+page).min(doc.lines.len()-1),
                 "Home"=>code.cursor=0,
                 "End"=>code.cursor=doc.lines.len()-1,
-                "ArrowLeft"=>{code.horizontal=(code.horizontal-48.*self.scale).max(0.);self.dirty=true;return true;}
-                "ArrowRight"=>{code.horizontal=(code.horizontal+48.*self.scale).min(code.max_horizontal);self.dirty=true;return true;}
+                "ArrowLeft"=>{code.horizontal=(code.horizontal-48.*self.ui.scale).max(0.);self.ui.dirty=true;return true;}
+                "ArrowRight"=>{code.horizontal=(code.horizontal+48.*self.ui.scale).min(code.max_horizontal);self.ui.dirty=true;return true;}
                 "Backspace"|"h"=>{self.activate(Action::FileUp);return true;}
-                "v"=>{code.selection=Some(Selection::new(doc,old,old));self.code_reference(false);self.dirty=true;return true;}
+                "v"=>{code.selection=Some(Selection::new(doc,old,old));self.code_reference(false);self.ui.dirty=true;return true;}
                 _=>return false,
             }
             if shift {let anchor=code.selection.as_ref().and_then(|s|doc.position(s.anchor)).unwrap_or(old);code.selection=Some(Selection::new(doc,anchor,code.cursor));}
@@ -349,36 +349,36 @@ impl App {
             if top<code.scroll {code.scroll=top;}else if top+code.line_height>code.scroll+code.viewport.height {code.scroll=(top+code.line_height-code.viewport.height).min(code.max_scroll);}
             if shift {self.code_reference(false);}
         }
-        self.dirty=true;true
+        self.ui.dirty=true;true
     }
     pub(super) fn code_frame(&mut self,ctx:&impl RenderContext,body:&mut Layer,chrome:&mut Layer,b:Rect) {
-        let s=self.scale;let mut code=self.code.take().unwrap();
-        let comments=code.search.is_none() && code.document.is_some() && (code.selection.is_some() || self.focus==Some(None));
+        let s=self.ui.scale;let mut code=self.root.legacy.code.take().unwrap();
+        let comments=code.search.is_none() && code.document.is_some() && (code.selection.is_some() || self.root.legacy.focus==Some(None));
         let bottom=if comments {self.composer_layout(b,&code.session).4} else {b.y+b.height};
         chrome.rect(Rect::new(b.x,b.y,b.width,124.*s),color(0x0e141b));
-        button(&mut self.renderer,chrome,&mut self.hits,Rect::new(b.x+8.*s,b.y+6.*s,64.*s,40.*s),"‹ Chat",Action::FileClose,s,false);
+        button(&mut self.services.renderer,chrome,&mut self.root.legacy.hits,Rect::new(b.x+8.*s,b.y+6.*s,64.*s,40.*s),"‹ Chat",Action::FileClose,s,false);
         if code.search.is_some() {
-            button(&mut self.renderer,chrome,&mut self.hits,Rect::new(b.x+76.*s,b.y+6.*s,44.*s,40.*s),"Here",Action::FileFindHere,s,false);
+            button(&mut self.services.renderer,chrome,&mut self.root.legacy.hits,Rect::new(b.x+76.*s,b.y+6.*s,44.*s,40.*s),"Here",Action::FileFindHere,s,false);
         } else if code.parent.is_some() || code.document.is_some() {
-            button(&mut self.renderer,chrome,&mut self.hits,Rect::new(b.x+76.*s,b.y+6.*s,44.*s,40.*s),"Up",Action::FileUp,s,false);
+            button(&mut self.services.renderer,chrome,&mut self.root.legacy.hits,Rect::new(b.x+76.*s,b.y+6.*s,44.*s,40.*s),"Up",Action::FileUp,s,false);
         }
-        self.renderer.label(chrome,"Files",Rect::new(b.x+130.*s,b.y+15.*s,(b.width-240.*s).max(1.),24.*s),16.*s,color(0xe5eaf0),true);
-        button(&mut self.renderer,chrome,&mut self.hits,Rect::new(b.x+b.width-104.*s,b.y+6.*s,60.*s,40.*s),if code.search.is_some(){"Done"}else{"Find"},Action::FileFind,s,code.search.is_some());
+        self.services.renderer.label(chrome,"Files",Rect::new(b.x+130.*s,b.y+15.*s,(b.width-240.*s).max(1.),24.*s),16.*s,color(0xe5eaf0),true);
+        button(&mut self.services.renderer,chrome,&mut self.root.legacy.hits,Rect::new(b.x+b.width-104.*s,b.y+6.*s,60.*s,40.*s),if code.search.is_some(){"Done"}else{"Find"},Action::FileFind,s,code.search.is_some());
         self.icon_button(ctx,chrome,Rect::new(b.x+b.width-44.*s,b.y+6.*s,40.*s,40.*s),Icon::Close,18.,Action::FileClose,false,true);
-        self.renderer.label(chrome,&display_path(code.path.as_deref().unwrap_or("Chat working directory")),Rect::new(b.x+14.*s,b.y+54.*s,b.width-28.*s,28.*s),13.*s,color(0xb7c2ce),false);
+        self.services.renderer.label(chrome,&display_path(code.path.as_deref().unwrap_or("Chat working directory")),Rect::new(b.x+14.*s,b.y+54.*s,b.width-28.*s,28.*s),13.*s,color(0xb7c2ce),false);
         let top=if let Some(search)=&mut code.search {
             let rect=Rect::new(b.x+12.*s,b.y+88.*s,b.width-24.*s,48.*s);
-            search.draw(&mut self.renderer,chrome,rect,16.*s,self.focus==Some(Some(SEARCH_FIELD)),false,"Fuzzy find paths…",true);
-            self.hits.push(Hit {rect,action:Action::Focus(Some(SEARCH_FIELD))});
-            self.renderer.label(chrome,code.error.as_deref().unwrap_or(if code.loading {"Searching…"} else {&code.status}),Rect::new(b.x+14.*s,b.y+139.*s,b.width-28.*s,18.*s),11.*s,color(0x82909f),false);
+            search.draw(&mut self.services.renderer,chrome,rect,16.*s,self.root.legacy.focus==Some(Some(SEARCH_FIELD)),false,"Fuzzy find paths…",true);
+            self.root.legacy.hits.push(Hit {rect,action:Action::Focus(Some(SEARCH_FIELD))});
+            self.services.renderer.label(chrome,code.error.as_deref().unwrap_or(if code.loading {"Searching…"} else {&code.status}),Rect::new(b.x+14.*s,b.y+139.*s,b.width-28.*s,18.*s),11.*s,color(0x82909f),false);
             b.y+160.*s
         } else {
             let status=code.error.as_deref().unwrap_or(if code.loading {"Loading…"} else {&code.status});
             let label=code.error.is_none().then(||code.selection.as_ref().zip(code.document.as_ref()).and_then(|(selection,doc)|selection.range(doc)).map(|r|format!("Lines {}–{}",r.start+1,r.end))).flatten();
-            self.renderer.label(chrome,label.as_deref().unwrap_or(status),Rect::new(b.x+14.*s,b.y+94.*s,(b.width-if comments{158.*s}else{28.*s}).max(1.),24.*s),12.*s,color(if code.error.is_some(){0xf2a6a6}else{0x82909f}),false);
+            self.services.renderer.label(chrome,label.as_deref().unwrap_or(status),Rect::new(b.x+14.*s,b.y+94.*s,(b.width-if comments{158.*s}else{28.*s}).max(1.),24.*s),12.*s,color(if code.error.is_some(){0xf2a6a6}else{0x82909f}),false);
             if comments {
-                button(&mut self.renderer,chrome,&mut self.hits,Rect::new(b.x+b.width-140.*s,b.y+84.*s,62.*s,40.*s),"Copy",Action::FileCopy,s,false);
-                button(&mut self.renderer,chrome,&mut self.hits,Rect::new(b.x+b.width-74.*s,b.y+84.*s,62.*s,40.*s),"Clear",Action::FileClear,s,false);
+                button(&mut self.services.renderer,chrome,&mut self.root.legacy.hits,Rect::new(b.x+b.width-140.*s,b.y+84.*s,62.*s,40.*s),"Copy",Action::FileCopy,s,false);
+                button(&mut self.services.renderer,chrome,&mut self.root.legacy.hits,Rect::new(b.x+b.width-74.*s,b.y+84.*s,62.*s,40.*s),"Clear",Action::FileClear,s,false);
             }
             b.y+124.*s
         };
@@ -387,7 +387,7 @@ impl App {
         let viewport=code.viewport;
         body.rect(viewport,color(0x0b1118));chrome.rect(Rect::new(b.x,top-s,b.width,s),color(0x2a3541));
         if let Some(doc)=&code.document && code.search.is_none() {
-            code.line_height=if self.mobile {28.}else{24.}*s;
+            code.line_height=if self.ui.mobile {28.}else{24.}*s;
             code.gutter=(44.+doc.lines.len().to_string().len().saturating_sub(3) as f32*8.)*s;
             code.max_scroll=(doc.lines.len() as f32*code.line_height+16.*s-viewport.height).max(0.);
             code.scroll=code.scroll.clamp(0.,code.max_scroll);
@@ -400,7 +400,7 @@ impl App {
                 let line=&doc.lines[i];visible.insert(line.id);
                 let y=viewport.y+i as f32*code.line_height-code.scroll;
                 if selection.as_ref().is_some_and(|r|r.contains(&i)) {body.clipped_rect(Rect::new(viewport.x,y,viewport.width,code.line_height),color(0x213c57),viewport);}
-                self.renderer.clipped_label(body,&(i+1).to_string(),Rect::new(viewport.x+8.*s,y+5.*s,code.gutter-14.*s,code.line_height),12.*s,color(if selection.as_ref().is_some_and(|r|r.contains(&i)){0x8bd6ff}else{0x6c7d90}),false,viewport);
+                self.services.renderer.clipped_label(body,&(i+1).to_string(),Rect::new(viewport.x+8.*s,y+5.*s,code.gutter-14.*s,code.line_height),12.*s,color(if selection.as_ref().is_some_and(|r|r.contains(&i)){0x8bd6ff}else{0x6c7d90}),false,viewport);
                 // Cap a single pathological/minified line's shaping work while
                 // retaining its original full text for selection and copying.
                 let mut stop=line.text.len().min(16*1024);while !line.text.is_char_boundary(stop){stop-=1;}
@@ -410,19 +410,19 @@ impl App {
                 let byte=|n:usize|{let n=n.min(stop);n+if tabs {line.text[..n].bytes().filter(|&b|b==b'\t').count()*3} else {0}};
                 let spans=line.paint.iter().filter(|p|p.range.start<stop).map(|p|PaintSpan {range:byte(p.range.start)..byte(p.range.end),color:color(p.color)}).collect::<Vec<_>>();
                 let cached=code.paints.entry(line.id).or_insert_with(||(vec![],None));
-                if cached.0!=spans {if let Some(p)=cached.1.take(){self.renderer.text.drop_paint(p);}cached.1=if spans.is_empty(){None}else{self.renderer.text.register_paint(&spans).ok()};cached.0=spans;}
+                if cached.0!=spans {if let Some(p)=cached.1.take(){self.services.renderer.text.drop_paint(p);}cached.1=if spans.is_empty(){None}else{self.services.renderer.text.register_paint(&spans).ok()};cached.0=spans;}
                 let namespace=0x5441_5546_0000_0000|doc.namespace;
                 let key=ParagraphKey {namespace,slot:line.id as u32,generation:1};
-                let style=Style {chain:self.renderer.faces.mono[0],wrap_em:None,align:Align::Left,line_spacing:1.2};
+                let style=Style {chain:self.services.renderer.faces.mono[0],wrap_em:None,align:Align::Left,line_spacing:1.2};
                 let key_id=0xe000_0000_0000_0000|(doc.namespace<<32)|line.id;
-                if let Some(block)=self.renderer.text.shape(BlockKey(key_id),&style,&[key],&Source(&text)) {
+                if let Some(block)=self.services.renderer.text.shape(BlockKey(key_id),&style,&[key],&Source(&text)) {
                     let size=14.*s;
-                    widest=widest.max(self.renderer.text.measure(block).width_em()*size+code.gutter+24.*s);
+                    widest=widest.max(self.services.renderer.text.measure(block).width_em()*size+code.gutter+24.*s);
                     body.draws.push(Draw {block,at:Vec2::new(viewport.x+code.gutter+8.*s-code.horizontal,y+4.*s),size,color:color(0xd8dee9),clip:Some(Rect::new(viewport.x+code.gutter,viewport.y,viewport.width-code.gutter,viewport.height)),paint:cached.1});
                 }
             }
             code.max_horizontal=(widest-viewport.width).max(code.horizontal);
-            code.paints.retain(|id,(_,paint)|{let keep=visible.contains(id);if !keep && let Some(p)=paint.take(){self.renderer.text.drop_paint(p);}keep});
+            code.paints.retain(|id,(_,paint)|{let keep=visible.contains(id);if !keep && let Some(p)=paint.take(){self.services.renderer.text.drop_paint(p);}keep});
         } else {
             code.max_scroll=(code.entries.len() as f32*44.*s-viewport.height).max(0.);code.scroll=code.scroll.clamp(0.,code.max_scroll);
             let first=(code.scroll/(44.*s)) as usize;let end=(first+(viewport.height/(44.*s)).ceil() as usize+1).min(code.entries.len());
@@ -432,20 +432,20 @@ impl App {
                 if i==code.row {body.clipped_rect(rect,color(0x172330),viewport);}
                 let name=if code.search.is_some(){entry.path.strip_prefix(code.path.as_deref().unwrap_or("")).unwrap_or(&entry.path).trim_start_matches('/')}else{&entry.name};
                 let label=format!("{} {}{}",if entry.directory{"▸"}else{"·"},display_path(name),if entry.directory{"/"}else{""});
-                self.renderer.clipped_label(body,&label,Rect::new(rect.x+10.*s,y+11.*s,rect.width-20.*s,24.*s),14.*s,color(if entry.directory{0x8bd6ff}else{0xd8dee9}),false,viewport);
-                if hit.height>0. {self.hits.push(Hit {rect:hit,action:Action::FileOpen(entry.path.clone(),entry.directory)});}
+                self.services.renderer.clipped_label(body,&label,Rect::new(rect.x+10.*s,y+11.*s,rect.width-20.*s,24.*s),14.*s,color(if entry.directory{0x8bd6ff}else{0xd8dee9}),false,viewport);
+                if hit.height>0. {self.root.legacy.hits.push(Hit {rect:hit,action:Action::FileOpen(entry.path.clone(),entry.directory)});}
             }
             if code.entries.is_empty() {
                 let text=code.error.as_deref().unwrap_or(if code.loading{"Loading remote files…"}else if code.search.is_some(){"No matching paths"}else{"Empty directory"});
-                self.renderer.label(body,text,Rect::new(viewport.x+24.*s,viewport.y+32.*s,viewport.width-48.*s,100.*s),14.*s,color(0x82909f),false);
+                self.services.renderer.label(body,text,Rect::new(viewport.x+24.*s,viewport.y+32.*s,viewport.width-48.*s,100.*s),14.*s,color(0x82909f),false);
             }
         }
         if paging {
             let y=bottom-44.*s;
-            if code.pages.len()>1 {button(&mut self.renderer,chrome,&mut self.hits,Rect::new(b.x+12.*s,y,88.*s,40.*s),"Previous",Action::FilePage(false),s,false);}
-            if code.next.is_some() {button(&mut self.renderer,chrome,&mut self.hits,Rect::new(b.x+b.width-100.*s,y,88.*s,40.*s),"Next",Action::FilePage(true),s,false);}
+            if code.pages.len()>1 {button(&mut self.services.renderer,chrome,&mut self.root.legacy.hits,Rect::new(b.x+12.*s,y,88.*s,40.*s),"Previous",Action::FilePage(false),s,false);}
+            if code.next.is_some() {button(&mut self.services.renderer,chrome,&mut self.root.legacy.hits,Rect::new(b.x+b.width-100.*s,y,88.*s,40.*s),"Next",Action::FilePage(true),s,false);}
         }
-        let session=code.session.clone();self.code=Some(code);self.scrollbar(chrome,Lane::Files,viewport);
+        let session=code.session.clone();self.root.legacy.code=Some(code);self.scrollbar(chrome,Lane::Files,viewport);
         if comments {self.draw_composer(ctx,chrome,b,&session,true);}
     }
 }

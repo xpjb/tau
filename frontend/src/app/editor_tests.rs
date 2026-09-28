@@ -20,7 +20,7 @@ impl Harness {
         crate::demo::populate(&mut app.controller).unwrap();
         app.resize(ctx.size(), 1., Vec2::new(0., 0.));
         app.tick(0.);
-        app.focus = Some(None);
+        app.root.legacy.focus = Some(None);
         Self { app, ctx, _root: root }
     }
     fn frame(&mut self) -> Vec<u8> {
@@ -48,16 +48,16 @@ fn composer_placeholder_and_single_line_caret_are_vertically_centered() {
     let rect = Rect::new(10., 10., 300., 56.);
     let mut editor = Editor::composer(String::new());
     let mut layer = Layer::default();
-    editor.draw(&mut h.app.renderer, &mut layer, rect, 16., false, false, "Message Tau", false);
+    editor.draw(&mut h.app.services.renderer, &mut layer, rect, 16., false, false, "Message Tau", false);
     let placeholder = &layer.draws[0];
-    let height = h.app.renderer.text.measure(placeholder.block).height_em() * placeholder.size;
+    let height = h.app.services.renderer.text.measure(placeholder.block).height_em() * placeholder.size;
     assert!((placeholder.at.y + height / 2. - (rect.y + rect.height / 2.)).abs() < 3.,
         "empty composer placeholder must share the input's vertical center");
 
     for value in ["", "one line"] {
         if !value.is_empty() { h.app.input(value); }
         h.frame();
-        let rect = h.app.hits.iter().find(|hit| matches!(hit.action, Action::Focus(None))).unwrap().rect;
+        let rect = h.app.root.legacy.hits.iter().find(|hit| matches!(hit.action, Action::Focus(None))).unwrap().rect;
         let caret = h.app.ime_rect().unwrap();
         assert!((caret.y + caret.height / 2. - (rect.y + rect.height / 2.)).abs() < 3.,
             "one-line caret in actual composer frame: {value:?}");
@@ -94,7 +94,7 @@ fn composer_navigation_repaints_without_sqlite_draft_writes_or_reshaping() {
     assert_eq!(h.app.controller.selected().unwrap().local.draft, "abcdefghij\nab\nabcdefghj\n👩‍💻");
     assert_eq!(db.query_row("SELECT count(*) FROM editor_writes", [], |r| r.get::<_, u32>(0)).unwrap(), 1);
     h.app.key("z", true, false);
-    assert_eq!(h.app.composer.value, "abcdefghij\nab\nabcdefghij\n👩‍💻");
+    assert_eq!(h.app.root.legacy.composer.value, "abcdefghij\nab\nabcdefghij\n👩‍💻");
 }
 
 #[test]
@@ -103,10 +103,10 @@ fn actual_prompt_settings_reuse_input_geometry_clipboard_ime_and_scrolling() {
     let content = format!("abcdefghij\nab\nabcdefghij\n{}", "a long settings prompt with emoji 😀\n".repeat(35));
     let mut settings = tau_protocol::settings::Settings::default();
     settings.agent.system_prompt = content.clone();
-    h.app.daemon_draft = Some(crate::daemon_settings::Draft::new(&settings, h.app.controller.identity.clone()).unwrap());
-    h.app.modal = Some(Modal { kind: ModalKind::Daemon, title: "Daemon settings".into(), fields: vec![], options: vec![] });
+    h.app.root.legacy.daemon_draft = Some(crate::daemon_settings::Draft::new(&settings, h.app.controller.identity.clone()).unwrap());
+    h.app.root.legacy.modal = Some(Modal { kind: ModalKind::Daemon, title: "Daemon settings".into(), fields: vec![], options: vec![] });
     h.app.load_setting_field().unwrap();
-    h.app.focus = Some(Some(0));
+    h.app.root.legacy.focus = Some(Some(0));
     h.frame();
     h.app.key("Home", true, false);
     h.app.key("ArrowDown", false, false);
@@ -121,24 +121,24 @@ fn actual_prompt_settings_reuse_input_geometry_clipboard_ime_and_scrolling() {
     h.app.release(1, point);
     h.app.key("ArrowRight", true, true);
     assert_eq!(h.copy(), "ab", "settings uses its real 15px layout, not a hard-coded 16px hit layout");
-    let committed = h.app.modal.as_ref().unwrap().fields[0].1.value.clone();
+    let committed = h.app.root.legacy.modal.as_ref().unwrap().fields[0].1.value.clone();
     h.app.preedit("世界".into(), Some((3, 6)));
     let composing = h.frame();
     h.dump("settings-preedit.png", &composing);
     h.app.key("Enter", false, false);
-    assert_eq!(h.app.modal.as_ref().unwrap().fields[0].1.value, committed);
+    assert_eq!(h.app.root.legacy.modal.as_ref().unwrap().fields[0].1.value, committed);
     h.app.input("世界");
-    assert_eq!(h.app.modal.as_ref().unwrap().fields[0].1.value, content.replacen("\nab\n", "\n世界\n", 1));
+    assert_eq!(h.app.root.legacy.modal.as_ref().unwrap().fields[0].1.value, content.replacen("\nab\n", "\n世界\n", 1));
     h.app.key("z", true, false);
-    assert_eq!(h.app.modal.as_ref().unwrap().fields[0].1.value, content);
+    assert_eq!(h.app.root.legacy.modal.as_ref().unwrap().fields[0].1.value, content);
     h.app.key("End", true, false);
     h.frame();
-    let field = h.app.hits.iter().find(|hit| matches!(hit.action, Action::Focus(Some(0)))).unwrap().rect;
+    let field = h.app.root.legacy.hits.iter().find(|hit| matches!(hit.action, Action::Focus(Some(0)))).unwrap().rect;
     let pointer = Vec2::new(field.x + field.width * 0.5, field.y + field.height * 0.5);
-    let transcript_scroll = h.app.scroll;
+    let transcript_scroll = h.app.root.legacy.scroll;
     h.app.wheel(-100_000., false, pointer);
     let scrolled = h.frame();
-    assert_eq!(h.app.scroll, transcript_scroll, "wheel over settings is not transcript scrolling");
+    assert_eq!(h.app.root.legacy.scroll, transcript_scroll, "wheel over settings is not transcript scrolling");
     assert_eq!(scrolled, h.frame(), "idle render must not undo manual field scrolling");
     h.dump("settings-scrolled.png", &scrolled);
     h.app.key("ArrowLeft", false, false);
@@ -155,7 +155,7 @@ fn key_repeat_cost_reports_work_not_an_idle_polling_loop() {
     sanscale::profiling::reset_work_counters();
     let mut samples = Vec::new();
     for i in 0..300 {
-        h.app.dirty = false;
+        h.app.ui.dirty = false;
         let started = Instant::now();
         h.app.key(if i % 2 == 0 { "ArrowDown" } else { "ArrowUp" }, false, false);
         samples.push(started.elapsed().as_nanos());

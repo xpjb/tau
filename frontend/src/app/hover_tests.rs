@@ -55,24 +55,24 @@ fn detail_rows_hover_independently_and_click_ripple_targets_the_inner_row() {
     app.tick(0.);
     app.frame(&ctx, ctx.view());
     let outer = app
-        .message_areas
+        .root.legacy.message_areas
         .iter()
         .find(|a| a.key == "demo/details:event-1")
         .unwrap()
         .rect;
     let inside = app
-        .detail_areas
+        .root.legacy.detail_areas
         .iter()
         .find(|a| a.key == "demo/tool:event-2")
         .unwrap()
         .rect;
     assert!(
-        app.detail_areas
+        app.root.legacy.detail_areas
             .iter()
             .any(|a| a.key == "demo/tool:event-2:Input")
     );
     assert!(
-        app.detail_areas
+        app.root.legacy.detail_areas
             .iter()
             .any(|a| a.key == "demo/tool:event-2:Input:text")
     );
@@ -114,14 +114,14 @@ fn detail_rows_hover_independently_and_click_ripple_targets_the_inner_row() {
     );
 
     app.press(1, inside_point, false);
-    assert_eq!(app.ripple.as_ref().unwrap().key, "demo/tool:event-2");
+    assert_eq!(app.root.legacy.ripple.as_ref().unwrap().key, "demo/tool:event-2");
     app.tick(0.);
     app.frame(&ctx, ctx.view()); // exercises the real GPU circle/rounded-clip shader
     app.motion(1, Vec2::new(inside_point.x + 20., inside_point.y));
     assert!(
-        app.ripple.is_none(),
+        app.root.legacy.ripple.is_none(),
         "dragging to scroll must not leave a click ripple"
     );
     app.release(1, inside_point);
-    assert!(app.ripple.is_none());
+    assert!(app.root.legacy.ripple.is_none());
 }

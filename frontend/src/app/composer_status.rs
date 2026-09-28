@@ -10,15 +10,15 @@ impl App {
         let level = summary.and_then(|s| s.thinking_level.as_deref())
             .filter(|level| !level.is_empty()).unwrap_or("unknown");
         let thinking = format!("Thinking: {level}");
-        let size = 12. * self.scale;
-        let gap = 12. * self.scale;
-        let thinking_width = self.renderer.label_width(&thinking, size, false).ceil();
-        let model_width = self.renderer.label_width(&model, size, false).ceil()
+        let size = 12. * self.ui.scale;
+        let gap = 12. * self.ui.scale;
+        let thinking_width = self.services.renderer.label_width(&thinking, size, false).ceil();
+        let model_width = self.services.renderer.label_width(&model, size, false).ceil()
             .min((rect.width - thinking_width - gap).max(0.));
-        self.renderer.ellipsized_label(layer, &model,
+        self.services.renderer.ellipsized_label(layer, &model,
             Rect::new(rect.x, rect.y, model_width, rect.height),
             size, color(0x82909f), false, false, rect);
-        self.renderer.label(layer, &thinking,
+        self.services.renderer.label(layer, &thinking,
             Rect::new(rect.x + model_width + gap, rect.y, thinking_width, rect.height),
             size, color(0xb7c2ce), false);
     }

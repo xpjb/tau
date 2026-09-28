@@ -44,8 +44,8 @@ pub(super) fn install(app: &mut App, case: &Case) -> ChatAttachment {
         download.bytes_per_second = case.rate;
         app.controller.downloads.insert(key.clone(), download);
     }
-    if case.state == "saving" { app.saving_downloads.insert(key.clone()); }
-    if case.state == "save-failed" { app.export_errors.insert(key, case.error.clone().unwrap()); }
+    if case.state == "saving" { app.root.legacy.saving_downloads.insert(key.clone()); }
+    if case.state == "save-failed" { app.root.legacy.export_errors.insert(key, case.error.clone().unwrap()); }
     if matches!(case.state.as_str(), "saved" | "saved-no-cache" | "missing") {
         let saved_path = app.controller.store.root.join(format!("saved-{entry}"));
         if case.state != "missing" { std::fs::write(&saved_path, b"saved fixture").unwrap(); }
@@ -68,17 +68,17 @@ pub(super) fn save(ctx: &HeadlessCtx, name: &str) {
 }
 
 pub(super) fn controls(app: &App) -> Vec<&Hit> {
-    app.hits.iter().filter(|h| matches!(h.action, Action::Attachment(..) | Action::SaveAttachment(..)
+    app.root.legacy.hits.iter().filter(|h| matches!(h.action, Action::Attachment(..) | Action::SaveAttachment(..)
         | Action::UseSaved(..) | Action::CancelDownload(..) | Action::Noop)
-        && app.info_areas.iter().any(|(rect, info)| *rect == h.rect
+        && app.root.legacy.info_areas.iter().any(|(rect, info)| *rect == h.rect
             && matches!(info, Info::Attachment(key, ..) if key.contains(":action:")))).collect()
 }
 pub(super) fn panel(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment, interaction: Interaction, viewport: Rect) -> Layer {
-    let s = app.scale;
-    app.hits.clear(); app.info_areas.clear();
+    let s = app.ui.scale;
+    app.root.legacy.hits.clear(); app.root.legacy.info_areas.clear();
     let mut layer = Layer::new(interaction);
     layer.rect(Rect::new(0., 0., ctx.size().0 as f32, ctx.size().1 as f32), color(0x0e141b));
-    app.renderer.label(&mut layer, &case.label,
+    app.services.renderer.label(&mut layer, &case.label,
         Rect::new(12. * s, 10. * s, ctx.size().0 as f32 - 24. * s, 28. * s), 12. * s, color(0xb7c2ce), false);
     let rect = Rect::new(12. * s, 44. * s, ctx.size().0 as f32 - 24. * s, attachments::card_height(file) * s);
     layer.clipped_rounded_rect(rect, 12. * s, color(0x18212b), viewport);
@@ -126,7 +126,7 @@ fn render_download_state_matrix() {
             }
             // All labels inside the actual control must be single-line, measured and non-overlapping.
             for draw in layer.draws.iter().filter(|d| d.at.y >= 44. * scale) {
-                let layout = app.renderer.text.measure(draw.block);
+                let layout = app.services.renderer.text.measure(draw.block);
                 assert_eq!(layout.line_count(), 1, "{}: labels must ellipsize, never wrap under buttons", case.id);
                 assert!(layout.width_em() * draw.size <= draw.clip.unwrap().width + 0.1);
                 if let Some(button) = buttons.iter().find(|b| contains(**b, draw.at)) {
@@ -138,7 +138,7 @@ fn render_download_state_matrix() {
                         "{}: filename/status must not run into a button", case.id);
                 }
             }
-            app.renderer.draw(&ctx, ctx.view(), &[layer]);
+            app.services.renderer.draw(&ctx, ctx.view(), &[layer]);
             save(&ctx, &format!("{name}-{}", case.id));
             for (i, button) in buttons.iter().enumerate() {
                 let point = Vec2::new(button.x + button.width / 2., button.y + button.height / 2.);
@@ -146,26 +146,26 @@ fn render_download_state_matrix() {
                     let layer = panel(&mut app, &ctx, &case, &file, Interaction {
                         hover: Some(point), pressed: pressed.then_some(point), held: pressed,
                     }, bounds);
-                    app.renderer.draw(&ctx, ctx.view(), &[layer]);
+                    app.services.renderer.draw(&ctx, ctx.view(), &[layer]);
                     save(&ctx, &format!("{name}-{}-{state}-{i}", case.id));
                 }
                 let mut layer = panel(&mut app, &ctx, &case, &file, Interaction::default(), bounds);
-                let (rect, info) = app.info_areas.iter().find(|(r, _)| contains(*r, point)).unwrap().clone();
-                app.info_target = info;
-                app.info_tip.region = rect; app.info_tip.progress = 1.;
+                let (rect, info) = app.root.legacy.info_areas.iter().find(|(r, _)| contains(*r, point)).unwrap().clone();
+                app.root.legacy.info_target = info;
+                app.root.legacy.info_tip.region = rect; app.root.legacy.info_tip.progress = 1.;
                 app.info_frame(&mut layer, bounds);
-                assert!(app.info_tip.content.text.contains(&file.file_name), "tooltip names the target file");
-                assert!(app.info_tip.card.y + app.info_tip.card.height <= bounds.height);
-                app.renderer.draw(&ctx, ctx.view(), &[layer]);
+                assert!(app.root.legacy.info_tip.content.text.contains(&file.file_name), "tooltip names the target file");
+                assert!(app.root.legacy.info_tip.card.y + app.root.legacy.info_tip.card.height <= bounds.height);
+                app.services.renderer.draw(&ctx, ctx.view(), &[layer]);
                 save(&ctx, &format!("{name}-{}-tooltip-{i}", case.id));
             }
             // Scrolling clips geometry rather than moving the label into a partial button.
             let last = *buttons.last().unwrap();
             let viewport = Rect::new(0., last.y + last.height / 2., bounds.width, bounds.height - last.y - last.height / 2.);
             let layer = panel(&mut app, &ctx, &case, &file, Interaction::default(), viewport);
-            assert!(app.hits.iter().all(|h| h.rect.y >= viewport.y));
+            assert!(app.root.legacy.hits.iter().all(|h| h.rect.y >= viewport.y));
             assert!(controls(&app).iter().all(|h| h.rect.height <= last.height / 2.));
-            app.renderer.draw(&ctx, ctx.view(), &[layer]);
+            app.services.renderer.draw(&ctx, ctx.view(), &[layer]);
             save(&ctx, &format!("{name}-{}-clipped", case.id));
         }
     }

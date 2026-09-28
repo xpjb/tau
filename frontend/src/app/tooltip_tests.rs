@@ -15,13 +15,13 @@ fn report() -> CodexUsage {
 fn assert_card(app: &mut App, bounds: Rect, usage: bool) -> usize {
     let mut layer = Layer::default();
     if usage { app.usage_frame(&mut layer, bounds); } else { app.info_frame(&mut layer, bounds); }
-    let card = if usage { app.usage.card } else { app.info_tip.card };
+    let card = if usage { app.root.legacy.usage.card } else { app.root.legacy.info_tip.card };
     assert!(card.x >= bounds.x && card.y >= bounds.y && card.x + card.width <= bounds.x + bounds.width
         && card.y + card.height <= bounds.y + bounds.height, "Card must fit the viewport: {card:?}");
     assert_eq!(layer.draws.len(), 1, "One shaped rich block, no refresh button");
     let draw = layer.draws[0];
     assert!(draw.paint.is_some(), "Inline colours must reach the actual text draw");
-    let layout = app.renderer.text.measure(draw.block);
+    let layout = app.services.renderer.text.measure(draw.block);
     assert!(layout.line_count() > 0, "Rich font spans must shape successfully");
     let clip = draw.clip.unwrap();
     assert!(draw.at.y + layout.height_em() * draw.size <= clip.y + clip.height + 0.1,
@@ -45,40 +45,40 @@ fn rich_tooltips_fit_desktop_phone_and_scaled_phone_without_clipping() {
         let ctx = HeadlessCtx::new(&Config { size, device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
         let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(|| {}), name != "desktop").unwrap();
         app.back(); crate::demo::populate(&mut app.controller).unwrap();
-        app.resize(size, scale, Vec2::new(0.,0.)); app.tick(0.); app.show_chats = false;
+        app.resize(size, scale, Vec2::new(0.,0.)); app.tick(0.); app.root.legacy.show_chats = false;
         let bounds = Rect::new(0.,0.,size.0 as f32,size.1 as f32);
         app.controller.account.sessions.iter_mut().find(|s|s.id=="demo").unwrap().model.as_mut().unwrap().provider = "openai-codex".into();
         app.controller.epoch = Some(1); // Rendering only: no tick/network in this fixture.
         app.controller.codex_usage.report = Some(report());
         app.controller.codex_usage.received = Some(Instant::now());
-        app.usage.pinned = true; app.usage.progress = 1.;
+        app.root.legacy.usage.pinned = true; app.root.legacy.usage.progress = 1.;
         app.frame(&ctx,ctx.view());
         assert_card(&mut app, bounds, true);
-        assert!(app.usage.content.spans.iter().any(|s|s.bold && s.tint==crate::tooltip::GOOD));
-        assert!(app.usage.content.spans.iter().any(|s|s.bold && s.tint==crate::tooltip::WARNING));
+        assert!(app.root.legacy.usage.content.spans.iter().any(|s|s.bold && s.tint==crate::tooltip::GOOD));
+        assert!(app.root.legacy.usage.content.spans.iter().any(|s|s.bold && s.tint==crate::tooltip::WARNING));
         preview(&ctx, &format!("quota-{name}"));
 
         app.controller.codex_usage.report.as_mut().unwrap().windows[0].label = "Longer quota window with literal **stars** and 日本語".into();
         app.controller.codex_usage.error = Some("Codex quota unavailable: sign in to Codex or renew its credentials.".into());
         app.frame(&ctx,ctx.view());
         let lines = assert_card(&mut app, bounds, true);
-        assert!(lines > app.usage.content.text.lines().count(), "Exercise real wrapping, not just newline counting");
-        assert!(app.usage.content.text.contains("**stars**"), "Provider data stays literal");
+        assert!(lines > app.root.legacy.usage.content.text.lines().count(), "Exercise real wrapping, not just newline counting");
+        assert!(app.root.legacy.usage.content.text.contains("**stars**"), "Provider data stays literal");
         preview(&ctx, &format!("quota-wrapped-{name}"));
 
-        app.usage = Tooltip::default(); app.show_chats = true;
+        app.root.legacy.usage = Tooltip::default(); app.root.legacy.show_chats = true;
         let session = app.controller.account.sessions.iter_mut().find(|s|s.id=="two").unwrap();
         session.updated_at_ms = clock::now_ms().unwrap() - 52 * 60_000;
-        app.info_target = Info::CacheTtl("two".into());
-        app.info_tip.pinned = true; app.info_tip.progress = 1.;
+        app.root.legacy.info_target = Info::CacheTtl("two".into());
+        app.root.legacy.info_tip.pinned = true; app.root.legacy.info_tip.progress = 1.;
         app.frame(&ctx,ctx.view());
         assert_eq!(assert_card(&mut app,bounds,false), 1);
-        assert_eq!(app.info_tip.content.text, "TTL ~8m remaining");
+        assert_eq!(app.root.legacy.info_tip.content.text, "TTL ~8m remaining");
         preview(&ctx, &format!("ttl-{name}"));
         app.controller.account.sessions.iter_mut().find(|s|s.id=="two").unwrap().status = SessionStatus::Running;
         app.frame(&ctx,ctx.view());
         assert_eq!(assert_card(&mut app,bounds,false), 1);
-        assert_eq!(app.info_tip.content.text, "Working...");
+        assert_eq!(app.root.legacy.info_tip.content.text, "Working...");
         preview(&ctx, &format!("working-{name}"));
 
         app.preview_connection(ConnectionPreview::Received);
@@ -144,16 +144,16 @@ async fn quota_refreshes_without_opening_a_tooltip_and_stops_when_hidden_or_non_
             app.tick(0.); tokio::time::sleep(Duration::from_millis(10)).await;
             if calls.load(Ordering::SeqCst)==expected && app.controller.codex_usage.in_flight.is_none() { break; }
         }
-        assert_eq!(app.usage.progress,0.,"No hover/click is needed");
+        assert_eq!(app.root.legacy.usage.progress,0.,"No hover/click is needed");
         assert!(app.controller.codex_usage.report.is_some());
         for _ in 0..5 { app.tick(0.); }
         assert_eq!(calls.load(Ordering::SeqCst),expected,"No duplicate reads while fresh");
         app.controller.codex_usage.attempted=Some(Instant::now()-Duration::from_secs(301));
     }
     let attempted=app.controller.codex_usage.attempted;
-    app.window_focused=false; app.tick(0.);
+    app.ui.window_focused=false; app.tick(0.);
     assert_eq!(app.controller.codex_usage.attempted,attempted);
-    app.window_focused=true;
+    app.ui.window_focused=true;
     app.set_connection_visible(false); app.tick(0.);
     assert_eq!(app.controller.codex_usage.attempted,attempted);
     app.set_connection_visible(true);

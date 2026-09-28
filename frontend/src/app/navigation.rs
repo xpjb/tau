@@ -19,45 +19,45 @@ impl App {
     pub(super) fn sync_navigation(&mut self) {
         self.validate_download_jump();
         let selected = self.controller.account.selected.clone();
-        if selected != self.navigation.session || self.controller.identity != self.navigation.identity {
+        if selected != self.root.legacy.navigation.session || self.controller.identity != self.root.legacy.navigation.identity {
             // Also handles server-driven changes. Never save the old layout
             // through a controller that has already switched accounts.
-            if self.controller.identity == self.navigation.identity
-                && let Some(previous) = &self.navigation.session
-                && self.placed_session.as_deref() == Some(previous.as_str())
+            if self.controller.identity == self.root.legacy.navigation.identity
+                && let Some(previous) = &self.root.legacy.navigation.session
+                && self.root.legacy.placed_session.as_deref() == Some(previous.as_str())
                 && let Err(error) = self.controller.save_chat(previous) {
                 self.controller.report_error(error);
             }
             // Cancel the old chat/account's file interest before rebinding the
             // composer; do not wait for the next UI tick after navigation.
             self.close_code();
-            self.placed.clear();
-            self.placed_session = None;
+            self.root.legacy.placed.clear();
+            self.root.legacy.placed_session = None;
             self.cancel_pointer();
-            self.history_attempt = None;
-            self.context_menu = None;
-            self.usage = Tooltip::default();
-            self.navigation.identity = self.controller.identity.clone();
-            self.navigation.session = selected;
-            self.scroll = 0.;
-            self.horizontal = 0.;
-            self.velocity = 0.;
-            self.composer = Editor::composer(
+            self.root.legacy.history_attempt = None;
+            self.root.legacy.context_menu = None;
+            self.root.legacy.usage = Tooltip::default();
+            self.root.legacy.navigation.identity = self.controller.identity.clone();
+            self.root.legacy.navigation.session = selected;
+            self.root.legacy.scroll = 0.;
+            self.root.legacy.horizontal = 0.;
+            self.root.legacy.velocity = 0.;
+            self.root.legacy.composer = Editor::composer(
                 self.controller
                     .selected()
                     .map(|c| c.local.draft.clone())
                     .unwrap_or_default(),
             );
-            self.show_chats = self.navigation.session.is_none();
-            self.attachment_scroll = 0.;
-            self.max_attachment_scroll = 0.;
-            if self.show_chats { self.show_attachments = false; }
-            self.dirty = true;
+            self.root.legacy.show_chats = self.root.legacy.navigation.session.is_none();
+            self.root.legacy.attachment_scroll = 0.;
+            self.root.legacy.max_attachment_scroll = 0.;
+            if self.root.legacy.show_chats { self.root.legacy.show_attachments = false; }
+            self.ui.dirty = true;
         } else if let Some(chat) = self.controller.selected()
-            && self.composer.value != chat.local.draft
+            && self.root.legacy.composer.value != chat.local.draft
         {
-            self.composer = Editor::composer(chat.local.draft.clone());
-            self.dirty = true;
+            self.root.legacy.composer = Editor::composer(chat.local.draft.clone());
+            self.ui.dirty = true;
         }
     }
 
@@ -73,8 +73,8 @@ impl App {
         // destination is the already-selected chat.
         self.close_code();
         self.sync_navigation();
-        self.show_chats = false;
-        self.focus = Some(None);
+        self.root.legacy.show_chats = false;
+        self.root.legacy.focus = Some(None);
         Ok(())
     }
 
@@ -85,11 +85,11 @@ impl App {
             return Ok(());
         }
         self.save()?;
-        self.controller.select_project(id, self.size.0 as f32 / self.scale >= 760.)?;
+        self.controller.select_project(id, self.ui.size.0 as f32 / self.ui.scale >= 760.)?;
         self.sync_navigation();
-        self.list_scroll = 0.;
-        self.show_chats = self.controller.account.selected.is_none();
-        self.focus = None;
+        self.root.legacy.list_scroll = 0.;
+        self.root.legacy.show_chats = self.controller.account.selected.is_none();
+        self.root.legacy.focus = None;
         Ok(())
     }
 
@@ -104,27 +104,27 @@ impl App {
         // the outgoing draft/anchor. Only the final viewport destination differs.
         self.navigate_chat(&target.session)?;
         self.cancel_pointer();
-        self.modal = None;
-        self.viewer = None;
-        self.viewer_image = None;
-        self.focus = None;
-        self.show_chats = false;
-        self.show_attachments = false;
-        self.list_scroll = 0.;
-        self.horizontal = 0.;
-        self.scroll = 0.;
-        self.placed.clear();
-        self.placed_session = None;
-        self.history_attempt = None;
-        self.navigation.download = Some(target);
+        self.root.legacy.modal = None;
+        self.root.legacy.viewer = None;
+        self.root.legacy.viewer_image = None;
+        self.root.legacy.focus = None;
+        self.root.legacy.show_chats = false;
+        self.root.legacy.show_attachments = false;
+        self.root.legacy.list_scroll = 0.;
+        self.root.legacy.horizontal = 0.;
+        self.root.legacy.scroll = 0.;
+        self.root.legacy.placed.clear();
+        self.root.legacy.placed_session = None;
+        self.root.legacy.history_attempt = None;
+        self.root.legacy.navigation.download = Some(target);
         Ok(())
     }
 
     pub(super) fn validate_download_jump(&mut self) {
-        if self.navigation.download.as_ref().is_some_and(|target|
+        if self.root.legacy.navigation.download.as_ref().is_some_and(|target|
             !target.matches_source(&self.controller.identity, self.controller.account.source_lineage.as_deref())
                 || self.controller.account.selected.as_deref() != Some(target.session.as_str())) {
-            self.navigation.download = None;
+            self.root.legacy.navigation.download = None;
         }
     }
 
@@ -133,24 +133,24 @@ impl App {
     /// interim page as the user's destination.
     pub(super) fn locate_download(&mut self, rows: &[Row], placements: &[Placed], viewport: Rect) -> bool {
         self.validate_download_jump();
-        let Some(target) = &self.navigation.download else { return false; };
+        let Some(target) = &self.root.legacy.navigation.download else { return false; };
         if let Some((_, placed)) = rows.iter().zip(placements).find(|(row, _)|
             row.attachment.as_ref().is_some_and(|(entry, _)| entry == &target.entry)) {
             // Center the actual download controls, not the beginning of a long
             // message or image above them. This also works at mobile UI scales.
-            let panel = attachments::control_panel(Rect::new(0., placed.top, viewport.width, placed.height), self.scale);
-            self.scroll = (panel.y + panel.height / 2. - viewport.height / 2.).clamp(0., self.max_scroll);
+            let panel = attachments::control_panel(Rect::new(0., placed.top, viewport.width, placed.height), self.ui.scale);
+            self.root.legacy.scroll = (panel.y + panel.height / 2. - viewport.height / 2.).clamp(0., self.root.legacy.max_scroll);
             let position = &mut self.controller.chats.get_mut(&target.session).unwrap().local.position;
             position.key = Some(placed.key.clone());
-            position.offset = (self.scroll - placed.top) / self.scale;
+            position.offset = (self.root.legacy.scroll - placed.top) / self.ui.scale;
             position.follow = false;
-            self.navigation.download = None;
+            self.root.legacy.navigation.download = None;
         } else {
-            self.scroll = 0.;
+            self.root.legacy.scroll = 0.;
             let feed = &self.controller.chats[&target.session].feed;
             if self.controller.account.missing_chats.contains(&target.session)
                 || feed.synchronized && !feed.loading && feed.before.is_none() {
-                self.navigation.download = None;
+                self.root.legacy.navigation.download = None;
                 self.controller.notice = Some("The download widget is no longer available in this chat.".into());
             }
         }

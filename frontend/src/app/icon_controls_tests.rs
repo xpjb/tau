@@ -34,11 +34,11 @@ fn settings_gear_stays_in_sidebar_header_and_opens_settings() {
         let (mut app, ctx, _root) = setup(size);
         app.tick(0.);
         if size.0 < 760 {
-            app.show_chats = true;
+            app.root.legacy.show_chats = true;
         }
         app.frame(&ctx, ctx.view());
         let settings = app
-            .hits
+            .root.legacy.hits
             .iter()
             .find(|hit| matches!(hit.action, Action::Settings))
             .unwrap()
@@ -51,7 +51,7 @@ fn settings_gear_stays_in_sidebar_header_and_opens_settings() {
         app.press(1, point, false);
         app.release(1, point);
         assert!(matches!(
-            app.modal.as_ref().map(|modal| &modal.kind),
+            app.root.legacy.modal.as_ref().map(|modal| &modal.kind),
             Some(ModalKind::Settings)
         ));
     }
@@ -75,9 +75,9 @@ fn latest_is_a_circular_chevron_only_when_scrolled_away_from_tail() {
             "A long reply that needs scrolling.\n\n".repeat(120);
         app.tick(0.);
         app.frame(&ctx, ctx.view());
-        assert!(app.max_scroll > 0.);
+        assert!(app.root.legacy.max_scroll > 0.);
         assert!(
-            !app.hits
+            !app.root.legacy.hits
                 .iter()
                 .any(|hit| matches!(hit.action, Action::Tail))
         );
@@ -96,10 +96,10 @@ fn latest_is_a_circular_chevron_only_when_scrolled_away_from_tail() {
             .local
             .position
             .key = None;
-        app.scroll = 0.;
+        app.root.legacy.scroll = 0.;
         app.frame(&ctx, ctx.view());
         let latest = app
-            .hits
+            .root.legacy.hits
             .iter()
             .find(|hit| matches!(hit.action, Action::Tail))
             .unwrap()
@@ -107,15 +107,15 @@ fn latest_is_a_circular_chevron_only_when_scrolled_away_from_tail() {
         assert_eq!((latest.width, latest.height), (40., 40.));
         assert_eq!(
             latest.y + latest.height + 8.,
-            app.transcript.y + app.transcript.height
+            app.root.legacy.transcript.y + app.root.legacy.transcript.height
         );
         let point = Vec2::new(latest.x + 20., latest.y + 20.);
         app.press(2, point, false);
         app.release(2, point);
-        assert_eq!(app.scroll, app.max_scroll);
+        assert_eq!(app.root.legacy.scroll, app.root.legacy.max_scroll);
         app.frame(&ctx, ctx.view());
         assert!(
-            !app.hits
+            !app.root.legacy.hits
                 .iter()
                 .any(|hit| matches!(hit.action, Action::Tail))
         );

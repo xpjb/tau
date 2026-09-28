@@ -68,7 +68,7 @@ impl ChadApp for Desktop {
         let waker = ctx.waker();
         let mut app = App::new(ctx, store, Arc::new(move || waker.wake()), false)
             .map_err(|e| e.to_string())?;
-        app.window_focused = ctx.window.has_focus();
+        app.ui.window_focused = ctx.window.has_focus();
         ctx.window.set_ime_allowed(true);
         let (tx, rx) = mpsc::channel();
         let attention_identity = app.controller.identity.clone();
@@ -104,7 +104,7 @@ impl ChadApp for Desktop {
             WindowEvent::Occluded(occluded) => self.app.set_connection_visible(!occluded),
             WindowEvent::ScaleFactorChanged { .. } => ctx.request_redraw(),
             WindowEvent::Focused(true) => {
-                self.app.window_focused = true;
+                self.app.ui.window_focused = true;
                 if self.attention_requested {
                     ctx.window.request_user_attention(None);
                     self.attention_requested = false;
@@ -178,7 +178,7 @@ impl ChadApp for Desktop {
                 self.app.report(result);
             }
             WindowEvent::Focused(false) => {
-                self.app.window_focused = false;
+                self.app.ui.window_focused = false;
                 self.modifiers = ModifiersState::empty();
                 self.app.cancel_preedit();
                 self.app.cancel_pointer();
@@ -230,7 +230,7 @@ impl ChadApp for Desktop {
         let new_delivery = finished.iter().any(|(id, at)|
             self.seen_finished.get(id).is_none_or(|seen| seen < at));
         self.seen_finished = finished;
-        if self.app.window_focused {
+        if self.app.ui.window_focused {
             if self.attention_requested {
                 ctx.window.request_user_attention(None);
                 self.attention_requested = false;

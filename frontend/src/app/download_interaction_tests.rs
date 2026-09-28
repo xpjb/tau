@@ -38,7 +38,7 @@ fn verified(app: &mut App, case: &Case) {
 }
 fn paint(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment) {
     let layer = panel(app, ctx, case, file, Interaction::default(), Rect::new(0.,0.,ctx.size().0 as f32,ctx.size().1 as f32));
-    app.renderer.draw(ctx, ctx.view(), &[layer]);
+    app.services.renderer.draw(ctx, ctx.view(), &[layer]);
 }
 fn tap(app: &mut App, index: usize, touch: bool) {
     let r = controls(app)[index].rect;
@@ -59,20 +59,20 @@ fn cached_large_file_saves_once_retries_failure_and_survives_restart_then_missin
     app.controller.chats.get_mut("demo").unwrap().feed.events.insert(5, item);
     let key = Controller::download_key("demo", &case.id);
     paint(&mut app, &ctx, &case, &file); tap(&mut app, 0, false);
-    assert!(matches!(&app.platform[..], [PlatformAction::SaveDownload { key:k, source, .. }] if k==&key && source==&path));
+    assert!(matches!(&app.services.platform[..], [PlatformAction::SaveDownload { key:k, source, .. }] if k==&key && source==&path));
     paint(&mut app, &ctx, &case, &file);
     assert!(matches!(controls(&app)[0].action, Action::Noop));
-    tap(&mut app,0,false); assert_eq!(app.platform.len(),1,"saving cannot queue a duplicate export");
-    app.platform.clear(); app.complete_save(&key, Err("Disk full".into()));
+    tap(&mut app,0,false); assert_eq!(app.services.platform.len(),1,"saving cannot queue a duplicate export");
+    app.services.platform.clear(); app.complete_save(&key, Err("Disk full".into()));
     paint(&mut app, &ctx, &case, &file);
-    assert!(app.info_areas.iter().any(|(_,info)| matches!(info, Info::Attachment(_,title,_) if title=="Retry")));
+    assert!(app.root.legacy.info_areas.iter().any(|(_,info)| matches!(info, Info::Attachment(_,title,_) if title=="Retry")));
     tap(&mut app,0,false);
-    assert_eq!(app.platform.len(),1);
+    assert_eq!(app.services.platform.len(),1);
     let saved = crate::downloads::save_into(&root.path().join("user-downloads"), &path, &file.file_name).unwrap();
-    app.platform.clear(); app.complete_save(&key, Ok(saved.clone())); app.controller.notice=None;
+    app.services.platform.clear(); app.complete_save(&key, Ok(saved.clone())); app.controller.notice=None;
     paint(&mut app, &ctx, &case, &file); tap(&mut app,0,false); tap(&mut app,1,false);
-    assert!(matches!(&app.platform[..], [PlatformAction::UseDownload(_,SavedAction::Open,_), PlatformAction::UseDownload(_,SavedAction::Show,_)]));
-    assert!(!app.export_errors.contains_key(&key));
+    assert!(matches!(&app.services.platform[..], [PlatformAction::UseDownload(_,SavedAction::Open,_), PlatformAction::UseDownload(_,SavedAction::Show,_)]));
+    assert!(!app.root.legacy.export_errors.contains_key(&key));
     drop(app);
     let mut app = App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),false).unwrap();
     app.back(); crate::demo::populate(&mut app.controller).unwrap(); app.resize(ctx.size(),1.,Vec2::new(0.,0.));
@@ -97,22 +97,22 @@ fn image_view_save_and_touch_labels_do_not_confuse_actions_or_trigger_on_long_pr
     let view=controls(&app)[0].rect;
     let point=Vec2::new(view.x+22.,view.y+22.);
     app.press(1,point,true);
-    app.pointer.as_mut().unwrap().started=Instant::now()-Duration::from_millis(500);
+    app.root.legacy.pointer.as_mut().unwrap().started=Instant::now()-Duration::from_millis(500);
     app.tick(0.); app.release(1,point);
-    assert!(app.info_tip.pinned);
-    assert!(matches!(&app.info_target,Info::Attachment(_,title,_) if title=="View image"));
-    assert!(app.viewer.is_none() && app.platform.is_empty(),"a held control shows its details, never acts");
-    app.info_tip=Tooltip::default(); paint(&mut app,&ctx,&case,&file);
-    tap(&mut app,0,true); assert!(app.viewer.is_some()); assert!(app.platform.is_empty());
+    assert!(app.root.legacy.info_tip.pinned);
+    assert!(matches!(&app.root.legacy.info_target,Info::Attachment(_,title,_) if title=="View image"));
+    assert!(app.root.legacy.viewer.is_none() && app.services.platform.is_empty(),"a held control shows its details, never acts");
+    app.root.legacy.info_tip=Tooltip::default(); paint(&mut app,&ctx,&case,&file);
+    tap(&mut app,0,true); assert!(app.root.legacy.viewer.is_some()); assert!(app.services.platform.is_empty());
     app.back(); paint(&mut app,&ctx,&case,&file);
     tap(&mut app,1,true);
-    assert!(matches!(&app.platform[..],[PlatformAction::SaveDownload {..}]));
+    assert!(matches!(&app.services.platform[..],[PlatformAction::SaveDownload {..}]));
     let key=Controller::download_key("demo",&case.id);
-    app.platform.clear(); app.complete_save(&key,Err("Permission denied".into()));
+    app.services.platform.clear(); app.complete_save(&key,Err("Permission denied".into()));
     paint(&mut app,&ctx,&case,&file);
     assert!(matches!(controls(&app)[0].action,Action::SaveAttachment(..)),"retry resumes saving, not just viewing");
     assert!(matches!(controls(&app)[1].action,Action::Attachment(_,_,_,true)),"save failure keeps View");
-    tap(&mut app,0,true); assert!(matches!(&app.platform[..],[PlatformAction::SaveDownload {..}]));
+    tap(&mut app,0,true); assert!(matches!(&app.services.platform[..],[PlatformAction::SaveDownload {..}]));
 }
 
 #[test]
@@ -127,20 +127,20 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
         app.controller.message(ServerMessage::TranscriptSnapshot {session_id:"demo".into(),snapshot:TranscriptSnapshot {
             generation:"demo".into(),sequence:1,events,queue:QueueState::default(),before:None,delivered:vec![]}}).unwrap();
         app.controller.account.sessions[0].title="Inline file downloads".into();
-        app.show_chats=false; app.tick(0.); app.frame(&ctx,ctx.view());
+        app.root.legacy.show_chats=false; app.tick(0.); app.frame(&ctx,ctx.view());
         save(&ctx,&format!("context-{name}-chat"));
-        app.show_attachments=true; app.frame(&ctx,ctx.view());
+        app.root.legacy.show_attachments=true; app.frame(&ctx,ctx.view());
         save(&ctx,&format!("context-{name}-attachments"));
-        let (rect,info)=app.info_areas.iter().find(|(_,info)| matches!(info,Info::Attachment(key,title,_)
+        let (rect,info)=app.root.legacy.info_areas.iter().find(|(_,info)| matches!(info,Info::Attachment(key,title,_)
             if key.starts_with("attachments:") && title=="Save to Downloads")).unwrap().clone();
-        app.info_target=info; app.info_tip.region=rect; app.info_tip.pinned=true; app.info_tip.progress=1.;
+        app.root.legacy.info_target=info; app.root.legacy.info_tip.region=rect; app.root.legacy.info_tip.pinned=true; app.root.legacy.info_tip.progress=1.;
         app.frame(&ctx,ctx.view());
-        assert_eq!(app.info_tip.region,rect,"duplicate file in chat must not steal sidebar tooltip anchor");
+        assert_eq!(app.root.legacy.info_tip.region,rect,"duplicate file in chat must not steal sidebar tooltip anchor");
         save(&ctx,&format!("context-{name}-tooltip"));
-        assert!(app.info_areas.iter().all(|(_,info)| !matches!(info,Info::Attachment(key,_,_)
+        assert!(app.root.legacy.info_areas.iter().all(|(_,info)| !matches!(info,Info::Attachment(key,_,_)
             if key.ends_with(":details") || key.ends_with(":caption"))), "Card text must not repeat itself in a tooltip");
-        app.show_attachments=false; app.frame(&ctx,ctx.view());
-        assert!(!app.info_tip.pinned,"hidden attachment pane must dismiss its tooltip");
+        app.root.legacy.show_attachments=false; app.frame(&ctx,ctx.view());
+        assert!(!app.root.legacy.info_tip.pinned,"hidden attachment pane must dismiss its tooltip");
     }
 }
 
@@ -151,9 +151,9 @@ fn saved_zip_text_actions_dispatch_open_show_extract_to_the_correct_file() {
     case.name=Some("source-code.ZIP".into());
     let file=install(&mut app,&case); paint(&mut app,&ctx,&case,&file);
     for index in 0..3 { tap(&mut app,index,false); }
-    assert!(matches!(&app.platform[..],[PlatformAction::UseDownload(_,SavedAction::Open,_),
+    assert!(matches!(&app.services.platform[..],[PlatformAction::UseDownload(_,SavedAction::Open,_),
         PlatformAction::UseDownload(_,SavedAction::Show,_),PlatformAction::UseDownload(_,SavedAction::Extract,_)]));
-    for action in &app.platform {
+    for action in &app.services.platform {
         let PlatformAction::UseDownload(saved,_,target)=action else {panic!("unexpected action")};
         assert_eq!(target.session,"demo"); assert_eq!(target.entry,case.id);
         assert!(saved.reference.ends_with(&format!("saved-{}",case.id)));
@@ -168,16 +168,16 @@ fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
         case.caption = Some("This caption stays on the card".into());
         let file = install(&mut app, &case);
         paint(&mut app, &ctx, &case, &file);
-        assert!(app.info_areas.iter().all(|(_, info)| matches!(info, Info::Attachment(key, ..) if key.contains(":action:"))));
-        assert!(!app.hits.iter().any(|hit| matches!(hit.action, Action::Info(Info::Attachment(..)))));
+        assert!(app.root.legacy.info_areas.iter().all(|(_, info)| matches!(info, Info::Attachment(key, ..) if key.contains(":action:"))));
+        assert!(!app.root.legacy.hits.iter().any(|hit| matches!(hit.action, Action::Info(Info::Attachment(..)))));
         let card = attachments::control_panel(Rect::new(12., 44., 336., attachments::card_height(&file)), 1.);
         for point in [Vec2::new(card.x + 16., card.y + 20.), Vec2::new(card.x + 16., card.y + 42.),
             Vec2::new(card.x + 16., card.y - 14.)] {
-            assert!(!app.info_areas.iter().any(|(r, _)| contains(*r, point)));
+            assert!(!app.root.legacy.info_areas.iter().any(|(r, _)| contains(*r, point)));
             app.hover(Some(point)); app.tick(0.);
             app.press(3, point, mobile); app.release(3, point);
-            assert!(!app.info_tip.pinned && app.info_tip.progress == 0.);
-            assert!(app.platform.is_empty());
+            assert!(!app.root.legacy.info_tip.pinned && app.root.legacy.info_tip.progress == 0.);
+            assert!(app.services.platform.is_empty());
         }
         assert!(!controls(&app).is_empty(), "Action controls and their own descriptions remain available");
     }

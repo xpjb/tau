@@ -39,14 +39,14 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.frame(&ctx, ctx.view());
     let received = ctx.read_rgba8().unwrap();
     assert!(
-        app.info_tip
+        app.root.legacy.info_tip
             .content.text
             .contains("RTT · latest 123ms · min 123ms · max 420ms"),
         "{}",
-        app.info_tip.content.text
+        app.root.legacy.info_tip.content.text
     );
-    assert!(elapsed(&app.info_tip.content.text, "Last ping: ") >= 1357);
-    assert!(!app.info_tip.content.text.contains("tau.example.invalid"));
+    assert!(elapsed(&app.root.legacy.info_tip.content.text, "Last ping: ") >= 1357);
+    assert!(!app.root.legacy.info_tip.content.text.contains("tau.example.invalid"));
     assert_eq!(app.controller.health.color(Instant::now()), 0x4ade80);
 
     app.controller
@@ -56,28 +56,28 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.frame(&ctx, ctx.view());
     let waiting = ctx.read_rgba8().unwrap();
     assert_ne!(received, waiting, "waiting must change the GPU frame");
-    assert!(elapsed(&app.info_tip.content.text, "Last ping: ") >= 1350);
-    assert!(app.info_tip.content.text.contains("Waiting for pong · timeout in:") && app.info_tip.content.text.contains("RTT · latest 123ms"), "pending probes are not acknowledged RTTs");
+    assert!(elapsed(&app.root.legacy.info_tip.content.text, "Last ping: ") >= 1350);
+    assert!(app.root.legacy.info_tip.content.text.contains("Waiting for pong · timeout in:") && app.root.legacy.info_tip.content.text.contains("RTT · latest 123ms"), "pending probes are not acknowledged RTTs");
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
-    assert_eq!(app.info_tip.content.text.lines().count(), 4);
+    assert_eq!(app.root.legacy.info_tip.content.text.lines().count(), 4);
 
     // Pong completes this probe without changing when it was actually attempted.
     app.controller
         .health
         .reply(Duration::from_millis(1350), Instant::now());
-    app.dirty = true; // A real transport event also marks the controller changed.
+    app.ui.dirty = true; // A real transport event also marks the controller changed.
     assert!(app.tick(0.));
     app.frame(&ctx, ctx.view());
     assert!(
-        app.info_tip
+        app.root.legacy.info_tip
             .content.text
             .contains("RTT · latest 1350ms · min 123ms · max 1350ms")
     );
-    let before = elapsed(&app.info_tip.content.text, "Last ping: ");
+    let before = elapsed(&app.root.legacy.info_tip.content.text, "Last ping: ");
     std::thread::sleep(Duration::from_millis(60));
     assert!(app.tick(0.), "attempt-age timer must continue while visible");
     app.frame(&ctx, ctx.view());
-    assert!(elapsed(&app.info_tip.content.text, "Last ping: ") > before);
+    assert!(elapsed(&app.root.legacy.info_tip.content.text, "Last ping: ") > before);
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
     app.controller
         .health
@@ -88,7 +88,7 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.tick(0.);
     app.frame(&ctx, ctx.view());
     assert!(
-        app.info_tip
+        app.root.legacy.info_tip
             .content.text
             .contains("RTT · latest 21ms · min 21ms · max 1350ms")
     );
@@ -99,20 +99,20 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     app.set_connection_visible(true);
     assert!(app.tick(0.));
     app.frame(&ctx, ctx.view());
-    app.info_tip = Tooltip::default(); // Closed card: no 50ms redraw loop.
+    app.root.legacy.info_tip = Tooltip::default(); // Closed card: no 50ms redraw loop.
     assert!(app.tick(0.)); // One final frame to close the card.
-    assert_eq!(app.counter_bucket, None);
+    assert_eq!(app.root.legacy.counter_bucket, None);
     assert!(!app.tick(0.));
 
     // Socket loss does not rewrite the chat's last known Working label or unread marker.
     app.preview_connection(ConnectionPreview::Disconnected);
     app.frame(&ctx, ctx.view());
     assert!(
-        app.info_tip
+        app.root.legacy.info_tip
             .content.text
             .starts_with("No WebSocket · acquiring\nAttempt #2 started:")
     );
-    assert!(app.info_tip.content.text.ends_with("\nLast failure: Ping timed out"));
+    assert!(app.root.legacy.info_tip.content.text.ends_with("\nLast failure: Ping timed out"));
     assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
     let disconnected = ctx.read_rgba8().unwrap();
     let pixel = |image: &[u8], x, y| {
@@ -124,26 +124,26 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert_ne!(pixel(&disconnected, 86, 39), pixel(&disconnected, 95, 39));
     assert_ne!(pixel(&received, 86, 39), pixel(&disconnected, 86, 39));
 
-    assert!(!app.info_tip.content.text.contains("RTT") && !app.info_tip.content.text.contains("received"));
+    assert!(!app.root.legacy.info_tip.content.text.contains("RTT") && !app.root.legacy.info_tip.content.text.contains("received"));
     let now = Instant::now();
     app.controller.health.attempt(3, now);
     app.controller.health.disconnected(false);
     app.controller.health.retry_scheduled(now + Duration::from_secs(1));
     app.tick(0.); app.frame(&ctx, ctx.view());
-    assert!(app.info_tip.content.text.contains("Next attempt in:"));
-    let before = elapsed(&app.info_tip.content.text, "Next attempt in: ");
+    assert!(app.root.legacy.info_tip.content.text.contains("Next attempt in:"));
+    let before = elapsed(&app.root.legacy.info_tip.content.text, "Next attempt in: ");
     std::thread::sleep(Duration::from_millis(60));
     assert!(app.tick(0.)); app.frame(&ctx, ctx.view());
-    assert!(elapsed(&app.info_tip.content.text, "Next attempt in: ") < before);
+    assert!(elapsed(&app.root.legacy.info_tip.content.text, "Next attempt in: ") < before);
     app.controller.health.attempt(4, Instant::now());
     app.tick(0.); app.frame(&ctx, ctx.view());
-    assert!(app.info_tip.content.text.contains("Attempt #4 started:"));
-    assert!(app.info_tip.content.text.contains("Waiting · timeout in:"));
-    assert!(!app.info_tip.content.text.contains("Next attempt"));
+    assert!(app.root.legacy.info_tip.content.text.contains("Attempt #4 started:"));
+    assert!(app.root.legacy.info_tip.content.text.contains("Waiting · timeout in:"));
+    assert!(!app.root.legacy.info_tip.content.text.contains("Next attempt"));
 
     app.preview_connection(ConnectionPreview::Unconfigured);
     app.frame(&ctx, ctx.view());
-    assert_eq!(app.info_tip.content.text, "No WebSocket · not configured");
+    assert_eq!(app.root.legacy.info_tip.content.text, "No WebSocket · not configured");
     assert_eq!(app.controller.health.color(Instant::now()), 0xff5a5f);
 }
 
@@ -155,31 +155,31 @@ fn context_hover_and_pinned_card_show_native_codex_account_quota_not_context_cap
     app.back();crate::demo::populate(&mut app.controller).unwrap();
     app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);
     app.frame(&ctx,ctx.view());
-    assert!(app.usage.content.text.contains("Context · ~9% used"));
-    assert!(app.usage.content.text.contains("Account quota unavailable for this provider"));
+    assert!(app.root.legacy.usage.content.text.contains("Context · ~9% used"));
+    assert!(app.root.legacy.usage.content.text.contains("Account quota unavailable for this provider"));
     app.controller.account.sessions[0].model.as_mut().unwrap().provider="openai-codex".into();
     app.controller.codex_usage.report=Some(CodexUsage {provider:"openai-codex".into(),fetched_at_ms:1_800_000_000_000,age_ms:0,plan:Some("pro".into()),limit_reached:false,
         windows:vec![CodexUsageWindow {id:"primary_window".into(),label:"5-hour".into(),duration_seconds:Some(18000),remaining_percent:Some(74.),resets_at_ms:Some(1_800_000_120_000)}]});
     app.controller.codex_usage.received=Some(Instant::now());
     app.frame(&ctx,ctx.view());
-    let indicator=app.usage.region;let point=Vec2::new(indicator.x+indicator.width/2.,indicator.y+indicator.height/2.);
+    let indicator=app.root.legacy.usage.region;let point=Vec2::new(indicator.x+indicator.width/2.,indicator.y+indicator.height/2.);
     app.hover(Some(point));std::thread::sleep(Duration::from_millis(255));app.tick(0.);
     std::thread::sleep(Duration::from_millis(180));app.tick(0.);app.frame(&ctx,ctx.view());
-    assert!(app.usage.progress>0.99,"Context hover opens the quota card");
-    assert!(app.usage.content.text.contains("Codex quota · pro · last known\n5-hour · 74% remaining\nResets in 2m"));
-    assert!(app.usage.content.text.contains("Context · ~9% used"),"The context gauge is independent");
+    assert!(app.root.legacy.usage.progress>0.99,"Context hover opens the quota card");
+    assert!(app.root.legacy.usage.content.text.contains("Codex quota · pro · last known\n5-hour · 74% remaining\nResets in 2m"));
+    assert!(app.root.legacy.usage.content.text.contains("Context · ~9% used"),"The context gauge is independent");
     app.apply(Action::Usage).unwrap();app.hover(None);app.tick(0.);app.frame(&ctx,ctx.view());
-    assert!(app.usage.pinned && app.usage.progress>0.99,"Pinned cards retain the quota on desktop and touch");
+    assert!(app.root.legacy.usage.pinned && app.root.legacy.usage.progress>0.99,"Pinned cards retain the quota on desktop and touch");
     app.controller.epoch=Some(1);
     app.controller.codex_usage.in_flight=Some(("pending".into(),Instant::now()));
     app.controller.codex_usage.attempted=Some(Instant::now());
     app.frame(&ctx,ctx.view());
-    let card = app.usage.card;
+    let card = app.root.legacy.usage.card;
     let point = Vec2::new(card.x + card.width / 2., card.y + card.height / 2.);
     let selected = app.controller.account.selected.clone();
     let pending = app.controller.selected().unwrap().local.pending.len();
     app.press(1,point,false);app.release(1,point);
-    assert!(app.usage.pinned, "The read-only card stays pinned");
+    assert!(app.root.legacy.usage.pinned, "The read-only card stays pinned");
     assert_eq!(app.controller.account.selected, selected, "No click-through into the chat");
     assert_eq!(app.controller.selected().unwrap().local.pending.len(), pending);
 }
@@ -191,14 +191,14 @@ fn touch_pins_the_quota_card_on_mobile_without_a_model_request() {
     let mut app=App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(|| {}),true).unwrap();
     app.back();crate::demo::populate(&mut app.controller).unwrap();
     app.controller.account.sessions[0].model.as_mut().unwrap().provider="openai-codex".into();
-    app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);app.show_chats=false;
+    app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);app.root.legacy.show_chats=false;
     app.frame(&ctx,ctx.view());
-    let r=app.usage.region;let point=Vec2::new(r.x+r.width/2.,r.y+r.height/2.);
+    let r=app.root.legacy.usage.region;let point=Vec2::new(r.x+r.width/2.,r.y+r.height/2.);
     app.press(1,point,true);app.release(1,point);
     app.tick(0.);std::thread::sleep(Duration::from_millis(180));app.tick(0.);
     app.frame(&ctx,ctx.view());
-    assert!(app.usage.pinned && app.usage.progress>0.99);
-    assert!(app.usage.content.text.contains("Codex quota\nUnavailable · offline"));
+    assert!(app.root.legacy.usage.pinned && app.root.legacy.usage.progress>0.99);
+    assert!(app.root.legacy.usage.content.text.contains("Codex quota\nUnavailable · offline"));
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn finished_reply_stays_unread_in_background_until_its_chat_is_visible_and_focus
     app.controller.message(ServerMessage::Sessions { sessions: app.controller.account.sessions.clone() }).unwrap();
     assert!(!app.controller.unread(&app.controller.account.sessions[0]));
 
-    app.window_focused = false;
+    app.ui.window_focused = false;
     app.tick(0.);
     let mut sessions = app.controller.account.sessions.clone();
     sessions[0].updated_at_ms += 1;
@@ -231,7 +231,7 @@ fn finished_reply_stays_unread_in_background_until_its_chat_is_visible_and_focus
     app.tick(0.);
     assert!(app.controller.unread(&app.controller.account.sessions[0]), "completion must stay unread while unfocused");
 
-    app.window_focused = true;
+    app.ui.window_focused = true;
     app.tick(0.);
     assert!(!app.controller.unread(&app.controller.account.sessions[0]));
     assert!(app.controller.unread(&app.controller.account.sessions[1]), "other chats stay unread after focusing");
@@ -262,15 +262,15 @@ fn hidden_card_wakes_only_when_the_dot_crosses_a_color_boundary() {
     app.tick(0.);
     app.preview_connection(ConnectionPreview::Received);
     app.frame(&ctx, ctx.view());
-    app.info_tip = Tooltip::default();
+    app.root.legacy.info_tip = Tooltip::default();
     app.controller
         .health
         .sent(Instant::now() - Duration::from_millis(920));
     app.tick(0.);
-    assert_eq!(app.dot_color, 0xfbbf24);
-    assert_eq!(app.counter_bucket, None);
+    assert_eq!(app.root.legacy.dot_color, 0xfbbf24);
+    assert_eq!(app.root.legacy.counter_bucket, None);
     let deadline = Instant::now() + Duration::from_secs(2);
-    while app.dot_color != 0xfb923c {
+    while app.root.legacy.dot_color != 0xfb923c {
         assert!(
             Instant::now() < deadline,
             "hidden color threshold did not wake the UI"
@@ -280,7 +280,7 @@ fn hidden_card_wakes_only_when_the_dot_crosses_a_color_boundary() {
     }
     app.frame(&ctx, ctx.view());
     assert_eq!(
-        app.counter_bucket, None,
+        app.root.legacy.counter_bucket, None,
         "hidden card must not start a 50ms loop"
     );
 }
@@ -295,9 +295,9 @@ fn saved_actions_and_restore_warning_fit_mobile_and_preserve_intents() {
         app.controller.store.put(&app.controller.identity,"account",&app.controller.account).unwrap();
         for action in [Action::Settings,Action::Outbox(0),Action::Outbox(1),Action::InspectControl("saved-00".into()),Action::ReviewRestore("chat".into())] {
             app.apply(action).unwrap();app.tick(0.);app.frame(&ctx,ctx.view());
-            for hit in &app.hits {assert!(hit.rect.y>=0. && hit.rect.y+hit.rect.height<=size.1 as f32,"Unreachable modal action at {:?}",hit.rect);}
+            for hit in &app.root.legacy.hits {assert!(hit.rect.y>=0. && hit.rect.y+hit.rect.height<=size.1 as f32,"Unreachable modal action at {:?}",hit.rect);}
         }
-        let modal=app.modal.as_ref().unwrap();let width=(size.0 as f32-24.).min(620.)-40.;assert!(app.renderer.label_height(&modal.title,width,17.,true)>60.,"Fixture must exercise the complete multi-line warning");
+        let modal=app.root.legacy.modal.as_ref().unwrap();let width=(size.0 as f32-24.).min(620.)-40.;assert!(app.services.renderer.label_height(&modal.title,width,17.,true)>60.,"Fixture must exercise the complete multi-line warning");
         if size.0<500 {image::save_buffer("/tmp/tau2-restore-mobile.png",&ctx.read_rgba8().unwrap(),size.0,size.1,image::ColorType::Rgba8).unwrap();}
         assert_eq!(app.controller.account.pending_controls.len(),12);app.apply(Action::ForgetControl("saved-00".into())).unwrap();assert_eq!(app.controller.account.pending_controls.len(),12);app.apply(Action::Confirm).unwrap();assert_eq!(app.controller.account.pending_controls.len(),11);
     }
