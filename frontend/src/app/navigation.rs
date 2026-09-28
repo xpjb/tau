@@ -28,6 +28,9 @@ impl App {
                 && let Err(error) = self.controller.save_chat(previous) {
                 self.controller.report_error(error);
             }
+            // Cancel the old chat/account's file interest before rebinding the
+            // composer; do not wait for the next UI tick after navigation.
+            self.close_code();
             self.placed.clear();
             self.placed_session = None;
             self.cancel_pointer();
@@ -66,6 +69,9 @@ impl App {
         if !same_chat || !same_topic {
             self.controller.select(id)?;
         }
+        // Explicit chat/download navigation also exits the browser when the
+        // destination is the already-selected chat.
+        self.close_code();
         self.sync_navigation();
         self.show_chats = false;
         self.focus = Some(None);

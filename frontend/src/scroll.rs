@@ -7,6 +7,7 @@ pub enum Lane {
     Transcript,
     Sidebar,
     Attachments,
+    Files,
     Projects,
     Horizontal,
 }

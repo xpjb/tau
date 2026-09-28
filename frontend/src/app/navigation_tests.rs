@@ -207,3 +207,28 @@ fn account_change_with_same_chat_id_discards_old_layout_and_pending_navigation()
     assert!(h.app.controller.store.load_chat("different-account", "demo").unwrap().draft.is_empty(),
         "Reconciliation must not write an old account's layout into the new account");
 }
+
+#[test]
+fn remote_browser_yields_to_chat_and_download_navigation_without_retargeting_drafts() {
+    for (size,mobile) in [((1000,800),false),((360,720),true)] {
+        let mut h=Harness::new(size,1.,mobile);
+        h.app.controller.draft("Keep this code comment draft".into()).unwrap();h.frame();
+        h.app.apply(Action::Files).unwrap();h.frame();assert!(h.app.code.is_some());
+        let browser_generation=h.app.controller.viewer_generation();
+        h.app.apply(Action::Select("two".into())).unwrap();
+        assert!(h.app.code.is_none(),"Chat selection cancels the browser before the next input event");
+        assert!(h.app.controller.viewer_generation()>browser_generation);
+        h.app.input("New chat text");
+        assert_eq!(h.app.controller.chats["demo"].local.draft,"Keep this code comment draft");
+        assert!(h.app.controller.chats["two"].local.draft.contains("New chat text"));
+        assert!(!h.app.controller.chats["two"].local.draft.contains("code comment"));
+        for session in ["two","demo"] {
+            h.app.apply(Action::Select(session.into())).unwrap();h.frame();
+            h.app.apply(Action::Files).unwrap();h.frame();assert!(h.app.code.is_some());
+            h.complete("entry-20");h.click_notice(false);
+            assert!(h.app.code.is_none(),"Same-chat and cross-chat notices must reveal the transcript, not the browser");
+            h.assert_target_visible("entry-20");
+            assert_eq!(h.app.controller.chats["demo"].local.draft,"Keep this code comment draft");
+        }
+    }
+}

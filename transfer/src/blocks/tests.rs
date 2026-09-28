@@ -33,6 +33,14 @@ impl Backend for Memory {
         self.reads.fetch_add(1,Ordering::SeqCst);
         let db = self.db.clone(); async move { tau_blocks::read(&db.lock().unwrap(),&request) }.boxed()
     }
+    fn files(&self, request: tau_protocol::files::FileRequest) -> BoxFuture<'static,Result<tau_protocol::files::FileReply>> {
+        self.reads.fetch_add(1,Ordering::SeqCst);
+        async move {
+            if request.path.as_deref()==Some("/wait") {std::future::pending::<()>().await;}
+            let text="credit-window café 🦀\n".repeat(12_000);
+            Ok(tau_protocol::files::FileReply::Text {path:"/fixture.rs".into(),revision:blake3::hash(text.as_bytes()).to_hex().to_string(),text})
+        }.boxed()
+    }
     fn changes(&self) -> watch::Receiver<u64> { self.notify.subscribe() }
 }
 async fn fixture() -> (Arc<Memory>,Server,Client) {
@@ -308,4 +316,29 @@ async fn background_metadata_cannot_occupy_selected_chat_stream_reservations() {
     let body=tokio::time::timeout(Duration::from_secs(2),client.watch_scheduled(block_request("answer",0,0,false),false)).await.unwrap().unwrap();
     assert_eq!(collect(body).await.0,b"foreground");
     drop(metadata);drop(background);client.shutdown().await;server.shutdown().await;
+}
+
+#[tokio::test]
+async fn filesystem_streams_require_grants_share_connection_and_release_credit_slots_on_cancel() {
+    use tau_protocol::files::*;
+    let (backend,server,client)=fixture().await;
+    let offer=server.authorize(&client.node_id(),backend.lineage()).unwrap();
+    let anonymous=Client::bind().await.unwrap();anonymous.configure(&offer,"127.0.0.1").await.unwrap();
+    let request=FileRequest {session_id:"chat".into(),path:Some("/fixture.rs".into()),operation:FileOperation::Open {revision:None}};
+    assert!(tokio::time::timeout(Duration::from_secs(3),anonymous.files(request.clone())).await.unwrap().is_err());
+    assert_eq!(backend.reads.load(Ordering::SeqCst),0,"No filesystem call before native authorization");
+    anonymous.shutdown().await;
+    let FileReply::Text {text,..}=client.files(request.clone()).await.unwrap() else {panic!()};
+    assert_eq!(text,"credit-window café 🦀\n".repeat(12_000));
+    assert!(client.stats().content_rx_bytes>BLOCK_WINDOW_BYTES as u64);
+    assert_eq!(client.stats().active_streams,0);
+    let mut waiting=request.clone();waiting.path=Some("/wait".into());
+    assert!(tokio::time::timeout(Duration::from_millis(100),client.files(waiting)).await.is_err());
+    assert_eq!(client.stats().active_streams,0);assert_eq!(client.stats().foreground_slots,0);
+    assert!(client.stats().cancelled_streams>0);
+    assert!(matches!(client.files(request.clone()).await.unwrap(),FileReply::Text {..}));
+    assert_eq!(client.stats().connections,1,"Cancelled file reads do not replace the shared connection");
+    let calls=backend.reads.load(Ordering::SeqCst);server.revoke(&client.node_id());
+    assert!(client.files(request).await.is_err());assert_eq!(backend.reads.load(Ordering::SeqCst),calls);
+    client.shutdown().await;server.shutdown().await;
 }

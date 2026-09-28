@@ -1,5 +1,5 @@
 [workspace]
-members = ["daemon", "transfer", "protocol", "blocks", "markdown", "frontend"]
+members = ["daemon", "transfer", "protocol", "blocks", "markdown", "frontend", "code-viewer"]
 exclude = ["windows"]
 resolver = "2"
 

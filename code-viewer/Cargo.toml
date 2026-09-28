@@ -1,0 +1,27 @@
+[package]
+name = "tau-code-viewer"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+filesystem = ["dep:ignore", "dep:tokio", "dep:libc"]
+syntax = ["dep:tree-sitter-highlight", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-json"]
+
+[dependencies]
+tau-protocol = { path = "../protocol" }
+anyhow = "1"
+blake3 = "1.8"
+similar = "2.7"
+ignore = { version = "0.4", optional = true }
+tokio = { version = "1", features = ["rt", "sync", "time"], optional = true }
+libc = { version = "0.2", optional = true }
+tree-sitter-highlight = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

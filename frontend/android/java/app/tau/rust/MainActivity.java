@@ -44,6 +44,7 @@ public final class MainActivity extends NativeActivity {
             nativeInsets(s.left,s.top,s.right,s.bottom);
         } else nativeInsets(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());
     }
+    public void selectionHaptic() { runOnUiThread(() -> getWindow().getDecorView().performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)); }
     public void background() { runOnUiThread(() -> moveTaskToBack(true)); }
     public void edit(String title, String value, boolean secret, boolean singleLine) { runOnUiThread(() -> {
         if (editor != null) return;

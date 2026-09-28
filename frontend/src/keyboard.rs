@@ -4,6 +4,7 @@ use chad::winit::{event::KeyEvent, keyboard::{Key, KeyCode, NamedKey, PhysicalKe
 
 pub fn named(key: &Key) -> Option<&'static str> {
     Some(match key {
+        Key::Named(NamedKey::Space) => "Space",
         Key::Named(NamedKey::Escape) => "Escape",
         Key::Named(NamedKey::Enter) => "Enter",
         Key::Named(NamedKey::Tab) => "Tab",
@@ -30,6 +31,7 @@ pub fn shortcut(event: &KeyEvent) -> Option<&str> {
     };
     logical.filter(|s| matches!(*s, "a" | "A" | "c" | "C" | "v" | "V" | "x" | "X" | "y" | "Y" | "z" | "Z"))
         .or(match event.physical_key {
+            PhysicalKey::Code(KeyCode::Space) => Some("Space"),
             PhysicalKey::Code(KeyCode::KeyA) => Some("a"),
             PhysicalKey::Code(KeyCode::KeyC) => Some("c"),
             PhysicalKey::Code(KeyCode::KeyV) => Some("v"),

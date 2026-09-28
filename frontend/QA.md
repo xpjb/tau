@@ -1,3 +1,28 @@
+# Remote code viewer — integration source only, September 28, 2026
+
+Folder button beside attachments; read-only directory/code views, Ctrl+Space/Find,
+daemon-owned `.gitignore` index, live Sanscale paragraphs, and selected-line
+references in the shared chat composer. Mobile gutter/hold/drag selection dispatches
+Android haptics. Live updates preserve IME/native-editor text and invalidate changed
+selections rather than retargeting comments. Protocol 21; matching daemon/client.
+
+Feature-branch managed workspace all-target check and **257/257 nextest tests** passed
+(`9017d8a4-3311-4c4a-9a4b-07b90897f386`). Windows/Android library checks, Android Java
+compilation and crate rustdoc passed. Actual GPU desktop/phone previews were
+inspected; this is **not** physical-device acceptance or a beta deployment.
+
+**Integration merge:** retained the newer transcript-prefetch and download-navigation
+work. Merged workspace/all-target check, **278/278 nextest tests** (run
+`b7162a06-0904-4c1f-a1c6-96f752da6b56`), Windows x64 and Android ARM64 checks passed.
+New desktop/phone coverage verifies browser cancellation on immediate chat input
+and same-/cross-chat download navigation, preserving each chat's draft. Not deployed;
+a new matched protocol-21 release is required, not the prior protocol-20 packages.
+
+See [scope, ownership, limits and validation](../docs/remote-code-viewer.md) and
+[reproducible previews](qa/code-viewer/README.md). No Clippy or built-in test runner.
+
+---
+
 # Warm transcripts and ongoing-chat prefetch — September 28, 2026 (unreleased)
 
 See [behavior, limits and focused evidence](../docs/transcript-prefetch.md).

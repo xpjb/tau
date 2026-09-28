@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 pub mod settings;
+pub mod files;
 pub mod blocks;
 mod transcript;
 pub use transcript::*;
 
-// Protocol 20 requires checkpoint-yielding native watches (tau/blocks/2).
-pub const PROTOCOL_VERSION: u32 = 20;
+// Protocol 21 adds read-only filesystem streams on the shared native connection.
+pub const PROTOCOL_VERSION: u32 = 21;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;

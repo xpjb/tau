@@ -1,3 +1,30 @@
+# Remote code viewer — integrated source, not deployed
+
+On September 28, 2026, `feat/tau2-remote-code-viewer` (`ec962ba`, implementation
+`823fa3e`) was merged into `tau2-integration`, which publishes to `origin/tau2`.
+The newer transcript-prefetch and download-navigation work is retained. Shared
+navigation closes/cancels the browser before rebinding a different chat/account,
+and same-chat download notices also reveal the transcript without losing drafts.
+
+Protocol **21** requires a matching daemon and client; there is no schema change.
+**Do not deploy this source with the existing 0.7.8 / protocol-20 packages or apply
+the older rollout command below to this HEAD.** A new versioned, matched
+protocol-21 release is needed when explicitly requested. This merge did not build
+release packages, deploy, restart services, or modify stable/master.
+
+Merged-tree validation: managed workspace/all-target check and **278/278 nextest
+tests** passed (`b7162a06-0904-4c1f-a1c6-96f752da6b56`, zero skipped). Windows x64
+MSVC and Android ARM64 library checks passed; Android retains four existing
+platform dead-code warnings. The added desktop/phone regression covers immediate
+chat input and same-/cross-chat download navigation out of the browser.
+
+See `docs/remote-code-viewer.md` for ownership, limits and validation, and
+`frontend/qa/code-viewer/README.md` for reproducible headless previews. Physical-device
+QA remains open. The feature worktree is `/root/tau2-remote-code-viewer`; the
+isolated merge/validation worktree is `/root/tau2-remote-code-viewer-merge`.
+
+---
+
 # Current rollout hold — beta 0.7.8 packages attached, awaiting download confirmation
 
 **Do not restart or deploy the daemon until the user explicitly confirms both
