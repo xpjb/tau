@@ -46,7 +46,7 @@ public final class MainActivity extends NativeActivity {
     }
     public void selectionHaptic() { runOnUiThread(() -> getWindow().getDecorView().performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)); }
     public void background() { runOnUiThread(() -> moveTaskToBack(true)); }
-    public void edit(String title, String value, boolean secret, boolean singleLine) { runOnUiThread(() -> {
+    public void edit(long token, String title, String value, boolean secret, boolean singleLine) { runOnUiThread(() -> {
         if (editor != null) return;
         Dialog dialog = new Dialog(this, android.R.style.Theme_Material_NoActionBar);
         editor = dialog;
@@ -74,7 +74,7 @@ public final class MainActivity extends NativeActivity {
         input.setText(value); input.setSelection(input.length());
         input.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s,int st,int c,int a) {}
-            public void onTextChanged(CharSequence s,int st,int before,int count) { nativeResult(0,s.toString(),""); }
+            public void onTextChanged(CharSequence s,int st,int before,int count) { nativeResult(0,s.toString(),Long.toString(token)); }
             public void afterTextChanged(Editable e) {}
         });
         page.addView(input,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,0,1));
@@ -92,7 +92,7 @@ public final class MainActivity extends NativeActivity {
             });
         } else page.setFitsSystemWindows(true);
         done.setOnClickListener(view -> {
-            nativeResult(0,input.getText().toString(),"");
+            nativeResult(0,input.getText().toString(),Long.toString(token));
             dialog.dismiss();
         });
         dialog.setOnDismissListener(closed -> {
@@ -106,9 +106,9 @@ public final class MainActivity extends NativeActivity {
         input.post(() -> ((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(input,InputMethodManager.SHOW_IMPLICIT));
     }); }
     public void copy(String text) { runOnUiThread(() -> ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Tau",text))); }
-    public void paste() { runOnUiThread(() -> {
+    public void paste(long token) { runOnUiThread(() -> {
         ClipData data = ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).getPrimaryClip();
-        if (data != null && data.getItemCount() > 0) nativeResult(2,data.getItemAt(0).coerceToText(this).toString(),"");
+        if (data != null && data.getItemCount() > 0) nativeResult(2,data.getItemAt(0).coerceToText(this).toString(),Long.toString(token));
     }); }
     public void openUrl(String url) { runOnUiThread(() -> { try { startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(url))); } catch (Exception e) { nativeResult(3,"No application can open this link",""); } }); }
     public void pickFile() { runOnUiThread(() -> {

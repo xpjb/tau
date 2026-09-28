@@ -112,7 +112,6 @@ impl Editor {
         self.follow_caret = true;
         changed
     }
-    #[cfg(target_os = "android")]
     pub fn replace_all(&mut self, value: &str) -> bool {
         self.replace_range(0..self.value.len(), value)
     }

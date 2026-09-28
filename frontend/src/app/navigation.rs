@@ -20,6 +20,7 @@ impl App {
         self.validate_download_jump();
         let selected = self.controller.account.selected.clone();
         if selected != self.root.legacy.navigation.session || self.controller.identity != self.root.legacy.navigation.identity {
+            self.ui.navigation_changed();
             // Also handles server-driven changes. Never save the old layout
             // through a controller that has already switched accounts.
             if self.controller.identity == self.root.legacy.navigation.identity
@@ -104,6 +105,7 @@ impl App {
         // the outgoing draft/anchor. Only the final viewport destination differs.
         self.navigate_chat(&target.session)?;
         self.cancel_pointer();
+        self.close_ui();
         self.root.legacy.modal = None;
         self.root.legacy.viewer = None;
         self.root.legacy.viewer_image = None;

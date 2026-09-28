@@ -23,6 +23,11 @@ impl Harness {
         let p = Vec2::new(r.x+r.width/2.,r.y+r.height/2.);
         self.app.press(1,p,self.app.ui.mobile); self.app.release(1,p); self.frame();
     }
+    fn click_dialog(&mut self, label: &str) {
+        let r = self.app.root.dialog.as_ref().unwrap().button(label).expect("visible retained control");
+        let p = Vec2::new(r.x + r.width / 2., r.y + r.height / 2.);
+        self.app.press(1, p, self.app.ui.mobile); self.app.release(1, p); self.frame();
+    }
     fn dump(&self, file: &str) {
         if let Some(root) = std::env::var_os("TAU_PROJECT_DUMP_DIR") {
             std::fs::create_dir_all(&root).unwrap();
@@ -94,21 +99,21 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
         h.app.key("Escape",false,false);
         h.app.root.legacy.project_scroll=h.app.root.legacy.max_project_scroll; h.frame();
         h.click(|a| matches!(a,Action::NewProject));
-        assert!(matches!(h.app.root.legacy.modal.as_ref().unwrap().kind,ModalKind::NewProject(_)));
+        assert_eq!(h.app.root.dialog.as_ref().unwrap().topic_key().unwrap().0, "new");
         h.app.input("gypqj New work"); // descenders in the compact Name editor
-        h.app.root.legacy.focus=Some(Some(1)); h.app.input("  Exact\ncontext\n"); h.frame();
-        assert_eq!(h.app.root.legacy.modal.as_ref().unwrap().fields[1].1.value,"  Exact\ncontext\n");
+        h.app.ui.focus=Some(h.app.root.dialog.as_ref().unwrap().fields()[1].control.target); h.app.input("  Exact\ncontext\n"); h.frame();
+        assert_eq!(h.app.root.dialog.as_ref().unwrap().fields()[1].editor.value,"  Exact\ncontext\n");
         h.dump(if mobile {"projects-phone-new.png"} else {"projects-desktop-new.png"});
-        h.click(|a| matches!(a,Action::CancelModal));
+        h.click_dialog("Cancel");
         h.app.apply(Action::RenameProject("p1".into())).unwrap(); h.frame();
-        assert_eq!(h.app.root.legacy.hits.iter().find(|h| matches!(h.action,Action::Focus(Some(0)))).unwrap().rect.height, 40., "Rename topic uses the same compact Name field");
+        assert_eq!(h.app.root.dialog.as_ref().unwrap().fields()[0].control.rect.unwrap().height, 40., "Rename topic uses the same compact Name field");
         h.app.apply(Action::CancelModal).unwrap();
         h.app.apply(Action::DeleteProject("p24".into())).unwrap(); h.frame();
-        h.click(|a| matches!(a,Action::Confirm));
-        assert!(matches!(h.app.root.legacy.modal.as_ref().unwrap().kind,ModalKind::DeleteProjectChoice(ref p) if p.id=="p24"));
-        assert_eq!(h.app.root.legacy.modal.as_ref().unwrap().options.len(),3);
+        h.click_dialog("Continue…");
+        assert_eq!(h.app.root.dialog.as_ref().unwrap().topic_key(), Some(("delete-choice", "p24")));
+        assert_eq!(h.app.root.dialog.as_ref().unwrap().buttons().len(),3);
         h.dump(if mobile {"projects-phone-delete.png"} else {"projects-desktop-delete.png"});
-        h.click(|a| matches!(a,Action::CancelModal));
+        h.click_dialog("Cancel");
         assert_eq!(h.app.controller.account.projects.len(),25);
         assert_eq!(h.app.controller.account.sessions.len(),3,"Cancellation changes nothing");
         h.app.root.legacy.project_scroll=0.; h.app.apply(Action::SelectProject("general".into())).unwrap(); h.frame();

@@ -274,11 +274,11 @@ impl Desktop {
                         self.app.report(result);
                     }
                 }
-                PlatformAction::Paste => {
+                PlatformAction::Paste { token } => {
                     if let Some(c) = &mut self.clipboard {
                         if let Ok(text) = c.get_text() {
-                            self.app.input(&text);
-                        } else if let Ok(image) = c.get_image() {
+                            self.app.paste(token, text);
+                        } else if self.app.can_paste_files(token) && let Ok(image) = c.get_image() {
                             let path = self.app.controller.store.root.join("clipboard.png");
                             let result = image::save_buffer(
                                 &path,
@@ -335,12 +335,13 @@ impl Desktop {
                 }
                 PlatformAction::Background | PlatformAction::Haptic => {}
                 PlatformAction::Edit {
+                    token,
                     title,
                     value,
                     secret,
                     single_line,
                 } => {
-                    let _ = (title, value, secret, single_line);
+                    let _ = (token, title, value, secret, single_line);
                 }
             }
         }

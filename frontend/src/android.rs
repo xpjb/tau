@@ -27,9 +27,9 @@ use std::{
 
 enum NativeEvent {
     Back,
-    Edit(String),
+    Edit(u64, String),
     File(PathBuf, String),
-    Paste(String),
+    Paste(u64, String),
     Saved(String, Result<crate::store::SavedDownload,String>),
     Missing(String,String,String,String),
     Error(String),
@@ -48,8 +48,7 @@ fn queue(event: NativeEvent) {
         && let Some(rt) = guard.as_mut()
     {
         // IME full-text updates are snapshots, not deltas; coalesce a busy keyboard.
-        if matches!(event, NativeEvent::Edit(_))
-            && matches!(rt.events.last(), Some(NativeEvent::Edit(_)))
+        if matches!((&event, rt.events.last()), (NativeEvent::Edit(a, _), Some(NativeEvent::Edit(b, _))) if a == b)
         {
             rt.events.pop();
         }
@@ -108,8 +107,8 @@ impl Android {
         for event in events {
             match event {
                 NativeEvent::Back => self.app.back(),
-                NativeEvent::Edit(text) => self.app.native_edit(text),
-                NativeEvent::Paste(text) => self.app.input(&text),
+                NativeEvent::Edit(token, text) => self.app.native_edit(token, text),
+                NativeEvent::Paste(token, text) => self.app.paste(token, text),
                 NativeEvent::File(path, name) => {
                     let result = if let Some((identity, session)) = self.import_scope.take() {
                         self.app
@@ -150,8 +149,8 @@ impl Android {
                             self.import_scope = Some((identity, session));
                             env.call_method(&activity, "pickFile", "()V", &[])?;
                         }
-                        PlatformAction::Paste => {
-                            env.call_method(&activity, "paste", "()V", &[])?;
+                        PlatformAction::Paste { token } => {
+                            env.call_method(&activity, "paste", "(J)V", &[JValue::Long(token as i64)])?;
                         }
                         PlatformAction::Copy(text) => {
                             let text = env.new_string(text)?;
@@ -196,6 +195,7 @@ impl Android {
                                   JValue::Object(&lineage),JValue::Object(&session),JValue::Object(&entry)])?;
                         }
                         PlatformAction::Edit {
+                            token,
                             title,
                             value,
                             secret,
@@ -206,8 +206,9 @@ impl Android {
                             env.call_method(
                                 &activity,
                                 "edit",
-                                "(Ljava/lang/String;Ljava/lang/String;ZZ)V",
+                                "(JLjava/lang/String;Ljava/lang/String;ZZ)V",
                                 &[
+                                    JValue::Long(token as i64),
                                     JValue::Object(&title),
                                     JValue::Object(&value),
                                     JValue::Bool(secret as u8),
@@ -274,10 +275,13 @@ impl chad::android::App for Android {
                     TouchPhase::Cancelled => self.app.cancel_pointer(),
                 }
             }
-            WindowEvent::Focused(false) => {
-                self.app.cancel_pointer();
-                let result = self.app.save();
-                self.app.report(result);
+            WindowEvent::Focused(focused) => {
+                self.app.ui.window_focused = *focused;
+                if !focused {
+                    self.app.cancel_pointer();
+                    let result = self.app.save();
+                    self.app.report(result);
+                } else { self.app.ui.dirty = true; }
             }
             WindowEvent::CloseRequested => self.app.back(),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
@@ -341,9 +345,9 @@ pub extern "system" fn Java_app_tau_rust_MainActivity_nativeResult(
         .map(String::from)
         .unwrap_or_default();
     queue(match kind {
-        0 => NativeEvent::Edit(a),
+        0 => NativeEvent::Edit(b.parse().unwrap_or(0), a),
         1 => NativeEvent::File(a.into(), b),
-        2 => NativeEvent::Paste(a),
+        2 => NativeEvent::Paste(b.parse().unwrap_or(0), a),
         4 => NativeEvent::Saved(a,serde_json::from_str(&b).map_err(|e|e.to_string())),
         5 => NativeEvent::Saved(a,Err(b)),
         6 => match serde_json::from_str::<(String,String,String)>(&b) {

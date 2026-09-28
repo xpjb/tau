@@ -1,5 +1,6 @@
 //! Actual rich-text shaping/GPU previews, plus automatic quota reads against a local socket.
 use super::*;
+use crate::store::Settings;
 use chad::{Config, HeadlessCtx};
 use std::{sync::Arc, time::Duration};
 

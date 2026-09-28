@@ -51,8 +51,8 @@ fn settings_gear_stays_in_sidebar_header_and_opens_settings() {
         app.press(1, point, false);
         app.release(1, point);
         assert!(matches!(
-            app.root.legacy.modal.as_ref().map(|modal| &modal.kind),
-            Some(ModalKind::Settings)
+            app.root.dialog.as_ref(),
+            Some(ui::Dialog::Connection(_))
         ));
     }
 }

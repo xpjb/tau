@@ -7,7 +7,7 @@ use crate::{
     icons::Icon,
     render::{Interaction, Layer, Renderer, color, contains, contains_rounded},
     scroll::{Autoscroll, Drag, Lane, Scrollbar, Wheel},
-    store::{Settings, Store},
+    store::Store,
     tooltip::{Content, Tooltip},
     transport::Wake,
 };
@@ -30,6 +30,8 @@ mod navigation;
 use crate::notice::DownloadTarget;
 mod composer_status;
 mod ui;
+mod ui_owner;
+use ui::Widget;
 mod code_view;
 
 #[derive(Clone)]
@@ -41,7 +43,6 @@ enum Action {
     RenameProject(String),
     ProjectPrompt(String),
     DeleteProject(String),
-    RemoveProject(DeleteProjectMode),
     MoveMenu(String),
     ContextBack,
     MoveChat(String, String),
@@ -60,8 +61,6 @@ enum Action {
     Tail,
     DismissNotice,
     OpenDownloadNotice(DownloadTarget),
-    CopyDiagnostics,
-    ClearReplica,
     CopyRecoveredDraft(String),
     ForgetRecovered(String),
     ReviewRestore(String),
@@ -134,12 +133,6 @@ impl Info {
 
 #[derive(Clone)]
 enum ModalKind {
-    Settings,
-    NewProject(String),
-    RenameProject(Project),
-    ProjectPrompt(Project),
-    DeleteProject(Project),
-    DeleteProjectChoice(Project),
     Models,
     Rename(String),
     Delete(String),
@@ -233,7 +226,7 @@ struct Pointer {
 pub enum PlatformAction {
     Haptic,
     Copy(String),
-    Paste,
+    Paste { token: u64 },
     PickFile {
         identity: String,
         session: String,
@@ -242,6 +235,7 @@ pub enum PlatformAction {
     SaveDownload { key: String, source: PathBuf, name: String },
     UseDownload(crate::store::SavedDownload, SavedAction, DownloadTarget),
     Edit {
+        token: u64,
         title: String,
         value: String,
         secret: bool,
@@ -297,7 +291,6 @@ struct LegacyWorkspace {
     project_velocity: f32,
     revealed_project: String,
     revealed_project_position: Option<usize>,
-    saving_project: Option<String>,
     usage: Tooltip,
     info_tip: Tooltip,
     info_target: Info,
@@ -323,7 +316,6 @@ struct LegacyWorkspace {
     waiting_settings: bool,
     daemon_draft: Option<crate::daemon_settings::Draft>,
     saving_settings: Option<String>,
-    connecting: bool,
     scroll: f32,
     max_scroll: f32,
     list_scroll: f32,
@@ -370,15 +362,9 @@ impl App {
                 renderer: Renderer::new(ctx).map_err(anyhow::Error::msg)?,
                 platform: vec![],
             },
-            ui: ui::UiState {
-                size: ctx.size(),
-                origin: Vec2::new(0., 0.),
-                scale: 1.,
-                mobile,
-                window_focused: true,
-                dirty: true,
-            },
+            ui: ui::UiState::new(ctx.size(), mobile),
             root: ui::RootWidget {
+                dialog: None,
                 legacy: LegacyWorkspace {
                     hits: vec![],
                     composer,
@@ -400,7 +386,7 @@ impl App {
                     project_velocity: 0.,
                     revealed_project: String::new(),
                     revealed_project_position: None,
-                    saving_project: None,
+
                     usage: Tooltip::default(),
                     info_tip: Tooltip::default(),
                     info_target: Info::Connection,
@@ -426,7 +412,7 @@ impl App {
                     waiting_settings: false,
                     daemon_draft: None,
                     saving_settings: None,
-                    connecting: false,
+
                     scroll: 0.,
                     max_scroll: 0.,
                     list_scroll: 0.,
@@ -531,7 +517,8 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn hover(&mut self, point: Option<Vec2>) {
-        let enabled = self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none();
+        if self.ui_event(ui::Event::Hover(point)) { return; }
+        let enabled = (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none();
         if enabled
             && let Some((rect, target)) =
                 point.and_then(|p| self.root.legacy.info_areas.iter().find(|(r, _)| contains(*r, p)))
@@ -566,7 +553,7 @@ impl App {
             p.is_some_and(|p| self.root.legacy.scrollbars.iter().any(|b| contains(b.track, p)))
         };
         self.ui.dirty |= on_bar(self.root.legacy.hover) != on_bar(point);
-        if self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
+        if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
             self.ui.dirty |= self.root.legacy.hover.and_then(|p| self.section_at(p).map(|(key, _)| key))
                 != point.and_then(|p| self.section_at(p).map(|(key, _)| key));
         }
@@ -580,6 +567,9 @@ impl App {
     #[cfg(not(target_os = "android"))]
     pub fn cursor(&self) -> chad::winit::window::CursorIcon {
         use chad::winit::window::CursorIcon;
+        if self.root.dialog.is_some() {
+            return self.ui.hot.map_or(CursorIcon::Default, |(_, text)| if text { CursorIcon::Text } else { CursorIcon::Pointer });
+        }
         if let Some(auto) = &self.root.legacy.autoscroll {
             return if auto.speed(self.ui.scale) < 0. {
                 CursorIcon::NResize
@@ -595,14 +585,14 @@ impl App {
         let Some(point) = self.root.legacy.hover else {
             return CursorIcon::Default;
         };
-        if self.root.legacy.modal.is_none()
+        if (self.root.dialog.is_none() && self.root.legacy.modal.is_none())
             && self.root.legacy.viewer.is_none()
             && self.root.legacy.context_menu.is_none()
             && (self.root.legacy.info_tip.contains_card(point) || self.root.legacy.usage.contains_card(point))
         {
             return CursorIcon::Default;
         }
-        if self.root.legacy.modal.is_none()
+        if (self.root.dialog.is_none() && self.root.legacy.modal.is_none())
             && self.root.legacy.viewer.is_none()
             && self.root.legacy.scrollbars.iter().any(|b| contains(b.track, point))
         {
@@ -615,7 +605,7 @@ impl App {
                 CursorIcon::Pointer
             };
         }
-        if self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none() {
+        if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none() {
             if self.services.renderer.hit_link(point).is_some() {
                 return CursorIcon::Pointer;
             }
@@ -637,7 +627,7 @@ impl App {
     pub fn tick(&mut self, dt: f32) -> bool {
         let visible = self.ui.window_focused && (self.ui.size.0 as f32 / self.ui.scale >= 760. || !self.root.legacy.show_chats)
             && (!self.root.legacy.show_attachments || !self.ui.mobile && self.ui.size.0 as f32 / self.ui.scale >= 1000.)
-            && self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.code.is_none();
+            && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none() && self.root.legacy.code.is_none();
         if let Err(error) = self.controller.viewing(visible) { self.controller.report_error(error); }
         self.ui.dirty |= self.controller.poll();
         if self.root.legacy.download_identity != self.controller.identity {
@@ -648,13 +638,7 @@ impl App {
         if let Some(text)=self.controller.copied.take() && !text.is_empty() {self.services.platform.push(PlatformAction::Copy(text));self.ui.dirty=true;}
         self.ui.dirty |= self.root.legacy.usage.tick();
         self.ui.dirty |= self.root.legacy.info_tip.tick();
-        if self.root.legacy.connecting && self.controller.epoch.is_some() {
-            self.root.legacy.connecting = false;
-            self.root.legacy.modal = None;
-            self.root.legacy.focus = None;
-            self.ui.dirty = true;
-        }
-        self.project_result();
+        self.ui_event(ui::Event::Tick(dt));
         self.sync_navigation();
         self.code_tick(dt);
         // Refresh the selected Codex account periodically, even with its card closed.
@@ -719,7 +703,7 @@ impl App {
                 self.ui.dirty = true;
             }
         }
-        if self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() {
+        if self.root.dialog.is_some() || self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() {
             self.root.legacy.usage.dismiss();
             self.root.legacy.info_tip.dismiss();
             self.root.legacy.autoscroll = None;
@@ -733,17 +717,17 @@ impl App {
             && self.root.legacy.info_target == Info::Connection
             && self.root.legacy.info_tip.progress > 0.
             && self.root.legacy.info_tip.region.width > 0.
-            && self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none();
+            && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none();
         let counter_bucket = card_visible.then(|| self.controller.health.counter(now))
             .flatten().map(|(_, ms)| ms / COUNTER_REFRESH.as_millis());
-        let next_wake = if !self.root.legacy.connection_visible || self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() {
+        let next_wake = if !self.root.legacy.connection_visible || self.root.dialog.is_some() || self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() {
             None
         } else if card_visible && counter_bucket.is_some() {
             Some(COUNTER_REFRESH)
         } else {
             self.controller.health.next_color_wake(now)
         };
-        let indeterminate = self.root.legacy.connection_visible && self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none()
+        let indeterminate = self.root.legacy.connection_visible && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none()
             && (!self.ui.mobile || !self.root.legacy.show_chats || self.root.legacy.show_attachments)
             && (self.controller.downloads.values().any(|d|!d.status.done && d.status.total==0)
                 || !self.root.legacy.saving_downloads.is_empty());
@@ -754,7 +738,7 @@ impl App {
             |duration|duration.min(std::time::Duration::from_millis(80))))} else {next_wake};
         // Quota reset / TTL text stays current when pinned, even while offline.
         // Share the existing timer; closed cards do not acquire a redraw loop.
-        let timed_tooltip = self.root.legacy.connection_visible && self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none()
+        let timed_tooltip = self.root.legacy.connection_visible && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none()
             && self.root.legacy.context_menu.is_none()
             && (self.root.legacy.usage.progress > 0. && self.root.legacy.usage.region.width > 0.
                 || self.root.legacy.info_tip.progress > 0. && self.root.legacy.info_tip.region.width > 0. && matches!(self.root.legacy.info_target, Info::CacheTtl(_)));
@@ -839,12 +823,12 @@ impl App {
             self.ui.dirty = true;
         }
         if let Some(point) = self.root.legacy.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
-            && self.root.legacy.modal.is_none() && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none()
+            && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none()
             && (self.root.legacy.project_areas.iter().any(|(r,_)| contains(*r, point)) || self.root.legacy.chat_areas.iter().any(|(r,_)| contains(*r, point))) {
             self.context_at(point);
         }
         if let Some(point) = self.root.legacy.pointer.as_ref().filter(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() >= 450).map(|p| p.start)
-            && self.root.legacy.modal.is_none() && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none()
+            && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none()
             && let Some((_, info)) = self.root.legacy.info_areas.iter().find(|(r, info)| matches!(info, Info::Attachment(..)) && contains(*r, point)) {
             let info = info.clone();
             self.root.legacy.pointer = None;
@@ -853,7 +837,7 @@ impl App {
             self.activate(Action::Info(info));
         }
         let waiting_hold = self.root.legacy.pointer.as_ref().is_some_and(|p| p.touch && !p.dragged && p.started.elapsed().as_millis() < 450)
-            && self.root.legacy.modal.is_none() && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none();
+            && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.context_menu.is_none() && self.root.legacy.viewer.is_none();
         if let Some(ripple) = &self.root.legacy.ripple {
             let now = Instant::now();
             if ripple.finished(now) {
@@ -903,6 +887,7 @@ impl App {
         }
     }
     pub fn back(&mut self) {
+        if self.ui_event(ui::Event::Back) { return; }
         if self.root.legacy.info_tip.pinned
             || self.root.legacy.info_tip.progress > 0.
             || self.root.legacy.usage.pinned
@@ -967,6 +952,7 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn middle(&mut self, pressed: bool, point: Vec2) {
+        if self.root.dialog.is_some() { return; }
         if pressed {
             if self.cancel_autoscroll() {
                 return;
@@ -999,6 +985,7 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn wheel(&mut self, amount: f32, horizontal: bool, point: Vec2) {
+        if self.ui_event(ui::Event::Wheel { amount, horizontal, point }) { return; }
         if self.root.legacy.context_menu.is_some() && contains(self.root.legacy.context_rect, point) {
             self.scroll_menu(amount);
             return;
@@ -1022,10 +1009,10 @@ impl App {
             self.ui.dirty = true;
             return;
         }
-        if self.root.legacy.modal.is_none() && self.code_wheel(amount, horizontal, point) { return; }
+        if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.code_wheel(amount, horizontal, point) { return; }
         if let Some(v) = &mut self.root.legacy.viewer {
             v.zoom = (v.zoom * (-amount * 0.002).exp()).clamp(1., 16.);
-        } else if self.root.legacy.modal.is_none() {
+        } else if self.root.dialog.is_none() && self.root.legacy.modal.is_none() {
             let lane = if contains(self.root.legacy.attachments_rect, point) {
                 Lane::Attachments
             } else if contains(self.root.legacy.projects_rect, point) {
@@ -1075,7 +1062,7 @@ impl App {
         }
     }
     fn history_near_edge(&mut self, session: &str, near: bool) {
-        if self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() || !near {
+        if self.root.dialog.is_some() || self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() || !near {
             return;
         }
         let feed = &self.controller.chats[session].feed;
@@ -1093,6 +1080,7 @@ impl App {
         }
     }
     pub fn press(&mut self, id: u64, point: Vec2, touch: bool) {
+        if self.ui_event(ui::Event::Down { pointer: id, point, touch }) { return; }
         if let Some(hit) = self.root.legacy.hits.iter().rev().find(|hit| contains(hit.rect, point))
             && matches!(hit.action, Action::DismissNotice | Action::OpenDownloadNotice(_)) {
             let action = hit.action.clone();
@@ -1105,7 +1093,7 @@ impl App {
             self.ui.dirty = true;
             return;
         }
-        if self.root.legacy.modal.is_none()
+        if (self.root.dialog.is_none() && self.root.legacy.modal.is_none())
             && self.root.legacy.viewer.is_none()
             && self.root.legacy.context_menu.is_none()
             && (self.root.legacy.info_tip.contains_card(point) || self.root.legacy.usage.contains_card(point))
@@ -1135,7 +1123,7 @@ impl App {
         }
         self.root.legacy.selecting = false;
         self.root.legacy.field_selection = None;
-        if self.root.legacy.modal.is_none()
+        if (self.root.dialog.is_none() && self.root.legacy.modal.is_none())
             && self.root.legacy.viewer.is_none()
             && self.root.legacy.context_menu.is_none()
             && let Some(bar) = self
@@ -1184,7 +1172,7 @@ impl App {
                     self.root.legacy.field_selection = Some(rect);
                     self.field_hit(point, false);
                 }
-            } else if self.root.legacy.modal.is_none()
+            } else if (self.root.dialog.is_none() && self.root.legacy.modal.is_none())
                 && self.root.legacy.context_menu.is_none()
                 && contains(self.root.legacy.transcript, point)
                 && let Some(caret) = self.services.renderer.nearest_text(point)
@@ -1203,12 +1191,13 @@ impl App {
             dragged: false,
             touch,
         });
-        self.root.legacy.ripple = if self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
+        self.root.legacy.ripple = if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
             self.section_at(point).map(|(key, rect)| Ripple::new(key.to_owned(), rect, point))
         } else { None };
         self.ui.dirty = true;
     }
     pub fn motion(&mut self, id: u64, point: Vec2) {
+        if self.ui_event(ui::Event::Move { pointer: id, point }) { return; }
         if self.code_motion(id, point) { return; }
         let Some(p) = &mut self.root.legacy.pointer else {
             return;
@@ -1281,7 +1270,7 @@ impl App {
             if let Some(v) = &mut self.root.legacy.viewer {
                 v.pan.x += dx;
                 v.pan.y += dy;
-            } else if self.root.legacy.modal.is_none() {
+            } else if self.root.dialog.is_none() && self.root.legacy.modal.is_none() {
                 if contains(self.root.legacy.projects_rect, p.start) {
                     self.root.legacy.project_scroll = (self.root.legacy.project_scroll - dx).clamp(0., self.root.legacy.max_project_scroll);
                     if p.touch { self.root.legacy.project_velocity = (-dx / p.at.elapsed().as_secs_f32().max(0.008)).clamp(-3000. * self.ui.scale, 3000. * self.ui.scale); }
@@ -1316,6 +1305,7 @@ impl App {
         self.ui.dirty = true;
     }
     pub fn release(&mut self, id: u64, point: Vec2) {
+        if self.ui_event(ui::Event::Up { pointer: id, point }) { return; }
         if self.code_release(id, point) { return; }
         if self.root.legacy.pinch.take().is_some() {
             self.root.legacy.pointer = None;
@@ -1391,6 +1381,8 @@ impl App {
         self.report(result);
     }
     pub fn cancel_pointer(&mut self) {
+        self.with_ui(|root, cx| root.handle_event(&ui::Event::Cancel, cx));
+        self.ui.cancel();
         if let Some(code)=&mut self.root.legacy.code { code.drag_anchor=None; }
         self.root.legacy.context_menu = None;
         self.root.legacy.usage.dismiss();
@@ -1411,9 +1403,12 @@ impl App {
         self.root.legacy.field_selection = None;
     }
     fn editor_and_renderer(&mut self) -> Option<(&mut Editor, &mut Renderer)> {
+        if self.root.dialog.is_some() {
+            return self.root.editor(self.ui.focus).map(|field| (&mut field.editor, &mut self.services.renderer));
+        }
         let editor = match self.root.legacy.focus? {
             None => &mut self.root.legacy.composer,
-            Some(code_view::SEARCH_FIELD) if self.root.legacy.modal.is_none() => self.root.legacy.code.as_mut()?.search.as_mut()?,
+            Some(code_view::SEARCH_FIELD) if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) => self.root.legacy.code.as_mut()?.search.as_mut()?,
             Some(i) => &mut self.root.legacy.modal.as_mut()?.fields.get_mut(i)?.1,
         };
         Some((editor, &mut self.services.renderer))
@@ -1432,9 +1427,10 @@ impl App {
         }
     }
     pub fn ime_rect(&self) -> Option<Rect> {
+        if self.root.dialog.is_some() { return self.root.editor_ref(self.ui.focus)?.editor.ime_rect(&self.services.renderer.text); }
         let editor = match self.root.legacy.focus? {
             None => &self.root.legacy.composer,
-            Some(code_view::SEARCH_FIELD) if self.root.legacy.modal.is_none() => self.root.legacy.code.as_ref()?.search.as_ref()?,
+            Some(code_view::SEARCH_FIELD) if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) => self.root.legacy.code.as_ref()?.search.as_ref()?,
             Some(i) => &self.root.legacy.modal.as_ref()?.fields.get(i)?.1,
         };
         editor.ime_rect(&self.services.renderer.text)
@@ -1446,39 +1442,64 @@ impl App {
         }
     }
     pub fn composing(&self) -> bool {
+        if self.root.dialog.is_some() { return self.root.editor_ref(self.ui.focus).is_some_and(|f| f.editor.composing()); }
         match self.root.legacy.focus {
             Some(None) => self.root.legacy.composer.composing(),
-            Some(Some(code_view::SEARCH_FIELD)) if self.root.legacy.modal.is_none() => self.root.legacy.code.as_ref().and_then(|c|c.search.as_ref()).is_some_and(|e|e.composing()),
+            Some(Some(code_view::SEARCH_FIELD)) if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) => self.root.legacy.code.as_ref().and_then(|c|c.search.as_ref()).is_some_and(|e|e.composing()),
             Some(Some(i)) => self.root.legacy.modal.as_ref().and_then(|m| m.fields.get(i)).is_some_and(|(_, e, _)| e.composing()),
             None => false,
         }
     }
     fn editor(&mut self) -> Option<&mut Editor> {
+        if self.root.dialog.is_some() { return self.root.editor(self.ui.focus).map(|field| &mut field.editor); }
         match self.root.legacy.focus? {
             None => Some(&mut self.root.legacy.composer),
-            Some(code_view::SEARCH_FIELD) if self.root.legacy.modal.is_none() => self.root.legacy.code.as_mut()?.search.as_mut(),
+            Some(code_view::SEARCH_FIELD) if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) => self.root.legacy.code.as_mut()?.search.as_mut(),
             Some(i) => self.root.legacy.modal.as_mut()?.fields.get_mut(i).map(|(_, e, _)| e),
         }
     }
     pub fn input(&mut self, value: &str) {
-        if self.root.legacy.focus.is_none() && self.root.legacy.modal.is_none() && self.root.legacy.code.is_some() && self.code_key(value, false, false) { return; }
+        if self.ui_event(ui::Event::Text(value)) { return; }
+        if self.root.legacy.focus.is_none() && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.code.is_some() && self.code_key(value, false, false) { return; }
         if self.editor().is_some_and(|e| e.replace(value)) { self.edited(); }
         self.ui.dirty = true;
     }
-    #[cfg(target_os = "android")]
-    pub fn native_edit(&mut self, value: String) {
-        let value=self.code_native_value(value);
-        if self.editor().is_some_and(|e| e.replace_all(&value)) { self.edited(); }
-        self.ui.dirty = true;
+    #[cfg(any(target_os = "android", test))]
+    pub fn native_edit(&mut self, token: u64, value: String) { self.complete_input(token, value, true); }
+    #[cfg(not(target_os = "android"))]
+    pub fn can_paste_files(&mut self, token: u64) -> bool {
+        let allowed = self.ui.paste.as_ref().is_some_and(|edit| edit.matches(token, &self.controller)
+            && matches!(edit.target, ui::EditorTarget::Legacy(None)) && self.root.dialog.is_none());
+        if allowed { self.ui.paste = None; }
+        allowed
+    }
+    pub fn paste(&mut self, token: u64, value: String) { self.complete_input(token, value, false); }
+    fn complete_input(&mut self, token: u64, value: String, replace: bool) {
+        let pending = if replace { &self.ui.native } else { &self.ui.paste };
+        let Some(edit) = pending.as_ref().filter(|edit| edit.matches(token, &self.controller)) else { return; };
+        let target = edit.target;
+        if !replace { self.ui.paste = None; }
+        match target {
+            ui::EditorTarget::Widget(target) => { self.ui_event(ui::Event::Native { target, text: &value, replace }); }
+            ui::EditorTarget::Legacy(field) if self.root.dialog.is_none() && self.root.legacy.focus == Some(field) => {
+                let value = if replace { self.code_native_value(value) } else { value };
+                if let Some(editor) = self.editor() {
+                    let changed = if replace { editor.replace_all(&value) } else { editor.replace(&value) };
+                    if changed { self.edited(); }
+                }
+                self.ui.dirty = true;
+            }
+            _ => {}
+        }
     }
     fn edited(&mut self) {
         if matches!(
             self.root.legacy.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Settings | ModalKind::Models | ModalKind::Daemon)
+            Some(ModalKind::Models | ModalKind::Daemon)
         ) {
             self.controller.notice = None;
         }
-        if self.root.legacy.focus == Some(Some(code_view::SEARCH_FIELD)) && self.root.legacy.modal.is_none() { self.code_query(); }
+        if self.root.legacy.focus == Some(Some(code_view::SEARCH_FIELD)) && (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) { self.code_query(); }
         if self.root.legacy.focus == Some(None) {
             let result = self.controller.draft(self.root.legacy.composer.value.clone());
             self.report(result);
@@ -1487,12 +1508,14 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        if self.ui_event(ui::Event::Preedit(&text, cursor)) { return; }
         if let Some(e) = self.editor() {
             e.preedit(text, cursor);
         }
         self.ui.dirty = true;
     }
     pub fn key(&mut self, key: &str, ctrl: bool, shift: bool) {
+        if self.ui_event(ui::Event::Key { key, ctrl, shift }) { return; }
         // Composition belongs to the IME. Enter must not send the draft, and
         // Escape must not abort the agent, while candidate text is active.
         if self.composing() {
@@ -1536,7 +1559,7 @@ impl App {
             self.ui.dirty = true;
             return;
         }
-        if self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none() && self.code_key(key, ctrl, shift) { return; }
+        if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none() && self.code_key(key, ctrl, shift) { return; }
         self.root.legacy.expansion_pin = None;
         self.root.legacy.wheel = None;
         if let Some(modal) = &self.root.legacy.modal {
@@ -1553,13 +1576,13 @@ impl App {
                 self.ui.dirty = true;
                 return;
             }
-            if key == "Enter" && matches!(modal.kind, ModalKind::Settings | ModalKind::Rename(_)) {
+            if key == "Enter" && matches!(modal.kind, ModalKind::Rename(_)) {
                 self.activate(Action::Confirm);
                 return;
             }
         }
         if key == "Escape" {
-            if self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.show_attachments {
+            if self.root.dialog.is_some() || self.root.legacy.modal.is_some() || self.root.legacy.viewer.is_some() || self.root.legacy.show_attachments {
                 self.back();
             } else {
                 self.activate(Action::Abort);
@@ -1567,7 +1590,8 @@ impl App {
             return;
         }
         if ctrl && key.eq_ignore_ascii_case("v") {
-            self.services.platform.push(PlatformAction::Paste);
+            let field = self.root.legacy.focus.unwrap_or(None);
+            self.with_ui(|_, cx| cx.paste(ui::EditorTarget::Legacy(field)));
             return;
         }
         if ctrl && (key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("x")) {
@@ -1601,6 +1625,14 @@ impl App {
         self.report(result);
     }
     fn apply(&mut self, action: Action) -> Result<()> {
+        if self.root.dialog.is_some() {
+            match action {
+                Action::Confirm => { self.ui_event(ui::Event::Submit); return Ok(()); }
+                Action::CancelModal => { self.ui_event(ui::Event::Back); return Ok(()); }
+                _ => {}
+            }
+        }
+        self.ui.native = None; self.ui.paste = None;
         self.cancel_preedit();
         if let Action::MoveMenu(ref id) = action { self.move_menu(id); return Ok(()); }
         if matches!(action, Action::ContextBack) {
@@ -1615,7 +1647,10 @@ impl App {
         let selected = self.controller.account.selected.clone();
         match action {
             Action::SelectProject(id) => self.navigate_project(&id)?,
-            Action::NewProject | Action::RenameProject(_) | Action::ProjectPrompt(_) | Action::DeleteProject(_) | Action::RemoveProject(_) => self.project_action(action)?,
+            Action::NewProject => self.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::New))?,
+            Action::RenameProject(id) => self.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Rename(id)))?,
+            Action::ProjectPrompt(id) => self.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Prompt(id)))?,
+            Action::DeleteProject(id) => self.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Delete(id)))?,
             Action::MoveChat(session_id, project_id) => {
                 self.controller.request(ClientCommand::MoveSession { session_id, project_id })?;
             }
@@ -1721,7 +1756,6 @@ impl App {
             Action::ReviewRestore(id)=>{
                 self.root.legacy.modal=Some(Modal {kind:ModalKind::ReviewRestore(id),title:"Restored history may omit external effects or paid work. Inspect those outcomes first. This acknowledgment only permits future explicit execution; it does not resume or resend anything.".into(),fields:vec![],options:vec![("Allow future explicit execution".into(),Action::Confirm),("Keep execution blocked".into(),Action::CancelModal)]});self.root.legacy.focus=None;
             }
-            Action::ClearReplica=>{self.controller.clear_replica()?;self.root.legacy.modal=None;self.controller.notice=Some("Replica cache cleared. Drafts, attachments and saved intents were preserved.".into());}
             Action::Outbox(page) => {
                 let mut options=self.controller.account.pending_controls.iter().skip(page*5).take(5).map(|(id,saved)| {
                     let kind=serde_json::to_value(&saved.request.command).ok().and_then(|v|v["type"].as_str().map(str::to_owned)).unwrap_or_default();
@@ -1744,40 +1778,12 @@ impl App {
             Action::ForgetControl(id) => {
                 self.root.legacy.modal=Some(Modal {kind:ModalKind::ForgetControl(id),title:"Forget this saved intent? This does NOT undo or cancel a daemon action.".into(),fields:vec![],options:vec![("Forget locally".into(),Action::Confirm),("Keep".into(),Action::Outbox(0))]});self.root.legacy.focus=None;
             }
-            Action::Settings => {
-                self.controller.notice = None;
-                self.root.legacy.connecting = false;
-                self.root.legacy.modal = Some(Modal {
-                    kind: ModalKind::Settings,
-                    title: "Connection settings".into(),
-                    fields: vec![
-                        (
-                            "Server URL".into(),
-                            Editor::line(self.controller.settings.server_url.clone()),
-                            false,
-                        ),
-                        (
-                            "Access token".into(),
-                            Editor::line(self.controller.settings.token.clone()),
-                            true,
-                        ),
-                    ],
-                    options: vec![
-                        ("Connect".into(), Action::Confirm),
-                        ("Daemon settings".into(), Action::DaemonSettings),
-                        (format!("Saved actions ({})",self.controller.account.pending_controls.len()),Action::Outbox(0)),
-                        ("Copy connection diagnostics".into(),Action::CopyDiagnostics),
-                        ("Clear replica cache (keep local work)".into(),Action::ClearReplica),
-                        ("Cancel".into(), Action::CancelModal),
-                    ],
-                });
-                self.root.legacy.focus = Some(Some(0));
-            }
+            Action::Settings => self.open_ui(ui::DialogSpec::Connection)?,
             Action::Focus(field) => {
                 self.root.legacy.focus = Some(field);
                 if self.ui.mobile {
                     let (title, value, secret, single_line) = match field {
-                        Some(code_view::SEARCH_FIELD) if self.root.legacy.modal.is_none() => ("Find remote path".into(), self.root.legacy.code.as_ref().unwrap().search.as_ref().unwrap().value.clone(), false, true),
+                        Some(code_view::SEARCH_FIELD) if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) => ("Find remote path".into(), self.root.legacy.code.as_ref().unwrap().search.as_ref().unwrap().value.clone(), false, true),
                         Some(i) => {
                             let (label, e, secret) = &self.root.legacy.modal.as_ref().unwrap().fields[i];
                             (label.clone(), e.value.clone(), *secret, e.single_line)
@@ -1789,12 +1795,7 @@ impl App {
                             false,
                         ),
                     };
-                    self.services.platform.push(PlatformAction::Edit {
-                        title,
-                        value,
-                        secret,
-                        single_line,
-                    });
+                    self.with_ui(|_, cx| cx.native_edit(ui::EditorTarget::Legacy(field), title, value, secret, single_line));
                 }
             }
             Action::Confirm => {
@@ -1807,22 +1808,6 @@ impl App {
                     .map(|(_, e, _)| e.value.clone())
                     .collect::<Vec<_>>();
                 match modal.kind.clone() {
-                    ModalKind::NewProject(_) | ModalKind::RenameProject(_) | ModalKind::ProjectPrompt(_) | ModalKind::DeleteProject(_) | ModalKind::DeleteProjectChoice(_) => {
-                        self.confirm_project()?;
-                        return Ok(());
-                    }
-                    ModalKind::Settings => {
-                        if self.root.legacy.connecting && self.controller.connection == "Connecting…" {
-                            return Ok(());
-                        }
-                        self.controller.configure(Settings {
-                            server_url: values[0].clone(),
-                            token: values[1].clone(),
-                        })?;
-                        self.root.legacy.connecting = true;
-                        // Stay on the form until the authenticated protocol hello succeeds.
-                        return Ok(());
-                    }
                     ModalKind::Models => {
                         self.controller.save_model_preferences(
                             crate::models::Preferences::parse(&values[0])?,
@@ -1891,8 +1876,6 @@ impl App {
                 self.root.legacy.focus = None;
             }
             Action::CancelModal => {
-                self.root.legacy.connecting = false;
-                self.root.legacy.saving_project = None;
                 self.root.legacy.waiting_settings = false;
                 self.root.legacy.daemon_draft = None;
                 self.root.legacy.saving_settings = None;
@@ -2066,7 +2049,6 @@ impl App {
                 self.controller.notice = None;
                 self.open_download_notice(target)?;
             }
-            Action::CopyDiagnostics => {self.services.platform.push(PlatformAction::Copy(self.controller.diagnostics()));}
             Action::Copy(text) => {self.controller.cancel_copy();self.services.platform.push(PlatformAction::Copy(text));}
             Action::CopyDetails(session, ids) => self.controller.copy_details(&session,ids)?,
             Action::CopySelection => {
@@ -2216,6 +2198,7 @@ impl App {
                 self.controller.draft(text)?;
             }
         }
+        if self.root.legacy.modal.is_some() { self.close_ui(); }
         self.sync_navigation();
         Ok(())
     }
@@ -2237,7 +2220,7 @@ impl App {
             held: self.root.legacy.pointer.is_some(),
         };
         let background_input =
-            if self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
+            if (self.root.dialog.is_none() && self.root.legacy.modal.is_none()) && self.root.legacy.viewer.is_none() && self.root.legacy.context_menu.is_none() {
                 input
             } else {
                 Interaction::default()
@@ -2486,32 +2469,17 @@ impl App {
                 );
             }
         }
-        if matches!(
-            self.root.legacy.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Settings)
-        ) {
-            self.settings_frame(&mut overlay, bounds);
-        } else if matches!(
-            self.root.legacy.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Models)
-        ) {
+        if matches!(self.root.legacy.modal.as_ref().map(|m| &m.kind), Some(ModalKind::Models)) {
             self.model_settings_frame(&mut overlay, bounds);
-        } else if matches!(
-            self.root.legacy.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Daemon)
-        ) {
+        } else if matches!(self.root.legacy.modal.as_ref().map(|m| &m.kind), Some(ModalKind::Daemon)) {
             self.daemon_settings_frame(&mut overlay, bounds);
-        } else if self.root.legacy.modal.as_ref().is_some_and(|m| projects::is_project_modal(&m.kind)) {
-            self.project_modal_frame(&mut overlay, bounds);
         } else if self.root.legacy.modal.is_some() {
             self.modal_frame(&mut overlay, bounds);
         }
-        if !matches!(
-            self.root.legacy.modal.as_ref().map(|m| &m.kind),
-            Some(ModalKind::Settings | ModalKind::Models | ModalKind::Daemon)
-        ) && !self.root.legacy.modal.as_ref().is_some_and(|m| projects::is_project_modal(&m.kind)) {
+        if self.root.dialog.is_none() && !matches!(self.root.legacy.modal.as_ref().map(|m| &m.kind), Some(ModalKind::Models | ModalKind::Daemon)) {
             self.notice_frame(ctx, &mut overlay, bounds);
         }
+        self.with_ui(|root, cx| root.visit_perframe(&mut ui::Frame { layer: &mut overlay, bounds, clip: bounds }, cx));
         if self.root.legacy.selecting
             && let Some(p) = &self.root.legacy.pointer
             && p.dragged
@@ -2521,6 +2489,10 @@ impl App {
         }
         self.services.renderer
             .draw(ctx, view, &[main, body, chrome, overlay]);
+        // Geometry is now presented. Re-probe it through the same route and
+        // finalize any visit-originated structural requests outside traversal.
+        if self.root.dialog.is_some() { self.ui_event(ui::Event::Hover(self.ui.hover)); }
+        else if let Err(error) = self.finish_ui_requests() { self.report(Err(error)); }
     }
     fn sidebar(&mut self, ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
         let s = self.ui.scale;
@@ -3813,6 +3785,7 @@ impl App {
         self.root.legacy.hits.push(Hit { rect: close, action: Action::DismissNotice });
     }
     pub fn context_at(&mut self, point: Vec2) {
+        if self.root.dialog.is_some() { return; }
         if self.root.legacy.hits.iter().rev().find(|hit| contains(hit.rect, point))
                 .is_some_and(|hit| matches!(hit.action, Action::DismissNotice | Action::OpenDownloadNotice(_)))
             || self.root.legacy.modal.is_some()
@@ -4017,215 +3990,6 @@ impl App {
             if bounds.width / self.ui.scale < 760. { bounds.width / self.ui.scale - 16. } else { 300. }
         } else if matches!(self.root.legacy.info_target, Info::Attachment(..)) { 300. } else { 180. };
         self.root.legacy.info_tip.frame(&mut self.services.renderer, layer, "info", bounds, self.ui.scale, width, false);
-    }
-    fn settings_frame(&mut self, layer: &mut Layer, b: Rect) {
-        let s = self.ui.scale;
-        self.root.legacy.hits.clear();
-        layer.rect(b, color(0x0e141b));
-        let modal = self.root.legacy.modal.as_mut().unwrap();
-        let connected = self.controller.epoch.is_some()
-            && modal.fields[0].1.value.trim().trim_end_matches('/')
-                == self.controller.settings.server_url
-            && modal.fields[1].1.value.trim() == self.controller.settings.token;
-        let configured = !self.controller.settings.token.is_empty();
-        let connection_error = (!matches!(
-            self.controller.connection.as_str(),
-            "Connected" | "Connecting…" | "Not connected"
-        ))
-        .then_some(self.controller.connection.as_str());
-        let error = self.controller.notice.as_deref().or(connection_error);
-        let width = (b.width - 48. * s).min(520. * s).max(240. * s);
-        let inner_w = width - 48. * s;
-        let height =
-            (416. + if configured { 92. } else { 0. } + if error.is_some() { 84. } else { 0. }) * s;
-        let card = Rect::new(
-            b.x + (b.width - width) / 2.,
-            b.y + ((b.height - height) / 2.).max(12. * s),
-            width,
-            height,
-        );
-        layer.rounded_rect(card, 12. * s, color(0x36343b));
-        let x = card.x + 24. * s;
-        self.services.renderer.label(
-            layer,
-            "Tau",
-            Rect::new(x, card.y + 24. * s, inner_w, 44. * s),
-            32. * s,
-            color(0xe5eaf0),
-            true,
-        );
-        self.services.renderer.label(
-            layer,
-            concat!("Version ", env!("CARGO_PKG_VERSION"), " · Beta"),
-            Rect::new(x, card.y + 66. * s, inner_w, 20. * s),
-            12. * s,
-            color(0xb7c2ce),
-            false,
-        );
-        self.services.renderer.label(
-            layer,
-            "Connect directly to the Tau daemon over your Tailnet.",
-            Rect::new(x, card.y + 102. * s, inner_w, 42. * s),
-            16. * s,
-            color(0xe5eaf0),
-            false,
-        );
-        let field_y = card.y + 146. * s;
-        for (i, (name, editor, secret)) in modal.fields.iter_mut().enumerate() {
-            let rect = Rect::new(x, field_y + i as f32 * 80. * s, inner_w, 56. * s);
-            editor.draw(
-                &mut self.services.renderer,
-                layer,
-                rect,
-                16. * s,
-                self.root.legacy.focus == Some(Some(i)),
-                *secret,
-                if i == 0 {
-                    "http://vibe:8787"
-                } else {
-                    "Access token"
-                },
-                true,
-            );
-            let label = if i == 0 { "Daemon URL" } else { name };
-            let style = sanscale::Style {
-                chain: self.services.renderer.faces.prose[0],
-                wrap_em: None,
-                align: sanscale::Align::Left,
-                line_spacing: 1.,
-            };
-            let label_w = self
-                .services.renderer
-                .text
-                .shape_transient(label, &style)
-                .map_or(100. * s, |b| {
-                    self.services.renderer.text.measure(b).width_em() * 12. * s + 12. * s
-                });
-            layer.rect(
-                Rect::new(x + 12. * s, rect.y - 7. * s, label_w, 16. * s),
-                color(0x36343b),
-            );
-            self.services.renderer.label(
-                layer,
-                label,
-                Rect::new(x + 16. * s, rect.y - 8. * s, label_w, 18. * s),
-                12. * s,
-                color(0xb7c2ce),
-                false,
-            );
-            self.root.legacy.hits.push(Hit {
-                rect,
-                action: Action::Focus(Some(i)),
-            });
-        }
-        let buttons_y = field_y + 158. * s;
-        if !self.root.legacy.connecting || self.controller.connection != "Connecting…" {
-            button(
-                &mut self.services.renderer,
-                layer,
-                &mut self.root.legacy.hits,
-                Rect::new(x + inner_w - 104. * s, buttons_y, 104. * s, 40. * s),
-                "Connect",
-                Action::Confirm,
-                s,
-                true,
-            );
-        } else {
-            self.services.renderer.label(
-                layer,
-                "Connecting…",
-                Rect::new(
-                    x + inner_w - 132. * s,
-                    buttons_y + 10. * s,
-                    132. * s,
-                    28. * s,
-                ),
-                14. * s,
-                color(0x67d4ff),
-                false,
-            );
-        }
-        button(
-            &mut self.services.renderer,
-            layer,
-            &mut self.root.legacy.hits,
-            Rect::new(x + inner_w - 204. * s, buttons_y, 88. * s, 40. * s),
-            "Cancel",
-            Action::CancelModal,
-            s,
-            false,
-        );
-        let mut y = buttons_y + 60. * s;
-        button(
-            &mut self.services.renderer,
-            layer,
-            &mut self.root.legacy.hits,
-            Rect::new(x, y, inner_w, 32. * s),
-            "Quick model selection",
-            Action::ModelSettings,
-            s,
-            false,
-        );
-        y += 44. * s;
-        if configured {
-            layer.rect(Rect::new(x, y, inner_w, s), color(0x526170));
-            y += 12. * s;
-            self.services.renderer.label(
-                layer,
-                "Daemon settings",
-                Rect::new(x, y, inner_w, 26. * s),
-                16. * s,
-                color(0xe5eaf0),
-                true,
-            );
-            y += 28. * s;
-            if connected && !self.root.legacy.waiting_settings {
-                button(
-                    &mut self.services.renderer,
-                    layer,
-                    &mut self.root.legacy.hits,
-                    Rect::new(x, y, (inner_w - 8. * s) / 2., 32. * s),
-                    "Open settings",
-                    Action::DaemonSettings,
-                    s,
-                    false,
-                );
-                button(
-                    &mut self.services.renderer,
-                    layer,
-                    &mut self.root.legacy.hits,
-                    Rect::new(x + (inner_w + 8. * s) / 2., y, (inner_w - 8. * s) / 2., 32. * s),
-                    "Refresh models",
-                    Action::RefreshCatalog,
-                    s,
-                    false,
-                );
-            } else {
-                self.services.renderer.label(
-                    layer,
-                    if self.root.legacy.waiting_settings {
-                        "Loading settings…"
-                    } else {
-                        "Connect to edit daemon, agent and prompt settings."
-                    },
-                    Rect::new(x, y, inner_w, 36. * s),
-                    14. * s,
-                    color(0xb7c2ce),
-                    false,
-                );
-            }
-            y += 42. * s;
-        }
-        if let Some(error) = error {
-            self.services.renderer.label(
-                layer,
-                error,
-                Rect::new(x, y, inner_w, 72. * s),
-                14. * s,
-                color(0xffb4ab),
-                false,
-            );
-        }
     }
     fn model_settings_frame(&mut self, layer: &mut Layer, b: Rect) {
         let s = self.ui.scale;
@@ -4728,37 +4492,9 @@ fn button(
     s: f32,
     primary: bool,
 ) {
-    if rect.width <= 0. || rect.height <= 0. {
-        return;
-    }
-    let destructive = matches!(action, Action::RemoveProject(DeleteProjectMode::DeleteChats));
-    layer.rounded_rect(
-        rect,
-        rect.height * 0.5,
-        layer.control_color(rect, color(if destructive { 0x402b30 } else if primary { 0x67d4ff } else { 0x18212b })),
-    );
-    let style = sanscale::Style {
-        chain: renderer.faces.prose[0],
-        wrap_em: None,
-        align: sanscale::Align::Left,
-        line_spacing: 1.,
-    };
-    if let Some(block) = renderer.text.shape_transient(label, &style) {
-        let layout = renderer.text.measure(block);
-        let size = (if label.chars().count() == 1 { 22. } else { 14. } * s)
-            .min((rect.width - 12. * s).max(1.) / layout.width_em().max(1.));
-        layer.draws.push(sanscale::Draw {
-            block,
-            at: Vec2::new(
-                rect.x + (rect.width - layout.width_em() * size) / 2.,
-                rect.y + (rect.height - layout.height_em() * size) / 2.,
-            ),
-            size,
-            color: color(if destructive { 0xffb4ab } else if primary { 0x003546 } else { 0x67d4ff }),
-            clip: Some(rect),
-            ..Default::default()
-        });
-    }
+    ui::controls::paint_button(renderer, layer, rect, label, s, primary,
+        false);
+
     hits.push(Hit { rect, action });
 }
 pub(crate) fn literal(text: &str) -> String {

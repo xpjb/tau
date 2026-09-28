@@ -124,3 +124,19 @@ fn live_references_preserve_ime_composition_and_newer_saved_draft_text() {
     assert!(h.app.root.legacy.composer.value.ends_with("入力 still typing"));assert!(!h.app.root.legacy.composer.value.contains("main.rs:"));
     assert!(h.app.apply(Action::Send).is_err());
 }
+
+#[test]
+fn retained_modal_pauses_file_interest_before_the_next_frame_without_destroying_the_view() {
+    let mut h = Harness::new((1000, 800), 1., false);
+    h.app.apply(Action::Files).unwrap();
+    // Model a previously submitted interest. The native worker is tested by the
+    // remote-files integration tests; this checks the UI's ownership boundary.
+    h.app.root.legacy.code.as_mut().unwrap().subscribed = true;
+    let generation = h.app.controller.viewer_generation();
+    h.app.apply(Action::Settings).unwrap();
+    assert!(!h.app.root.legacy.code.as_ref().unwrap().subscribed);
+    assert!(h.app.controller.viewer_generation() > generation, "Opening a modal cancels the old interest before another event/frame");
+    h.app.apply(Action::CancelModal).unwrap();
+    assert!(h.app.root.legacy.code.is_some(), "Closing the dialog reveals the same code viewport");
+    assert!(!h.app.root.legacy.code.as_ref().unwrap().subscribed, "Offline does not invent a replacement connection");
+}

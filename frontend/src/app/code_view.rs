@@ -182,7 +182,6 @@ impl App {
             }
         }
     }
-    #[cfg(any(target_os="android",test))]
     pub(super) fn code_native_value(&self, mut value: String) -> String {
         if self.root.legacy.focus!=Some(None) {return value;}
         let Some(code)=&self.root.legacy.code else {return value;};
@@ -201,7 +200,7 @@ impl App {
         if code.identity!=self.controller.identity || code.session!=self.controller.account.selected.as_deref().unwrap_or("") || code.lineage!=self.controller.account.source_lineage {
             self.close_code();self.ui.dirty=true;return;
         }
-        let active=self.ui.window_focused && self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none();
+        let active=self.ui.window_focused && self.root.dialog.is_none() && self.root.legacy.modal.is_none() && self.root.legacy.viewer.is_none();
         if !active && code.subscribed {
             let _=self.controller.view_files(None);self.root.legacy.code.as_mut().unwrap().subscribed=false;
         } else if active && (!code.subscribed || code.generation!=self.controller.viewer_generation()) && self.controller.epoch.is_some() {self.code_request();}

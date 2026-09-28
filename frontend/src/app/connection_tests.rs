@@ -295,7 +295,10 @@ fn saved_actions_and_restore_warning_fit_mobile_and_preserve_intents() {
         app.controller.store.put(&app.controller.identity,"account",&app.controller.account).unwrap();
         for action in [Action::Settings,Action::Outbox(0),Action::Outbox(1),Action::InspectControl("saved-00".into()),Action::ReviewRestore("chat".into())] {
             app.apply(action).unwrap();app.tick(0.);app.frame(&ctx,ctx.view());
-            for hit in &app.root.legacy.hits {assert!(hit.rect.y>=0. && hit.rect.y+hit.rect.height<=size.1 as f32,"Unreachable modal action at {:?}",hit.rect);}
+            let rects = if let Some(dialog) = &app.root.dialog {
+                dialog.buttons().into_iter().map(|(_, rect)| rect).chain(dialog.fields().into_iter().filter_map(|field| field.control.rect)).collect::<Vec<_>>()
+            } else { app.root.legacy.hits.iter().map(|hit| hit.rect).collect() };
+            for rect in rects { assert!(rect.y >= 0. && rect.y + rect.height <= size.1 as f32, "Unreachable modal action at {rect:?}"); }
         }
         let modal=app.root.legacy.modal.as_ref().unwrap();let width=(size.0 as f32-24.).min(620.)-40.;assert!(app.services.renderer.label_height(&modal.title,width,17.,true)>60.,"Fixture must exercise the complete multi-line warning");
         if size.0<500 {image::save_buffer("/tmp/tau2-restore-mobile.png",&ctx.read_rgba8().unwrap(),size.0,size.1,image::ColorType::Rgba8).unwrap();}
