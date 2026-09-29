@@ -313,6 +313,46 @@ fn attachment_history_paging_clears_loading_without_fetching_closed_tools_or_fil
     }
 }
 
+#[test]
+fn authored_message_has_one_model_identity_across_receipt_queue_and_history() {
+    use crate::feed::{Feed, MessageBody, MessageId};
+    let mut f = Fixture::new();
+    let text = "keep MY text café 😀, without **interpreting it**";
+    let mut local = local_prompt("original-request", text);
+    let original = local.pending[0].request.clone();
+    let mut feed = Feed::default();
+    let id = MessageId::Request(original.id.clone());
+    let check = |feed: &Feed, local: &LocalChat| {
+        assert_eq!(feed.order, [id.clone()]);
+        assert_eq!(feed.messages[&id].text(feed, local), text);
+        assert_eq!(id.key("chat"), "message:chat:original-request");
+    };
+    feed.reconcile(&local);
+    check(&feed, &local);
+    // Accepted intent survives restart without executing or fabricating delivery.
+    local = serde_json::from_slice(&serde_json::to_vec(&local).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&local.pending[0].request).unwrap(), serde_json::to_value(&original).unwrap());
+    f.put(QUEUE, None, i64::MAX as u64, BlockKind::Queue, json!({}), &serde_json::to_vec(&QueueState::native()).unwrap());
+    f.put("queued:original-request", Some(QUEUE), 0, BlockKind::Text,
+        json!({"request":{"requestId":"original-request","revision":0,"kind":"steer","text":"","images":0}}), text.as_bytes());
+    f.page(None, None); f.page(Some(QUEUE), None); f.body(QUEUE);
+    feed.native_view(f.cache.snapshot("chat").unwrap().unwrap()).unwrap();
+    feed.reconcile(&local); check(&feed, &local);
+    assert!(matches!(feed.messages[&id].body, MessageBody::Local(_)));
+    f.put("canonical", None, 1, BlockKind::Text, user_body("canonical", "original-request", text), text.as_bytes());
+    f.page(None, None);
+    feed.native_view(f.cache.snapshot("chat").unwrap().unwrap()).unwrap();
+    feed.reconcile(&local); check(&feed, &local);
+    assert_eq!(feed.messages[&id].event.as_deref(), Some("canonical"));
+    assert_eq!(local.pending.len(), 1, "header overlap is not retirement evidence");
+    f.body("canonical");
+    let delivered = feed.native_view(f.cache.snapshot("chat").unwrap().unwrap()).unwrap();
+    local.reconcile_complete(&feed.queue, &delivered, &feed.incomplete);
+    feed.reconcile(&local); check(&feed, &local);
+    assert!(local.pending.is_empty());
+    assert!(matches!(feed.messages[&id].body, MessageBody::Remote(_)));
+}
+
 fn local_prompt(id: &str, text: &str) -> LocalChat {
     use crate::store::{Delivery, Pending};
     LocalChat { pending: vec![Pending { request: tau_protocol::ClientRequest { id: id.into(),

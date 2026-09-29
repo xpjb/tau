@@ -32,7 +32,7 @@ fn center(r: Rect) -> Vec2 {
 }
 
 #[test]
-fn retained_rows_keep_identity_on_streaming_and_reorder_but_not_source_replacement() {
+fn retained_messages_keep_identity_on_streaming_and_prepend_but_not_source_replacement() {
     let mut h = Harness::new(false);
     let template = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
     let chat = h.app.controller.chats.get_mut("demo").unwrap();
@@ -41,20 +41,26 @@ fn retained_rows_keep_identity_on_streaming_and_reorder_but_not_source_replaceme
         let mut event = template.clone();
         event.id = format!("row-{order}");
         event.entry_id = event.id.clone();
-        event.order = order;
+        event.order = order + 1;
         event.text = format!("Message {order}");
-        chat.feed.events.insert(order, event);
+        chat.feed.events.insert(order + 1, event);
     }
+    let events = chat.feed.events.values().cloned().collect();
+    chat.feed = crate::feed::Feed::default();
+    chat.feed.snapshot(tau_protocol::TranscriptSnapshot { generation: "fixture".into(), sequence: 0, events, queue: Default::default(), before: None, delivered: vec![] }).unwrap();
+    chat.reconcile();
     h.frame();
     let row =
         h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.row.block.as_deref() == Some("row-119")).unwrap();
     let target = row.control.target;
     assert!(h.app.root.workspace.chat.transcript.rows.len() < 40, "Only overscan rows own interaction widgets");
     let chat = h.app.controller.chats.get_mut("demo").unwrap();
-    chat.feed.events.get_mut(&119).unwrap().text.push_str(" streamed");
-    let mut reordered = chat.feed.events.remove(&119).unwrap();
-    reordered.order = 118;
-    chat.feed.events.insert(118, reordered);
+    chat.feed.events.get_mut(&120).unwrap().text.push_str(" streamed");
+    let mut prepended = template;
+    prepended.id = "prepended".into(); prepended.order = 0;
+    let mut events = vec![prepended]; events.extend(chat.feed.events.values().cloned());
+    chat.feed.snapshot(tau_protocol::TranscriptSnapshot { generation: "fixture".into(), sequence: 1, events, queue: Default::default(), before: None, delivered: vec![] }).unwrap();
+    chat.reconcile();
     h.frame();
     let row =
         h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.row.block.as_deref() == Some("row-119")).unwrap();
@@ -277,6 +283,7 @@ fn selection_follows_scrolled_text_and_tail_returns_to_latest() {
     let chat = h.app.controller.chats.get_mut("demo").unwrap();
     chat.feed.events.clear();
     chat.feed.events.insert(event.order, event);
+    chat.reconcile();
     chat.local.position.follow = false;
     chat.local.position.key = None;
     h.frame();
@@ -319,6 +326,7 @@ fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
     event.attachment = None;
     chat.feed.events.clear();
     chat.feed.events.insert(event.order, event);
+    chat.reconcile();
     chat.local.position.follow = false;
     chat.local.position.key = None;
     h.frame();
@@ -357,6 +365,7 @@ fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
     chat.feed.native_view(source.cache.preview("chat", None).unwrap().unwrap()).unwrap();
     chat.local.details_default = true;
     chat.local.expansion.extend([("tool:native-tool".into(), true), ("tool:native-tool:Input".into(), true)]);
+    chat.reconcile();
     h.frame();
     h.app.with_ui(|root, cx| {
         let transcript = &mut root.workspace.chat.transcript;

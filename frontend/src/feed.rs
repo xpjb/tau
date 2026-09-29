@@ -4,8 +4,42 @@ use anyhow::{Result, ensure};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tau_protocol::*;
 
+/// Logical identities and body ownership, not UI descriptions. Ordered entries
+/// refer to the durable outbox or verified feed; they never duplicate authored bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MessageId { Event(String), Request(String), Intent(String) }
+impl MessageId {
+    pub fn key(&self, scope: &str) -> String {
+        match self {
+            Self::Event(id) => format!("{scope}/{id}"),
+            Self::Request(id) => format!("message:{scope}:{id}"),
+            Self::Intent(id) => format!("pending:{id}"),
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MessageBody { Remote(String), Queue(String), Local(String) }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    pub event: Option<String>,
+    pub queue: Option<String>,
+    pub intent: Option<String>,
+    pub body: MessageBody,
+}
+impl Message {
+    pub fn text<'a>(&self, feed: &'a Feed, local: &'a crate::store::LocalChat) -> &'a str {
+        match &self.body {
+            MessageBody::Remote(id) => feed.event(id).map(|e| e.text.as_str()),
+            MessageBody::Queue(id) => feed.queue.requests.iter().find(|q| &q.request_id == id).map(|q| q.text.as_str()),
+            MessageBody::Local(id) => local.pending.iter().find(|p| &p.request.id == id).map(|p| p.text.as_str()),
+        }.unwrap_or("")
+    }
+}
+
 #[derive(Default)]
 pub struct Feed {
+    pub order: Vec<MessageId>,
+    pub messages: HashMap<MessageId, Message>,
     pub generation: String,
     pub sequence: u64,
     pub events: BTreeMap<u64, Event>,
@@ -25,6 +59,62 @@ pub struct Feed {
 }
 
 impl Feed {
+    /// Install display ownership at the model boundary, without retiring intent
+    /// or executing anything. Receipt/content evidence remains in LocalChat.
+    pub fn reconcile(&mut self, local: &crate::store::LocalChat) {
+        use crate::store::Delivery;
+        let prompts = local.pending.iter().filter(|p|
+            matches!(p.request.command, ClientCommand::Prompt { .. }) && p.status != Delivery::Rejected)
+            .map(|p| (p.request.id.as_str(), p)).collect::<HashMap<_, _>>();
+        let mut order = Vec::new();
+        let mut messages = HashMap::new();
+        let mut requests = HashSet::new();
+        let mut insert = |id: MessageId, message: Message| { order.push(id); messages.insert(order.last().unwrap().clone(), message); };
+        for e in self.events.values() {
+            if e.attachment.is_none() && e.error_message.is_none() && !e.is_error
+                && (e.kind == EventKind::Hidden || matches!(e.kind, EventKind::Thinking | EventKind::Text)
+                    && e.text.is_empty() && !self.incomplete.contains(&e.id)) { continue; }
+            if e.attachment.is_none() && e.role == EventRole::Tool && self.parents.contains_key(&e.id) { continue; }
+            let request = e.origin.request_id.as_deref()
+                .filter(|_| e.role == EventRole::User && e.kind == EventKind::Text && e.attachment.is_none());
+            if request.is_some_and(|id| !requests.insert(id.to_owned())) { continue; }
+            let intent = request.filter(|_| self.incomplete.contains(&e.id)).and_then(|id| prompts.get(id));
+            insert(request.map_or_else(|| MessageId::Event(e.id.clone()), |id| MessageId::Request(id.into())), Message {
+                event: Some(e.id.clone()), queue: None, intent: intent.map(|p| p.request.id.clone()),
+                body: intent.map_or_else(|| MessageBody::Remote(e.id.clone()), |p| MessageBody::Local(p.request.id.clone())),
+            });
+        }
+        let represented = |id: &str| requests.contains(id) || self.queue.requests.iter().any(|q| q.request_id == id);
+        let targets = |p: &crate::store::Pending, q: &QueuedRequest| match &p.request.command {
+            ClientCommand::QueueControl { operation: QueueOperation::Edit { request_id, revision, .. }
+                | QueueOperation::Delete { request_id, revision }, .. } => request_id == &q.request_id && q.revision <= revision.saturating_add(1),
+            _ => false,
+        };
+        for p in &local.pending {
+            let prompt = matches!(p.request.command, ClientCommand::Prompt { .. });
+            if p.status != Delivery::Rejected && (prompt && represented(&p.request.id)
+                || self.queue.requests.iter().any(|q| targets(p, q))) { continue; }
+            let id = if prompt && !represented(&p.request.id) { MessageId::Request(p.request.id.clone()) }
+                else { MessageId::Intent(p.request.id.clone()) };
+            insert(id, Message { event: None, queue: None, intent: Some(p.request.id.clone()), body: MessageBody::Local(p.request.id.clone()) });
+        }
+        for q in &self.queue.requests {
+            if requests.contains(&q.request_id) { continue; }
+            let pending = local.pending.iter().rev().find(|p| targets(p, q)
+                && matches!(p.status, Delivery::Sending | Delivery::Unconfirmed | Delivery::Accepted));
+            let original = self.incomplete.contains(&format!("queued:{}", q.request_id))
+                .then(|| prompts.get(q.request_id.as_str())).flatten().copied();
+            let editing = pending.filter(|p| matches!(p.request.command, ClientCommand::QueueControl { operation: QueueOperation::Edit { .. }, .. }));
+            insert(MessageId::Request(q.request_id.clone()), Message {
+                event: None, queue: Some(q.request_id.clone()), intent: pending.or(original).map(|p| p.request.id.clone()),
+                body: editing.or(original).map_or_else(|| MessageBody::Queue(q.request_id.clone()), |p| MessageBody::Local(p.request.id.clone())),
+            });
+        }
+        self.order = order;
+        self.messages = messages;
+        self.revision += 1;
+    }
+
     /// Conservative decoded-view accounting, not a process-RSS promise. Headers
     /// are <=4 KiB each; preview payloads and full queued text are counted too.
     pub(crate) fn resident_bytes(&self) -> usize {

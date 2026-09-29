@@ -43,6 +43,7 @@ fn queue_controls_follow_run_state_and_pending_edits_stay_with_their_message() {
         status: crate::store::Delivery::Sending,
         detail: None,
     });
+    chat.reconcile();
     let rows = projection::rows(&app.controller, "demo");
     assert!(
         rows.iter()
@@ -52,6 +53,7 @@ fn queue_controls_follow_run_state_and_pending_edits_stay_with_their_message() {
     let chat = app.controller.chats.get_mut("demo").unwrap();
     chat.local.pending.clear();
     chat.feed.queue.requests.clear();
+    chat.reconcile();
     assert!(app.root.workspace.chat.header.controls.placed().any(|(a, _)| matches!(a, Header::Abort)));
     app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().status = SessionStatus::Idle;
     let queue = &mut app.controller.chats.get_mut("demo").unwrap().feed.queue;
@@ -183,50 +185,3 @@ fn middle_click_marker_is_drawn_at_the_autoscroll_anchor_not_text_baseline() {
     );
 }
 
-#[test]
-fn own_message_keeps_one_display_identity_through_receipt_queue_and_header_only_history() {
-    use crate::store::{Delivery, Pending};
-    let root = tempfile::tempdir().unwrap();
-    let ctx = HeadlessCtx::new(&Config { size: (1000,700), device_limits:crate::desktop::limits(), ..Default::default() }).unwrap();
-    let mut app = App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),false).unwrap();
-    app.back(); crate::demo::populate(&mut app.controller).unwrap();
-    let text = "keep MY text café 😀, without **interpreting it**";
-    let chat = app.controller.chats.get_mut("demo").unwrap();
-    chat.feed = crate::feed::Feed::default();
-    chat.local.pending.push(Pending { request:ClientRequest { id:"my-id".into(),command:ClientCommand::Prompt {session_id:"demo".into(),text:text.into()} },
-        text:text.into(),files:vec![],status:Delivery::Sending,started_at_ms:None,detail:None });
-    let check = |app:&App| {
-        let rows=projection::rows(&app.controller, "demo"); assert_eq!(rows.len(),1,"never show a duplicate local/queue/history row");
-        assert_eq!(rows[0].key,"message:demo:my-id");
-        assert!(rows[0].source.starts_with(&literal(text)),"local text vanished: {}",rows[0].source);
-        assert!(!rows[0].source.contains("Loading"));
-    };
-    check(&app);
-    app.controller.message(ServerMessage::Receipts {session_id:"demo".into(),reports:vec![OperationReceipt {
-        id:"my-id".into(),accepted:true,complete:true,error:None,notice:None,
-    }]}).unwrap();
-    check(&app);
-    assert_eq!(app.controller.chats["demo"].local.pending[0].status,Delivery::Accepted);
-    // A restart must retain this accepted-but-not-yet-replicated display copy.
-    assert_eq!(app.controller.store.load_chat(&app.controller.identity,"demo").unwrap().pending[0].text,text);
-    let chat = app.controller.chats.get_mut("demo").unwrap();
-    chat.feed.queue=QueueState::native();
-    chat.feed.queue.requests.push(QueuedRequest {request_id:"my-id".into(),revision:0,kind:"steer".into(),text:"Loading…".into(),images:0,timestamp_ms:None});
-    chat.feed.incomplete.insert("queued:my-id".into());
-    check(&app);
-    let chat = app.controller.chats.get_mut("demo").unwrap();
-    let mut event:Event=serde_json::from_value(serde_json::json!({"id":"canonical","entryId":"canonical","order":1,"phase":"saved","origin":{"requestId":"my-id"},"role":"user","kind":"text","text":"Loading…","isError":false})).unwrap();
-    chat.feed.snapshot(TranscriptSnapshot {generation:"demo".into(),sequence:1,events:vec![event.clone()],queue:chat.feed.queue.clone(),before:None,delivered:vec![]}).unwrap();
-    chat.feed.incomplete.insert("canonical".into());
-    check(&app); // Queue tombstone has not arrived yet; still exactly one row.
-    app.resize(ctx.size(),1.,Vec2::new(0.,0.));app.tick(0.);app.frame(&ctx,ctx.view());
-    let chat = app.controller.chats.get_mut("demo").unwrap();
-    event.text=text.into();
-    chat.feed.snapshot(TranscriptSnapshot {generation:"demo".into(),sequence:2,events:vec![event],queue:QueueState::native(),before:None,delivered:vec!["my-id".into()]}).unwrap();
-    chat.feed.incomplete.clear();
-    chat.local.reconcile_complete(&chat.feed.queue,&["my-id".into()],&chat.feed.incomplete);
-    assert!(chat.local.pending.is_empty());
-    check(&app);
-    assert_eq!(projection::rows(&app.controller, "demo")[0].block.as_deref(),Some("canonical"),"stable UI keys must still request the native body ID");
-    app.tick(0.);app.frame(&ctx,ctx.view());
-}

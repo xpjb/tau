@@ -121,6 +121,7 @@ fn download_destination_survives_empty_loading_and_multiple_older_pages() {
     let before = h.app.controller.chats["demo"].local.position.clone();
     h.app.controller.chats.get_mut("demo").unwrap().feed.snapshot(TranscriptSnapshot {
         generation: "paged".into(), sequence: 0, events: events[50..].to_vec(), queue: QueueState::default(), before: Some(50), delivered: vec![] }).unwrap();
+    h.app.controller.chats.get_mut("demo").unwrap().reconcile();
     h.app.controller.epoch = Some(1); // Allow the existing near-edge paging gate.
     h.app.frame(&h.ctx, h.ctx.view());
     assert_eq!(h.app.root.workspace.chat.transcript.history_attempt.as_ref().unwrap().2, 50);
@@ -128,11 +129,13 @@ fn download_destination_survives_empty_loading_and_multiple_older_pages() {
     assert_eq!(h.app.controller.chats["demo"].local.position.key, before.key);
     h.app.controller.chats.get_mut("demo").unwrap().feed.page("paged", 50, HistoryPage {
         events: events[30..50].to_vec(), before: Some(30) }).unwrap();
+    h.app.controller.chats.get_mut("demo").unwrap().reconcile();
     h.app.frame(&h.ctx, h.ctx.view());
     assert_eq!(h.app.root.workspace.chat.transcript.history_attempt.as_ref().unwrap().2, 30);
     assert!(h.app.root.workspace.chat.transcript.download.is_some());
     h.app.controller.chats.get_mut("demo").unwrap().feed.page("paged", 30, HistoryPage {
         events: events[..30].to_vec(), before: None }).unwrap();
+    h.app.controller.chats.get_mut("demo").unwrap().reconcile();
     h.app.controller.epoch = None;
     h.frame(); h.assert_target_visible("entry-20");
 

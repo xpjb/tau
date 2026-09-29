@@ -112,8 +112,8 @@ impl Workspace {
     }
     pub fn save(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
         self.chat.transcript.remember_scroll(cx);
-        if let Some(id) = &cx.model.account.selected {
-            cx.model.save_chat(id)?;
+        if let Some(id) = cx.model.account.selected.clone() {
+            cx.model.save_chat(&id)?;
         }
         Ok(())
     }

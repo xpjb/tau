@@ -603,8 +603,8 @@ impl Transcript {
             && capture.is_some_and(|c| c.pointer == pointer)
         {
             self.remember_scroll(cx);
-            if let Some(session) = &cx.model.account.selected {
-                let result = cx.model.save_chat(session);
+            if let Some(session) = cx.model.account.selected.clone() {
+                let result = cx.model.save_chat(&session);
                 cx.report(result);
             }
         }

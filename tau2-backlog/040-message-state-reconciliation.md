@@ -56,3 +56,26 @@ touched; do not change retry policy or make a registry migration a prerequisite.
 Done means one model rule is used by real consumers and the superseded branches
 are gone. A new facade that delegates to all the old reconciliations fails the
 slice. Report net cross-workspace production/test cost, including any adapters.
+
+## Model ownership installed — September 29, 2026
+
+Feed now owns an ordered identity index referring to verified events, queue items
+and durable intent, with one explicit body owner. It contains IDs, not cloned text,
+menus, titles or a second widget tree. Controller mutation/persistence and native
+update boundaries reconcile that index. Painting no longer chooses local/queue/
+history precedence or suppresses duplicates. The existing outbox still retires only
+against content/receipt evidence; root-cursor queue-removal barriers are unchanged.
+Source reset/alias/local restoration paths rebuild the same index without execution.
+
+The transitional projection consumes those identities; 041 must still remove its
+presentation objects. The old own-message GPU/Row matrix is deleted. One real native
+cache case checks accepted intent, queue headers, overlapping canonical headers,
+complete verified content and stable original request/display identity. Existing
+recovery, pending queue control and real two-client tests remain. A retained identity
+fixture that previously violated native immutable ordering now uses a valid prepend.
+
+Fresh frontend all-target check and **194/194 frontend tests**, zero skipped, pass
+(`f8e5d0c6-58c5-4f2f-86ad-5b8481a7ee78`). The slice removes 101 raw but adds 78
+normalized frontend lines: production −107 raw / +88 normalized; tests +6 / −10.
+No added shared code in this slice. This is model ownership, not a claimed large
+simplification; direct consumers and their competing description path are next.
