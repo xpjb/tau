@@ -1,6 +1,6 @@
 # 039 — Share native tool meaning and use it directly
 
-Status: **In progress: viewport-key decoding removed; native record/copy migration remains.** Replaces old 015 and the tool part
+Status: **In progress: native parent membership replaces provider-ID rewriting; direct retained tool/body-reference migration remains.** Replaces old 015 and the tool part
 of 016/018/022. Integrate its actual tool-widget consumer with 037; no standalone
 intermediate-description module. The original state proposal remains historical.
 
@@ -72,7 +72,52 @@ existing cache fixture is reused, rather than copying its database/range setup.
 This case seeds native records; it does **not** claim the remaining daemon-to-widget
 shared metadata migration is complete.
 
-Still required: typed shared metadata/body references with source/version and
-availability/finality, direct native parent membership for display/copy/demand,
-and deletion of `native_event`'s provider-ID rewrite / `details::Tools` re-pairing.
+At this checkpoint, shared metadata/body references, direct native membership and
+the provider-ID rewrite/re-pairing deletion were still required (see the next slice).
 The rich Row/projection pipeline remains explicitly scheduled for 040–041.
+
+## Native membership and public metadata contract — September 29, 2026
+
+Deleted `native_event`, its provider-call-ID overwrite and the overflow-metadata
+restoration of that fabricated ID. The existing bounded View/Feed carry a compact
+native parent index. Display and complete Copy group results by that relationship,
+not by provider IDs; orphans remain independent roots. `details::Tools` no longer
+builds a provider-call set or repairs orphan groups. Bootstrap disclosure grouping
+now consumes actual roots, not flattened children followed by re-pairing. Persisted
+`tool:<native-id>` keys are unchanged. This is a native relationship index, not a
+new editable tool tree or intermediate widget specification.
+
+Shared `ToolState`, textual `ToolBody` classification and input addressing live
+in the existing protocol module. Daemon publication/recovery and client demand /
+copy readiness use them with unchanged JSON encoding. Metadata/attachment payloads
+are not classified as text results. The existing real two-client daemon/network
+case opens tools by native IDs, no longer relying on overwritten provider IDs.
+
+The native table now covers repeated provider IDs, multiple mixed success/error
+results, an orphan, unknown child coverage, displayed section membership, closed
+body demand and complete Copy. It revealed a real mismatch: UI presents one Error
+section containing all results, but demand independently applied Output/Error keys
+per child. Demand now uses the displayed aggregate section and aggregate length.
+The narrow assertion failed before (`9b031b31-d1c3-407d-be97-dbd771d3e122`) and
+passes after (`c1c8467f-218e-4642-a3dd-ad2eb560576a`). Provider-ID preservation
+also fails at `6171d42` (`b3a75666-4b7e-4721-aa23-ebc2517d80f0`). The temporary
+regression worktree was removed.
+
+A daemon-side case exercises actual publication for reused IDs, orphan results,
+overflow metadata, success/failure and interrupted recovery using the shared
+accessors. Together with the actual viewport-interest case and the real impaired
+link/two-client test, it covers both endpoints without exposing private daemon
+modules just for frontend tests.
+
+Validation: frontend/daemon/protocol all-target compiler checks and **254/254 tests
+across 14 binaries, zero skipped** (`5a638867-c1b4-4e49-af40-fa007a6b1034`).
+Frontend production shrinks **21 raw / 13 same-format** but shared production grows
+**41 / 69**; frontend tests grow **35 / 42** and daemon tests **36 / 37**.
+**Charged net growth is 91 / 135**, not a saving. Cumulative reduction after all
+outside charges is **314 / 265**; the 5,000-line gate remains very far open.
+
+Still open: explicit source/scope/version and availability/finality body references,
+removal of authored-text loading placeholders, and actual retained tool children
+instead of the remaining `Line`/Row/Part reconstruction. Those must be integrated
+with 040–041, not declared done because parent membership now works. The existing
+text/Markdown caches, complete-Copy integrity/budget gates and sparse updates remain.

@@ -1,8 +1,8 @@
 //! Tau 1's disclosure hierarchy: Details → tool → large Input/Output sections.
-//! Tool results are paired by call ID, including results whose call is not in the loaded page.
+//! Tool membership uses native parents. Provider call IDs remain opaque metadata.
 use crate::store::LocalChat;
 use std::collections::{HashMap, HashSet};
-use tau_protocol::{Event, EventKind, EventRole};
+use tau_protocol::{Event, EventKind, EventRole, blocks::{ToolBody, ToolState}};
 
 #[derive(Clone)]
 pub struct Line {
@@ -33,37 +33,26 @@ impl Line {
     }
 }
 pub struct Tools<'a> {
-    calls: HashSet<&'a str>,
+    parents: &'a HashMap<String,String>,
     results: HashMap<&'a str, Vec<&'a Event>>,
     lengths: Option<&'a HashMap<String,u64>>,
-    states: Option<&'a HashMap<String,String>>,
+    states: Option<&'a HashMap<String,ToolState>>,
 }
 impl<'a> Tools<'a> {
-    pub fn new(events: impl Iterator<Item = &'a Event>) -> Self {
-        let mut calls = HashSet::new();
+    pub fn new(events: impl Iterator<Item = &'a Event>, parents: &'a HashMap<String,String>) -> Self {
         let mut results: HashMap<&str, Vec<&Event>> = HashMap::new();
         for e in events {
-            if let Some(id) = e.tool_call_id.as_deref() {
-                if e.role == EventRole::Tool {
-                    results.entry(id).or_default().push(e);
-                } else if e.kind == EventKind::Tool {
-                    calls.insert(id);
-                }
+            if e.role == EventRole::Tool && let Some(parent) = parents.get(&e.id) {
+                results.entry(parent).or_default().push(e);
             }
         }
-        Self { calls, results, lengths:None, states:None }
+        Self { parents, results, lengths:None, states:None }
     }
     pub fn with_lengths(mut self, lengths: &'a HashMap<String,u64>) -> Self { self.lengths = Some(lengths); self }
-    pub fn with_states(mut self, states:&'a HashMap<String,String>) -> Self {self.states=Some(states);self}
+    pub fn with_states(mut self, states:&'a HashMap<String,ToolState>) -> Self {self.states=Some(states);self}
     fn length(&self, event: &Event) -> u64 { self.lengths.and_then(|lengths|lengths.get(&event.id)).copied().unwrap_or(event.text.len() as u64) }
     pub fn paired_result(&self, e: &Event) -> bool {
-        e.role == EventRole::Tool
-            && e.tool_call_id.as_deref().is_some_and(|id| {
-                self.calls.contains(id)
-                    || self.results[id]
-                        .first()
-                        .is_some_and(|first| first.id != e.id)
-            })
+        e.role == EventRole::Tool && self.parents.contains_key(&e.id)
     }
     /// Copy this logical Details section, including currently collapsed tools,
     /// without pulling in the adjacent assistant answer. Only assembled on demand.
@@ -81,10 +70,7 @@ impl<'a> Tools<'a> {
             if e.role != EventRole::Tool && !e.text.is_empty() {
                 tool.push_str(&format!("\nInput\n{}", e.text));
             }
-            let results = e
-                .tool_call_id
-                .as_deref()
-                .and_then(|id| self.results.get(id));
+            let results = self.results.get(e.id.as_str());
             let orphan = [*e];
             let results = results.map(Vec::as_slice).unwrap_or_else(|| {
                 if e.role == EventRole::Tool {
@@ -132,11 +118,8 @@ impl<'a> Tools<'a> {
                 }
                 continue;
             }
-            let key = format!("tool:{}", e.tool_call_id.as_deref().unwrap_or(&e.id));
-            let results = e
-                .tool_call_id
-                .as_deref()
-                .and_then(|id| self.results.get(id))
+            let key = format!("tool:{}", e.id);
+            let results = self.results.get(e.id.as_str())
                 .cloned()
                 .unwrap_or_else(|| {
                     if e.role == EventRole::Tool {
@@ -150,7 +133,7 @@ impl<'a> Tools<'a> {
             lines.push(Line::label(
                 key.clone(),
                 format!("Tool · {}{}", e.tool_name.as_deref().unwrap_or("tool"),
-                    self.states.and_then(|states|states.get(&e.id)).map(|state|format!(" · {state}")).unwrap_or_default()),
+                    self.states.and_then(|states|states.get(&e.id)).map(|state|format!(" · {}",state.as_str())).unwrap_or_default()),
                 8.,
                 Some(open),
                 error,
@@ -173,8 +156,8 @@ impl<'a> Tools<'a> {
             let input_length = if e.role == EventRole::Tool {0} else {self.length(e)};
             let output_length = results.iter().filter(|e|e.kind == EventKind::Text).map(|e|self.length(e)).sum::<u64>();
             for (label, text, length) in [
-                ("Input", input, input_length),
-                (if error { "Error" } else { "Output" }, output.as_str(), output_length),
+                (ToolBody::Input.label(), input, input_length),
+                ((if error { ToolBody::Error } else { ToolBody::Output }).label(), output.as_str(), output_length),
             ] {
                 if text.is_empty() && length == 0 {
                     continue;
@@ -217,14 +200,12 @@ fn group_state(group: &[&Event], local: &LocalChat) -> (String,bool) {
     (key,open)
 }
 
-/// The same disclosure grouping used by rendering, operating on headers alone.
+/// The same disclosure grouping used by rendering, operating on root headers only.
 pub(crate) fn open_items<'a>(events: impl Iterator<Item=&'a Event>, local: &LocalChat) -> HashSet<String> {
-    let events = events.collect::<Vec<_>>();
-    let tools = Tools::new(events.iter().copied());
-    let visible = events.into_iter().filter(|e| {
+    let visible = events.filter(|e| {
         let empty = e.attachment.is_none() && e.error_message.is_none() && !e.is_error &&
             (e.kind == EventKind::Hidden || matches!(e.kind,EventKind::Thinking|EventKind::Text) && e.text.is_empty());
-        !empty && !(e.attachment.is_none() && tools.paired_result(e))
+        !empty
     }).collect::<Vec<_>>();
     let detail = |e:&Event|e.attachment.is_none() && (matches!(e.kind,EventKind::Thinking|EventKind::Tool) || e.role == EventRole::Tool);
     let mut open = HashSet::new(); let mut i=0;

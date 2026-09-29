@@ -15,7 +15,8 @@ pub struct Feed {
     pub queue_transitions: HashMap<String,u64>, // Display-only rows awaiting the root cursor.
     pub block_lengths: HashMap<String,u64>,
     pub incomplete: HashSet<String>,
-    pub block_states: HashMap<String,String>,
+    pub block_states: HashMap<String,blocks::ToolState>,
+    pub parents: HashMap<String,String>,
     pub before: Option<u64>,
     pub synchronized: bool,
     pub loading: bool,
@@ -75,11 +76,11 @@ impl Feed {
         }
         if view.partial {
             if view.queue_changed {self.incomplete.retain(|id|!id.starts_with("queued:"));}
-            for event in &view.snapshot.events {self.incomplete.remove(&event.id);}
+            for event in &view.snapshot.events {self.incomplete.remove(&event.id);self.parents.remove(&event.id);self.block_states.remove(&event.id);}
             self.native_patch(view.snapshot,view.queue_changed)?;
-            self.block_lengths.extend(view.lengths);self.incomplete.extend(view.incomplete);self.block_states.extend(view.states);
+            self.block_lengths.extend(view.lengths);self.incomplete.extend(view.incomplete);self.block_states.extend(view.states);self.parents.extend(view.parents);
         } else {
-            self.generation.clear();self.snapshot(view.snapshot)?;self.block_lengths=view.lengths;self.incomplete=view.incomplete;self.block_states=view.states;
+            self.generation.clear();self.snapshot(view.snapshot)?;self.block_lengths=view.lengths;self.incomplete=view.incomplete;self.block_states=view.states;self.parents=view.parents;
         }
         self.previews.extend(view.previews.into_iter().filter(|(_,_,bytes)|*bytes>0));
         let mut bytes=self.previews.iter().map(|(_,_,bytes)|bytes).sum::<usize>();

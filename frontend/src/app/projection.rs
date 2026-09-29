@@ -2,7 +2,7 @@
 use super::*;
 pub(super) fn rows(model: &Controller, session: &str) -> Vec<Row> {
     let chat = &model.chats[session];
-    let tools = Tools::new(chat.feed.events.values())
+    let tools = Tools::new(chat.feed.events.values(), &chat.feed.parents)
         .with_lengths(&chat.feed.block_lengths)
         .with_states(&chat.feed.block_states);
     let events = chat

@@ -86,12 +86,13 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After 036–038, the first 039 interest fix and the independent 042 pruning below,
-raw frontend code is **27,320**; same-format code is **32,618**. Production is
-**19,103 / 21,547** and tests are **8,217 / 11,071** (raw / same-format).
-Net reduction is **405 / 400**; remaining gap is **4,595 / 4,600**. Production
-saving is only **71 / 37** so far: the later architectural deletions must deliver
-substantially more. These are intermediate results, not completion.
+After the 039 native-membership slice, frontend Rust is **27,334 raw / 32,647
+same-format**: production **19,082 / 21,534**, tests **8,252 / 11,113**. Its
+unadjusted reduction is **391 / 371**. Replacement code outside frontend adds
+**77 / 106** (production **41 / 69**, tests **36 / 37**), so the **charged reduction
+is 314 / 265**, with **4,686 / 4,735 remaining**. Charged production is **51 raw
+smaller / 19 same-format larger** than baseline. This is not production-simplification
+acceptance: the large architectural deletions remain outstanding.
 Deltas below use reduction-positive values and show raw / same-format:
 
 | Slice / commit | Deleted path | Replacement cost | Net production reduction | Net test reduction | Outside charge | Cumulative / remaining |
@@ -102,6 +103,15 @@ Deltas below use reduction-positive values and show raw / same-format:
 | 038 forms | Floating-label path; repeated field/footer/page placement; fixed-field/choice Vec rebuilding; bespoke suggestion controls; redundant form tests | Shared concrete placement helpers, compact IME layout and explicit form-action feedback | +55 / +67 | +14 / +24 | 0 | Reduction 313 / 289; gap 4,687 / 4,711 |
 | 039 viewport ownership (`55c11f0`) | Reverse display-key parser and tool-root rescan | Direct owner on existing detail lines; real viewport/native-body regression using shared fixture | +22 / +5 | −40 / −70 | 0 | Reduction 295 / 224; gap 4,705 / 4,776 |
 | 042 independent pruning / Submit retirement | Project activity/layout matrix, repeated GPU persistence setup, status glyph matrix, test-only Submit event and handlers | Controller persistence check, one isolated status render, real pointer submissions | +5 / +5 | +105 / +171 | 0 | Reduction 405 / 400; gap 4,595 / 4,600 |
+| 039 native parent membership / metadata | Provider-ID overwrite and restore; provider pairing/orphan repair; child-by-child output disclosure mismatch | Native parent index, shared metadata accessors, direct grouping and expanded native/publisher cases | +21 / +13 frontend | −35 / −42 frontend | +77 / +106 (production 41 / 69; tests 36 / 37) | Charged reduction 314 / 265; gap 4,686 / 4,735 |
+
+Outside-code measurement compares every tracked Rust source in `daemon` and
+`protocol` with the same counter/formatter and reviewed test boundaries in the
+changed files. Baseline combined totals: **8,454 / 13,425**, production
+**7,447 / 11,767**. Candidate: **8,531 / 13,531**, production **7,488 / 11,836**.
+Only `daemon/src/blocks.rs` and `protocol/src/blocks.rs` add code; the earlier
+`protocol/src/lib.rs` equality derive still has zero code-line delta. No other
+crate, language, generated code or runtime host acquired replacement logic.
 
 Keep raw and same-format totals alongside the ledger. A deletion shared by two
 slices is counted once. Documentation and this measurement recipe are not runtime

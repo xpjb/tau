@@ -6,7 +6,8 @@ Triaged **September 29, 2026**, against freshly fetched `origin/tau2` at
 `33f7d6f`. This supersedes the earlier implementation ordering, not the recorded
 bug evidence. Implementation is on `feat/tau2-simplification`; **036 is source-complete**.
 037's control/composition/lifetime and 038's form reuse are implemented.
-039 is in progress: viewport ownership decoding is gone; native membership/copy remains.
+039 is in progress: viewport-key decoding and provider-ID rewriting/pairing are gone;
+explicit body state and direct retained tool children remain.
 042's independent test pruning and test-only Submit retirement are also committed.
 Remaining slices and the 5,000-line gate are not complete.
 

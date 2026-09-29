@@ -65,7 +65,7 @@ fn disclosure_interests_are_per_group_and_large_input_is_explicit() {
     assert!(!plan.parents.contains(&Some("a".into())));assert!(plan.parents.contains(&Some("b".into())));
     assert!(!plan.blocks.iter().any(|(id,_)|id.ends_with("/input")));
     let view=f.cache.snapshot("chat").unwrap().unwrap();
-    let tools=crate::details::Tools::new(view.snapshot.events.iter()).with_lengths(&view.lengths).with_states(&view.states);
+    let tools=crate::details::Tools::new(view.snapshot.events.iter(), &view.parents).with_lengths(&view.lengths).with_states(&view.states);
     let lines=tools.lines(&[view.snapshot.events.iter().find(|e|e.id=="b").unwrap()],&local);
     assert!(lines.iter().any(|line|line.label=="Input" && line.toggle==Some(false)),"An unfetched input still has an expansion control");
     local.expansion.insert("tool:b:Input".into(),true);
@@ -185,13 +185,48 @@ fn cache_migrates_without_losing_verified_bytes_and_rejects_future_versions() {
 }
 
 #[test]
-fn native_tool_pairing_uses_block_parents_not_reused_provider_call_ids() {
+fn native_tool_membership_preserves_provider_ids_for_display_copy_and_demand() {
     let mut f=Fixture::new();
-    for (id,order) in [("a",0),("b",2)] {let mut meta=event(id,order,"tool");meta["event"]["toolCallId"]=json!("provider-reused");f.put(id,None,order,BlockKind::Tool,meta,b"");}
-    for (id,parent,order,text) in [("one","a",1,b"first".as_slice()),("two","b",3,b"second".as_slice())] {let mut meta=event(id,order,"text");meta["event"]["role"]=json!("tool");meta["event"]["toolCallId"]=json!("provider-reused");f.put(id,Some(parent),order,BlockKind::Code,meta,text);}
-    f.page(None,None);f.page(Some("a"),None);f.page(Some("b"),None);f.body("one");f.body("two");
-    let view=f.cache.snapshot("chat").unwrap().unwrap();let tools=crate::details::Tools::new(view.snapshot.events.iter());
-    let a=view.snapshot.events.iter().find(|e|e.id=="a").unwrap();let text=tools.copy(&[a]);assert!(text.contains("first"));assert!(!text.contains("second"));
+    for (id,order) in [("a",0),("b",3)] {
+        let mut meta=event(id,order,"tool");meta["event"]["toolCallId"]=json!("provider-reused");
+        f.put(id,None,order,BlockKind::Tool,meta,b"");
+    }
+    for (id,parent,order,text,error) in [
+        ("one",Some("a"),1,"first",false), ("error",Some("a"),2,"failure",true),
+        ("two",Some("b"),4,"second",false), ("orphan",None,5,"alone",false),
+    ] {
+        let mut meta=event(id,order,"text");meta["event"]["role"]=json!("tool");
+        meta["event"]["toolCallId"]=json!("provider-reused");meta["event"]["isError"]=json!(error);
+        f.put(id,parent,order,BlockKind::Code,meta,text.repeat(400).as_bytes());
+    }
+    f.page(None,None);
+    assert!(f.cache.copy_ready("chat",&["a".into()]).unwrap().is_none(), "Unknown children are not an empty completed tool");
+    f.page(Some("a"),None);f.page(Some("b"),None);
+    for id in ["one","error","two","orphan"] {f.body(id);}
+    let view=f.cache.snapshot("chat").unwrap().unwrap();
+    assert!(view.snapshot.events.iter().all(|e|e.tool_call_id.as_deref()==Some("provider-reused")),
+        "Native membership must not rewrite provider metadata");
+    let tools=crate::details::Tools::new(view.snapshot.events.iter(), &view.parents);
+    let group=["a","b","orphan"].map(|id|view.snapshot.events.iter().find(|e|e.id==id).unwrap());
+    let mut local=LocalChat {details_default:true,..Default::default()};
+    local.expansion.extend([("tool:a".into(),true),("tool:b".into(),true),("tool:a:Error".into(),true),("tool:b:Output".into(),true)]);
+    let lines=tools.lines(&group,&local);
+    let output=|key|lines.iter().find(|line|line.key==key).unwrap().source.as_str();
+    assert!(output("tool:a:Error:text").contains("first") && output("tool:a:Error:text").contains("failure"));
+    assert!(!output("tool:a:Error:text").contains("second"));
+    assert!(output("tool:b:Output:text").contains("second"));
+    let copied=f.cache.copy_ready("chat",&["a".into()]).unwrap().unwrap();
+    assert!(copied.contains("Output\nfirst") && copied.contains("Error\nfailure"));
+    assert!(!copied.contains("second") && !copied.contains("alone"));
+    assert!(f.cache.copy_ready("chat",&["orphan".into()]).unwrap().unwrap().contains("alone"));
+    local.expansion.insert("tool:b".into(),false);
+    let plan=f.cache.plan("chat",&local,&[]).unwrap();
+    assert!(plan.parents.contains(&Some("a".into())) && !plan.parents.contains(&Some("b".into())));
+    assert!(plan.blocks.iter().any(|(id,_)|id=="one") && plan.blocks.iter().any(|(id,_)|id=="error"), "The visible Error section contains every native result, not only error-marked children");
+    assert!(!plan.blocks.iter().any(|(id,_)|id=="two" || id=="orphan"));
+    local.expansion.insert("tool:a:Error".into(),false);
+    assert!(f.cache.plan("chat",&local,&[]).unwrap().blocks.iter().all(|(id,_)|id==QUEUE),
+        "Closed body sections do not request their large results");
 }
 
 #[test]
