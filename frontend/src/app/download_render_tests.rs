@@ -6,7 +6,6 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 pub(super) struct Case {
     pub(super) id: String,
-    pub(super) label: String,
     pub(super) state: String,
     pub(super) size: Option<u64>,
     #[serde(default)] pub(super) transferred: u64,
@@ -71,26 +70,15 @@ pub(super) fn save(ctx: &HeadlessCtx, name: &str) {
 
 pub(super) struct CardControl { pub rect: Rect, pub action: ui::CardChoice }
 pub(super) fn controls(app: &App) -> Vec<CardControl> {
-    app.root.test_cards.cards.values().flat_map(|card| card.controls.items.iter()).filter_map(|(key,button,choice)| {
+    app.root.workspace.attachments.cards.cards.values().flat_map(|card| card.controls.items.iter()).filter_map(|(key,button,choice)| {
         if key.is_none() { return None; }
         let control = &button.control;
         let rect = crate::render::intersect(control.rect?,control.clip);
         (rect.width > 0. && rect.height > 0.).then(|| CardControl { rect, action: choice.clone() })
     }).collect()
 }
-pub(super) fn hints(app: &App) -> Vec<(Rect,Info)> { app.root.test_cards.hints().chain(app.root.workspace.attachments.cards.hints()).map(|(r,i)|(r,i.clone())).collect() }
-pub(super) fn panel(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment, viewport: Rect) -> Layer {
-    let s = app.ui.scale;
-    app.root.test_cards.begin();
-    let mut layer = Layer::default();
-    layer.rect(Rect::new(0., 0., ctx.size().0 as f32, ctx.size().1 as f32), color(0x0e141b));
-    app.services.renderer.label(&mut layer, &case.label,
-        Rect::new(12. * s, 10. * s, ctx.size().0 as f32 - 24. * s, 28. * s), 12. * s, color(0xb7c2ce), false);
-    let rect = Rect::new(12. * s, 44. * s, ctx.size().0 as f32 - 24. * s, attachments::card_height(file) * s);
-    layer.clipped_rounded_rect(rect, 12. * s, color(0x18212b), viewport);
-    app.attachment_card(ctx, &mut layer, "demo", &case.id, file, "gallery", rect, viewport);
-    app.with_ui(|root,cx| root.test_cards.finish(cx));
-    layer
+pub(super) fn hints(app: &App) -> Vec<(Rect,Info)> {
+    app.root.workspace.attachments.cards.hints().map(|(r,i)|(r,i.clone())).collect()
 }
 
 #[test]
@@ -99,7 +87,10 @@ fn download_actions_and_labels_fit_a_narrow_card() {
     let case = cases().into_iter().find(|case| case.id == "18-saved-zip").unwrap();
     let file = install(&mut app, &case);
     let bounds = Rect::new(0., 0., ctx.size().0 as f32, ctx.size().1 as f32);
-    let layer = panel(&mut app, &ctx, &case, &file, bounds);
+    super::download_interaction_tests::paint(&mut app, &ctx, &case, &file);
+    let mut layer = Layer::default();
+    app.with_ui(|root, cx| root.workspace.attachments.visit_perframe(
+        &mut ui::Frame { layer: &mut layer, bounds, clip: bounds }, cx));
     let buttons = controls(&app);
     for (i, button) in buttons.iter().enumerate() {
         assert!(button.rect.x >= 0. && button.rect.x + button.rect.width <= bounds.width);

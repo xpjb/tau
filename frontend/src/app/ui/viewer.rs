@@ -1,5 +1,5 @@
 use super::controls::Form;
-use super::{Context, Event, Frame, Id, Request, Widget};
+use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     notice::DownloadTarget,
     render::{color, contains},
@@ -59,6 +59,11 @@ impl ImageViewer {
     }
 }
 impl Widget for ImageViewer {
+    fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
+        self.spec.target.matches_source(&model.identity, model.account.source_lineage.as_deref())
+            && self.form.owns(target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if !self.spec.target.matches_source(&cx.model.identity, cx.model.account.source_lineage.as_deref()) {
             cx.ui.requests.push_back(Request::CloseViewer(self.id));

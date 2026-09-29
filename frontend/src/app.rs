@@ -123,15 +123,12 @@ impl App {
         let controller = Controller::new(store, wake.clone())?;
         let needs_setup = controller.settings.url().is_err();
         let root = ui::RootWidget {
-            id: ui::Id::new(),
             workspace: ui::Workspace::new(&controller),
             dialog: None,
             viewer: None,
             menu: None,
             notice: ui::NoticeWidget::new(),
             tooltips: ui::TooltipHost::default(),
-            #[cfg(test)]
-            test_cards: ui::CardDeck::new(),
         };
         let services = ui::Services {
             renderer: Renderer::new(ctx).map_err(anyhow::Error::msg)?,
@@ -206,7 +203,7 @@ impl App {
         if let Err(error) = self.finish_ui_requests() {
             self.report(Err(error));
         }
-        self.reconcile_routes();
+        self.reconcile_targets();
         self.services.renderer.draw(ctx, view, &[layer]);
         if let Some(point) = self.ui.hover {
             self.ui_event(ui::Event::Hover(Some(point)));

@@ -1028,6 +1028,14 @@ impl CodeBrowser {
 }
 
 impl Widget for CodeBrowser {
+    fn owns(&self, target: ui::Target, model: &Controller, _ui: &ui::UiState) -> bool {
+        self.view.as_ref().is_some_and(|v| v.identity == model.identity && v.lineage == model.account.source_lineage
+            && Some(&v.session) == model.account.selected.as_ref()
+            && (self.controls.owns(target) || self.surface.target == target && v.document.is_some()
+                || [v.scroll.target, v.horizontal.target, v.preview_scroll.target, v.preview_horizontal.target].contains(&target)
+                || v.search.as_ref().is_some_and(|f| f.control.target == target)))
+    }
+
     fn handle_event(&mut self, event: &InputEvent<'_>, cx: &mut Context<'_>) -> bool {
         if matches!(event, InputEvent::Cancel) {
             self.cancel_pointer(cx);

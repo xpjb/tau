@@ -1,5 +1,5 @@
 use super::controls::{ButtonStyle, Controls};
-use super::{Context, Event, Frame, Id, Request, Widget};
+use super::{Context, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     app::{
         Info, PlatformAction, SavedAction,
@@ -42,6 +42,15 @@ impl AttachmentCard {
     }
 }
 impl Widget for AttachmentCard {
+    fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
+        self.controls.owns(target)
+            && model.account.selected.as_ref() == Some(&self.target.session)
+            && self.target.matches_source(&model.identity, model.account.source_lineage.as_deref())
+            && model.selected().is_some_and(|chat| {
+                chat.feed.events.values().any(|e| e.entry_id == self.target.entry && e.attachment.is_some())
+            })
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if !self.target.matches_source(&cx.model.identity, cx.model.account.source_lineage.as_deref())
             || Some(&self.target.session) != cx.model.account.selected.as_ref()
@@ -394,9 +403,12 @@ impl CardDeck {
         card.visit_perframe(frame, cx);
     }
     pub fn event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        self.cards
-            .values_mut()
-            .any(|card| cx.ui.routes_pointer_to(event, card.controls.id) && card.handle_event(event, cx))
+        let mut handled = false;
+        for card in self.cards.values_mut() {
+            handled |= card.dispatch(event, cx);
+            if handled && !event.broadcast() { break; }
+        }
+        handled
     }
     pub fn hints(&self) -> impl Iterator<Item = (Rect, &Info)> {
         self.cards
@@ -462,11 +474,11 @@ impl AttachmentBrowser {
         self.form.begin_frame();
         self.interests.clear();
     }
-    fn bound(&self, cx: &Context<'_>) -> bool {
+    fn bound(&self, model: &Controller) -> bool {
         self.binding.as_ref().is_some_and(|(identity, lineage, session)| {
-            identity == &cx.model.identity
-                && lineage == &cx.model.account.source_lineage
-                && Some(session) == cx.model.account.selected.as_ref()
+            identity == &model.identity
+                && lineage == &model.account.source_lineage
+                && Some(session) == model.account.selected.as_ref()
         })
     }
     fn history(&mut self, cx: &mut Context<'_>) {
@@ -490,12 +502,20 @@ impl AttachmentBrowser {
     }
 }
 impl Widget for AttachmentBrowser {
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        self.show
+            && self.bound(model)
+            && (self.scroll.target == target
+                || self.form.owns(target)
+                || self.cards.cards.values().any(|c| c.owns(target, model, ui)))
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if matches!(event, Event::Cancel) {
             self.scroll.stop();
             return false;
         }
-        if !self.show || !self.bound(cx) {
+        if !self.show || !self.bound(cx.model) {
             return false;
         }
         if matches!(event, Event::Back) {

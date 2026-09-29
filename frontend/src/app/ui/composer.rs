@@ -1,5 +1,5 @@
 use super::controls::{ButtonStyle, Controls, TextField};
-use super::{Context, DialogSpec, Event, Frame, Id, Request, Widget};
+use super::{Context, Controller, DialogSpec, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     app::{PlatformAction, context_usage_display},
     editor::Editor,
@@ -173,6 +173,10 @@ impl Composer {
     }
 }
 impl Widget for Composer {
+    fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
+        self.bound(model) && (self.field.control.target == target || self.controls.owns(target))
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if !self.bound(cx.model) {
             return false;
@@ -194,9 +198,7 @@ impl Widget for Composer {
         if self.field.editor.value != old {
             self.edited(cx);
         }
-        if field {
-            return true;
-        }
+        if field && !event.broadcast() { return true; }
         let (handled, choice) = self.controls.event(event, cx);
         let result = match choice {
             Some(Choice::RetryCreate) => cx.model.retry_create_manually(),
@@ -457,6 +459,10 @@ impl QuickModels {
     }
 }
 impl Widget for QuickModels {
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.controls.owns(target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         let (handled, choice) = self.controls.event(event, cx);
         match choice {

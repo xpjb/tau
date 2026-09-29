@@ -318,16 +318,6 @@ impl ui::Context<'_> {
     }
 }
 impl App {
-    #[cfg(test)]
-    pub(super) fn attachment_card(&mut self, _gpu: &impl RenderContext, layer: &mut Layer, session: &str, entry: &str, file: &ChatAttachment, surface: &'static str, rect: Rect, clip: Rect) {
-        self.with_ui(|root,cx| root.test_cards.paint(session,entry,file,surface,&mut ui::Frame { layer,bounds:rect,clip },cx));
-    }
-
-
-}
-
-
-impl App {
     pub(super) fn finish_exports(&mut self) { self.with_ui(|_, cx| cx.finish_exports()); }
     pub(super) fn export_target(&self, session: &str, entry: &str) -> DownloadTarget {
         DownloadTarget { identity: self.controller.identity.clone(), lineage: self.controller.account.source_lineage.clone().unwrap_or_default(), session: session.into(), entry: entry.into() }

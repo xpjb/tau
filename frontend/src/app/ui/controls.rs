@@ -1,4 +1,4 @@
-use super::{Capture, Context, Event, Frame, Id, Target, Widget};
+use super::{Capture, Context, Controller, Event, Frame, Id, Target, UiState, Widget};
 use crate::{
     editor::Editor,
     render::{Layer, color, contains, contains_rounded},
@@ -121,7 +121,7 @@ impl Control {
             _ => false,
         }
     }
-    pub fn highlight(&mut self, layer: &mut Layer, ui: &mut super::UiState, pinned: bool) {
+    pub fn highlight(&mut self, layer: &mut Layer, ui: &mut UiState, pinned: bool) {
         let Some(rect) = self.rect else {
             return;
         };
@@ -162,6 +162,10 @@ impl Button {
     }
 }
 impl Widget for Button {
+    fn owns(&self, target: Target, _: &Controller, _: &UiState) -> bool {
+        self.control.target == target
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         self.control.handle(event, cx, false)
     }
@@ -242,6 +246,10 @@ impl TextField {
     }
 }
 impl Widget for TextField {
+    fn owns(&self, target: Target, _: &Controller, _: &UiState) -> bool {
+        self.control.target == target
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         let target = self.control.target;
         let capture = cx.ui.capture.filter(|c| c.target == target);
@@ -363,6 +371,10 @@ pub(in crate::app) struct Form<A> {
     pub buttons: Vec<(A, Button)>,
 }
 impl<A: Clone + PartialEq> Form<A> {
+    pub fn owns(&self, target: Target) -> bool {
+        self.buttons.iter().any(|(_, b)| b.control.target == target && b.control.rect.is_some())
+    }
+
     pub fn new(id: Id, buttons: &[(A, &str)]) -> Self {
         Self { id, buttons: buttons.iter().map(|(action, label)| (action.clone(), Button::new(id, label))).collect() }
     }
@@ -399,12 +411,8 @@ impl<A: Clone + PartialEq> Form<A> {
                 return (true, None);
             }
         }
-        for field in fields.iter_mut().rev() {
-            if field.handle_event(event, cx) {
-                return (true, None);
-            }
-        }
-        (false, None)
+        let handled = super::dispatch_children(fields.iter_mut().map(|f| &mut **f as &mut dyn Widget), event, cx);
+        (handled, None)
     }
     pub fn begin_frame(&mut self) {
         for (_, button) in &mut self.buttons {
@@ -439,6 +447,10 @@ pub(in crate::app) struct Controls<A> {
     pub items: Vec<(Option<usize>, Button, A)>,
 }
 impl<A: Clone + PartialEq> Controls<A> {
+    pub fn owns(&self, target: Target) -> bool {
+        self.items.iter().any(|(_, b, _)| b.control.target == target && b.control.rect.is_some())
+    }
+
     pub fn new(id: Id) -> Self {
         Self { id, items: vec![] }
     }

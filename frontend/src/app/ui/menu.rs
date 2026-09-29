@@ -3,7 +3,7 @@
 //! never dispatch through it.
 use super::controls::Control;
 use super::scroll::ScrollState;
-use super::{Context, DialogSpec, Event, Frame, Id, Operation, Request, TopicEdit, Widget};
+use super::{Context, Controller, DialogSpec, Event, Frame, Id, Operation, Request, Target, TopicEdit, UiState, Widget};
 use crate::{
     app::PlatformAction,
     render::{color, contains},
@@ -285,6 +285,12 @@ impl Menu {
     }
 }
 impl Widget for Menu {
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        self.scroll.target == target
+            || self.controls.iter().any(|c| c.target == target && c.rect.is_some())
+            || self.parent.as_ref().is_some_and(|p| p.rect.width > 0. && p.owns(target, model, ui))
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity
             || self.lineage != cx.model.account.source_lineage
@@ -292,6 +298,9 @@ impl Widget for Menu {
         {
             cx.ui.requests.push_back(Request::CloseMenu(self.id));
             return true;
+        }
+        if event.broadcast() && let Some(parent) = &mut self.parent {
+            parent.handle_event(event, cx);
         }
         let choice = match *event {
             Event::Cancel => {

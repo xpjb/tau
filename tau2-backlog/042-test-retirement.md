@@ -79,3 +79,14 @@ frontend test code is 8,551 raw / 11,434 same-format lines; app/UI test code occ
   and idle behavior, no longer an obsolete string-key check.
 - `test_ui.rs` remains, minus the obsolete ripple/section forwarders. It is **not
   deleted yet**; the rest of 042 and its 2,000-line test allocation are still open.
+
+### 037 ownership retirement
+
+Deleted the synthetic ancestor-path test and path-vector assertion. Strengthened
+actual nested capture coverage to require cancellation before any frame. Added
+one consumed-Tick/sibling-motion regression (both fixes reproduced against the
+previous commit). Deleted the gallery-only caption/tooltip coordinate test and
+Root's separate test-card ownership/dispatch tree, along with its App paint
+adapter. Existing Save/retry/restart/source and Extract single-flight checks now
+paint and dispatch through the actual attachment browser. Net tests: **45 raw /
+77 same-format lines removed**; all 198 surviving frontend tests pass.

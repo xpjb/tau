@@ -1,5 +1,5 @@
 use super::controls::{Form, TextField};
-use super::{Context, Event, Frame, Id, Request, Target, Widget};
+use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{editor::Editor, render::color, store::Settings};
 use anyhow::Result;
 use sanscale::Rect;
@@ -51,7 +51,7 @@ impl Dialog {
     }
     pub fn field(&mut self, target: Target) -> Option<&mut TextField> {
         match self {
-            Self::Connection(d) => [&mut d.url, &mut d.token].into_iter().find(|f| f.control.target == target),
+            Self::Connection(d) => (!d.tools).then_some([&mut d.url, &mut d.token]).into_iter().flatten().find(|f| f.control.target == target),
             Self::Topic(d) => d.fields().into_iter().find(|f| f.control.target == target),
             Self::Models(d) => [&mut d.models, &mut d.search].into_iter().find(|f| f.control.target == target),
             Self::Daemon(d) => d.value.iter_mut().find(|f| f.control.target == target),
@@ -60,7 +60,7 @@ impl Dialog {
     }
     pub fn field_ref(&self, target: Target) -> Option<&TextField> {
         match self {
-            Self::Connection(d) => [&d.url, &d.token].into_iter().find(|f| f.control.target == target),
+            Self::Connection(d) => (!d.tools).then_some([&d.url, &d.token]).into_iter().flatten().find(|f| f.control.target == target),
             Self::Topic(d) => d.name.iter().chain(d.prompt.iter()).find(|f| f.control.target == target),
             Self::Models(d) => [&d.models, &d.search].into_iter().find(|f| f.control.target == target),
             Self::Daemon(d) => d.value.iter().find(|f| f.control.target == target),
@@ -110,6 +110,16 @@ impl Dialog {
     }
 }
 impl Widget for Dialog {
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        match self {
+            Self::Connection(d) => d.owns(target, model, ui),
+            Self::Topic(d) => d.owns(target, model, ui),
+            Self::Models(d) => d.owns(target, model, ui),
+            Self::Daemon(d) => d.owns(target, model, ui),
+            Self::Operation(d) => d.owns(target, model, ui),
+        }
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         match self {
             Self::Connection(d) => d.handle_event(event, cx),
@@ -200,6 +210,11 @@ impl ConnectionDialog {
     }
 }
 impl Widget for ConnectionDialog {
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.form.owns(target)
+            || !self.tools && (self.url.control.target == target || self.token.control.target == target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         let composing = self.url.editor.composing() || self.token.editor.composing();
         if matches!(event, Event::Back) && composing {
@@ -677,6 +692,10 @@ impl TopicDialog {
     }
 }
 impl Widget for TopicDialog {
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.form.owns(target) || self.name.iter().chain(&self.prompt).any(|f| f.control.target == target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
             cx.ui.requests.push_back(Request::Close(self.form.id));

@@ -1,6 +1,6 @@
 # 037 — One retained control and child-traversal contract
 
-Status: **In progress. Control migration implemented; composition/lifetime slice next.**
+Status: **Source-complete. Physical interaction acceptance remains open.**
 Depends on 036's paint-order contract. Absorbs unfinished
 005/008/009/028 and residual 030/031 work. Keep the concrete Widget tree and broad
 sibling-borrowed Context/Services; do not add another framework.
@@ -107,3 +107,41 @@ number; both extraction tests passed after that locator cleanup
 (`9a3d28cf-467e-42ef-8772-bdfa2b379481`). Neither cleanup changes the size totals.
 `origin/tau2` was re-fetched and remains `33f7d6f`. No integration merge, deployment,
 full-workspace acceptance or physical Android/Windows QA is claimed.
+
+## Composition/lifetime slice — September 29, 2026
+
+Removed `ui/routes.rs`, all cached ancestor paths (including native/clipboard
+paths), and routing-only Root/Workspace/Chat IDs. `Widget::owns` queries the real
+retained owner and exact leaf, with source-record liveness for transcript rows and
+attachment cards. Container-local workspace layout governs paint, input and
+visibility; Chat's child order and Root's modal choice are also shared. Captured
+movement/release traverses only its owner, not whichever opaque sibling it crosses.
+There is no second tree, registry or serialized identity. Shared child visits
+inherit one clip. Lost focus cancels preedit; abandoned captures also stop their
+selection/scroll candidates.
+
+Tick/Cancel traversal is explicitly broadcast rather than consumable input.
+Workspace, overlays, sibling controls and menu ancestors all receive their updates;
+hidden notices suspend deadlines, and hidden tooltip updates do not demand paints.
+Durable operations and file-interest reconciliation remain outside paint.
+
+Strengthened the existing attachment lifetime check to remove its source **without
+a frame**, and added one real long-press/sibling-wheel regression. Both fail on
+`18764eb` (`e0c86321-74f0-45ee-94de-7c20f5ca1edd`) and pass after the fix
+(`3ddfacda-de8d-47ee-8422-bb0decb42088`). Removed the route-vector representation
+assertion and synthetic ancestor-path test, not the actual source/IME/capture
+checks. Removed Root's test-only card subtree and gallery paint/dispatch adapter;
+Save/Extract checks now use the real attachment browser. The redundant
+coordinate-based caption/tooltip check is gone.
+
+Validation: all-target frontend compiler check and **198/198 frontend tests across
+10 binaries, zero skipped** (`fce6f5eb-a8ac-4458-8c94-9f96a33286a6`, 76.644s).
+Later import-only cleanup also compiler-checked. No device acceptance is claimed.
+
+This correctness slice costs **104 raw / 123 same-format production lines**, while
+removing **45 / 77 test lines**: total growth **59 / 46**, not a saving. The old
+routing machinery is deleted, rather than wrapped, but exact ownership and
+lifecycle checks cost more than its incomplete scope-only switch. Do not conceal
+that cost: cumulative saving is now **244 / 198**, and the 5,000-line gate remains
+open. 038 must remove actual repeated placement code; 039–041 still own removal
+of the legacy projection/model pipeline.

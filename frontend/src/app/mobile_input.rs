@@ -7,7 +7,7 @@ impl App {
             return None;
         }
         let edit = self.ui.native.as_ref()?;
-        self.root.active_route(edit.target, &self.ui)?;
+        if !self.root.owns(edit.target, &self.controller, &self.ui) { return None; }
         if !edit.matches(edit.token, &self.controller) || self.ui.focus != Some(edit.target) {
             return None;
         }

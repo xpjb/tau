@@ -1,7 +1,7 @@
 //! Settings widgets own staged edits and completion lifetimes. Settings schema,
 //! parsing and validation remain in daemon_settings / models, not in the UI tree.
 use super::controls::{Button, Form, TextField};
-use super::{Context, Event, Frame, Id, Request, Widget};
+use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     daemon_settings::{Draft, Kind, SECTIONS, fields},
     editor::Editor,
@@ -64,6 +64,13 @@ impl ModelsDialog {
     }
 }
 impl Widget for ModelsDialog {
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.form.owns(target)
+            || self.models.control.target == target
+            || self.search.control.target == target
+            || self.suggestions.iter().any(|(_, b)| b.control.target == target && b.control.rect.is_some())
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity {
             cx.ui.requests.push_back(Request::Close(self.id));
@@ -362,6 +369,10 @@ impl DaemonDialog {
     }
 }
 impl Widget for DaemonDialog {
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.form.owns(target) || self.value.as_ref().is_some_and(|f| f.control.target == target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
             cx.ui.requests.push_back(Request::Close(self.id));

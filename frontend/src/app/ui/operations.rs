@@ -1,7 +1,7 @@
 //! Short, instance-bound forms. The field and each choice live on the dialog;
 //! submission uses the captured destination, never a current-chat field index.
 use super::controls::{Form, TextField};
-use super::{Context, DialogSpec, Event, Frame, Id, Request, Widget};
+use super::{Context, Controller, DialogSpec, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{editor::Editor, render::color};
 use anyhow::Result;
 use sanscale::Rect;
@@ -194,6 +194,10 @@ impl OperationDialog {
     }
 }
 impl Widget for OperationDialog {
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.form.owns(target) || self.value.as_ref().is_some_and(|f| f.control.target == target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
             cx.ui.requests.push_back(Request::Close(self.id));

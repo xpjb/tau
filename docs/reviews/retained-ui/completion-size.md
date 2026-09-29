@@ -86,16 +86,19 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After 036 and 037's control checkpoint, raw frontend code is **27,422**;
-same-format code is **32,774**. Production is **19,081 / 21,501** and tests are
-**8,341 / 11,273** (raw / same-format). Net reduction is **303 / 244**; remaining
-gap is **4,697 / 4,756**. These are intermediate results, not completion.
+After 036 and 037's control/composition/lifetime work, raw frontend code is
+**27,481**; same-format code is **32,820**. Production is **19,185 / 21,624** and
+tests are **8,296 / 11,196** (raw / same-format). Net reduction is **244 / 198**;
+remaining gap is **4,756 / 4,802**. Production is currently **11 / 40 above** the
+baseline: the later architectural deletions must deliver real production savings.
+These are intermediate results, not completion.
 Deltas below use reduction-positive values and show raw / same-format:
 
 | Slice / commit | Deleted path | Replacement cost | Net production reduction | Net test reduction | Outside charge | Cumulative / remaining |
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | 036 | Unordered surface batching; Move-only selection; icon/centering tests | Ordered surface boundaries + three behavior checks | −44 / −46 | +44 / −24 | 0 | Reduction 0 / −70; gap 5,000 / 5,070 |
 | 037 controls | Paint/register bypasses; renderer input state; per-row feedback; Debug keys; redundant hover/gallery tests | One retained Button/Control feedback path, explicit styles/cursor, typed equality, consumed/action pair, compact checks | +137 / +129 | +166 / +185 | 0 | Reduction 303 / 244; gap 4,697 / 4,756 |
+| 037 composition/lifetime | Root descendant routes, cached paths/routing IDs, separate fixture card tree and redundant path/gallery tests | Exact owner/leaf validation, local layout/order, explicit lifecycle broadcast, two before/after checks | −104 / −123 | +45 / +77 | 0 | Reduction 244 / 198; gap 4,756 / 4,802 |
 
 Keep raw and same-format totals alongside the ledger. A deletion shared by two
 slices is counted once. Documentation and this measurement recipe are not runtime

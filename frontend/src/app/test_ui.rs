@@ -284,7 +284,7 @@ impl App {
         }
         self.finish_ui_requests()?;
         self.sync_navigation();
-        self.reconcile_routes();
+        self.reconcile_targets();
         Ok(())
     }
     pub(super) fn code_action(&mut self, action: FixtureChoice) -> Result<()> {

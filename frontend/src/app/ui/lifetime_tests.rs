@@ -62,16 +62,6 @@ fn retained_rows_keep_identity_on_streaming_and_reorder_but_not_source_replaceme
     let p = center(crate::render::intersect(row.control.rect.unwrap(), row.control.clip));
     h.app.press(1, p, true);
     assert_eq!(h.app.ui.capture.unwrap().target, target);
-    assert_eq!(
-        h.app.ui.capture_route,
-        vec![
-            h.app.root.id,
-            h.app.root.workspace.id,
-            h.app.root.workspace.chat.id,
-            h.app.root.workspace.chat.transcript.scroll.target.scope,
-            target.scope
-        ]
-    );
     h.app.controller.account.source_lineage = Some("replacement-history".into());
     h.app.release(1, p); // no frame can mediate the source fence
     assert!(h.app.ui.capture.is_none());
@@ -153,24 +143,6 @@ fn claimed_text_selection_is_not_taken_by_its_scroll_parent() {
         assert!(cx.ui.capture.unwrap().claimed);
         assert_eq!(scroll.value, 0.);
     });
-}
-
-#[test]
-fn ancestor_detach_does_not_apply_a_stale_path_to_a_replacement_focus() {
-    let mut ui = UiState::new((100, 100), false);
-    let root = Id::new();
-    let parent = Id::new();
-    let child = Id::new();
-    let target = Target { scope: child, widget: Id::new() };
-    ui.focus = Some(target);
-    ui.focus_route = vec![root, parent, child];
-    ui.detach(parent);
-    assert!(ui.focus.is_none());
-    ui.focus_route = vec![root, parent, child];
-    let replacement = Target { scope: Id::new(), widget: Id::new() };
-    ui.focus = Some(replacement);
-    ui.detach(parent);
-    assert_eq!(ui.focus, Some(replacement));
 }
 
 #[test]
@@ -334,4 +306,27 @@ fn selection_follows_scrolled_text_and_tail_returns_to_latest() {
     assert!(h.app.controller.chats["demo"].local.position.follow);
     let scroll = &h.app.root.workspace.chat.transcript.scroll;
     assert_eq!(scroll.value, scroll.max);
+}
+
+#[test]
+fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
+    let mut h = Harness::new(false);
+    let chat = h.app.controller.chats.get_mut("demo").unwrap();
+    let mut event = chat.feed.events.values().next().unwrap().clone();
+    event.text = "A scrolling transcript paragraph.\n\n".repeat(120);
+    event.attachment = None;
+    chat.feed.events.clear();
+    chat.feed.events.insert(event.order, event);
+    chat.local.position.follow = false;
+    chat.local.position.key = None;
+    h.frame();
+    h.app.wheel(200., false, center(h.app.root.workspace.chat.transcript.scroll.rect));
+    h.app.root.workspace.chat.transcript.scroll.wheel.as_mut().unwrap().1 -= std::time::Duration::from_millis(100);
+    let point = center(h.app.root.workspace.chat.header.title.rect.unwrap());
+    h.app.press(41, point, true);
+    h.app.ui.capture.as_mut().unwrap().started -= std::time::Duration::from_millis(500);
+    let before = h.app.root.workspace.chat.transcript.scroll.value;
+    h.app.ui_event(Event::Tick(0.05));
+    assert!(h.app.root.menu.is_some(), "The header consumes its held-touch update");
+    assert!(h.app.root.workspace.chat.transcript.scroll.value > before, "That consumption cannot skip the body update");
 }

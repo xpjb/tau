@@ -1,4 +1,4 @@
-use super::{Context, Event, Frame, Id, Menu, MenuChoice, Request, Widget};
+use super::{Context, Controller, Event, Frame, Id, Menu, MenuChoice, Request, Target, UiState, Widget};
 use super::{attachments::AttachmentCard, controls::Control};
 use crate::{
     app::{DetailLine, Row},
@@ -101,9 +101,21 @@ impl MessageRow {
     }
 }
 impl Widget for MessageRow {
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        let local = self.control.target == target
+            || self.parts.iter().any(|p| p.control.target == target && p.control.rect.is_some());
+        (local
+            && self
+                .row
+                .block
+                .as_ref()
+                .is_none_or(|id| model.selected().is_some_and(|chat| chat.feed.events.values().any(|e| &e.id == id))))
+            || self.attachment.as_ref().is_some_and(|c| c.owns(target, model, ui))
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if let Some(card) = &mut self.attachment
-            && card.handle_event(event, cx)
+            && card.dispatch(event, cx) && !event.broadcast()
         {
             return true;
         }

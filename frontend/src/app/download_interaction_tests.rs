@@ -1,7 +1,7 @@
 //! Exercise the real hit dispatch and save lifecycle without invoking OS apps or a daemon.
 use super::*;
 use tau_protocol::blocks::{BlockHeader, BlockKind};
-use super::download_render_tests::{Case, cases, install, controls, panel, save, hints};
+use super::download_render_tests::{Case, cases, install, controls, save, hints};
 use chad::{Config, HeadlessCtx};
 use std::{sync::Arc, time::Duration};
 
@@ -36,9 +36,17 @@ fn verified(app: &mut App, case: &Case) {
     app.controller.store.bind_source(&app.controller.identity, &lineage).unwrap();
     app.controller.account.source_lineage = Some(lineage);
 }
-fn paint(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment) {
-    let layer = panel(app, ctx, case, file, Rect::new(0.,0.,ctx.size().0 as f32,ctx.size().1 as f32));
-    app.services.renderer.draw(ctx, ctx.view(), &[layer]);
+pub(super) fn paint(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment) {
+    if !app.controller.chats["demo"].feed.events.values().any(|e| e.entry_id == case.id) {
+        let item = event(app, case, file.clone(), 0);
+        let chat = app.controller.chats.get_mut("demo").unwrap();
+        chat.feed.events.clear();
+        chat.feed.events.insert(0, item);
+    }
+    app.root.workspace.show_chats = false;
+    app.root.workspace.attachments.show = true;
+    app.tick(0.);
+    app.frame(ctx, ctx.view());
 }
 fn tap(app: &mut App, index: usize, touch: bool) {
     let r = controls(app)[index].rect;
@@ -157,29 +165,6 @@ fn saved_zip_text_actions_dispatch_open_show_extract_to_the_correct_file() {
         let PlatformAction::UseDownload(saved,_,target)=action else {panic!("unexpected action")};
         assert_eq!(target.session,"demo"); assert_eq!(target.entry,case.id);
         assert!(saved.reference.ends_with(&format!("saved-{}",case.id)));
-    }
-}
-
-#[test]
-fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
-    for mobile in [false, true] {
-        let (mut app, ctx, _root) = fixture((360, 720), mobile);
-        let mut case = cases().into_iter().find(|c| c.id == "14-cached").unwrap();
-        case.caption = Some("This caption stays on the card".into());
-        let file = install(&mut app, &case);
-        paint(&mut app, &ctx, &case, &file);
-        assert!(hints(&app).iter().all(|(_, info)| matches!(info, Info::Attachment(key, ..) if key.contains(":action:"))));
-        assert!(!app.placed_controls().iter().any(|hit| matches!(hit.action, FixtureChoice::Info(Info::Attachment(..)))));
-        let card = attachments::control_panel(Rect::new(12., 44., 336., attachments::card_height(&file)), 1.);
-        for point in [Vec2::new(card.x + 16., card.y + 20.), Vec2::new(card.x + 16., card.y + 42.),
-            Vec2::new(card.x + 16., card.y - 14.)] {
-            assert!(!hints(&app).iter().any(|(r, _)| contains(*r, point)));
-            app.hover(Some(point)); app.tick(0.);
-            app.press(3, point, mobile); app.release(3, point);
-            assert!(!app.root.tooltips.info.pinned && app.root.tooltips.info.progress == 0.);
-            assert!(app.services.platform.is_empty());
-        }
-        assert!(!controls(&app).is_empty(), "FixtureChoice controls and their own descriptions remain available");
     }
 }
 

@@ -1,5 +1,5 @@
 use super::controls::{ButtonStyle, Control, Controls};
-use super::{Context, Event, Frame, Id, Request, Widget};
+use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{icons::Icon, render::color};
 use sanscale::Rect;
 use tau_protocol::*;
@@ -27,6 +27,10 @@ impl Header {
     }
 }
 impl Widget for Header {
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.title.target == target && self.title.rect.is_some() || self.controls.owns(target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if matches!(event,Event::Context(p) if self.title.contains(*p))
             || matches!(event, Event::Tick(_) | Event::Up { .. })

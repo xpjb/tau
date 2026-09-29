@@ -127,9 +127,10 @@ fn nested_capture_is_clipped_and_cannot_activate_a_replaced_card_or_another_poin
     h.app.release(22, p);
     assert!(h.app.actions().is_empty());
     assert_eq!(h.app.ui.capture.unwrap().pointer, 21);
-    // Reconcile the captured node away between press and release.
+    // Remove the source while the same card scope still exists. No paint may
+    // mediate cancellation or allow the saved-file action to escape.
     h.app.controller.chats.get_mut("demo").unwrap().feed.events.remove(&19);
-    h.frame();
+    h.app.hover(Some(p));
     assert!(h.app.ui.capture.is_none_or(|c| c.target != old));
     h.app.release(21, p);
     assert!(h.app.actions().is_empty());

@@ -9,7 +9,7 @@ impl App {
     }
     pub(super) fn ui_event(&mut self, event: ui::Event<'_>) -> bool {
         self.sync_navigation();
-        self.reconcile_routes();
+        self.reconcile_targets();
         if let ui::Event::Down { pointer, .. } | ui::Event::Move { pointer, .. } | ui::Event::Up { pointer, .. } = event
             && self.ui.capture.is_some_and(|capture| capture.pointer != pointer)
         {
@@ -46,50 +46,32 @@ impl App {
         {
             self.ui.capture = None;
         }
-        self.reconcile_routes();
+        self.reconcile_targets();
         handled
     }
-    pub(super) fn reconcile_routes(&mut self) {
-        if let Some(target) = self.ui.focus {
-            if let Some(path) = self.root.active_route(target, &self.ui) {
-                self.ui.focus_route = path;
-            } else {
-                self.ui.focus = None;
-            }
+    pub(super) fn reconcile_targets(&mut self) {
+        let owns = |target| self.root.owns(target, &self.controller, &self.ui);
+        let focus = self.ui.focus.filter(|t| owns(*t));
+        let capture = self.ui.capture.filter(|c| owns(c.target));
+        let hot = self.ui.hot.filter(|(t, _)| owns(*t));
+        let native = self.ui.native.as_ref().is_none_or(|e| owns(e.target));
+        let paste = self.ui.paste.as_ref().is_none_or(|e| owns(e.target));
+        if self.ui.focus != focus {
+            self.cancel_preedit();
+            self.ui.dirty = true;
         }
-        if self.ui.focus.is_none() {
-            self.ui.focus_route.clear();
+        if self.ui.capture.is_some() && capture.is_none() {
+            // The sole pointer lost its owner. Stop the abandoned selection and
+            // ancestor scroll candidates too, not just the global target token.
+            self.with_ui(|root, cx| root.workspace.cancel(cx));
         }
-        if let Some(capture) = self.ui.capture {
-            if let Some(path) = self.root.active_route(capture.target, &self.ui) {
-                self.ui.capture_route = path;
-            } else {
-                self.ui.capture = None;
-            }
-        }
-        if self.ui.capture.is_none() {
-            self.ui.capture_route.clear();
-        }
-        if let Some((target, _)) = self.ui.hot {
-            if let Some(path) = self.root.active_route(target, &self.ui) {
-                self.ui.hot_route = path;
-            } else {
-                self.ui.hot = None;
-            }
-        }
-        if self.ui.hot.is_none() {
-            self.ui.hot_route.clear();
-        }
-        let native = self.ui.native.as_ref().and_then(|e| self.root.active_route(e.target, &self.ui));
-        if let Some(path) = native {
-            self.ui.native.as_mut().unwrap().route = path;
-        } else {
+        self.ui.focus = focus;
+        self.ui.capture = capture;
+        self.ui.hot = hot;
+        if !native {
             self.ui.native = None;
         }
-        let paste = self.ui.paste.as_ref().and_then(|e| self.root.active_route(e.target, &self.ui));
-        if let Some(path) = paste {
-            self.ui.paste.as_mut().unwrap().route = path;
-        } else {
+        if !paste {
             self.ui.paste = None;
         }
     }

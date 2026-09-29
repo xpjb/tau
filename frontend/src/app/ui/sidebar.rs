@@ -1,4 +1,4 @@
-use super::{Context, DialogSpec, Event, Frame, Id, Request, TopicEdit, Widget};
+use super::{Context, Controller, DialogSpec, Event, Frame, Id, Request, Target, TopicEdit, UiState, Widget};
 use super::{
     controls::{ButtonStyle, Controls},
     scroll::ScrollState,
@@ -63,6 +63,22 @@ impl ProjectTabs {
     }
 }
 impl Widget for Sidebar {
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        self.controls.items.iter().any(|(_, b, choice)| {
+            b.control.target == target
+                && b.control.rect.is_some()
+                && match choice {
+                    Choice::Select(id) | Choice::Info(Info::CacheTtl(id)) => model
+                        .account
+                        .sessions
+                        .iter()
+                        .any(|s| &s.id == id && s.project_id == model.account.selected_project),
+                    _ => true,
+                }
+        }) || self.scroll.target == target
+            || self.projects.owns(target, model, ui)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.binding.as_ref().is_none_or(|(identity, lineage)| {
             identity != &cx.model.identity || lineage != &cx.model.account.source_lineage
@@ -72,7 +88,7 @@ impl Widget for Sidebar {
         if self.scroll.bar_event(event, cx) {
             return true;
         }
-        if cx.ui.routes_pointer_to(event, self.projects.controls.id) && self.projects.handle_event(event, cx) {
+        if self.projects.dispatch(event, cx) && !event.broadcast() {
             return true;
         }
         if let Some((Choice::Select(id), point)) = self.controls.context(event, cx) {
@@ -264,6 +280,18 @@ impl Widget for Sidebar {
     }
 }
 impl Widget for ProjectTabs {
+    fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
+        self.scroll.target == target
+            || self.controls.items.iter().any(|(_, b, choice)| {
+                b.control.target == target
+                    && b.control.rect.is_some()
+                    && match choice {
+                        TopicChoice::Select(id) => model.account.projects.iter().any(|p| &p.id == id),
+                        TopicChoice::New => true,
+                    }
+            })
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if let Some((TopicChoice::Select(id), point)) = self.controls.context(event, cx) {
             self.scroll.stop();

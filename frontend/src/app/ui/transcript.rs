@@ -1,4 +1,4 @@
-use super::{Context, Event, Frame, Id, Request, Target, Widget};
+use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use super::{composer::QuickModels, message_row::MessageRow, scroll::ScrollState};
 use crate::{
     app::{Autoscroll, Placed, PlatformAction, Row, attachments},
@@ -207,6 +207,19 @@ impl Transcript {
     }
 }
 impl Widget for Transcript {
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        self.binding.as_ref().is_some_and(|(identity, lineage, session)| {
+            identity == &model.identity
+                && lineage == &model.account.source_lineage
+                && session == &model.account.selected
+        }) && (self.selection == target
+            || self.scroll.target == target
+            || self.horizontal.target == target
+            || model.account.selected.as_ref().is_some_and(|s| model.quick_start(s))
+                && self.models.owns(target, model, ui)
+            || self.rows.iter().any(|r| r.owns(target, model, ui)))
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         self.route(event, cx)
     }
@@ -513,11 +526,11 @@ impl Transcript {
             self.remember_scroll(cx);
             return true;
         }
-        let mut child = cx.ui.routes_pointer_to(event, self.models.controls.id) && self.models.handle_event(event, cx);
+        let mut child = self.models.dispatch(event, cx);
         let mut toggle = None;
         for row in self.rows.iter_mut().rev() {
-            if (!child && cx.ui.routes_pointer_to(event, row.control.target.scope)) || matches!(event, Event::Tick(_)) {
-                child |= row.handle_event(event, cx);
+            if !child || event.broadcast() {
+                child |= row.dispatch(event, cx);
             }
             if let Some(choice) = row.toggle.take() {
                 toggle = Some(choice);

@@ -1,5 +1,5 @@
 use super::controls::Control;
-use super::{Context, Event, Frame, Id, Request, Widget};
+use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     app::notices::NoticePopup,
     icons::Icon,
@@ -41,6 +41,10 @@ impl NoticeWidget {
     }
 }
 impl Widget for NoticeWidget {
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.popup.visible() && (self.body.target == target || self.close.target == target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         self.sync(cx);
         if !self.popup.visible() {
