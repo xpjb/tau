@@ -341,6 +341,7 @@ impl App {
         if !visible {
             self.services.wake.sync(None);
             self.services.counter_bucket = None;
+            self.with_ui(|root, cx| root.workspace.chat.code.code_tick(0., cx));
         }
     }
     pub fn resize(&mut self, size: (u32, u32), scale: f32, origin: Vec2) {

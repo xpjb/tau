@@ -342,3 +342,16 @@ async fn filesystem_streams_require_grants_share_connection_and_release_credit_s
     assert!(client.files(request).await.is_err());assert_eq!(backend.reads.load(Ordering::SeqCst),calls);
     client.shutdown().await;server.shutdown().await;
 }
+
+#[tokio::test]
+async fn warming_file_names_uses_background_slots_and_does_not_block_file_previews() {
+    use tau_protocol::files::*;
+    let (_,server,client)=fixture().await;
+    let mut background=Box::pin(client.files(FileRequest {session_id:"chat".into(),path:Some("/wait".into()),operation:FileOperation::Index {revision:None}}));
+    tokio::select! {_ = &mut background => panic!("fixture must stall"), _ = tokio::time::sleep(Duration::from_millis(150)) => {}}
+    assert_eq!(client.stats().bulk_slots,1);assert_eq!(client.stats().foreground_slots,0);
+    let preview=client.files(FileRequest {session_id:"chat".into(),path:Some("/fixture.rs".into()),operation:FileOperation::Open {revision:None}});
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(3),preview).await.unwrap().unwrap(),FileReply::Text {..}));
+    drop(background);assert_eq!(client.stats().active_streams,0);assert_eq!(client.stats().bulk_slots,0);
+    client.shutdown().await;server.shutdown().await;
+}

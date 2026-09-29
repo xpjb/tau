@@ -1,4 +1,4 @@
-# Remote code viewer — integrated source, unreleased
+# Remote files and local fuzzy picker
 
 Read-only files, launched with the folder button beside View attachments. Directory
 list and code buffer share one surface on desktop and Android. The chat's cwd is
@@ -8,9 +8,27 @@ it. There are no filesystem write/save, rename, delete or execute actions.
 ## Interaction
 
 - Tap a directory/file, use Up to browse parents, or use arrows/j/k and Enter.
-- Ctrl+Space / Find opens a fuzzy path picker over the chat's initial cwd. Names
+  Dot-prefixed files and directories are hidden by default. **Show hidden** toggles
+  them in both directory browsing and the picker; it does not disable ignore rules.
+- Ctrl+Space / Find opens a local fuzzy **file** picker over the chat's initial cwd.
+  Nucleo supplies subsequence scoring, path/word-boundary ranking, smart case,
+  accent normalization, independent whitespace-separated terms (in either order),
+  and exact/prefix/suffix/negative terms. Matching characters are coloured. Names
   include directory components, not file contents. **Here** narrows the picker to
   the currently browsed folder (also useful for folders outside cwd).
+- Up/Down, Ctrl-N/P, Ctrl-J/K, Tab/Shift-Tab, Page Up/Down and Ctrl-Home/End move the
+  selection without editing the query. All matches are scrollable, not just 100.
+  The count shows matches / eligible indexed files, with explicit indexing,
+  partial-index and cached/error states. Ignored files and untraversed symlink
+  directories are not represented as complete filesystem coverage.
+- The selected file has a syntax-coloured, independently scrollable preview below
+  the results. Single click/tap selects; Enter, **Open**, or double-click opens it.
+  Rapid movement coalesces into a 75 ms delayed preview interest; cached previews
+  appear immediately, and revision checks avoid retransmitting unchanged bodies.
+  The preview is separate from the opened buffer, selection and saved chat draft.
+- **Browse** returns to the directory/code surface. Escape returns directly to chat
+  when the picker was opened from chat, or to the prior browser otherwise. **Chat**
+  and **X** have distinct retained control identities and both close the browser.
 - Desktop: click/drag lines; Shift+arrows extend a selection, `v` starts one, and
   Ctrl+C / Copy copies the original selected text. Horizontal wheel/arrows pan.
 - Android: gutter tap/drag selects, or hold code for a haptic acknowledgement then
@@ -34,25 +52,37 @@ it. There are no filesystem write/save, rename, delete or execute actions.
   service. Parsing/diffing and filesystem work run off the render thread.
 - The daemon owns one index worker, initialized ahead of time over its cwd. Indexes
   are shared by canonical root, not chat, and refreshed every ten seconds. They
-  respect `.gitignore`, including when no repository is initialized. Explicit
-  directory browsing still exposes ignored files. Symlink directories are not
-  recursively followed by the index. Git's internal `.git` directory is skipped.
-- Up to four roots are indexed; each scan is limited to 200,000 entries, 32 MiB of
-  name/path strings, or 15 seconds. Partial/indexing status is explicit; Here can
-  narrow the root. Shallow paths are indexed first so project/folder names remain
-  discoverable even if a huge cache subtree exhausts the deeper scan. Ordinary directories use 256-entry pages, search returns 100
-  ranked paths, and neither response requires an unbounded tree on the client.
-- The native protocol is **21** (matching client/daemon required; no schema change).
-  File RPCs share the existing authenticated Iroh endpoint/connection, foreground
-  admission budget, 16 KiB chunks, 64 KiB byte credit, compression, chunk hashes,
-  whole-response hash, and stream-local cancellation. No HTTP file path, attachment
+  respect `.gitignore`/ignore rules, including when no repository is initialized.
+  Explicit directory browsing still exposes ignored files. Symlink directories
+  are not recursively followed; Git's internal `.git` directory is skipped.
+- Up to four roots are indexed. Each scan is limited to 200,000 **files**, 24 MiB of
+  conservatively estimated JSON records (within the 32 MiB response budget), or
+  15 seconds. Visible paths are scanned before hidden paths, so hidden caches
+  cannot consume the visible-file budget first. Unsupported paths/read failures
+  and scan limits mark the index partial. Ordinary directories use 256-entry pages.
+- The client warms names for the foreground chat before the picker is opened.
+  Index sync is independent of preview interests and query edits. An unchanged
+  revision transfers no names; a known previous revision sends additions/removals,
+  and an unknown/evicted revision sends a snapshot. The client applies each update
+  atomically off the UI thread, retaining verified cached names on temporary loss.
+  Chat/root/source changes fence publication; a new scope must be confirmed before
+  cached names are reused. Names are memory-only, not transcript or disk-cache data.
+- Ranking runs on a reusable, latest-only worker with cancellation during scans.
+  Rendering shapes only visible result/preview rows. Preview caching is bounded to
+  eight documents / 8 MiB of source text, in addition to the open buffer.
+- The native protocol is **22** (matching client/daemon required; no schema change).
+  File RPCs share the existing authenticated Iroh endpoint/connection, 16 KiB
+  chunks, 64 KiB byte credit, compression, chunk hashes, whole-response hash, and
+  stream-local cancellation. Name sync uses lower-priority background admission;
+  directory reads and previews retain foreground admission. No HTTP file path, attachment
   staging, transcript database write, provider call, or separate native endpoint.
 - Before any filesystem access the daemon verifies the chat still exists. Cwd
   resolution is centralized in the manager; today all chats use the daemon cwd.
-- The frontend owns one coalesced viewer interest and bounded result mailbox. Chat,
-  account/source lineage and request generations fence stale results. Navigation,
-  closing and backgrounding cancel the stream; foregrounding and reconnecting
-  resubscribe. Closing also releases the last file payload held by the mailbox.
+- The frontend owns independent coalesced name-sync and viewer interests with
+  bounded result mailboxes. Chat, account/source lineage and request generations
+  fence stale results. Navigation cancels old interests; backgrounding/occlusion
+  and modals suspend them. Closing the browser releases preview payloads while
+  ordinary foreground-chat name warming continues. Reopening needs no query RPC.
 - Open files/directories refresh once per second after completion of a read. Files
   are published to the UI only as complete verified snapshots; unchanged files send
   no body. Equal source lines keep their Sanscale paragraph identities even across
@@ -85,7 +115,7 @@ Reproduce screenshots with `TAU_CODE_PREVIEW_DIR=/tmp/code-previews` and managed
 variable is optional). All Rust commands use `/usr/local/bin/cargo`; no Clippy or
 Cargo built-in test runner. Final run IDs/results are recorded below at handoff.
 
-This branch is **not deployed**. Physical Windows/Android input, native keyboard,
+The local-picker update is **not deployed**. Physical Windows/Android input, native keyboard,
 IME, haptic feedback and weak-device GPU acceptance remain device QA; successful
 cross-compilation or headless phone layouts do not establish those results.
 
@@ -134,3 +164,38 @@ Merged-tree checks, all through `/usr/local/bin/cargo`:
 No release packages, deployment or service restart. The older 0.7.8 downloads use
 protocol 20 and cannot be paired with this protocol-21 source; a new matched
 client/daemon release is needed. Physical-device QA remains open.
+
+
+## Local-picker QA handoff
+
+Branch `fix/tau2-fzf-picker`, worktree `/root/tau2-fzf-picker`, based on release
+`c13c670` (0.7.9 / protocol 21). Implementation commits `9a3c3f9` and `41cc562` are
+pushed; the follow-up fixes idle prefetch invalidation and updates native tests.
+**No merge, release build, installer delivery, deployment or service restart.**
+The running 0.7.9 beta is unchanged; this protocol-22 branch needs a matched future
+client/daemon release. No Clippy or Cargo built-in test runner was used.
+
+Validation, with managed Cargo and one build job:
+
+- Workspace all-target compiler check passed (`/tmp/tau-fzf-check.log`).
+- Full workspace nextest run `c6fe4db1-08b8-4c32-8368-670868461031`: **325/328 passed**.
+  Three existing idle-render regressions caught an unconditional dirty flag in the
+  new prefetch hook. That hook was corrected to invalidate only on errors/data.
+- Final focused nextest run `adf430d5-373b-418f-a174-f1acf4b3d186`: **25/25 passed**,
+  including all three previously failing tests, all code-viewer/index tests, real
+  native prefetch/delta/preview-cancellation tests, background stream admission,
+  and the actual-daemon filesystem integration. The entire suite was not repeated
+  after the one-line idle fix (`/tmp/tau-fzf-final-tests.log`).
+- Windows x64 MSVC and Android ARM64 library compiler checks passed
+  (`/tmp/tau-fzf-{windows,android}-check.log`). Existing platform/dead-code warnings
+  are not release gates; no unrelated lint rewrites were made.
+- Headless UI checks cover desktop, 360dp phone and 2.5x phone, 240 results (no
+  top-100 cutoff), highlighted loose/reordered queries, syntax previews, cached
+  preview reuse, independent preview scrolling, hidden path components, partial
+  counts, root/source fencing, draft preservation, keyboard traversal and actual
+  Chat/X/Browse/Open/Show-hidden hit regions. A worker test ranks 50,000 names and
+  cancels obsolete queries. Physical-device input/IME acceptance remains open.
+
+Inspected frames are reproducible using `TAU_CODE_PREVIEW_DIR` with the focused
+code-view tests. Representative local-picker frames are in
+`frontend/qa/code-viewer/fzf-{desktop,phone,phone-2x}.png`.

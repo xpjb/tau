@@ -1,3 +1,19 @@
+# Local fuzzy picker follow-up — feature branch, not deployed
+
+`fix/tau2-fzf-picker` in `/root/tau2-fzf-picker` implements local fzf-style matching,
+background revisioned name sync, highlighted results + selected-file preview,
+hidden-file toggles, complete match counts, and working distinct Chat/X controls.
+See `docs/remote-code-viewer.md` for ownership, limits, validation and handoff.
+Protocol **22** requires a future matched client/daemon release; source only, no
+merge/deployment/packages/restarts. The running 0.7.9 beta is untouched.
+
+Final focused nextest: **25/25 passed**, including the three idle regressions found
+and fixed during the broad run (325/328 before that fix). Windows/Android library
+checks pass. Physical-device QA remains open. Continue using managed Cargo only;
+Clippy and the built-in test runner remain prohibited.
+
+---
+
 # ZIP Extract QA fix — integrated source, not deployed
 
 At the user's request, `fix/tau2-extract-behavior` (`a66fc3d`) was merged into

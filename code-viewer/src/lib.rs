@@ -6,6 +6,7 @@ use std::{ops::Range, sync::atomic::{AtomicU64, Ordering}, time::Duration};
 pub mod filesystem;
 #[cfg(feature = "syntax")]
 mod syntax;
+pub mod finder;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paint { pub range: Range<usize>, pub color: u32 }
@@ -81,22 +82,9 @@ impl Selection {
     }
 }
 
-/// Case-insensitive subsequence ranking over the *whole relative path*, with
-/// bonuses for contiguous matches and path/word boundaries. No content search.
+/// Compatibility helper; interactive callers reuse a Finder on a worker.
 pub fn fuzzy_score(query: &str, path: &str) -> Option<i64> {
-    let query: Vec<_> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
-    let chars: Vec<_> = path.chars().flat_map(char::to_lowercase).collect();
-    if query.is_empty() { return Some(-(chars.len() as i64)); }
-    let mut at = 0; let mut score = 0; let mut last = None;
-    for wanted in query {
-        let found = (at..chars.len()).find(|&i| chars[i] == wanted)?;
-        score += 10;
-        if found == 0 || matches!(chars[found-1], '/' | '\\' | '_' | '-' | '.') { score += 18; }
-        if last == Some(found.wrapping_sub(1)) { score += 24; }
-        score -= (found-at) as i64;
-        last = Some(found); at = found+1;
-    }
-    Some(score - chars.len() as i64 / 8)
+    finder::Finder::new(query).score(path).map(i64::from)
 }
 
 #[cfg(test)]

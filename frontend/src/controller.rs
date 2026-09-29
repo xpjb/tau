@@ -84,6 +84,9 @@ pub struct Controller {
     pub copied:Option<String>,
     pub file_update:Option<std::sync::Arc<crate::file_client::Update>>,
     file_generation:u64,
+    pub file_index:Option<std::sync::Arc<crate::file_index::Update>>,
+    index_generation:u64,
+    index_plan:Option<(String,Option<String>)>,
     network: Option<Network>,
     requests: HashMap<String, ClientCommand>,
     project_deletions: HashMap<String, Vec<String>>,
@@ -127,7 +130,7 @@ impl Controller {
             remote,
             block_plan: vec![],background_dirty:Default::default(),plan_dirty:std::cell::Cell::new(true),
             viewport:None,
-            copy:None, copied:None, file_update:None, file_generation:0,
+            copy:None, copied:None, file_update:None, file_generation:0, file_index:None,index_generation:0,index_plan:None,
             network: None,
             requests: HashMap::new(),
             project_deletions: HashMap::new(),
@@ -154,6 +157,7 @@ impl Controller {
     pub fn connect(&mut self) {
         self.file_generation += 1;
         self.file_update = None;
+        self.index_generation += 1; self.index_plan = None; self.file_index = None;
         self.transport_error = None;
         self.epoch = None;
         self.connection = "Connecting…".into();
@@ -170,6 +174,7 @@ impl Controller {
         self.store.put("", "settings", &settings)?;
         self.network = None;
         self.file_update = None;
+        self.index_generation += 1; self.index_plan = None; self.file_index = None;
         self.file_generation += 1;
         self.settings = settings;
         self.identity = self.settings.identity();
@@ -487,15 +492,35 @@ impl Controller {
         self.send_waiting(&session, false)?;
         Ok(())
     }
+    /// Warm the current chat's names while it is foregrounded, before Find is
+    /// opened. Query edits never change this interest.
+    pub fn sync_file_index(&mut self, plan: Option<(String, Option<String>)>) -> Result<()> {
+        if self.index_plan == plan { return Ok(()); }
+        self.index_generation += 1;
+        // Fence old deliveries even if the command queue is temporarily full;
+        // don't mark a failed submission as installed (the next tick retries).
+        if plan.is_some() { self.file_index = None; }
+        if let Some(network) = &self.network {
+            if let Err(error) = network.send(Command::Blocks(crate::blocks::Command::FileIndex(plan.clone().map(|(session, path)| crate::file_index::Interest { generation: self.index_generation, session, path })))) {
+                return Err(error);
+            }
+        }
+        self.index_plan = plan;
+        Ok(())
+    }
+    pub(crate) fn file_wake(&self) -> Wake { self.wake.clone() }
     pub(crate) fn viewer_generation(&self) -> u64 {self.file_generation}
     pub fn view_files(&mut self, request: Option<tau_protocol::files::FileRequest>) -> Result<u64> {
         self.view_files_document(request, None)
     }
     pub(crate) fn view_files_document(&mut self, request: Option<tau_protocol::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>) -> Result<u64> {
+        self.view_files_preview(request, document, false)
+    }
+    pub(crate) fn view_files_preview(&mut self, request: Option<tau_protocol::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>, preview: bool) -> Result<u64> {
         self.file_generation += 1;
         self.file_update = None;
         if let Some(network)=&self.network {
-            network.send(Command::Blocks(crate::blocks::Command::Files(request.map(|request|crate::file_client::Interest {generation:self.file_generation,request,document}))))?;
+            network.send(Command::Blocks(crate::blocks::Command::Files(request.map(|request|crate::file_client::Interest {preview,generation:self.file_generation,request,document}))))?;
         } else if request.is_some() { anyhow::bail!("Connect to browse remote files"); }
         Ok(self.file_generation)
     }
@@ -1048,6 +1073,14 @@ impl Controller {
             if let Some(update)=update && update.generation==self.file_generation
                 && self.account.source_lineage.as_ref()==Some(&update.lineage) {
                 self.file_update=Some(update); changed=true;
+            }
+        }
+        if let Some(network)=&mut self.network && network.file_index.has_changed().unwrap_or(false) {
+            if let Some(update)=network.file_index.borrow_and_update().clone()
+                && update.generation==self.index_generation
+                && self.account.source_lineage.as_ref()==Some(&update.lineage)
+                && self.account.selected.as_ref()==Some(&update.session) {
+                self.file_index=Some(update); changed=true;
             }
         }
         let mut scopes = std::collections::HashSet::new();

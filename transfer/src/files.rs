@@ -7,7 +7,7 @@ pub(super) async fn serve(send: &mut SendStream, recv: &mut RecvStream, backend:
     ensure!(credit == BLOCK_WINDOW_BYTES, "Invalid filesystem byte credit");
     ensure!(authorized(grants, &node), "Block authorization expired");
     ensure!(!request.session_id.is_empty() && request.session_id.len() <= 128, "Invalid chat identity");
-    send.set_priority(3)?;
+    send.set_priority(if matches!(request.operation, FileOperation::Index {..}) { 1 } else { 3 })?;
     let reply = tokio::select! {
         _ = send.stopped() => return Ok(()),
         reply = backend.files(request) => reply?,
@@ -28,11 +28,12 @@ impl Client {
     /// Dropping this future resets only its own stream. It shares the foreground
     /// admission budget and authenticated endpoint, never opens another client.
     pub async fn files(&self, request: FileRequest) -> Result<FileReply> {
-        let class = self.foreground.clone().acquire_owned().await?;
+        let background = matches!(request.operation, FileOperation::Index {..});
+        let class = if background { &self.bulk } else { &self.foreground }.clone().acquire_owned().await?;
         let permit = self.streams.clone().acquire_owned().await?;
         let connection = self.connection().await?;
         let (mut send, recv) = connection.open_bi().await?;
-        send.set_priority(3)?;
+        send.set_priority(if background { 1 } else { 3 })?;
         let bytes = encode(&Frame::metadata(Header::Browse { request, credit: BLOCK_WINDOW_BYTES }))?;
         send.write_all(&bytes).await?;
         self.stats.tx.fetch_add(bytes.len() as u64, Ordering::Relaxed);

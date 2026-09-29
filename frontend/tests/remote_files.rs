@@ -46,10 +46,13 @@ async fn remote_files_stream_live_updates_search_parent_traversal_and_cancel_wit
     assert_eq!(doc.namespace,update.document.as_ref().unwrap().namespace);
     let update=query(&mut c,Some(cwd.join("../outside.txt").to_str().unwrap().into()),FileOperation::Open {revision:None}).await;
     assert_eq!(update.document.as_ref().unwrap().text,"outside cwd");
-    let _=query(&mut c,None,FileOperation::Search {query:"srcmain".into()}).await;
-    until(&mut c,|c|c.file_update.as_ref().is_some_and(|u|matches!(&u.response,Ok(FileReply::Search {entries,indexing:false,..}) if entries.len()==1))).await;
-    let update=query(&mut c,None,FileOperation::Search {query:"hidden".into()}).await;
-    assert!(matches!(&update.response,Ok(FileReply::Search {entries,..}) if entries.is_empty()));
+    // Warm names independently of the viewer; fuzzy queries are entirely local.
+    c.sync_file_index(Some((session.clone(), None))).unwrap();
+    until(&mut c,|c|c.file_index.as_ref().is_some_and(|u|!u.indexing && u.index.is_some())).await;
+    let index=c.file_index.as_ref().unwrap().index.as_ref().unwrap().clone();
+    let mut finder=tau_code_viewer::finder::Finder::new("main src");
+    assert_eq!(index.entries.iter().filter(|p|finder.score(&p.path).is_some()).count(),1);
+    assert!(!index.entries.iter().any(|p|p.path.contains("hidden.txt")));
     let update=query(&mut c,Some(cwd.join("ignored/hidden.txt").to_str().unwrap().into()),FileOperation::Open {revision:None}).await;
     assert_eq!(update.document.as_ref().unwrap().text,"explicit browsing allowed");
     // Rapid interest replacement is generation fenced, including already-queued
@@ -66,5 +69,6 @@ async fn remote_files_stream_live_updates_search_parent_traversal_and_cancel_wit
     let generation=c.view_files(Some(FileRequest {session_id:"missing-chat".into(),path:None,operation:FileOperation::List {after:None}})).unwrap();
     until(&mut c,|c|c.file_update.as_ref().is_some_and(|u|u.generation==generation)).await;
     assert!(c.file_update.as_ref().unwrap().response.is_err());
+    c.sync_file_index(None).unwrap();
     drop(c);daemon.abort();let _=daemon.await;
 }

@@ -7,7 +7,7 @@ mod transcript;
 pub use transcript::*;
 
 // Protocol 21 adds read-only filesystem streams on the shared native connection.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
