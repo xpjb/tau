@@ -81,19 +81,10 @@ impl Workspace {
         }
     }
     pub fn sync_navigation(&mut self, cx: &mut Context<'_>) {
-        self.chat.transcript.validate_download_jump(cx);
         if self.navigation.identity != cx.model.identity
             || self.navigation.lineage != cx.model.account.source_lineage
             || self.navigation.session != cx.model.account.selected
         {
-            if self.navigation.identity == cx.model.identity
-                && self.navigation.lineage == cx.model.account.source_lineage
-                && let Some(previous) = &self.navigation.session
-                && self.chat.transcript.placed_session.as_ref() == Some(previous)
-            {
-                let result = cx.model.save_chat(previous);
-                cx.report(result);
-            }
             cx.ui.navigation_changed();
             self.chat.code.close_code(cx);
             self.cancel(cx);
@@ -110,15 +101,8 @@ impl Workspace {
         self.chat.transcript.bind(cx);
         self.chat.composer.bind(cx);
     }
-    pub fn save(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.chat.transcript.remember_scroll(cx);
-        if let Some(id) = cx.model.account.selected.clone() {
-            cx.model.save_chat(&id)?;
-        }
-        Ok(())
-    }
     pub fn navigate_chat(&mut self, id: &str, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         let same = cx.model.account.selected.as_deref() == Some(id);
         let topic = cx
             .model
@@ -147,7 +131,7 @@ impl Workspace {
         {
             return Ok(());
         }
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         cx.model.select_project(id, cx.ui.size.0 as f32 / cx.ui.scale >= 760.)?;
         self.sync_navigation(cx);
         self.sidebar.scroll.value = 0.;
@@ -156,7 +140,7 @@ impl Workspace {
         Ok(())
     }
     pub fn new_chat(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         cx.model.new_chat()?;
         self.sync_navigation(cx);
         self.show_chats = false;
@@ -179,17 +163,11 @@ impl Workspace {
         self.show_chats = false;
         self.attachments.show = false;
         self.sidebar.scroll.value = 0.;
-        let transcript = &mut self.chat.transcript;
-        transcript.horizontal.value = 0.;
-        transcript.scroll.value = 0.;
-        transcript.placed.clear();
-        transcript.placed_session = None;
-        transcript.history_attempt = None;
-        transcript.download = Some(target);
+        self.chat.transcript.jump_to_download(target.entry, cx);
         Ok(())
     }
     pub fn files(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         self.cancel(cx);
         self.chat.code.code_action(CodeChoice::Files, cx)?;
         self.show_chats = false;
@@ -197,7 +175,7 @@ impl Workspace {
         Ok(())
     }
     pub fn attachments(&mut self, show: bool, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         self.cancel(cx);
         self.chat.code.close_code(cx);
         cx.ui.focus = None;
@@ -211,7 +189,7 @@ impl Workspace {
         Ok(())
     }
     pub fn back(&mut self, cx: &mut Context<'_>) {
-        self.chat.transcript.download = None;
+        self.chat.transcript.cancel_download_jump(cx);
         cx.ui.focus = None;
         cx.ui.native = None;
         cx.ui.paste = None;
@@ -251,6 +229,7 @@ impl Workspace {
             self.chat.composer.bind(cx);
         }
         self.chat.composer.send(cx)?;
+        self.chat.transcript.tail(cx);
         if let Some(code) = &mut self.chat.code.view {
             code.sent();
         }

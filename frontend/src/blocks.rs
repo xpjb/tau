@@ -215,6 +215,7 @@ impl Cache {
         let roots = tau_blocks::children(&db, scope, None)?;
         let anchor = roots.iter().position(|h| {
             key == &format!("{scope}/{}",h.id) || key == &format!("{scope}/details:{}",h.id)
+                || key == &format!("{scope}/tool:{}",h.id) || key == &format!("{scope}/thinking:{}",h.id)
                 || h.meta.pointer("/event/origin/requestId").and_then(|v|v.as_str())
                     .is_some_and(|request| key == &format!("message:{scope}:{request}"))
         });

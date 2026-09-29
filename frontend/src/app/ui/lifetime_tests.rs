@@ -282,10 +282,12 @@ fn selection_follows_scrolled_text_and_tail_returns_to_latest() {
     let mut event = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
     event.text = (0..120).map(|i| format!("Selectable paragraph {i}.\n\n")).collect();
     event.attachment = None;
-    let chat = h.app.controller.chats.get_mut("demo").unwrap();
-    chat.local.position.follow = false;
-    chat.local.position.key = None;
     h.app.controller.preview("demo", vec![event], Default::default(), None).unwrap();
+    h.frame();
+    h.app.with_ui(|root, cx| {
+        root.workspace.chat.transcript.scroll.set(0.);
+        root.workspace.chat.transcript.remember_scroll(cx);
+    });
     h.frame();
     let viewport = h.app.root.workspace.chat.transcript.scroll.rect;
     let start = Vec2::new(viewport.x + viewport.width / 2., viewport.y + 40.);
@@ -324,9 +326,12 @@ fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
     let mut event = chat.feed.events.values().next().unwrap().clone();
     event.text = "A scrolling transcript paragraph.\n\n".repeat(120);
     event.attachment = None;
-    chat.local.position.follow = false;
-    chat.local.position.key = None;
     h.app.controller.preview("demo", vec![event], Default::default(), None).unwrap();
+    h.frame();
+    h.app.with_ui(|root, cx| {
+        root.workspace.chat.transcript.scroll.set(0.);
+        root.workspace.chat.transcript.remember_scroll(cx);
+    });
     h.frame();
     h.app.wheel(200., false, center(h.app.root.workspace.chat.transcript.scroll.rect));
     h.app.root.workspace.chat.transcript.scroll.wheel.as_mut().unwrap().1 -= std::time::Duration::from_millis(100);
@@ -372,7 +377,7 @@ fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
     });
     h.frame();
     let transcript = &h.app.root.workspace.chat.transcript;
-    assert!(transcript.expansion_positions.values().all(|top| *top < transcript.scroll.value), "Headings are above the viewport");
+    assert!(transcript.placed.iter().filter(|p| p.key == "chat/tool:native-tool").all(|p| p.top < transcript.scroll.value), "The tool heading is above the viewport");
     let chat = &h.app.controller.chats["chat"];
     let plan = source.cache.plan_visible("chat", &chat.local, &[], Some(&transcript.interests)).unwrap();
     let (_, head) = plan.blocks.iter().find(|(id, _)| id == &input).expect("Visible input must request its native body");

@@ -12,8 +12,9 @@ has deleted the rich projection/Row/Part pipeline and the legacy transcript fixt
 protocol. The redundant attachment-card registry and addressed button routes are
 also gone. 042 has retired the global test action adapter, test-only Submit and
 old scroll scenario, alongside independent matrix pruning.
-Reading-position review, remaining simplification, the 5,000-line gate and physical
-acceptance are **not complete**.
+Transcript reading-position ownership is now consolidated; external layout resets
+and the expansion registry are gone. Remaining simplification, the 5,000-line gate
+and physical acceptance are **not complete**.
 
 ### Deletion-first execution
 
@@ -39,7 +40,7 @@ predecessors; do not add another UI or replication framework.
 | [038 Finish forms and chrome](038-forms-and-chrome.md) | Delete repeated field/footer/layout and migrated control plumbing | Source-complete; device QA open |
 | [039 Native tool records, used directly](039-native-tool-records.md) | Delete native tool re-pairing and display-key parsing | Tool-widget consumer uses 037 |
 | [040 One message through local/queue/history state](040-message-state-reconciliation.md) | Move reconciliation out of paint; delete competing precedence rules | Reuse 039 body-reference contract |
-| [041 Transcript owns its children](041-direct-retained-transcript.md) | Delete `app/projection.rs`, rich `Row` descriptions and wrapper reconciliation; revisit 012 | 037, 039, 040 |
+| [041 Transcript owns its children](041-direct-retained-transcript.md) | Projection/wrapper and competing reading-policy paths deleted; 012 source review closed | Source ownership complete; size/device gates open |
 | [042 Remove low-value tests and compatibility scaffolding](042-test-retirement.md) | Delete brittle assertions, obsolete tests and `test_ui.rs`; smaller behavioral suite | Start now; finish with each owning slice |
 | [043 Completion audit](043-simplification-acceptance.md) | Measured reduction, actual behavioral/device acceptance, no legacy path left | All above |
 
@@ -93,7 +94,7 @@ estimates are retired; they do not finance the 5,000-line target.
 | [003 Navigation](003-text-input.md), [004 Sanscale](004-sanscale-migration.md), [006 Caret](006-caret-response.md), [007 Editor scroll](007-editor-scrolling.md) | Implemented; outstanding device/upstream checks retained, relevant device acceptance in 043 |
 | [005 Highlight](005-highlight-colour.md), [008 Ripple](008-click-ripple.md), [009 Nested hover](009-tool-hover.md) | Open visual acceptance, absorbed into 037; some mechanics exist, not blanket closure |
 | [010 Account usage](010-usage-remaining.md) | Shipped beta 0.7.6; live provider/device acceptance remains separate |
-| [012 Scroll ownership](012-chat-scroll-position-audit.md) | Reopened for bounded 041; delete the explicitly unwanted scroll tests |
+| [012 Scroll ownership](012-chat-scroll-position-audit.md) | Source ownership complete in 041; old scroll tests deleted; physical acceptance open |
 | [013 Queue content lifetime](013-queued-message-content-lifetime.md) | Independent model-side follow-up; deterministic reproduction and proportionate fix, not solved by 040 |
 | [014 Outage recovery](014-native-data-recovery-after-outage.md) | Deferred diagnosis; preserve failing evidence, no guessed timeout/receiver rewrite |
 

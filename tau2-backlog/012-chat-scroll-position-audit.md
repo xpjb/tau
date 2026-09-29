@@ -1,6 +1,6 @@
 # 012 — Revisit chat scroll-position ownership and delete the old tests
 
-Status: **Reopened for the bounded [041 transcript slice](041-direct-retained-transcript.md), September 29, 2026.** The earlier session-specific deferment is superseded by the user's request to triage and finish simplification. No implementation is part of this planning pass.
+Status: **Source ownership complete in [041](041-direct-retained-transcript.md), September 29, 2026; physical acceptance remains open.** The bounded implementation deletes competing reading bookkeeping and external layout resets. Existing navigation coverage plus one checkpoint case cover restoration and old-release/source boundaries. This is not completion of the whole-refactor size gate.
 
 Review source/chat-bound ownership of reading position, persistence, switching, empty/loading frames, prepend/expansion and layout identity. Preserve useful reading behavior, not the provisional mechanism. Consolidate policy into the actual Transcript owner rather than introduce another state store. Fix stationary-pointer selection immediately in 036; it does not wait for this work.
 

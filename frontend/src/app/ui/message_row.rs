@@ -222,13 +222,14 @@ impl MessageRow {
             [&tool.input, &tool.output].into_iter().filter(|s| s.visible && s.height > 0.).map(|s| format!("{session}/{}", s.key)).collect()
         } else if self.disclosure.is_some() { vec![] } else { vec![self.key.clone()] }
     }
-    pub fn expansions(&self, top: f32) -> Vec<(String, f32)> {
-        if let Some(d) = &self.disclosure { return vec![(d.key.clone(), top + d.top)]; }
-        if let Some(t) = &self.tool {
-            let mut out = vec![(t.heading.key.clone(), top)];
-            if t.open { for section in [&t.input, &t.output] { if section.visible && section.heading.open.is_some() { out.push((section.heading.key.clone(), top + section.heading.top)); } } }
-            out
-        } else { vec![] }
+    /// Resolve just the requested disclosure against this actual owner.
+    pub fn anchor(&self, key: &str) -> Option<f32> {
+        if let Some(d) = &self.disclosure { return (d.key == key).then_some(d.top); }
+        let t = self.tool.as_ref()?;
+        if t.heading.key == key { return Some(0.); }
+        [&t.input, &t.output].into_iter()
+            .find(|s| t.open && s.visible && s.heading.open.is_some() && s.heading.key == key)
+            .map(|s| s.heading.top)
     }
     pub fn interest(&self, chat: &Chat) -> Option<String> {
         if matches!(self.item, ItemId::Details { .. }) { None } else { self.item.root(chat).map(str::to_owned) }

@@ -699,10 +699,15 @@ fn disk_reads_refresh_eviction_recency_and_saved_anchors_hydrate_offline() {
     while let Some(before) = f.cache.history_cursor("chat").unwrap() { f.page(None,Some(before)); }
     f.body("e001"); f.body("e002");
     f.cache = Cache::open(&f._root.path().join("cache.db")).unwrap();
-    let mut local = LocalChat::default();local.position.follow=false;local.position.key=Some("chat/e001".into());
-    let visible = f.cache.resume_viewport("chat",&local).unwrap().unwrap();
-    assert!(visible.contains("e001"));assert!(!visible.contains("e069"));
-    assert_eq!(f.cache.preview("chat",Some(&visible)).unwrap().unwrap().events.iter().find(|e|e.id=="e001").unwrap().text,"body 01");
+    let mut local = LocalChat::default(); local.position.follow = false;
+    // Persisted row identities must all resume the same native root, including
+    // the direct tool/thinking rows introduced by retained transcript ownership.
+    for key in ["chat/e001", "chat/details:e001", "chat/tool:e001", "chat/thinking:e001"] {
+        local.position.key = Some(key.into());
+        let visible = f.cache.resume_viewport("chat", &local).unwrap().expect(key);
+        assert!(visible.contains("e001")); assert!(!visible.contains("e069"));
+        assert_eq!(f.cache.preview("chat",Some(&visible)).unwrap().unwrap().events.iter().find(|e|e.id=="e001").unwrap().text,"body 01");
+    }
     f.cache.preview("chat",Some(&BTreeSet::from(["e001".into()]))).unwrap();
     f.body("e003");
     let mut db = f.cache.db.lock().unwrap();let tx=db.transaction().unwrap();

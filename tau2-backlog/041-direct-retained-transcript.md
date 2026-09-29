@@ -1,8 +1,9 @@
 # 041 — Transcript owns its actual children; delete the row-description layer
 
-Status: **Selected after 037, 039 and 040.** This is a bounded rewrite of transcript
-UI assembly/ownership, not networking, persistence, Markdown or shaping. Absorbs
-the UI part of 016/031, cleanup 035 and reopened 012.
+Status: **Source ownership complete; size and physical acceptance remain open.**
+This is a bounded rewrite of transcript UI assembly/ownership, not networking,
+persistence, Markdown or shaping. Absorbs the UI part of 016/031, cleanup 035 and
+reopened 012.
 
 ## Replacement
 
@@ -130,3 +131,64 @@ boundary cleanup, broader pruning and the final size/device gates remain open.
 Synthetic lifecycle follow-up is now closed in 037: update/cancellation no longer
 travel through input dispatch. Fresh frontend validation is recorded there. The
 remaining reading-position, size and physical-device gates are not closed by it.
+
+
+## Reading policy consolidated — September 29, 2026
+
+The existing source/chat-bound Transcript now owns one private live reading
+choice: a position (follow-tail or row anchor), a disclosure anchor, or a pending
+download entry. LocalChat.position is a checkpoint, not another live controller restored
+and rewritten on every paint. The existing serialized preference schema is intact.
+
+Deleted `placed_session`, the expansion-position map and separate expansion pin,
+standalone jump validation/location traversal, Workspace's old-chat save policy
+and save facade, its manual scroll/layout/history resets, and timer-owned motion
+cancellation. The source-bound owner checkpoints before rebinding; old geometry
+cannot be stored under the newly selected account/chat. Save retains an unresolved
+anchor and its intended offset across empty, partial and temporarily clamped
+layouts. Explicit scroll/tail/jump transitions replace the live choice. Successful
+Send requests tail explicitly rather than relying on a paint-time model reread.
+
+Disclosure positions come from the actual retained row on demand. No global
+heading registry is rebuilt; a pinned disclosure can retain its one owner through
+a temporarily tiny viewport. If the control disappears, reading falls back to its
+row checkpoint, rather than seeking older pages for a dead control key. Checkpoints serialize a row identity, not a transient
+control key. Geometry-dependent offsets use the measurement's scale, including a
+save between a DPI change and its first reflow. Existing selection/autoscroll,
+wheel interpolation, overscan, paging/error guards and source fences remain.
+
+The native cache's existing saved-anchor hydration now also recognizes direct
+Tool/Thinking row keys by comparison with known native headers. This preserves
+cold offline body hydration without parsing provider IDs, changing schemas or
+adding another replica path.
+
+### Evidence and validation
+
+The [baseline regression patch](../docs/reviews/retained-ui/reading-regressions.patch)
+applies to `bdfbec3`. Run the named tests with managed Cargo/nextest in an isolated
+worktree; no live data or OS file actions are needed:
+
+- Existing same-chat download navigation: **83 measurement calls** before the
+  change, versus the retained-window bound **<35** afterward on desktop, phone and
+  scaled-phone headless scenarios. Failing-before run
+  `6addc27b-746d-49a8-9669-42ece78f3a53`.
+- One checkpoint case reuses the navigation fixture for late pointer release,
+  cold/partial windows (including an anchor-only clamped window), prepend, DPI and
+  pinned expansion during streaming. Before the change an interim page replaced
+  saved `demo-event-29` with `demo-event-50`
+  (`33f8ad8e-48a6-4c47-8eca-39afd29b5f5d`). Existing selection/copy and native-interest
+  tests remain; the retired scroll_tests.rs scenario was not resurrected.
+- The existing disk hydration/recency test failed on the saved tool-row key before
+  the cache match was fixed (`50e64137-8d9d-4416-ae83-82055c6681db`). It now checks
+  text, Details, Tool and Thinking keys while retaining the byte/eviction assertions.
+
+Final fresh workspace all-target check and **325/325 workspace tests across 19
+binaries**, zero skipped, pass (`0f842d26-834d-433a-b9e7-f9a173b04277`, 100.265s).
+Windows MSVC and Android ARM64/API29 library checks and frontend rustdoc pass.
+No Clippy/built-in Cargo test runner, Java changes, physical-device QA, integration
+merge, package build, deployment, restart or live-data change.
+
+Net production: **−17 raw / +12 normalized**; tests **+80 / +107**. The necessary
+replacement/checks make this slice grow **53 / 106** overall. This closes the
+reading-ownership review, not the whole-refactor reduction target. The shared size
+ledger records the remaining gap; 013/014 and physical acceptance stay separate.

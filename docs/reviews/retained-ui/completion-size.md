@@ -92,11 +92,11 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After attachment registry/routing retirement, frontend Rust is **26,046 raw /
-32,256 same-format**: production **18,620 / 21,857**, tests **7,426 / 10,399**.
+After reading-policy consolidation, frontend Rust is **26,109 raw /
+32,375 same-format**: production **18,603 / 21,869**, tests **7,506 / 10,506**.
 Outside growth remains **62 / 97** (production **26 / 60**, tests **36 / 37**).
-The **charged reduction is 1,617 / 665**, with **3,383 / 4,335 remaining**.
-Charged production is **548 raw smaller / 297 same-format larger**. The 5,000-line
+The **charged reduction is 1,554 / 546**, with **3,446 / 4,454 remaining**.
+Charged production is **565 raw smaller / 309 same-format larger**. The 5,000-line
 and normalized production-simplification gates are still not met.
 Deltas below use reduction-positive values and show raw / same-format:
 
@@ -122,6 +122,13 @@ Deltas below use reduction-positive values and show raw / same-format:
 | 037 synthetic lifecycle retirement | Tick/Cancel event variants, broadcast classifier and lifecycle input handlers | Direct child updates, actual-owner cancellation and held-control checks | −71 / −86 | 0 / 0 | 0 new | Charged reduction 1,564 / 626; gap 3,436 / 4,374 |
 
 | 038 attachment registry/routing retirement | CardDeck registry/seen-set/dispatcher/hints and per-button destination envelopes | Actual browser-owned cards; local choices use their existing target; metadata replacement remounts controls | +64 / +64 | −11 / −25 | 0 new | Charged reduction 1,617 / 665; gap 3,383 / 4,335 |
+
+| 041 / 012 reading-policy consolidation | External layout reset/save policy, placed_session, expansion-position map/pin and per-paint preference round trip | One private reading choice on Transcript, scoped checkpoints and actual-owner anchor lookup; native bookmark hydration and bounded regressions | +17 / −12 | −80 / −107 | 0 new | Charged reduction 1,554 / 546; gap 3,446 / 4,454 |
+
+This reading slice is an ownership/correctness change, **not a net size win**:
+production is 17 raw lines smaller but 12 normalized lines larger; added/updated
+coverage costs 80 / 107. Total growth is 63 / 119. No tests were deleted to offset
+that cost, and no second reading coordinator or persistence schema was introduced.
 
 Outside-code measurement compares every tracked Rust source in `daemon` and
 `protocol` with the same counter/formatter and reviewed test boundaries in the

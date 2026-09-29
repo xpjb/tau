@@ -141,7 +141,8 @@ impl App {
         }
     }
     pub fn save(&mut self) -> Result<()> {
-        self.with_ui(|root, cx| root.workspace.save(cx))
+        self.sync_navigation();
+        self.with_ui(|root, cx| root.workspace.chat.transcript.save(cx))
     }
     pub fn tick(&mut self, dt: f32) -> bool {
         self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
@@ -219,9 +220,7 @@ impl App {
         self.ui_event(ui::Event::Preedit(&text, cursor));
     }
     pub fn cancel_autoscroll(&mut self) -> bool {
-        let active = self.root.workspace.chat.transcript.autoscroll.take().is_some();
-        self.ui.dirty |= active;
-        active
+        self.with_ui(|root, cx| root.workspace.chat.transcript.cancel_autoscroll(cx))
     }
     pub fn cancel_pointer(&mut self) {
         if self.ui.native.is_none() { self.cancel_preedit(); }

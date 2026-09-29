@@ -2,7 +2,7 @@ use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Wid
 use super::{composer::QuickModels, message_row::{MessageRow, ItemId, is_detail}, scroll::ScrollState};
 use crate::{
     app::{Autoscroll, PlatformAction, attachments},
-    notice::DownloadTarget,
+    store::Position,
     render::{color, contains},
 };
 use sanscale::{Rect, Vec2};
@@ -20,6 +20,13 @@ pub(in crate::app) struct Placed {
     text_keys: Vec<String>,
     overflow: f32,
 }
+// Live policy belongs to this source-bound transcript. LocalChat.position is a
+// restart/checkpoint preference, not a second controller read back on every paint.
+enum Reading {
+    Position(Position),
+    Disclosure(Position),
+    Download(String),
+}
 pub(in crate::app) struct Transcript {
     pub rows: Vec<MessageRow>,
     measured: Option<(u64, u32, u32)>,
@@ -27,11 +34,8 @@ pub(in crate::app) struct Transcript {
     pub horizontal: ScrollState,
     pub models: QuickModels,
     pub placed: Vec<Placed>,
-    pub placed_session: Option<String>,
-    pub expansion_positions: HashMap<String, f32>,
-    pub expansion_pin: Option<(String, f32)>,
+    reading: Reading,
     pub history_attempt: Option<(String, String, u64, u64)>,
-    pub download: Option<DownloadTarget>,
     pub autoscroll: Option<Autoscroll>,
     pub interests: BTreeSet<String>,
     selection: Target,
@@ -47,11 +51,8 @@ impl Transcript {
             horizontal: ScrollState::new(id, true),
             models: QuickModels::new(),
             placed: vec![],
-            placed_session: None,
-            expansion_positions: HashMap::new(),
-            expansion_pin: None,
+            reading: Reading::Position(Position { follow: true, ..Position::default() }),
             history_attempt: None,
-            download: None,
             autoscroll: None,
             interests: BTreeSet::new(),
             selection: Target { scope: id, widget: Id::new() },
@@ -72,6 +73,8 @@ impl Transcript {
         let next =
             (cx.model.identity.clone(), cx.model.account.source_lineage.clone(), cx.model.account.selected.clone());
         if self.binding.as_ref() != Some(&next) {
+            let result = self.save(cx);
+            cx.report(result);
             cx.ui.detach(self.selection.scope);
             for row in &mut self.rows {
                 row.detach(cx);
@@ -79,6 +82,9 @@ impl Transcript {
             cx.services.renderer.selection = None;
             cx.services.renderer.retain_messages(&HashSet::new());
             *self = Self::new();
+            if let Some(chat) = cx.model.selected() {
+                self.reading = Reading::Position(chat.local.position.clone());
+            }
             self.binding = Some(next);
             cx.ui.dirty = true;
         }
@@ -88,56 +94,87 @@ impl Transcript {
         self.horizontal.stop();
         self.selecting = false;
         self.autoscroll = None;
-        self.expansion_pin = None;
         for row in &mut self.rows {
             row.cancel();
         }
     }
-    pub fn remember_scroll(&mut self, cx: &mut Context<'_>) {
-        if self.download.is_some()
-            || self.binding.as_ref().is_none_or(|(identity, lineage, session)| {
-                identity != &cx.model.identity
-                    || lineage != &cx.model.account.source_lineage
-                    || session != &cx.model.account.selected
+    pub fn cancel_autoscroll(&mut self, cx: &mut Context<'_>) -> bool {
+        let active = self.autoscroll.take().is_some();
+        if active { self.remember_scroll(cx); cx.ui.dirty = true; }
+        active
+    }
+    fn anchor<'a>(&self, key: &str, rows: impl IntoIterator<Item = &'a MessageRow>) -> Option<f32> {
+        self.placed.iter().find(|p| p.key == key).map(|p| p.top).or_else(|| {
+            rows.into_iter().find_map(|row| {
+                let offset = row.anchor(key)?;
+                self.placed.iter().find(|p| p.key == row.key).map(|p| p.top + offset)
             })
-        {
-            return;
-        }
-        if let Some(id) = cx.model.account.selected.clone()
-            && self.placed_session.as_deref() == Some(id.as_str())
-            && let Some(anchor) = self.placed.iter().find(|r| r.top + r.height >= self.scroll.value)
-            && let Some(chat) = cx.model.chats.get_mut(&id)
-        {
-            chat.local.position.key = Some(anchor.key.clone());
-            chat.local.position.offset = (self.scroll.value - anchor.top) / cx.ui.scale;
-            chat.local.position.follow = self.expansion_pin.is_none()
-                && self.scroll.wheel.is_none()
-                && self.autoscroll.is_none()
-                && !self.scroll.dragging_bar()
-                && self.scroll.max - self.scroll.value < cx.ui.scale;
-        }
+        })
+    }
+    fn position(&self, follow: bool) -> Option<Position> {
+        let scale = f32::from_bits(self.measured?.2);
+        let anchor = self.placed.iter().find(|p| p.top + p.height >= self.scroll.value)?;
+        Some(Position { key: Some(anchor.key.clone()), offset: (self.scroll.value - anchor.top) / scale, follow })
+    }
+    /// A pending jump or unloaded anchor never checkpoints an interim page.
+    /// Keep a row anchor's intended offset through temporary layout clamps.
+    /// Only nested disclosure anchors need a row-identity checkpoint.
+    fn checkpoint(&self, cx: &mut Context<'_>) -> Option<String> {
+        let (identity, lineage, Some(session)) = self.binding.as_ref()? else { return None; };
+        if identity != &cx.model.identity || lineage != &cx.model.account.source_lineage { return None; }
+        let position = match &self.reading {
+            Reading::Position(p) if p.follow || p.key.as_ref().is_some_and(|key| self.placed.iter().any(|row| &row.key == key)) => Some(p.clone()),
+            Reading::Position(p) | Reading::Disclosure(p)
+                if p.key.as_ref().is_none_or(|key| self.anchor(key, &self.rows).is_some()) => self.position(false),
+            _ => None,
+        };
+        let chat = cx.model.chats.get_mut(session)?;
+        if let Some(position) = position { chat.local.position = position; }
+        Some(session.clone())
+    }
+    pub fn save(&self, cx: &mut Context<'_>) -> anyhow::Result<()> {
+        if let Some(session) = self.checkpoint(cx) { cx.model.save_chat(&session)?; }
+        Ok(())
+    }
+    /// Called for actual scrolling, not as a paint-time save/restore round trip.
+    pub fn remember_scroll(&mut self, cx: &mut Context<'_>) {
+        let follow = self.scroll.wheel.is_none() && self.autoscroll.is_none()
+            && !self.scroll.dragging_bar() && self.scroll.max - self.scroll.value < cx.ui.scale;
+        self.reading = Reading::Position(self.position(follow).unwrap_or_default());
+        self.checkpoint(cx);
     }
     pub fn tail(&mut self, cx: &mut Context<'_>) {
         self.cancel();
-        self.download = None;
+        self.reading = Reading::Position(Position { follow: true, ..Position::default() });
         self.scroll.value = self.scroll.max;
-        if let Some(chat) = cx.model.account.selected.clone().and_then(|id| cx.model.chats.get_mut(&id)) {
-            chat.local.position.follow = true;
-        }
+        self.checkpoint(cx);
         cx.ui.dirty = true;
     }
+    pub fn jump_to_download(&mut self, entry: String, cx: &mut Context<'_>) {
+        self.cancel();
+        self.reading = Reading::Download(entry);
+        self.horizontal.value = 0.;
+        self.history_attempt = None;
+        cx.ui.dirty = true;
+    }
+    pub fn cancel_download_jump(&mut self, cx: &mut Context<'_>) {
+        if self.locating_download() {
+            self.reading = Reading::Position(cx.model.selected().map(|c| c.local.position.clone()).unwrap_or_default());
+        }
+    }
+    pub fn locating_download(&self) -> bool { matches!(self.reading, Reading::Download(_)) }
     pub fn toggle(&mut self, key: String, open: bool, cx: &mut Context<'_>) {
         self.scroll.stop();
-        self.expansion_pin = self.expansion_positions.get(&key).map(|y| (key.clone(), *y - self.scroll.value));
-        if let Some(session) = cx.model.account.selected.clone()
-            && let Some(chat) = cx.model.chats.get_mut(&session)
-        {
-            if key.starts_with("details:") {
-                chat.local.details_default = open;
-            }
+        if let Some(top) = self.anchor(&key, &self.rows) {
+            let scale = f32::from_bits(self.measured.unwrap().2);
+            self.reading = Reading::Disclosure(Position {
+                key: Some(key.clone()), offset: (self.scroll.value - top) / scale, follow: false,
+            });
+        }
+        if let Some(chat) = cx.model.account.selected.as_ref().and_then(|s| cx.model.chats.get_mut(s)) {
+            if key.starts_with("details:") { chat.local.details_default = open; }
             chat.local.expansion.insert(key, open);
-            chat.local.position.follow = false;
-            let result = cx.model.save_chat(&session);
+            let result = self.save(cx);
             cx.report(result);
         }
     }
@@ -159,58 +196,59 @@ impl Transcript {
             cx.report(result);
         }
     }
-    pub(super) fn validate_download_jump(&mut self, cx: &mut Context<'_>) {
-        if self.download.as_ref().is_some_and(|target| {
-            !target.matches_source(&cx.model.identity, cx.model.account.source_lineage.as_deref())
-                || cx.model.account.selected.as_deref() != Some(target.session.as_str())
-        }) {
-            self.download = None;
+    fn place_reading(&mut self, session: &str, quick_models: bool, owners: &HashMap<String, MessageRow>, cx: &mut Context<'_>) {
+        let old = self.scroll.value;
+        let chat = &cx.model.chats[session];
+        // A removed/renamed control is not unloaded history. Resume the row
+        // checkpoint instead of seeking older pages for a dead disclosure key.
+        if let Reading::Disclosure(p) = &self.reading
+            && p.key.as_ref().is_none_or(|key| self.anchor(key, owners.values()).is_none()) {
+            self.reading = Reading::Position(chat.local.position.clone());
         }
-    }
-
-    /// Return true while explicit navigation owns the scroll position. Keep the
-    /// request across empty/loading frames and older pages, but never persist an
-    /// interim page as the user's destination.
-    pub(super) fn locate_download(
-        &mut self,
-        placements: &[Placed],
-        viewport: Rect,
-        cx: &mut Context<'_>,
-    ) -> bool {
-        self.validate_download_jump(cx);
-        let Some(target) = &self.download else {
-            return false;
-        };
-        if let Some(placed) = placements.iter().find(|p| p.item.root(&cx.model.chats[&target.session])
-            .and_then(|id| cx.model.chats[&target.session].feed.event(id)).is_some_and(|e| e.entry_id == target.entry && e.attachment.is_some()))
-        {
-            // Center the actual download controls, not the beginning of a long
-            // message or image above them. This also works at mobile UI scales.
-            let panel =
-                attachments::control_panel(Rect::new(0., placed.top, viewport.width, placed.height), cx.ui.scale);
-            self.scroll.value = (panel.y + panel.height / 2. - viewport.height / 2.).clamp(0., self.scroll.max);
-            let position = &mut cx.model.chats.get_mut(&target.session).unwrap().local.position;
-            position.key = Some(placed.key.clone());
-            position.offset = (self.scroll.value - placed.top) / cx.ui.scale;
-            position.follow = false;
-            self.download = None;
-        } else {
-            self.scroll.value = 0.;
-            let feed = &cx.model.chats[&target.session].feed;
-            if cx.model.account.missing_chats.contains(&target.session)
-                || feed.synchronized && !feed.loading && feed.before.is_none()
-            {
-                self.download = None;
-                cx.model.notice = Some("The download widget is no longer available in this chat.".into());
+        match &self.reading {
+            Reading::Download(entry) => {
+                if let Some(p) = self.placed.iter().find(|p| p.item.root(chat).and_then(|id| chat.feed.event(id))
+                    .is_some_and(|e| e.entry_id == *entry && e.attachment.is_some())) {
+                    // Center the controls, not the long message/image above them.
+                    let panel = attachments::control_panel(Rect::new(0., p.top, self.scroll.rect.width, p.height), cx.ui.scale);
+                    self.scroll.set(panel.y + panel.height / 2. - self.scroll.rect.height / 2.);
+                    self.reading = Reading::Position(Position {
+                        key: Some(p.key.clone()), offset: (self.scroll.value - p.top) / cx.ui.scale, follow: false,
+                    });
+                    self.checkpoint(cx);
+                } else {
+                    self.scroll.value = 0.;
+                    if cx.model.account.missing_chats.contains(session)
+                        || chat.feed.synchronized && !chat.feed.loading && chat.feed.before.is_none() {
+                        self.reading = Reading::Position(self.position(false).unwrap_or_default());
+                        cx.model.notice = Some("The download widget is no longer available in this chat.".into());
+                    }
+                }
+            }
+            Reading::Position(p) | Reading::Disclosure(p) => {
+                if p.follow && !quick_models { self.scroll.value = self.scroll.max; }
+                else if let Some(top) = p.key.as_ref().and_then(|key| self.anchor(key, owners.values())) {
+                    self.scroll.set(top + p.offset * cx.ui.scale);
+                } else {
+                    self.scroll.set(if p.key.is_some() && chat.feed.before.is_some() { 0. } else { self.scroll.value });
+                    // Keep an unresolved preference across partial/empty windows.
+                    // A complete nonempty layout can retire a deleted anchor.
+                    if chat.feed.synchronized && !chat.feed.loading && chat.feed.before.is_none()
+                        && let Some(position) = self.position(p.follow) {
+                        self.reading = Reading::Position(position);
+                    }
+                }
             }
         }
-        true
+        self.scroll.shift_wheel(self.scroll.value - old);
     }
+
 }
 impl Widget for Transcript {
     fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
         let capture = cx.ui.capture;
         let old_scroll = self.scroll.value;
+        let was_wheeling = self.scroll.wheel.is_some();
         if let Some(auto) = &self.autoscroll {
             self.scroll.set(self.scroll.value + auto.speed(cx.ui.scale) * dt.min(0.05));
         }
@@ -234,8 +272,7 @@ impl Widget for Transcript {
         for row in &mut self.rows {
             row.update(dt, cx);
         }
-        if self.scroll.value != old_scroll {
-            self.download = None;
+        if self.scroll.value != old_scroll || was_wheeling && self.scroll.wheel.is_none() {
             self.remember_scroll(cx);
             cx.ui.dirty = true;
         }
@@ -331,33 +368,19 @@ impl Widget for Transcript {
         self.horizontal.value = self.horizontal.value.clamp(0., self.horizontal.max);
         self.scroll.max = (y - viewport.height).max(0.);
         if y < viewport.height { for p in &mut self.placed { p.top += viewport.height - y; } }
-        self.expansion_positions.clear();
-        for p in &self.placed { if let Some(row) = owners.get(&p.key) { self.expansion_positions.extend(row.expansions(p.top)); } }
-        let old_scroll = self.scroll.value;
-        let position = &cx.model.chats[&session].local.position;
-        let can_remember = !self.placed.is_empty() && cx.model.chats[&session].feed.synchronized
-            && (position.follow || position.key.as_ref().is_none_or(|key| self.placed.iter().any(|p| &p.key == key)) || cx.model.chats[&session].feed.before.is_none());
-        if quick_models { self.scroll.value = self.scroll.value.clamp(0., self.scroll.max); }
-        else if position.follow { self.scroll.value = self.scroll.max; }
-        else if let Some(p) = position.key.as_ref().and_then(|key| self.placed.iter().find(|p| &p.key == key)) {
-            self.scroll.value = (p.top + position.offset * s).clamp(0., self.scroll.max);
-        } else { self.scroll.value = self.scroll.value.clamp(0., self.scroll.max); }
-        if let Some((key, screen_y)) = &self.expansion_pin && let Some(top) = self.expansion_positions.get(key) {
-            self.scroll.value = (top - screen_y).clamp(0., self.scroll.max);
-        }
-        let placements = std::mem::take(&mut self.placed);
-        let locating_download = self.locate_download(&placements, viewport, cx);
-        self.placed = placements;
-        self.scroll.shift_wheel(self.scroll.value - old_scroll);
+        self.place_reading(&session, quick_models, &owners, cx);
         let top = self.scroll.value - 2. * viewport.height;
         let bottom = self.scroll.value + 3. * viewport.height;
-        self.placed_session = Some(session.clone());
-        if can_remember || locating_download { self.remember_scroll(cx); }
-        self.history_near_edge(&session, self.download.is_some() || self.scroll.value <= 2. * viewport.height, cx);
+        self.history_near_edge(&session, self.locating_download() || self.scroll.value <= 2. * viewport.height, cx);
         if quick_models { self.models.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x, viewport.y + quick_top - self.scroll.value, width, quick_h), clip: viewport }, cx); }
         for (index, p) in self.placed.iter().enumerate() {
-            let active = owners.get(&p.key).is_some_and(|row| cx.ui.capture.is_some_and(|c|
-                c.target.scope == row.control.target.scope || row.attachment.as_ref().is_some_and(|a| a.controls.id == c.target.scope)));
+            // A pinned disclosure survives a temporarily tiny viewport, like capture.
+            let active = owners.get(&p.key).is_some_and(|row| {
+                cx.ui.capture.is_some_and(|c| c.target.scope == row.control.target.scope
+                    || row.attachment.as_ref().is_some_and(|a| a.controls.id == c.target.scope))
+                    || matches!(&self.reading, Reading::Disclosure(position)
+                        if position.key.as_ref().is_some_and(|key| row.anchor(key).is_some()))
+            });
             if !active && (p.top + p.height < top || p.top > bottom) { continue; }
             let mut row = if let Some(owner) = owners.remove(&p.key) { owner } else {
                 let mut owner = MessageRow::new(p.item.clone(), &session); owner.measure(bubble_width, &session, cx); owner
@@ -367,7 +390,6 @@ impl Widget for Transcript {
             let lower = if self.placed.get(index + 1).is_some_and(|next| next.sender == p.sender) { 0. } else { 12. * s };
             row.corners = [upper, upper, lower, lower];
             if let Some(id) = row.interest(&cx.model.chats[&session]) { self.interests.insert(id); }
-            self.expansion_positions.extend(row.expansions(p.top));
             let screen_top = viewport.y + p.top - self.scroll.value;
             if screen_top + p.height >= viewport.y && screen_top <= viewport.y + viewport.height {
                 row.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x + if p.sender == tau_protocol::EventRole::User { width - bubble_width } else { 0. }, screen_top, bubble_width, p.height), clip: viewport }, cx);
@@ -411,10 +433,7 @@ impl Transcript {
         }
         if let Event::Middle { pressed, point } = *event {
             if pressed {
-                if self.autoscroll.take().is_some() {
-                    cx.ui.dirty = true;
-                    return true;
-                }
+                if self.cancel_autoscroll(cx) { return true; }
                 if !contains(self.scroll.rect, point) || self.scroll.max <= 0. {
                     return false;
                 }
@@ -439,17 +458,14 @@ impl Transcript {
         if let Event::Down { point, .. } = *event
             && contains(self.scroll.rect, point)
         {
-            if self.autoscroll.take().is_some() {
+            if self.cancel_autoscroll(cx) {
                 cx.ui.capture = None;
-                cx.ui.dirty = true;
                 return true;
             }
-            self.expansion_pin = None;
             self.history_attempt = None;
         }
         if self.scroll.bar_event(event, cx) {
-            self.download = None;
-            self.remember_scroll(cx);
+            if matches!(event, Event::Down { .. }) { self.remember_scroll(cx); }
             return true;
         }
         let mut child = self.models.dispatch(event, cx);
@@ -510,9 +526,7 @@ impl Transcript {
             }
             Event::Wheel { amount: _, horizontal, point } if !child && contains(self.scroll.rect, point) => {
                 self.autoscroll = None;
-                self.expansion_pin = None;
                 self.history_attempt = None;
-                self.download = None;
                 let handled = if horizontal {
                     self.horizontal.event(event, false, cx)
                 } else {
@@ -541,14 +555,13 @@ impl Transcript {
         if let Event::Up { pointer, .. } = *event
             && capture.is_some_and(|c| c.pointer == pointer)
         {
-            self.remember_scroll(cx);
-            if let Some(session) = cx.model.account.selected.clone() {
-                let result = cx.model.save_chat(&session);
-                cx.report(result);
+            if capture.is_some_and(|c| c.target == self.scroll.target || c.target == self.selection && c.dragged) {
+                self.remember_scroll(cx);
             }
+            let result = self.save(cx);
+            cx.report(result);
         }
         if self.scroll.value != old_scroll {
-            self.download = None;
             self.remember_scroll(cx);
             cx.ui.dirty = true;
         }
