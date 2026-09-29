@@ -461,3 +461,28 @@ and worktree remain preserved. This is not a stable/master merge or a deployment
 - No packages, service restarts, production data writes, version/protocol/schema
   changes or physical-device acceptance. Existing matched-release/deployment
   requirements and holds remain. See `docs/zip-extraction.md` for full evidence.
+
+
+## Local fuzzy picker — source integration only
+
+At the user's request, merged `fix/tau2-fzf-picker` (`7963270`) into
+`tau2-integration` as **`4501584`**, publishing to `origin/tau2`. Integration was
+clean and freshly fetched at `c13c670` (0.7.9); the merge was conflict-free. Merge
+preparation used `/root/tau2-fzf-merge` on `merge/tau2-fzf-picker`, leaving the
+feature branch and worktree intact.
+
+- Local fzf-style matching with background revisioned name sync; no query RPC.
+- Highlighted results, keyboard navigation and selected-file preview underneath.
+- Hidden-file toggle, explicit counts/partial-index status and no 100-result cap.
+- Distinct working Chat and X controls; no idle redraw loop from prefetch.
+- Merge tree **`3a911f9ffbf6043d1e501010d7543b0728b6b7e5`** exactly equals the tested feature tip.
+  Reused the final **25/25 focused nextest** result
+  (`adf430d5-373b-418f-a174-f1acf4b3d186`), including all three corrected idle
+  regressions from the earlier 325/328 broad run, and the native all-target /
+  Windows MSVC / Android ARM64 compiler checks. Only integration documentation
+  changes follow the identical-tree merge. No new test or build claim.
+- **No deployment, service restart, release packages, provider calls, production
+  data writes or stable/master changes.** Running beta remains unchanged. Protocol
+  **22** requires a future matched client/daemon release; version stays 0.7.9 in
+  this source-only integration, with no schema change. Physical-device QA remains
+  open. See `docs/remote-code-viewer.md` for feature limits and validation details.

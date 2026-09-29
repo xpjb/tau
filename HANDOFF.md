@@ -1,11 +1,15 @@
-# Local fuzzy picker follow-up — feature branch, not deployed
+# Local fuzzy picker — integrated source, not deployed
 
-`fix/tau2-fzf-picker` in `/root/tau2-fzf-picker` implements local fzf-style matching,
+At the user's request, `fix/tau2-fzf-picker` (`7963270`) was merged into
+`tau2-integration` as **`4501584`**, publishing to `origin/tau2`. It implements local
+fzf-style matching,
 background revisioned name sync, highlighted results + selected-file preview,
 hidden-file toggles, complete match counts, and working distinct Chat/X controls.
 See `docs/remote-code-viewer.md` for ownership, limits, validation and handoff.
 Protocol **22** requires a future matched client/daemon release; source only, no
-merge/deployment/packages/restarts. The running 0.7.9 beta is untouched.
+deployment/packages/restarts. The running 0.7.9 beta is untouched. The merge is
+conflict-free and exactly matches the tested feature tree; prior validation is
+reused, with no redundant rebuild or test rerun.
 
 Final focused nextest: **25/25 passed**, including the three idle regressions found
 and fixed during the broad run (325/328 before that fix). Windows/Android library

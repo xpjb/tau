@@ -171,7 +171,8 @@ client/daemon release is needed. Physical-device QA remains open.
 Branch `fix/tau2-fzf-picker`, worktree `/root/tau2-fzf-picker`, based on release
 `c13c670` (0.7.9 / protocol 21). Implementation commits `9a3c3f9` and `41cc562` are
 pushed; the follow-up fixes idle prefetch invalidation and updates native tests.
-**No merge, release build, installer delivery, deployment or service restart.**
+**At the feature handoff: no merge, release build, installer delivery, deployment
+or service restart.**
 The running 0.7.9 beta is unchanged; this protocol-22 branch needs a matched future
 client/daemon release. No Clippy or Cargo built-in test runner was used.
 
@@ -199,3 +200,13 @@ Validation, with managed Cargo and one build job:
 Inspected frames are reproducible using `TAU_CODE_PREVIEW_DIR` with the focused
 code-view tests. Representative local-picker frames are in
 `frontend/qa/code-viewer/fzf-{desktop,phone,phone-2x}.png`.
+
+
+### Approved source integration
+
+Merged `7963270` into `tau2-integration` / `origin/tau2` as **`4501584`**, on top of
+`c13c670`. The merge was conflict-free and its tree exactly matches the tested
+feature tip (`3a911f9ffbf6043d1e501010d7543b0728b6b7e5`). Prior compiler checks and the final
+25/25 focused nextest result are reused; no test or package rebuild was repeated.
+Only integration notes differ after the merge. No deployment or service restart;
+protocol 22 still requires a future matched daemon/client release.
