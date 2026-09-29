@@ -116,6 +116,15 @@ impl Dialog {
     }
 }
 impl Widget for Dialog {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        match self {
+            Self::Connection(d) => d.update(dt, cx),
+            Self::Topic(d) => d.update(dt, cx),
+            Self::Models(d) => d.update(dt, cx),
+            Self::Daemon(d) => d.update(dt, cx),
+            Self::Operation(d) => d.update(dt, cx),
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         match self {
             Self::Connection(d) => d.owns(target, model, ui),
@@ -216,6 +225,23 @@ impl ConnectionDialog {
     }
 }
 impl Widget for ConnectionDialog {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if let Some(identity) = &self.attempt {
+            if identity != &cx.model.identity {
+                self.attempt = None;
+            } else if cx.model.epoch.is_some() {
+                cx.ui.requests.push_back(Request::Close(self.form.id));
+                self.attempt = None;
+            } else if cx.model.connection != "Connecting…" {
+                self.attempt = None;
+            }
+            if self.attempt.is_none() {
+                self.url.control.enabled = true;
+                self.token.control.enabled = true;
+                cx.ui.dirty = true;
+            }
+        }
+    }
     fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
         self.form.owns(target)
             || !self.tools && (self.url.control.target == target || self.token.control.target == target)
@@ -230,24 +256,7 @@ impl Widget for ConnectionDialog {
             return true;
         }
         let choice = match event {
-            Event::Tick(_) => {
-                if let Some(identity) = &self.attempt {
-                    if identity != &cx.model.identity {
-                        self.attempt = None;
-                    } else if cx.model.epoch.is_some() {
-                        cx.ui.requests.push_back(Request::Close(self.form.id));
-                        self.attempt = None;
-                    } else if cx.model.connection != "Connecting…" {
-                        self.attempt = None;
-                    }
-                    if self.attempt.is_none() {
-                        self.url.control.enabled = true;
-                        self.token.control.enabled = true;
-                        cx.ui.dirty = true;
-                    }
-                }
-                self.form.event(event, [&mut self.url, &mut self.token].into_iter(), cx).1
-            }
+
             Event::Back | Event::Key { key: "Escape", .. } if !composing => {
                 Some(if self.tools { ConnectionChoice::Main } else { ConnectionChoice::Cancel })
             }
@@ -631,6 +640,34 @@ impl TopicDialog {
     }
 }
 impl Widget for TopicDialog {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
+            cx.ui.requests.push_back(Request::Close(self.form.id));
+            return;
+        }
+        if let Some(request) = &self.request {
+            if cx.model.project_result.as_ref().is_some_and(|(id, _)| id == request) {
+                let ok = cx.model.project_result.take().unwrap().1;
+                self.request = None;
+                if ok {
+                    cx.ui.requests.push_back(Request::Close(self.form.id));
+                }
+                for field in self.fields() {
+                    field.control.enabled = true;
+                }
+                cx.ui.dirty = true;
+            } else if cx.model.epoch.is_none() {
+                self.request = None;
+                for field in self.fields() {
+                    field.control.enabled = true;
+                }
+                cx.model.notice = Some(
+                    "Topic change unconfirmed. Reconnect and check before trying again; it was not resent.".into(),
+                );
+                cx.ui.dirty = true;
+            }
+        }
+    }
     fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
         self.form.owns(target) || self.name.iter().chain(&self.prompt).any(|f| f.control.target == target)
     }
@@ -649,33 +686,7 @@ impl Widget for TopicDialog {
             return true;
         }
         let choice = match event {
-            Event::Tick(_) => {
-                if let Some(request) = &self.request {
-                    if cx.model.project_result.as_ref().is_some_and(|(id, _)| id == request) {
-                        let ok = cx.model.project_result.take().unwrap().1;
-                        self.request = None;
-                        if ok {
-                            cx.ui.requests.push_back(Request::Close(self.form.id));
-                        }
-                        for field in self.fields() {
-                            field.control.enabled = true;
-                        }
-                        cx.ui.dirty = true;
-                    } else if cx.model.epoch.is_none() {
-                        self.request = None;
-                        for field in self.fields() {
-                            field.control.enabled = true;
-                        }
-                        cx.model.notice = Some(
-                            "Topic change unconfirmed. Reconnect and check before trying again; it was not resent."
-                                .into(),
-                        );
-                        cx.ui.dirty = true;
-                    }
-                }
-                let fields = self.name.iter_mut().chain(self.prompt.iter_mut());
-                self.form.event(event, fields, cx).1
-            }
+
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(TopicChoice::Cancel),
             _ => {
                 let fields = self.name.iter_mut().chain(self.prompt.iter_mut());

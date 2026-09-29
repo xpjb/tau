@@ -90,16 +90,9 @@ pub(super) enum Event<'a> {
     Text(&'a str),
     Preedit(&'a str, Option<(usize, usize)>),
     Paste { target: Target, text: &'a str },
-    Tick(f32),
-    Cancel,
     Back,
     Context(Vec2),
     Middle { pressed: bool, point: Vec2 },
-}
-impl Event<'_> {
-    fn broadcast(&self) -> bool {
-        matches!(self, Self::Tick(_) | Self::Cancel)
-    }
 }
 pub(super) struct Frame<'a> {
     pub layer: &'a mut super::Layer,
@@ -162,6 +155,8 @@ impl Context<'_> {
     }
 }
 pub(super) trait Widget {
+    /// Model/time advancement cannot be consumed by a sibling's input handler.
+    fn update(&mut self, _dt: f32, _cx: &mut Context<'_>) {}
     /// Consumption is independent of whether text/model data changed.
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool;
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>);
@@ -179,7 +174,7 @@ pub(super) trait Widget {
         self.handle_event(event, cx)
     }
 }
-/// Callers supply their children in paint order. Lifecycle broadcasts are not input.
+/// Callers supply input children in paint order; the frontmost consumer wins.
 fn dispatch_children<'a>(
     children: impl DoubleEndedIterator<Item = &'a mut dyn Widget>,
     event: &Event<'_>,
@@ -188,7 +183,7 @@ fn dispatch_children<'a>(
     let mut handled = false;
     for child in children.rev() {
         handled |= child.dispatch(event, cx);
-        if handled && !event.broadcast() {
+        if handled {
             break;
         }
     }
@@ -274,6 +269,36 @@ impl RootWidget {
     }
 }
 impl Widget for RootWidget {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        self.workspace.chat.code.code_tick(dt, cx);
+        self.workspace.update(dt, cx);
+        if let Some(dialog) = &mut self.dialog {
+            dialog.update(dt, cx);
+        }
+        if let Some(viewer) = &mut self.viewer {
+            viewer.update(dt, cx);
+        }
+        if let Some(menu) = &mut self.menu {
+            menu.update(dt, cx);
+        }
+        let visible = self.overlay().is_none();
+        if visible {
+            self.notice.update(dt, cx);
+        } else {
+            self.notice.suspend(cx);
+        }
+        let dirty = cx.ui.dirty;
+        self.tooltips.update(dt, cx);
+        if !visible {
+            cx.ui.dirty = dirty;
+        }
+        // Only the actual captured editor can need selection autoscroll.
+        if let Some(c) = cx.ui.capture
+            && let Some(field) = self.editor(Some(c.target))
+        {
+            field.update(dt, cx);
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         if let Some(overlay) = self.overlay() {
             return self.overlay_widget(overlay).owns(target, model, ui);
@@ -282,39 +307,6 @@ impl Widget for RootWidget {
     }
 
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        self.workspace.sync_navigation(cx);
-        // File-interest lifetime is reconciled even when an opaque scope consumes input.
-        let dt = if let Event::Tick(dt) = event { *dt } else { 0. };
-        self.workspace.chat.code.code_tick(dt, cx);
-        self.workspace.chat.composer.bind(cx);
-        if self.dialog.is_some() || self.viewer.is_some() || self.menu.is_some() {
-            // Hidden notices do not run an expired wake deadline. Their model
-            // destination is unchanged and receives a fresh display on return.
-            self.notice.suspend(cx);
-        }
-        if event.broadcast() {
-            self.workspace.handle_event(event, cx);
-            if let Some(dialog) = &mut self.dialog {
-                dialog.handle_event(event, cx);
-            }
-            if let Some(viewer) = &mut self.viewer {
-                viewer.handle_event(event, cx);
-            }
-            if let Some(menu) = &mut self.menu {
-                menu.handle_event(event, cx);
-            }
-            let visible = self.dialog.is_none() && self.viewer.is_none() && self.menu.is_none();
-            if visible {
-                self.notice.handle_event(event, cx);
-            }
-            // Advance hidden tooltip clocks without requesting paints for invisible effects.
-            let dirty = cx.ui.dirty;
-            self.tooltips.handle_event(event, cx);
-            if !visible {
-                cx.ui.dirty = dirty;
-            }
-            return false;
-        }
         if let Some(overlay) = self.overlay() {
             self.overlay_mut(overlay).handle_event(event, cx);
             return true; // Opaque/modal input boundary, including consumed-without-action.

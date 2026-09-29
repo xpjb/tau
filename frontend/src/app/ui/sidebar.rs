@@ -63,6 +63,15 @@ impl ProjectTabs {
     }
 }
 impl Widget for Sidebar {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        self.projects.update(dt, cx);
+        self.scroll.update(dt, cx);
+        if let Some((Choice::Select(id), point)) = self.controls.held(cx) {
+            self.scroll.stop();
+            cx.ui.capture = None;
+            cx.chat_menu(&id, point);
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         self.controls.items.iter().any(|(_, b, choice)| {
             b.control.target == target
@@ -88,7 +97,7 @@ impl Widget for Sidebar {
         if self.scroll.bar_event(event, cx) {
             return true;
         }
-        if self.projects.dispatch(event, cx) && !event.broadcast() {
+        if self.projects.dispatch(event, cx) {
             return true;
         }
         if let Some((Choice::Select(id), point)) = self.controls.context(event, cx) {
@@ -280,6 +289,14 @@ impl Widget for Sidebar {
     }
 }
 impl Widget for ProjectTabs {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        self.scroll.update(dt, cx);
+        if let Some((TopicChoice::Select(id), point)) = self.controls.held(cx) {
+            self.scroll.stop();
+            cx.ui.capture = None;
+            cx.project_menu(&id, point);
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
         self.scroll.target == target
             || self.controls.items.iter().any(|(_, b, choice)| {

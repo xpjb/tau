@@ -17,6 +17,11 @@ pub(in crate::app) struct Control {
     pub ripple: Option<crate::app::Ripple>,
 }
 impl Control {
+    pub fn held(&self, cx: &Context<'_>) -> Option<Vec2> {
+        cx.ui.capture.filter(|c| c.target == self.target && c.touch && !c.dragged
+            && c.started.elapsed().as_millis() >= 450 && self.contains(c.point)).map(|c| c.point)
+    }
+
     pub fn new(scope: Id, rounded: bool) -> Self {
         Self {
             target: Target { scope, widget: Id::new() },
@@ -114,10 +119,7 @@ impl Control {
                 cx.ui.dirty = true;
                 true
             }
-            Event::Cancel => {
-                self.ripple = None;
-                false
-            }
+
             _ => false,
         }
     }
@@ -262,6 +264,14 @@ impl TextField {
     }
 }
 impl Widget for TextField {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        let capture = cx.ui.capture.filter(|c| c.target == self.control.target && !c.touch && c.dragged);
+        if capture.is_some() {
+            let renderer = &mut cx.services.renderer;
+            cx.ui.dirty |=
+                self.editor.drag_scroll(&mut renderer.text, renderer.faces.prose[0], capture.unwrap().point, dt);
+        }
+    }
     fn owns(&self, target: Target, _: &Controller, _: &UiState) -> bool {
         self.control.target == target
     }
@@ -293,17 +303,8 @@ impl Widget for TextField {
                 cx.ui.dirty = true;
                 return true;
             }
-            Event::Tick(dt) if capture.is_some_and(|c| !c.touch && c.dragged) => {
-                cx.ui.dirty |=
-                    self.editor.drag_scroll(&mut renderer.text, renderer.faces.prose[0], capture.unwrap().point, dt);
-                return true;
-            }
-            Event::Cancel => {
-                if self.editor.composing() && cx.ui.native.is_none() {
-                    self.editor.preedit(String::new(), None);
-                }
-                return false;
-            }
+
+
             Event::Preedit(text, cursor) if focused => {
                 self.editor.preedit(text.into(), cursor);
                 cx.ui.dirty = true;
@@ -569,21 +570,13 @@ impl<A: Clone + PartialEq> Controls<A> {
 }
 
 impl<A: Clone + PartialEq> Controls<A> {
+    pub fn held(&self, cx: &Context<'_>) -> Option<(A, Vec2)> {
+        self.items.iter().find_map(|(_, button, choice)| button.control.held(cx).map(|point| (choice.clone(), point)))
+    }
     pub fn context(&self, event: &Event<'_>, cx: &Context<'_>) -> Option<(A, Vec2)> {
         let point = match *event {
             Event::Context(point) => point,
-            Event::Tick(_) | Event::Up { .. } => {
-                let capture = cx.ui.capture?;
-                if !capture.touch || capture.dragged || capture.started.elapsed().as_millis() < 450 {
-                    return None;
-                }
-                let (_, button, choice) = self
-                    .items
-                    .iter()
-                    .find(|(_, b, _)| b.control.target == capture.target && b.control.contains(capture.point))?;
-                let _ = button;
-                return Some((choice.clone(), capture.point));
-            }
+            Event::Up { .. } => return self.held(cx),
             _ => return None,
         };
         self.items.iter().rev().find(|(_, b, _)| b.control.contains(point)).map(|(_, _, a)| (a.clone(), point))

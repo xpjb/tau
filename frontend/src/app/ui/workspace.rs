@@ -233,8 +233,7 @@ impl Workspace {
         self.sidebar.scroll.stop();
         self.sidebar.projects.scroll.stop();
         self.attachments.scroll.stop();
-        self.chat.code.handle_event(&Event::Cancel, cx);
-        self.chat.composer.handle_event(&Event::Cancel, cx);
+        self.chat.code.cancel_pointer(cx);
         cx.ui.cancel();
     }
     pub fn send(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
@@ -270,6 +269,13 @@ impl Workspace {
     }
 }
 impl Widget for Workspace {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        for (bounds, child) in self.children(cx.ui.bounds(), cx.ui) {
+            if bounds.is_some() {
+                child.update(dt, cx);
+            }
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         self.layout(ui.bounds(), ui)
             .into_iter()
@@ -278,10 +284,6 @@ impl Widget for Workspace {
     }
 
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if matches!(event, Event::Cancel) {
-            self.cancel(cx);
-            return false;
-        }
         let children = self.children(cx.ui.bounds(), cx.ui);
         let handled = super::dispatch_children(
             children.into_iter().filter_map(|(bounds, child)| bounds.map(|_| child)),
@@ -394,6 +396,11 @@ impl ChatPane {
     }
 }
 impl Widget for ChatPane {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        for child in self.order(cx.ui).into_iter().flatten() {
+            self.child_mut(child).update(dt, cx);
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         model.selected().is_some()
             && self.order(ui).into_iter().flatten().any(|child| self.child(child).owns(target, model, ui))
@@ -406,7 +413,7 @@ impl Widget for ChatPane {
         let mut handled = false;
         for child in self.order(cx.ui).into_iter().flatten().rev() {
             handled |= self.child_mut(child).dispatch(event, cx);
-            if handled && !event.broadcast() {
+            if handled {
                 break;
             }
         }

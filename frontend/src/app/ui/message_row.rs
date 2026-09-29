@@ -281,6 +281,12 @@ impl MessageRow {
     }
 }
 impl Widget for MessageRow {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if let Some(point) = self.control.held(cx) {
+            cx.ui.capture = None;
+            self.menu(point, cx);
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         let Some(chat) = model.selected() else { return false; };
         let exists = match &self.item { ItemId::Message(id) => chat.feed.messages.contains_key(id), _ => self.item.root(chat).is_some_and(|id| chat.feed.event(id).is_some()) };
@@ -289,21 +295,21 @@ impl Widget for MessageRow {
             || self.attachment.as_ref().is_some_and(|c| c.owns(target, model, ui)))
     }
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if let Some(card) = &mut self.attachment && card.dispatch(event, cx) && !event.broadcast() { return true; }
+        if let Some(card) = &mut self.attachment && card.dispatch(event, cx) { return true; }
         let capture = cx.ui.capture;
         if let Some(t) = &mut self.tool {
             for section in [&mut t.output, &mut t.input] {
                 if t.open && section.visible {
                     if matches!(event, Event::Hover(_)) && section.text.handle(event, cx, true) { return true; }
-                    if section.heading.event(event, &mut self.toggle, cx) && !event.broadcast() { return true; }
+                    if section.heading.event(event, &mut self.toggle, cx) { return true; }
                 }
             }
-            if t.heading.event(event, &mut self.toggle, cx) && !event.broadcast() { return true; }
+            if t.heading.event(event, &mut self.toggle, cx) { return true; }
         }
-        if let Some(d) = &mut self.disclosure && d.event(event, &mut self.toggle, cx) && !event.broadcast() { return true; }
+        if let Some(d) = &mut self.disclosure && d.event(event, &mut self.toggle, cx) { return true; }
         if self.toggle.is_some() || cx.ui.capture.map(|c| c.target) != capture.map(|c| c.target) { return true; }
         if let Event::Context(point) = *event && self.control.contains(point) { self.menu(point, cx); return true; }
-        if matches!(event, Event::Tick(_) | Event::Up { .. }) && cx.ui.capture.is_some_and(|c| c.target == self.control.target && c.touch && !c.dragged && c.started.elapsed().as_millis() >= 450) {
+        if matches!(event, Event::Up { .. }) && cx.ui.capture.is_some_and(|c| c.target == self.control.target && c.touch && !c.dragged && c.started.elapsed().as_millis() >= 450) {
             let p = cx.ui.capture.take().unwrap().point; self.menu(p, cx); return true;
         }
         if matches!(event, Event::Hover(_)) {

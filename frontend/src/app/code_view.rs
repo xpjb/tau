@@ -221,7 +221,7 @@ impl CodeBrowser {
             composer_bottom: None,
         }
     }
-    fn cancel_pointer(&mut self, cx: &mut Context<'_>) {
+    pub(in crate::app) fn cancel_pointer(&mut self, cx: &mut Context<'_>) {
         self.pointer = None;
         if cx.ui.capture.is_some_and(|c| {
             c.target.scope == self.controls.id || self.view.as_ref().is_some_and(|v| v.id == c.target.scope)
@@ -1028,6 +1028,12 @@ impl CodeBrowser {
 }
 
 impl Widget for CodeBrowser {
+    fn update(&mut self, dt: f32, cx: &mut ui::Context<'_>) {
+        if let Some(code) = &mut self.view {
+            code.scroll.update(dt, cx); code.horizontal.update(dt, cx);
+            code.preview_scroll.update(dt, cx); code.preview_horizontal.update(dt, cx);
+        }
+    }
     fn owns(&self, target: ui::Target, model: &Controller, _ui: &ui::UiState) -> bool {
         self.view.as_ref().is_some_and(|v| v.identity == model.identity && v.lineage == model.account.source_lineage
             && Some(&v.session) == model.account.selected.as_ref()
@@ -1037,10 +1043,6 @@ impl Widget for CodeBrowser {
     }
 
     fn handle_event(&mut self, event: &InputEvent<'_>, cx: &mut Context<'_>) -> bool {
-        if matches!(event, InputEvent::Cancel) {
-            self.cancel_pointer(cx);
-            return false;
-        }
         if let InputEvent::Text(text) = event
             && cx.ui.focus.is_none()
             && self.code_key(text, false, false, cx)

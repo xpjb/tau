@@ -295,7 +295,7 @@ fn selection_follows_scrolled_text_and_tail_returns_to_latest() {
     let before = h.app.services.renderer.selected_text().unwrap();
     let scroll = h.app.root.workspace.chat.transcript.scroll.value;
     for _ in 0..16 {
-        h.app.ui_event(Event::Tick(0.05));
+        h.app.update_widgets(0.05);
         h.frame();
     }
     assert!(h.app.root.workspace.chat.transcript.scroll.value > scroll);
@@ -334,7 +334,7 @@ fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
     h.app.press(41, point, true);
     h.app.ui.capture.as_mut().unwrap().started -= std::time::Duration::from_millis(500);
     let before = h.app.root.workspace.chat.transcript.scroll.value;
-    h.app.ui_event(Event::Tick(0.05));
+    h.app.update_widgets(0.05);
     assert!(h.app.root.menu.is_some(), "The header consumes its held-touch update");
     assert!(h.app.root.workspace.chat.transcript.scroll.value > before, "That consumption cannot skip the body update");
 }

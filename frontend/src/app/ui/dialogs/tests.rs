@@ -152,16 +152,16 @@ fn async_topic_results_match_request_scope_and_preserve_edits_after_failure() {
     h.app.controller.epoch = Some(7);
     let Dialog::Topic(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() };
     dialog.request = Some("operation-one".into());
-    h.app.controller.project_result = Some(("other-operation".into(), true)); h.app.ui_event(Event::Tick(0.));
+    h.app.controller.project_result = Some(("other-operation".into(), true)); h.app.update_widgets(0.);
     assert!(matches!(h.dialog(), Dialog::Topic(TopicDialog { request: Some(_), .. })));
-    h.app.controller.project_result = Some(("operation-one".into(), false)); h.app.ui_event(Event::Tick(0.));
+    h.app.controller.project_result = Some(("operation-one".into(), false)); h.app.update_widgets(0.);
     assert_eq!(h.dialog().fields()[0].editor.value, "First draft");
     assert!(matches!(h.dialog(), Dialog::Topic(TopicDialog { request: None, .. })));
     h.app.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Rename("second".into()))).unwrap();
-    h.app.controller.project_result = Some(("operation-one".into(), true)); h.app.ui_event(Event::Tick(0.));
+    h.app.controller.project_result = Some(("operation-one".into(), true)); h.app.update_widgets(0.);
     assert_eq!(h.dialog().topic_key(), Some(("rename", "second")));
     let Dialog::Topic(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() }; dialog.request = Some("operation-two".into());
-    h.app.controller.project_result = Some(("operation-two".into(), true)); h.app.ui_event(Event::Tick(0.));
+    h.app.controller.project_result = Some(("operation-two".into(), true)); h.app.update_widgets(0.);
     assert!(h.app.root.dialog.is_none(), "Matching completion closes before a frame/next input");
 }
 
@@ -170,18 +170,18 @@ fn connection_completion_and_focus_restoration_validate_their_owner() {
     let mut h = Harness::new(false); h.app.ui.focus=Some(h.app.root.workspace.chat.composer.field.control.target);
     h.app.open_ui(ui::DialogSpec::Connection).unwrap();
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() }; dialog.attempt = Some(h.app.controller.identity.clone());
-    h.app.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Rename("first".into()))).unwrap(); h.app.controller.epoch = Some(9); h.app.ui_event(Event::Tick(0.));
+    h.app.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Rename("first".into()))).unwrap(); h.app.controller.epoch = Some(9); h.app.update_widgets(0.);
     assert_eq!(h.dialog().topic_key(), Some(("rename", "first")), "Old connection success cannot close a different dialog");
     h.app.back(); assert_eq!(h.app.ui.focus, Some(h.app.root.workspace.chat.composer.field.control.target));
-    h.app.open_ui(ui::DialogSpec::Connection).unwrap(); h.app.ui_event(Event::Tick(0.)); assert!(h.app.root.dialog.is_some(), "Already connected is not a new submission completion");
+    h.app.open_ui(ui::DialogSpec::Connection).unwrap(); h.app.update_widgets(0.); assert!(h.app.root.dialog.is_some(), "Already connected is not a new submission completion");
     h.app.controller.epoch = None; h.app.controller.connection = "Authentication failed".into();
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() };
     dialog.attempt = Some(h.app.controller.identity.clone()); dialog.url.control.enabled = false; dialog.token.control.enabled = false;
-    h.app.ui_event(Event::Tick(0.));
+    h.app.update_widgets(0.);
     assert!(h.dialog().fields().iter().all(|field| field.control.enabled), "Failure restores editable fields without dropping their draft");
     h.app.controller.epoch = Some(9);
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() }; dialog.attempt = Some(h.app.controller.identity.clone());
-    h.app.ui_event(Event::Tick(0.)); assert!(h.app.root.dialog.is_none());
+    h.app.update_widgets(0.); assert!(h.app.root.dialog.is_none());
     h.app.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Rename("first".into()))).unwrap(); h.app.controller.account.selected = Some("two".into());
     h.app.back(); assert_ne!(h.app.ui.focus, Some(h.app.root.workspace.chat.composer.field.control.target), "Do not restore an editor bound to another chat");
 }
@@ -191,7 +191,7 @@ fn retained_forms_settle_idle_and_reuse_real_editor_geometry_on_desktop_and_phon
     for mobile in [false, true] {
         let mut h = Harness::new(mobile); h.app.open_ui(ui::DialogSpec::Connection).unwrap(); h.frame();
         h.dump(if mobile { "connection-phone.png" } else { "connection-desktop.png" });
-        h.app.ui.dirty = false; h.app.ui_event(Event::Tick(0.)); assert!(!h.app.ui.dirty, "Idle UI update cannot itself require a paint");
+        h.app.ui.dirty = false; h.app.update_widgets(0.); assert!(!h.app.ui.dirty, "Idle UI update cannot itself require a paint");
         h.click(h.button("More…")); h.frame(); h.dump(if mobile { "connection-tools-phone.png" } else { "connection-tools-desktop.png" });
         h.click(h.button("Copy connection diagnostics")); assert!(h.app.actions().iter().any(|a| matches!(a, PlatformAction::Copy(text) if text.contains("Native:"))));
         h.click(h.button("Back")); h.frame(); assert!(h.dialog().fields()[0].control.rect.is_some());

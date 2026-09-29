@@ -404,7 +404,7 @@ impl CardDeck {
         let mut handled = false;
         for card in self.cards.values_mut() {
             handled |= card.dispatch(event, cx);
-            if handled && !event.broadcast() {
+            if handled {
                 break;
             }
         }
@@ -502,6 +502,11 @@ impl AttachmentBrowser {
     }
 }
 impl Widget for AttachmentBrowser {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        if self.show && self.bound(cx.model) {
+            self.scroll.update(dt, cx);
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         self.show
             && self.bound(model)
@@ -511,10 +516,6 @@ impl Widget for AttachmentBrowser {
     }
 
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if matches!(event, Event::Cancel) {
-            self.scroll.stop();
-            return false;
-        }
         if !self.show || !self.bound(cx.model) {
             return false;
         }

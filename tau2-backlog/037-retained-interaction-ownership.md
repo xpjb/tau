@@ -156,11 +156,29 @@ sufficient. Do not introduce a new event framework to remove the old one.
 | Current exception | Disposition / owner |
 | --- | --- |
 | `Submit` (only test emitters) | **Removed immediately under 042**, including production handlers and fixture selector; real controls exercise the two useful callers. |
-| `Tick` | Existing broadcast is a correctness repair, not an architectural endorsement. **037 follow-up with 041 ownership work, before 043:** use an explicit non-consuming update call if it removes the synthetic dispatch path; preserve on-demand drawing, elapsed timing, independent siblings and completion/source checks. No new scheduler/registry. |
-| `Cancel` | **037 follow-up with 041 ownership work, before 043:** consolidate actual owner cleanup, replacing the mixture of synthetic delivery and direct resets where unnecessary. Platform focus loss/touch cancellation/suspend and app-owned hide/source/navigation changes must still abandon interactions without activation. Review broad resize cancellation separately from true owner loss; no fabricated pointer-up or generic lifecycle bus. |
+| `Tick` | **Deleted.** Non-consuming `Widget::update` calls advance actual children, timers and source-bound completions. No lifecycle event or scheduler/registry. |
+| `Cancel` | **Deleted.** Explicit owner cleanup abandons capture, scroll and selection without activation. Repeated identical resize notifications are inert; real geometry changes cancel gestures without invalidating a live native editor. |
 | `Hover` replay after layout | **Retain for now:** a stationary pointer must retarget when geometry/content moves. Reconcile against actual placed owners; this is not invented mouse movement or a new gesture vocabulary. |
 | `Back` / targeted `Paste` | **Retain:** Android back and clipboard completion are real platform actions, not literal winit variants. Keep field/source/token fencing on clipboard completion. |
 
 No offscreen-gesture signal exists: desktop cursor-leaving clears hover. The
 cancellation entry points already live at the platform/App/owner boundaries;
 there is no requirement to retransmit every reason as a new synthetic event.
+
+
+## Synthetic lifecycle subsystem retired — September 29, 2026
+
+Removed Tick/Cancel variants, broadcast classification and their input-dispatch
+branches. Actual retained parents advance their children through non-consuming
+updates; async completions retain their instance/source/request checks. Long-hold
+menus use captured controls directly, not fabricated context events. Gesture
+cancellation calls actual owners, and tests use that same boundary. No event bus,
+scheduler or descendant registry replaces the deleted subsystem.
+
+Fresh frontend all-target check and **194/194 frontend tests**, zero skipped, pass
+(`bbcf077c-3404-4dfc-8230-359673f7ecc7`). Explicit ownership costs **71 raw / 86
+normalized production lines** versus the preceding checkpoint; tests are unchanged
+in code-line count. This is an architectural deletion, not a net size saving.
+The user's follow-up prioritizes removing whole redundant subsystems and their
+callers over line-by-line squeezing. Future slices must identify the responsibility
+that disappears, not merely introduce shorter wrappers or move code.

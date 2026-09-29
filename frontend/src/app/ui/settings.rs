@@ -67,6 +67,11 @@ impl ModelsDialog {
     }
 }
 impl Widget for ModelsDialog {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity {
+            cx.ui.requests.push_back(Request::Close(self.id));
+        }
+    }
     fn owns(&self, target: Target, _model: &Controller, ui: &UiState) -> bool {
         self.form.owns(target)
             || self.models.control.target == target
@@ -98,7 +103,7 @@ impl Widget for ModelsDialog {
                     })();
                     self.form.report(result, cx);
                 }
-                if handled && !event.broadcast() {
+                if handled {
                     return true;
                 }
                 self.form
@@ -354,6 +359,37 @@ impl DaemonDialog {
     }
 }
 impl Widget for DaemonDialog {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
+            cx.ui.requests.push_back(Request::Close(self.id));
+            return;
+        }
+        if self.waiting
+            && let Some(document) = cx.model.daemon_settings.clone()
+        {
+            self.waiting = false;
+            let result = Draft::new(&document, self.identity.clone()).and_then(|draft| {
+                self.draft = Some(draft);
+                self.load(cx)
+            });
+            self.form.report(result, cx);
+        }
+        if let Some(request) = &self.saving {
+            if cx.model.settings_result.as_ref().is_some_and(|(id, _)| id == request) {
+                let ok = cx.model.settings_result.take().unwrap().1;
+                self.saving = None;
+                if ok && let (Some(d), Some(doc)) = (&mut self.draft, &cx.model.daemon_settings) {
+                    d.revision = doc.revision;
+                    cx.model.notice = Some("Settings saved".into());
+                }
+                cx.ui.dirty = true;
+            } else if cx.model.epoch.is_none() {
+                self.saving = None;
+                cx.model.notice = Some("Save unconfirmed. Reload before saving again; it was not resent.".into());
+                cx.ui.dirty = true;
+            }
+        }
+    }
     fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
         self.form.owns(target)
             || self.field_visible() && self.value.as_ref().is_some_and(|f| f.control.target == target)
@@ -364,33 +400,7 @@ impl Widget for DaemonDialog {
             cx.ui.requests.push_back(Request::Close(self.id));
             return true;
         }
-        if matches!(event, Event::Tick(_)) {
-            if self.waiting
-                && let Some(document) = cx.model.daemon_settings.clone()
-            {
-                self.waiting = false;
-                let result = Draft::new(&document, self.identity.clone()).and_then(|draft| {
-                    self.draft = Some(draft);
-                    self.load(cx)
-                });
-                self.form.report(result, cx);
-            }
-            if let Some(request) = &self.saving {
-                if cx.model.settings_result.as_ref().is_some_and(|(id, _)| id == request) {
-                    let ok = cx.model.settings_result.take().unwrap().1;
-                    self.saving = None;
-                    if ok && let (Some(d), Some(doc)) = (&mut self.draft, &cx.model.daemon_settings) {
-                        d.revision = doc.revision;
-                        cx.model.notice = Some("Settings saved".into());
-                    }
-                    cx.ui.dirty = true;
-                } else if cx.model.epoch.is_none() {
-                    self.saving = None;
-                    cx.model.notice = Some("Save unconfirmed. Reload before saving again; it was not resent.".into());
-                    cx.ui.dirty = true;
-                }
-            }
-        }
+
         let composing = self.value.as_ref().is_some_and(|f| f.editor.composing());
         let choice = match event {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(SettingChoice::Close),

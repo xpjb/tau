@@ -7,6 +7,15 @@ impl App {
         let Self { controller, root, ui, services } = self;
         run(root, &mut ui::Context { model: controller, ui, services })
     }
+    pub(super) fn update_widgets(&mut self, dt: f32) {
+        self.sync_navigation();
+        self.reconcile_targets();
+        self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
+        self.ui.composing = self.composing();
+        self.with_ui(|root, cx| root.update(dt, cx));
+        if let Err(error) = self.finish_ui_requests() { self.report(Err(error)); }
+        self.reconcile_targets();
+    }
     pub(super) fn ui_event(&mut self, event: ui::Event<'_>) -> bool {
         self.sync_navigation();
         self.reconcile_targets();

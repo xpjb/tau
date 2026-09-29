@@ -194,6 +194,11 @@ impl OperationDialog {
     }
 }
 impl Widget for OperationDialog {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
+            cx.ui.requests.push_back(Request::Close(self.id));
+        }
+    }
     fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
         self.form.owns(target) || self.value.as_ref().is_some_and(|f| f.control.target == target)
     }

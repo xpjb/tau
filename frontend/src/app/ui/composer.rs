@@ -198,7 +198,7 @@ impl Widget for Composer {
         if self.field.editor.value != old {
             self.edited(cx);
         }
-        if field && !event.broadcast() { return true; }
+        if field { return true; }
         let (handled, choice) = self.controls.event(event, cx);
         let result = match choice {
             Some(Choice::RetryCreate) => cx.model.retry_create_manually(),

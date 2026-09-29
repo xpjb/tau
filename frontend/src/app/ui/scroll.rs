@@ -18,6 +18,29 @@ pub(in crate::app) struct ScrollState {
     drag: Option<f32>,
 }
 impl ScrollState {
+    pub fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        let old = self.value;
+        if let Some((target, last)) = self.wheel {
+            let target = target.clamp(0., self.max);
+            let now = Instant::now();
+            let elapsed = now.duration_since(last).as_secs_f32().min(0.1);
+            let next = self.value + (target - self.value) * (1. - (-elapsed / 0.065).exp());
+            let settled = (target - next).abs() < 0.25 * cx.ui.scale;
+            self.value = if settled { target } else { next };
+            self.wheel = (!settled).then_some((target, now));
+            cx.ui.dirty = true;
+        }
+        if self.candidate.is_none() && self.velocity.abs() > 4. {
+            self.set(self.value + self.velocity * dt.min(0.05));
+            self.velocity *= (-9. * dt).exp();
+            if (old - self.value).abs() < 0.1 {
+                self.velocity = 0.;
+            }
+            cx.ui.dirty = true;
+        }
+        cx.ui.dirty |= self.value != old;
+    }
+
     pub fn new(scope: Id, horizontal: bool) -> Self {
         Self {
             target: Target { scope, widget: Id::new() },
@@ -115,7 +138,6 @@ impl ScrollState {
         let old = self.value;
         let mut handled = child_handled;
         match *event {
-            Event::Cancel => self.stop(),
             Event::Down { pointer, point, touch }
                 if contains(self.rect, point) && cx.ui.capture.is_none_or(|c| c.pointer == pointer) =>
             {
@@ -199,26 +221,7 @@ impl ScrollState {
                 self.wheel = Some(((target + amount).clamp(0., self.max), Instant::now()));
                 handled = true;
             }
-            Event::Tick(dt) => {
-                if let Some((target, last)) = self.wheel {
-                    let target = target.clamp(0., self.max);
-                    let now = Instant::now();
-                    let elapsed = now.duration_since(last).as_secs_f32().min(0.1);
-                    let next = self.value + (target - self.value) * (1. - (-elapsed / 0.065).exp());
-                    let settled = (target - next).abs() < 0.25 * cx.ui.scale;
-                    self.value = if settled { target } else { next };
-                    self.wheel = (!settled).then_some((target, now));
-                    cx.ui.dirty = true;
-                }
-                if self.candidate.is_none() && self.velocity.abs() > 4. {
-                    self.set(self.value + self.velocity * dt.min(0.05));
-                    self.velocity *= (-9. * dt).exp();
-                    if (old - self.value).abs() < 0.1 {
-                        self.velocity = 0.;
-                    }
-                    cx.ui.dirty = true;
-                }
-            }
+
             _ => {}
         }
         cx.ui.dirty |= self.value != old;

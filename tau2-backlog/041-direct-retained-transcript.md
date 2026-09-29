@@ -125,3 +125,8 @@ frontend/daemon/protocol all-target compilation and 35 native contract tests pas
 (`db018803-8bd7-49de-83aa-acc90d494588`). Net cross-workspace saving: **462 raw /
 326 normalized**, including deletion of 30 shared protocol code lines. Event
 boundary cleanup, broader pruning and the final size/device gates remain open.
+
+
+Synthetic lifecycle follow-up is now closed in 037: update/cancellation no longer
+travel through input dispatch. Fresh frontend validation is recorded there. The
+remaining reading-position, size and physical-device gates are not closed by it.

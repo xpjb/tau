@@ -86,11 +86,11 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After legacy feed/protocol adapter retirement, frontend Rust is **26,028 raw /
-32,209 same-format**: production **18,593 / 21,799**, tests **7,435 / 10,410**.
-Outside growth is now **62 / 97** (production **26 / 60**, tests **36 / 37**).
-The **charged reduction is 1,635 / 712**, with **3,365 / 4,288 remaining**.
-Charged production is **555 raw smaller / 275 same-format larger**. The 5,000-line
+After synthetic lifecycle retirement, frontend Rust is **26,099 raw /
+32,295 same-format**: production **18,664 / 21,885**, tests **7,435 / 10,410**.
+Outside growth remains **62 / 97** (production **26 / 60**, tests **36 / 37**).
+The **charged reduction is 1,564 / 626**, with **3,436 / 4,374 remaining**.
+Charged production is **484 raw smaller / 361 same-format larger**. The 5,000-line
 and normalized production-simplification gates are still not met.
 Deltas below use reduction-positive values and show raw / same-format:
 
@@ -113,10 +113,12 @@ Deltas below use reduction-positive values and show raw / same-format:
 
 | 041 legacy adapter retirement | Feed update/page/legacy overlap, skipped Transcript wire variants/type, old delta/page tests | Native full/sparse installation, offline native preview and compact thinking check | +180 / +62 frontend | +252 / +234 | −30 / −30 production; cumulative 62 / 97 | Charged reduction 1,635 / 712; gap 3,365 / 4,288 |
 
+| 037 synthetic lifecycle retirement | Tick/Cancel event variants, broadcast classifier and lifecycle input handlers | Direct child updates, actual-owner cancellation and held-control checks | −71 / −86 | 0 / 0 | 0 new | Charged reduction 1,564 / 626; gap 3,436 / 4,374 |
+
 Outside-code measurement compares every tracked Rust source in `daemon` and
 `protocol` with the same counter/formatter and reviewed test boundaries in the
 changed files. Baseline combined totals: **8,454 / 13,425**, production
-**7,447 / 11,767**. Candidate: **8,531 / 13,531**, production **7,488 / 11,836**.
+**7,447 / 11,767**. Candidate: **8,516 / 13,522**, production **7,473 / 11,827**.
 Only `daemon/src/blocks.rs` and `protocol/src/blocks.rs` add code; legacy types/variants
 were deleted from `protocol/src/lib.rs` and `protocol/src/transcript.rs`; the earlier
 `protocol/src/lib.rs` equality derive still has zero code-line delta. No other

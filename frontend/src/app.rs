@@ -160,7 +160,7 @@ impl App {
             self.ui.dirty = true;
         }
         self.sync_navigation();
-        self.ui_event(ui::Event::Tick(dt));
+        self.update_widgets(dt);
         self.with_ui(|root, cx| root.timers(cx));
         let waiting = self.ui.capture.is_some_and(|c| c.touch && !c.dragged && c.started.elapsed().as_millis() < 450);
         std::mem::take(&mut self.ui.dirty) || waiting
@@ -224,14 +224,10 @@ impl App {
         active
     }
     pub fn cancel_pointer(&mut self) {
+        if self.ui.native.is_none() { self.cancel_preedit(); }
         self.with_ui(|root, cx| {
             root.workspace.cancel(cx);
-            if let Some(dialog) = &mut root.dialog {
-                dialog.handle_event(&ui::Event::Cancel, cx);
-            }
-            if let Some(viewer) = &mut root.viewer {
-                viewer.handle_event(&ui::Event::Cancel, cx);
-            }
+            if let Some(viewer) = &mut root.viewer { viewer.cancel_pointer(); }
             root.tooltips.dismiss();
         });
         self.root.menu = None;

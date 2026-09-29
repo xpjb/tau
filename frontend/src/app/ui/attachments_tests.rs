@@ -142,7 +142,7 @@ fn nested_capture_is_clipped_and_cannot_activate_a_replaced_card_or_another_poin
         let p = Vec2::new(r.x + r.width / 2., top - 1.);
         assert!(!b.control.contains(p));
     }
-    h.app.with_ui(|root, cx| root.workspace.attachments.handle_event(&Event::Cancel, cx));
+    h.app.cancel_pointer();
     assert!(h.app.root.workspace.attachments.scroll.velocity == 0.);
 }
 

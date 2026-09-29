@@ -41,6 +41,9 @@ impl NoticeWidget {
     }
 }
 impl Widget for NoticeWidget {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        self.sync(cx);
+    }
     fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
         self.popup.visible() && (self.body.target == target || self.close.target == target)
     }

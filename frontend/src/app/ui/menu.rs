@@ -285,6 +285,19 @@ impl Menu {
     }
 }
 impl Widget for Menu {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity
+            || self.lineage != cx.model.account.source_lineage
+            || self.session != cx.model.account.selected
+        {
+            cx.ui.requests.push_back(Request::CloseMenu(self.id));
+            return;
+        }
+        self.scroll.update(dt, cx);
+        if let Some(parent) = &mut self.parent {
+            parent.update(dt, cx);
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         self.scroll.target == target
             || self.controls.iter().any(|c| c.target == target && c.rect.is_some())
@@ -299,14 +312,8 @@ impl Widget for Menu {
             cx.ui.requests.push_back(Request::CloseMenu(self.id));
             return true;
         }
-        if event.broadcast() && let Some(parent) = &mut self.parent {
-            parent.handle_event(event, cx);
-        }
         let choice = match *event {
-            Event::Cancel => {
-                self.scroll.stop();
-                return true;
-            }
+
             Event::Back | Event::Key { key: "Escape" | "ArrowLeft", .. } => {
                 self.back(cx);
                 return true;

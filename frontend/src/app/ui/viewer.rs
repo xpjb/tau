@@ -31,6 +31,8 @@ pub(in crate::app) struct ImageViewer {
     second: Option<(u64, Vec2)>,
 }
 impl ImageViewer {
+    pub fn cancel_pointer(&mut self) { self.pointer = None; self.second = None; }
+
     pub fn new(spec: ImageSpec) -> Self {
         let id = Id::new();
         Self {
@@ -59,6 +61,11 @@ impl ImageViewer {
     }
 }
 impl Widget for ImageViewer {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if !self.spec.target.matches_source(&cx.model.identity, cx.model.account.source_lineage.as_deref()) {
+            cx.ui.requests.push_back(Request::CloseViewer(self.id));
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
         self.spec.target.matches_source(&model.identity, model.account.source_lineage.as_deref())
             && self.form.owns(target)
@@ -97,10 +104,7 @@ impl Widget for ImageViewer {
             return true;
         }
         match *event {
-            Event::Cancel => {
-                self.pointer = None;
-                self.second = None;
-            }
+
             Event::Down { pointer, point, .. } if cx.ui.capture.is_none() => {
                 if let Some((id, _, _, _)) = self.pointer {
                     if id != pointer && self.second.is_none() {

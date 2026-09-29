@@ -27,13 +27,21 @@ impl Header {
     }
 }
 impl Widget for Header {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if let Some(point) = self.title.held(cx)
+            && let Some(session) = cx.model.account.selected.clone()
+        {
+            cx.ui.capture = None;
+            cx.chat_menu(&session, point);
+        }
+    }
     fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
         self.title.target == target && self.title.rect.is_some() || self.controls.owns(target)
     }
 
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if matches!(event,Event::Context(p) if self.title.contains(*p))
-            || matches!(event, Event::Tick(_) | Event::Up { .. })
+            || matches!(event, Event::Up { .. })
                 && cx.ui.capture.is_some_and(|c| {
                     c.target == self.title.target && c.touch && !c.dragged && c.started.elapsed().as_millis() >= 450
                 })

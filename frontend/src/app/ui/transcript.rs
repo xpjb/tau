@@ -208,6 +208,38 @@ impl Transcript {
     }
 }
 impl Widget for Transcript {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        let capture = cx.ui.capture;
+        let old_scroll = self.scroll.value;
+        if let Some(auto) = &self.autoscroll {
+            self.scroll.set(self.scroll.value + auto.speed(cx.ui.scale) * dt.min(0.05));
+        }
+        if self.selecting
+            && let Some(c) = capture.filter(|c| c.target == self.selection && c.dragged)
+        {
+            let margin = 16. * cx.ui.scale;
+            let r = self.scroll.rect;
+            let y = c.point.y;
+            let speed = if y < r.y + margin {
+                (y - r.y - margin) * 20.
+            } else if y > r.y + r.height - margin {
+                (y - r.y - r.height + margin) * 20.
+            } else {
+                0.
+            };
+            self.scroll.set(self.scroll.value + speed.clamp(-1800. * cx.ui.scale, 1800. * cx.ui.scale) * dt.min(0.05));
+        }
+        self.scroll.update(dt, cx);
+        self.horizontal.update(dt, cx);
+        for row in &mut self.rows {
+            row.update(dt, cx);
+        }
+        if self.scroll.value != old_scroll {
+            self.download = None;
+            self.remember_scroll(cx);
+            cx.ui.dirty = true;
+        }
+    }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         self.binding.as_ref().is_some_and(|(identity, lineage, session)| {
             identity == &model.identity
@@ -362,10 +394,6 @@ impl Widget for Transcript {
 
 impl Transcript {
     fn route(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if matches!(event, Event::Cancel) {
-            self.cancel();
-            return false;
-        }
         if self.binding.as_ref().is_none_or(|(identity, lineage, session)| {
             identity != &cx.model.identity
                 || lineage != &cx.model.account.source_lineage
@@ -427,7 +455,7 @@ impl Transcript {
         let mut child = self.models.dispatch(event, cx);
         let mut toggle = None;
         for row in self.rows.iter_mut().rev() {
-            if !child || event.broadcast() {
+            if !child {
                 child |= row.dispatch(event, cx);
             }
             if let Some(choice) = row.toggle.take() {
@@ -493,27 +521,7 @@ impl Transcript {
                 self.remember_scroll(cx);
                 return handled;
             }
-            Event::Tick(dt) => {
-                if let Some(auto) = &self.autoscroll {
-                    self.scroll.set(self.scroll.value + auto.speed(cx.ui.scale) * dt.min(0.05));
-                }
-                if self.selecting
-                    && let Some(c) = capture.filter(|c| c.target == self.selection && c.dragged)
-                {
-                    let margin = 16. * cx.ui.scale;
-                    let r = self.scroll.rect;
-                    let y = c.point.y;
-                    let speed = if y < r.y + margin {
-                        (y - r.y - margin) * 20.
-                    } else if y > r.y + r.height - margin {
-                        (y - r.y - r.height + margin) * 20.
-                    } else {
-                        0.
-                    };
-                    self.scroll
-                        .set(self.scroll.value + speed.clamp(-1800. * cx.ui.scale, 1800. * cx.ui.scale) * dt.min(0.05));
-                }
-            }
+
             Event::Context(point) if !child && contains(self.scroll.rect, point) => {
                 if let Some(session) = cx.model.account.selected.clone() {
                     cx.chat_menu(&session, point);

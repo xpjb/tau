@@ -85,11 +85,12 @@ impl TooltipHost {
     }
 }
 impl Widget for TooltipHost {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        cx.ui.dirty |= self.usage.tick() | self.info.tick();
+    }
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         match *event {
-            Event::Tick(_) => {
-                cx.ui.dirty |= self.usage.tick() | self.info.tick();
-            }
+
             Event::Back | Event::Key { key: "Escape", .. }
                 if self.info.pinned || self.info.progress > 0. || self.usage.pinned || self.usage.progress > 0. =>
             {
