@@ -252,7 +252,7 @@ fn extraction_busy_state_is_shared_by_chat_and_sidebar_and_survives_navigation()
         app.root.workspace.chat.transcript.rows.iter().filter_map(|r| r.attachment.as_ref())
             .chain(app.root.workspace.attachments.cards.cards.values())
             .flat_map(|c| c.controls.items.iter())
-            .filter(|(key, _, _)| *key == Some(2))
+            .filter(|(_, button, _)| matches!(button.label.as_str(), "Extract" | "Extracting…"))
             .filter_map(|(_, b, _)| b.control.rect.map(|r| (r, b.control.enabled, b.control.info.is_some())))
             .collect::<Vec<_>>()
     };

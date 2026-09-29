@@ -97,3 +97,13 @@ Net checkpoint reduction relative to 036: production **137 raw / 129 same-format
 tests **166 raw / 185 same-format**. Cumulative reduction from the original
 baseline: **303 raw / 244 same-format**, including 036's correction costs. No new
 paint or input framework was added. See the whole-tree size ledger for the gap.
+
+Expanded checkpoint validation at `5db17a2`: **all 199 frontend tests across 10
+binaries passed, zero skipped**, run `090280fc-d0f9-45f3-919c-1111246b1c4f` (76.032s).
+This includes the frontend integration binaries, not only App/library checks.
+The narrow saved-ZIP render was also inspected. The Extract single-flight test
+now finds its action by visible semantic label rather than an incidental slot
+number; both extraction tests passed after that locator cleanup
+(`9a3d28cf-467e-42ef-8772-bdfa2b379481`). Neither cleanup changes the size totals.
+`origin/tau2` was re-fetched and remains `33f7d6f`. No integration merge, deployment,
+full-workspace acceptance or physical Android/Windows QA is claimed.
