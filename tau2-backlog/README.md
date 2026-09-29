@@ -1,6 +1,6 @@
 # Tau 2 backlog
 
-## Current priority: finish the simplification
+## Current disposition: bounded source closeout
 
 Triaged **September 29, 2026**, against freshly fetched `origin/tau2` at
 `33f7d6f`. This supersedes the earlier implementation ordering, not the recorded
@@ -13,8 +13,12 @@ protocol. The redundant attachment-card registry and addressed button routes are
 also gone. 042 has retired the global test action adapter, test-only Submit and
 old scroll scenario, alongside independent matrix pruning.
 Transcript reading-position ownership is now consolidated; external layout resets
-and the expansion registry are gone. Remaining simplification, the 5,000-line gate
-and physical acceptance are **not complete**.
+and the expansion registry are gone. The user has now authorized local/justified
+deletions, backlogging the remaining work and merging both this source and the
+independent compaction/pause fix into `tau2-integration`. The 5,000-line target is
+**not achieved**; physical acceptance is **not complete**. These are explicit
+open/deferred items, not reasons to start another speculative rewrite before the
+authorized source merge. See [044 closeout/follow-ups](044-closeout-and-followups.md).
 
 ### Deletion-first execution
 
@@ -27,9 +31,10 @@ features and safety contracts. Helpers, formatting and test-setup consolidation
 are not standalone simplification targets merely because they can shave lines.
 Keep measuring net cost, but don't let the counter drive local code golfing.
 
-The retained rewrite established ownership but did not finish shared input/paint
-semantics or simplify the transcript. Finish those boundaries and remove their
-predecessors; do not add another UI or replication framework.
+The selected ownership, input/paint and transcript boundaries are now implemented
+and their named predecessors removed. A bounded final pass deleted three unused
+hit-test entry points; no further large safe local deletion was demonstrated.
+Do not add another UI or replication framework to chase the remaining count.
 
 ### Ordered, bounded slices
 
@@ -38,20 +43,19 @@ predecessors; do not add another UI or replication framework.
 | [036 Correct drawing and selection](036-drawing-and-selection-correctness.md) | Ordered compositing; selection follows scrolled text | Source-complete; device QA open |
 | [037 One control and child-traversal contract](037-retained-interaction-ownership.md) | Delete paint/register bypasses and root-maintained descendant routing | Source-complete; device QA open |
 | [038 Finish forms and chrome](038-forms-and-chrome.md) | Delete repeated field/footer/layout and migrated control plumbing | Source-complete; device QA open |
-| [039 Native tool records, used directly](039-native-tool-records.md) | Delete native tool re-pairing and display-key parsing | Tool-widget consumer uses 037 |
-| [040 One message through local/queue/history state](040-message-state-reconciliation.md) | Move reconciliation out of paint; delete competing precedence rules | Reuse 039 body-reference contract |
+| [039 Native tool records, used directly](039-native-tool-records.md) | Delete native tool re-pairing and display-key parsing | Source-complete through 041; device QA open |
+| [040 One message through local/queue/history state](040-message-state-reconciliation.md) | Move reconciliation out of paint; delete competing precedence rules | Source-complete through 041; 013 remains separate |
 | [041 Transcript owns its children](041-direct-retained-transcript.md) | Projection/wrapper and competing reading-policy paths deleted; 012 source review closed | Source ownership complete; size/device gates open |
-| [042 Remove low-value tests and compatibility scaffolding](042-test-retirement.md) | Delete brittle assertions, obsolete tests and `test_ui.rs`; smaller behavioral suite | Start now; finish with each owning slice |
-| [043 Completion audit](043-simplification-acceptance.md) | Measured reduction, actual behavioral/device acceptance, no legacy path left | All above |
+| [042 Remove low-value tests and compatibility scaffolding](042-test-retirement.md) | Delete brittle assertions, obsolete tests and `test_ui.rs`; smaller behavioral suite | Targeted retirements complete; optional further pruning in 044 |
+| [043 Completion audit](043-simplification-acceptance.md) | Measured reduction, actual behavioral/device acceptance, no legacy path left | Source closeout authorized with unmet size/device goals recorded |
 
-036 is not held hostage by the model work. 038 and the model slices can proceed
-independently after the shared control contract. 042 starts by removing independent
-layout/glyph assertions; delete owner-specific adapters when their last useful
-consumer migrates. No prolonged dual implementation earns a completed slice.
+The numbered slice descriptions and intermediate check results remain historical
+evidence. Their stale “next” work is superseded by the implementation follow-ups
+and the current disposition in 044. No dormant dual implementation is accepted.
 
 ### Size and test policy
 
-- Completion requires **at least 5,000 fewer frontend Rust code lines** than
+- The original, **unmet and now deferred**, reduction target is **at least 5,000 fewer frontend Rust code lines** than
   `33f7d6f`, including tests: **27,725 → at most 22,725**. Also require a 5,000-line
   reduction under identical formatting, charging growth elsewhere in the workspace.
   [Baseline and measurement](../docs/reviews/retained-ui/completion-size.md).
@@ -76,7 +80,7 @@ consumer migrates. No prolonged dual implementation earns a completed slice.
 The remembered shared-state proposal exists on `review/tau2-client-structure` at
 `24b8323`; it was **not implemented**. Existing `tau-blocks` / `tau-transfer` already
 share revisioned records, delta/reset handling and verified content transfer.
-The unfinished part here is shared **meaning and reconciliation**, not a missing
+The implemented work concerned shared **meaning and reconciliation**, not a missing
 transport engine. 039–040 use confirmed records plus durable local intents, then
 feed retained children directly. State replay must never execute tools or paid
 requests. Do not serialize the whole daemon, add a fixed tick, or introduce a

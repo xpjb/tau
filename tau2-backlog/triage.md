@@ -1,5 +1,10 @@
 # Earlier backlog disposition — September 29, 2026
 
+**Closeout note:** the dated planning map below is historical. 036–042's selected
+source work is implemented; [044](044-closeout-and-followups.md) is the current
+remaining-work disposition. Earlier speculative rewrites are not reactivated by
+the unachieved size target.
+
 This is a disposition map, **not another task queue**. Active work is 036–043 in
 [README](README.md). Items 001–014 remain in their original files. Items 015–035
 were found only on `origin/review/tau2-client-structure` at `24b8323`; none were

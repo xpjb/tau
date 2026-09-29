@@ -1,8 +1,6 @@
 # 039 — Share native tool meaning and use it directly
 
-Status: **In progress: native parent membership replaces provider-ID rewriting; direct retained tool/body-reference migration remains.** Replaces old 015 and the tool part
-of 016/018/022. Integrate its actual tool-widget consumer with 037; no standalone
-intermediate-description module. The original state proposal remains historical.
+Status: **Source-complete through 039–041; physical acceptance remains open.** Native parent/body semantics and direct retained tool consumers are installed; older intermediate statuses below are historical.
 
 ## Scope and owner
 

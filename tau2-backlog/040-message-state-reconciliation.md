@@ -1,8 +1,6 @@
 # 040 — One message through local, queued and confirmed state
 
-Status: **Selected, bounded model slice.** Replaces old 017 and the message portion
-of 018/022. Reuse 039's explicit body-reference contract. No operation-registry,
-storage-schema, catalogue or generic replication migration.
+Status: **Source-complete through 040–041.** Model ownership and direct consumers are installed; 013 remains an independent daemon content-lifetime issue.
 
 ## Change
 

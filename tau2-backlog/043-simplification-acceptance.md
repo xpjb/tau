@@ -1,7 +1,6 @@
 # 043 — Completion means correct behavior and measured removal
 
-Status: **Final gate, not implemented.** Applies across 036–042; not an invitation
-to another generic audit/refactor after all the real work.
+Status: **Practical source closeout/integration authorized; original size and physical gates remain unmet.** The user explicitly requested local/justified deletions, remaining work triaged into backlog, and integration including the pause fix. This supersedes holding the source merge for the original 5,000-line goal, not its accounting or the open device checks. See [044](044-closeout-and-followups.md). The criteria below remain the original acceptance contract, not a claim that all passed.
 
 ## Source/deletion gates
 

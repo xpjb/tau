@@ -92,12 +92,14 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After reading-policy consolidation, frontend Rust is **26,109 raw /
-32,375 same-format**: production **18,603 / 21,869**, tests **7,506 / 10,506**.
-Outside growth remains **62 / 97** (production **26 / 60**, tests **36 / 37**).
-The **charged reduction is 1,554 / 546**, with **3,446 / 4,454 remaining**.
-Charged production is **565 raw smaller / 309 same-format larger**. The 5,000-line
-and normalized production-simplification gates are still not met.
+At the bounded simplification closeout, before the independent pause fix,
+frontend Rust is **26,093 raw / 32,357 same-format**: production **18,587 / 21,851**,
+tests **7,506 / 10,506**. Outside growth remains **62 / 97** (production **26 / 60**,
+tests **36 / 37**). The **charged reduction is 1,570 / 564**, with **3,430 / 4,436
+remaining**. Charged production is **581 raw smaller / 291 same-format larger**.
+The 5,000-line and normalized production-simplification goals are **not met**.
+The user authorized a practical source closeout/integration with that shortfall
+backlogged, rather than another speculative rewrite to meet the counter.
 Deltas below use reduction-positive values and show raw / same-format:
 
 | Slice / commit | Deleted path | Replacement cost | Net production reduction | Net test reduction | Outside charge | Cumulative / remaining |
@@ -130,10 +132,26 @@ production is 17 raw lines smaller but 12 normalized lines larger; added/updated
 coverage costs 80 / 107. Total growth is 63 / 119. No tests were deleted to offset
 that cost, and no second reading coordinator or persistence schema was introduced.
 
+| Bounded closeout (`24803c1`) | Unused Editor/Controls containment entry points and unordered Renderer::hit_text lookup | None; actual retained hit owners and ordered text selection remain | +16 / +18 | 0 / 0 | 0 new | Charged reduction 1,570 / 564; gap 3,430 / 4,436 |
+
+The report now excludes Git-classified binary assets, without dropping textual
+Java/host changes. Its historical 415aeff guard is **6,625 physical / 6,582 nonblank**:
+the corrected per-item cfg(test) scanner preserves five blank separators that the
+old suffix shortcut removed (four in app.rs, one in notices.rs). Nonblank source
+is identical. This fixes the previously flagged PNG/UTF-8 report failure; the
+Rust-only completion counts are unaffected.
+
+The outside split also now classifies the daemon's cfg(test) agent_test family,
+protocol_audit_test and transcript_legacy_test correctly. Their real entrypoints
+were checked in lib.rs/transcript.rs. Before the pause merge this reclassifies
+**1,624 raw / 2,937 normalized** from production to tests at **both** revisions;
+whole-tree totals and all existing net deltas are unchanged. It prevents charging
+the pause fix's new agent-test module as runtime code.
+
 Outside-code measurement compares every tracked Rust source in `daemon` and
 `protocol` with the same counter/formatter and reviewed test boundaries in the
 changed files. Baseline combined totals: **8,454 / 13,425**, production
-**7,480 / 11,820**. Candidate: **8,516 / 13,522**, production **7,506 / 11,880**.
+**5,856 / 8,883**. Pre-pause candidate: **8,516 / 13,522**, production **5,882 / 8,943**.
 Only `daemon/src/blocks.rs` and `protocol/src/blocks.rs` add code; legacy types/variants
 were deleted from `protocol/src/lib.rs` and `protocol/src/transcript.rs`; the earlier
 `protocol/src/lib.rs` equality derive still has zero code-line delta. No other

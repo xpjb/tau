@@ -1,8 +1,6 @@
 # 042 — Delete brittle/redundant tests and their compatibility code
 
-Status: **In progress: cosmetic matrices, global test action adapter and old scroll scenario retired; model/transcript coverage consolidation remains.** Supersedes
-old 034's “preserve all assertions” policy. No coverage-percentage or test-count
-quota. Fewer tests with stronger guarantees is the intended result.
+Status: **Targeted retirements complete; further optional consolidation is backlogged in 044.** No coverage-percentage or test-count quota. The global compatibility adapter, old scroll scenario and selected incidental matrices are deleted; unique safety tests remain.
 
 ## Concrete disposition at `33f7d6f`
 
