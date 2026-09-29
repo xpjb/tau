@@ -85,13 +85,13 @@ fn cached_large_file_saves_once_retries_failure_and_survives_restart_then_missin
     let mut app = App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),false).unwrap();
     app.back(); crate::demo::populate(&mut app.controller).unwrap(); app.resize(ctx.size(),1.,Vec2::new(0.,0.));
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,ui::CardChoice::UseSaved(_,_,SavedAction::Open)),"saved copy survives restart");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::UseSaved(SavedAction::Open)),"saved copy survives restart");
     std::fs::remove_file(&saved.reference).unwrap();
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,ui::CardChoice::SaveAttachment(..)),"missing copy can be saved again from cache");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Save),"missing copy can be saved again from cache");
     assert!(app.controller.saved_download("demo",&case.id).is_none());
     std::fs::remove_file(path).unwrap(); paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Attachment(_,_,_,false)),"evicted cache returns to Download");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Acquire),"evicted cache returns to Download");
 }
 
 #[test]
@@ -118,8 +118,8 @@ fn image_view_save_and_touch_labels_do_not_confuse_actions_or_trigger_on_long_pr
     let key=Controller::download_key("demo",&case.id);
     app.services.platform.clear(); app.complete_save(&key,Err("Permission denied".into()));
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,ui::CardChoice::SaveAttachment(..)),"retry resumes saving, not just viewing");
-    assert!(matches!(controls(&app)[1].action,ui::CardChoice::Attachment(_,_,_,true)),"save failure keeps View");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Save),"retry resumes saving, not just viewing");
+    assert!(matches!(controls(&app)[1].action,ui::CardChoice::Acquire),"save failure keeps View");
     tap(&mut app,0,true); assert!(matches!(&app.services.platform[..],[PlatformAction::SaveDownload {..}]));
 }
 
@@ -204,7 +204,7 @@ fn extract_busy_state_clears_on_failure_and_success_and_allows_retry() {
     let target = app.export_target("demo", &case.id);
     for result in [Err("Disk full".into()), Ok(())] {
         paint(&mut app, &ctx, &case, &file);
-        assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(_, _, SavedAction::Extract)));
+        assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(SavedAction::Extract)));
         tap(&mut app, 2, false);
         assert!(matches!(&app.actions()[..], [PlatformAction::UseDownload(_, SavedAction::Extract, t)] if t == &target));
         paint(&mut app, &ctx, &case, &file);
@@ -218,7 +218,7 @@ fn extract_busy_state_clears_on_failure_and_success_and_allows_retry() {
         app.controller.notice = None;
     }
     paint(&mut app, &ctx, &case, &file);
-    assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(_, _, SavedAction::Extract)));
+    assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(SavedAction::Extract)));
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn extraction_busy_state_is_shared_by_chat_and_sidebar_and_survives_navigation()
     app.tick(0.); app.frame(&ctx, ctx.view());
     let extract_controls = |app: &App| {
         app.root.workspace.chat.transcript.rows.iter().filter_map(|r| r.attachment.as_ref())
-            .chain(app.root.workspace.attachments.cards.cards.values())
+            .chain(app.root.workspace.attachments.cards.values())
             .flat_map(|c| c.controls.items.iter())
             .filter(|(_, button, _)| matches!(button.label.as_str(), "Extract" | "Extracting…"))
             .filter_map(|(_, b, _)| b.control.rect.map(|r| (r, b.control.enabled, b.control.info.is_some())))

@@ -73,11 +73,9 @@ impl Harness {
             .workspace
             .attachments
             .cards
-            .cards
-            .values()
-            .flat_map(|card| card.controls.items.iter())
+            .get("entry-19").unwrap().controls.items.iter()
             .find_map(|(_, b, a)| {
-                matches!(a,CardChoice::UseSaved(_,entry,SavedAction::Open) if entry=="entry-19")
+                matches!(a, CardChoice::UseSaved(SavedAction::Open))
                     .then_some((b.control.target, b.control.rect.unwrap()))
             })
             .unwrap()
@@ -116,6 +114,20 @@ fn nested_capture_is_clipped_and_cannot_activate_a_replaced_card_or_another_poin
     h.app.release(22, p);
     assert!(h.app.actions().is_empty());
     assert_eq!(h.app.ui.capture.unwrap().pointer, 21);
+    h.app.frame(&h.ctx, h.ctx.view());
+    assert_eq!(h.open().0, old, "An ordinary repaint retains the actual card control");
+    assert_eq!(h.app.ui.capture.unwrap().target, old);
+    let mut events = h.app.controller.chats["demo"].feed.events.values().cloned().collect::<Vec<_>>();
+    events[19].attachment.as_mut().unwrap().file_name = "replacement.txt".into();
+    h.app.controller.preview("demo", events, QueueState::default(), None).unwrap();
+    h.app.frame(&h.ctx, h.ctx.view()); // No update/input boundary before repaint.
+    assert!(h.app.ui.capture.is_none(), "Changed file metadata remounts its controls, not the held destination");
+    h.app.release(21, p);
+    assert!(h.app.actions().is_empty());
+    let (replacement, _) = h.open();
+    assert_ne!(replacement, old);
+    h.app.press(21, p, true);
+    let old = replacement;
     // Remove the source while the same card scope still exists. No paint may
     // mediate cancellation or allow the saved-file action to escape.
     h.app.controller.chats.get_mut("demo").unwrap().feed.events.remove(&19);
@@ -131,7 +143,6 @@ fn nested_capture_is_clipped_and_cannot_activate_a_replaced_card_or_another_poin
         .root
         .workspace
         .attachments
-        .cards
         .cards
         .values()
         .flat_map(|card| card.controls.items.iter())
@@ -154,7 +165,7 @@ fn child_feedback_and_activation_do_not_belong_to_the_enclosing_message() {
     let row = h.app.root.workspace.chat.transcript.rows.iter()
         .find(|r| r.attachment.as_ref().is_some_and(|c| c.target.entry == "entry-19")).unwrap();
     let (_, button, _) = row.attachment.as_ref().unwrap().controls.items.iter()
-        .find(|(_, _, a)| matches!(a, CardChoice::UseSaved(_, _, SavedAction::Open))).unwrap();
+        .find(|(_, _, a)| matches!(a, CardChoice::UseSaved(SavedAction::Open))).unwrap();
     let (parent, outer, target, inner) = (row.control.target, row.control.rect.unwrap(), button.control.target, button.control.rect.unwrap());
     let point = Vec2::new(inner.x + inner.width / 2., inner.y + inner.height / 2.);
     let before = h.ctx.read_rgba8().unwrap();

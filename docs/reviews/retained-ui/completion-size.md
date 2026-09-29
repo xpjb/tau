@@ -8,8 +8,8 @@ tracked source. This measurement is not a deletion forecast.
 
 | Rust code lines (tokei, excludes comments/blanks) | Raw | Same format |
 | --- | ---: | ---: |
-| Production | 19,174 | 21,584 |
-| Test-only, including helpers/module declarations | 8,551 | 11,434 |
+| Production | 19,194 | 21,620 |
+| Test-only, including helpers/module declarations | 8,531 | 11,398 |
 | **Total** | **27,725** | **33,018** |
 | **Required final ceiling before outside-code charges** | **22,725** | **28,018** |
 
@@ -20,7 +20,7 @@ not a way to count unrelated existing code deletions toward this requirement.
 
 Useful **physical**, comments/blanks-included inspection areas:
 
-- All frontend Rust: 28,707 = 19,777 production + 8,930 tests.
+- All frontend Rust: 28,707 = 19,805 production + 8,902 tests.
 - App/UI (`src/app.rs` and `src/app/**`): 10,399 production + 4,744 tests.
 - `app/projection.rs`: 307; `app/test_ui.rs`: 345; `app/scroll_tests.rs`: 199.
   These are gross removals, not net savings: their necessary replacements count.
@@ -36,10 +36,16 @@ closed slice and revise a growing design; do not declare completion below target
 
 Tools used: `tokei 12.1.2`; `rustfmt 1.10.0-nightly (ad3d0bc141 2026-07-31)`.
 Fixed formatting: edition 2024, width 120, Max small heuristics, skip_children.
-Reuse the existing frontend-local cfg(test) scanner in
-`scripts/retained-ui-size.py`. Its module-suffix/item assumptions must be checked
+Reuse the frontend-local cfg(test) scanner in
+`scripts/retained-ui-size.py`. Its item-boundary assumptions must be checked
 again if future test organization changes; it is not a general Rust parser.
-The test count is total minus production, not a filename-only guess.
+The test count is total minus production, not a filename-only guess. The classifier
+now removes each cfg(test) item individually: production export handling follows
+an inline test module in app/attachments.rs. This corrects the old suffix shortcut,
+reclassifying 20 raw / 36 normalized frontend lines and 33 / 53 daemon/protocol
+lines at **both** baseline and candidate. Whole-tree totals and net savings are
+unchanged; the absolute production/test splits below are corrected. Inline and
+external test-module examples were checked against this rule.
 
 Run from the repository root, passing the same baseline or a future candidate:
 
@@ -86,11 +92,11 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After synthetic lifecycle retirement, frontend Rust is **26,099 raw /
-32,295 same-format**: production **18,664 / 21,885**, tests **7,435 / 10,410**.
+After attachment registry/routing retirement, frontend Rust is **26,046 raw /
+32,256 same-format**: production **18,620 / 21,857**, tests **7,426 / 10,399**.
 Outside growth remains **62 / 97** (production **26 / 60**, tests **36 / 37**).
-The **charged reduction is 1,564 / 626**, with **3,436 / 4,374 remaining**.
-Charged production is **484 raw smaller / 361 same-format larger**. The 5,000-line
+The **charged reduction is 1,617 / 665**, with **3,383 / 4,335 remaining**.
+Charged production is **548 raw smaller / 297 same-format larger**. The 5,000-line
 and normalized production-simplification gates are still not met.
 Deltas below use reduction-positive values and show raw / same-format:
 
@@ -115,10 +121,12 @@ Deltas below use reduction-positive values and show raw / same-format:
 
 | 037 synthetic lifecycle retirement | Tick/Cancel event variants, broadcast classifier and lifecycle input handlers | Direct child updates, actual-owner cancellation and held-control checks | −71 / −86 | 0 / 0 | 0 new | Charged reduction 1,564 / 626; gap 3,436 / 4,374 |
 
+| 038 attachment registry/routing retirement | CardDeck registry/seen-set/dispatcher/hints and per-button destination envelopes | Actual browser-owned cards; local choices use their existing target; metadata replacement remounts controls | +64 / +64 | −11 / −25 | 0 new | Charged reduction 1,617 / 665; gap 3,383 / 4,335 |
+
 Outside-code measurement compares every tracked Rust source in `daemon` and
 `protocol` with the same counter/formatter and reviewed test boundaries in the
 changed files. Baseline combined totals: **8,454 / 13,425**, production
-**7,447 / 11,767**. Candidate: **8,516 / 13,522**, production **7,473 / 11,827**.
+**7,480 / 11,820**. Candidate: **8,516 / 13,522**, production **7,506 / 11,880**.
 Only `daemon/src/blocks.rs` and `protocol/src/blocks.rs` add code; legacy types/variants
 were deleted from `protocol/src/lib.rs` and `protocol/src/transcript.rs`; the earlier
 `protocol/src/lib.rs` equality derive still has zero code-line delta. No other

@@ -257,7 +257,7 @@ impl Workspace {
         Ok(())
     }
     pub fn hints(&self) -> impl Iterator<Item = (Rect, &crate::app::Info)> {
-        self.sidebar.hints().chain(self.attachments.cards.hints()).chain(
+        self.sidebar.hints().chain(self.attachments.cards.values().flat_map(|card| card.controls.hints())).chain(
             self.chat.transcript.rows.iter().filter_map(|r| r.attachment.as_ref()).flat_map(|c| c.controls.hints()),
         )
     }

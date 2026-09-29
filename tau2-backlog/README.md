@@ -5,12 +5,26 @@
 Triaged **September 29, 2026**, against freshly fetched `origin/tau2` at
 `33f7d6f`. This supersedes the earlier implementation ordering, not the recorded
 bug evidence. Implementation is on `feat/tau2-simplification`; **036 is source-complete**.
-037's control/composition/lifetime and 038's form reuse are implemented.
-039 is in progress: viewport-key decoding and provider-ID rewriting/pairing are gone;
-explicit body state and direct retained tool children remain.
-042 has retired test-only Submit, the global test action adapter and the old scroll
-scenario, alongside independent matrix pruning. No replacement test registry was added.
-Remaining slices and the 5,000-line gate are not complete.
+037's control/composition/lifetime and explicit update/cancellation paths are in;
+synthetic lifecycle events are gone. 038's form reuse is implemented. 039–040 use
+native body/tool identity and reconcile authored messages outside painting. 041
+has deleted the rich projection/Row/Part pipeline and the legacy transcript fixture
+protocol. The redundant attachment-card registry and addressed button routes are
+also gone. 042 has retired the global test action adapter, test-only Submit and
+old scroll scenario, alongside independent matrix pruning.
+Reading-position review, remaining simplification, the 5,000-line gate and physical
+acceptance are **not complete**.
+
+### Deletion-first execution
+
+The user's follow-up prioritizes removing **entire redundant subsystems**, not
+agonizing over individual lines. Choose each slice by naming the competing owner,
+adapter or algorithm that will disappear, its actual replacement owner and all
+remaining callers. Delete the obsolete path end-to-end in that slice; don't leave
+a facade, dormant branch or test-only reconstruction behind. Preserve product
+features and safety contracts. Helpers, formatting and test-setup consolidation
+are not standalone simplification targets merely because they can shave lines.
+Keep measuring net cost, but don't let the counter drive local code golfing.
 
 The retained rewrite established ownership but did not finish shared input/paint
 semantics or simplify the transcript. Finish those boundaries and remove their

@@ -263,7 +263,7 @@ impl MessageRow {
                 if let Some(old) = self.attachment.take() { cx.ui.detach(old.controls.id); }
                 self.attachment = Some(AttachmentCard::new(session, &entry, &file, "chat", cx));
             }
-            self.attachment.as_mut().unwrap().file = file;
+            self.attachment.as_mut().unwrap().bind_file(&file, cx);
         } else if let Some(old) = self.attachment.take() { cx.ui.detach(old.controls.id); }
         let thinking = matches!(self.item, ItemId::Thinking(_));
         let height = cx.services.renderer.message_height(&self.key, &source, text_width, if thinking { 12. * s } else { 16. * s });

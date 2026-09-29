@@ -66,9 +66,8 @@ def item_end(mask, start):
 
 
 def production(text):
-    # All cfg(test) *module declarations* in the production files selected here
-    # start their file's test-only suffix. Imports, helpers and gallery fields
-    # before that suffix are individually removed, not treated as suffixes.
+    # Remove each test-only item, not the entire suffix after a test module:
+    # app/attachments.rs has production export handling after its inline tests.
     attr = re.compile(r"^[ \t]*#\[cfg\((?:test|all\(test,\s*not\(target_os\s*=\s*\"android\"\)\))\)\]", re.M)
     while m := attr.search(text):
         start = m.end()
@@ -77,8 +76,6 @@ def production(text):
             if text.startswith("#[", start):
                 start = text.index("]", start) + 1
             else: break
-        if re.match(r"mod\b", text[start:]):
-            return text[:m.start()]
         end = item_end(code_mask(text), start)
         if text[end:end+1] == "\n": end += 1
         text = text[:m.start()] + text[end:]

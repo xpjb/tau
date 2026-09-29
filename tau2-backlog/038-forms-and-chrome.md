@@ -94,3 +94,25 @@ The pilot's normalized saving was only 27 total lines; measured reuse, not the
 much larger raw call-formatting delta, justified migration. Rewritten form files
 were formatted before final counting. Cumulative reduction is **313 / 289**;
 this is deliberately not represented as satisfying the 5,000-line gate.
+
+
+## Attachment registry/routing deletion — September 29, 2026
+
+Deleted the whole `CardDeck` registry, its compound source/session/surface key,
+separate seen-set lifecycle, event dispatcher and copied hint traversal. The
+source-bound AttachmentBrowser owns its actual mounted cards directly. Input goes
+to those cards; hints use their existing Controls; unmounted cards detach by their
+actual geometry. Source/session changes still discard the entire bound pane.
+
+Deleted the per-button destination envelopes: Acquire/Save/UseSaved/Cancel read
+the mounted card's existing DownloadTarget and file metadata. There is no second
+chat/entry/name copy to route. A changed native file remounts the card's controls,
+so a held gesture cannot activate replacement metadata; an unchanged repaint
+retains its control identity. Existing capture coverage now checks both cases.
+No save/export/extract state machine, acquisition policy or feature was removed.
+
+Fresh all-target frontend check and **194/194 frontend tests**, zero skipped, pass
+(`ba5ce64f-5ed7-4656-b4b9-66680fa06c98`). Windows MSVC and Android ARM64/API29 library
+checks pass. Physical device QA is still open. Net production saving is **64 raw /
+64 normalized**; retained test changes cost **11 / 25**, for **53 / 39** overall.
+This is a modest complete-layer deletion, not a claim to have closed the size gap.

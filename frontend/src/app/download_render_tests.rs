@@ -70,7 +70,7 @@ pub(super) fn save(ctx: &HeadlessCtx, name: &str) {
 
 pub(super) struct CardControl { pub rect: Rect, pub action: ui::CardChoice }
 pub(super) fn controls(app: &App) -> Vec<CardControl> {
-    app.root.workspace.attachments.cards.cards.values().flat_map(|card| card.controls.items.iter()).filter_map(|(key,button,choice)| {
+    app.root.workspace.attachments.cards.values().flat_map(|card| card.controls.items.iter()).filter_map(|(key,button,choice)| {
         if key.is_none() { return None; }
         let control = &button.control;
         let rect = crate::render::intersect(control.rect?,control.clip);
@@ -78,7 +78,7 @@ pub(super) fn controls(app: &App) -> Vec<CardControl> {
     }).collect()
 }
 pub(super) fn hints(app: &App) -> Vec<(Rect,Info)> {
-    app.root.workspace.attachments.cards.hints().map(|(r,i)|(r,i.clone())).collect()
+    app.root.workspace.attachments.cards.values().flat_map(|card| card.controls.hints()).map(|(r,i)|(r,i.clone())).collect()
 }
 
 #[test]

@@ -59,8 +59,8 @@ impl Harness {
     fn assert_target_visible(&self, entry: &str) {
         assert_eq!(self.app.controller.account.selected.as_deref(), Some("demo"));
         assert!(self.app.root.workspace.chat.transcript.download.is_none());
-        let rect = self.app.root.workspace.chat.transcript.rows.iter().filter_map(|r|r.attachment.as_ref()).flat_map(|c| c.controls.items.iter()).find_map(|(_, b, choice)|
-            matches!(choice, ui::CardChoice::UseSaved(session, id, SavedAction::Open) if session == "demo" && id == entry).then_some(b.control.rect).flatten()).expect("Target download's Open control is on screen");
+        let rect = self.app.root.workspace.chat.transcript.rows.iter().filter_map(|r|r.attachment.as_ref()).filter(|c| c.target.session == "demo" && c.target.entry == entry).flat_map(|c| c.controls.items.iter()).find_map(|(_, b, choice)|
+            matches!(choice, ui::CardChoice::UseSaved(SavedAction::Open)).then_some(b.control.rect).flatten()).expect("Target download's Open control is on screen");
         assert!(rect.y >= self.app.root.workspace.chat.transcript.scroll.rect.y && rect.y + rect.height <= self.app.root.workspace.chat.transcript.scroll.rect.y + self.app.root.workspace.chat.transcript.scroll.rect.height);
         assert!(!self.app.controller.chats["demo"].local.position.follow);
         assert!(self.app.services.platform.is_empty(), "Navigation never opens/exports/re-downloads the file");

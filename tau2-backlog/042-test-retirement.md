@@ -59,7 +59,7 @@ into the smaller surviving suite. Delete probe scaffolding from runtime worktree
 
 Working allocation: 2,000 net test code lines toward the overall target, measured
 separately from production and including replacement tests/helpers. Current total
-frontend test code is 8,551 raw / 11,434 same-format lines; app/UI test code occupies
+frontend test code is 8,531 raw / 11,398 same-format lines; app/UI test code occupies
 4,744 physical lines. These inventories do not prove a particular deletion yield.
 
 ## Deletion ledger so far
