@@ -86,15 +86,19 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After 036, raw frontend code remains **27,725**; same-format code is **33,088**.
-The remaining gap is **5,000 raw / 5,070 same-format** lines. No simplification
-saving is claimed for the correctness fixes. Deltas below use reduction-positive
-values and show raw / same-format:
+After 036 and 037's control checkpoint, raw frontend code is **27,422**;
+same-format code is **32,774**. Production is **19,081 / 21,501** and tests are
+**8,341 / 11,273** (raw / same-format). Net reduction is **303 / 244**; remaining
+gap is **4,697 / 4,756**. These are intermediate results, not completion.
+Deltas below use reduction-positive values and show raw / same-format:
 
 | Slice / commit | Deleted path | Replacement cost | Net production reduction | Net test reduction | Outside charge | Cumulative / remaining |
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | 036 | Unordered surface batching; Move-only selection; icon/centering tests | Ordered surface boundaries + three behavior checks | −44 / −46 | +44 / −24 | 0 | Reduction 0 / −70; gap 5,000 / 5,070 |
+| 037 controls | Paint/register bypasses; renderer input state; per-row feedback; Debug keys; redundant hover/gallery tests | One retained Button/Control feedback path, explicit styles/cursor, typed equality, consumed/action pair, compact checks | +137 / +129 | +166 / +185 | 0 | Reduction 303 / 244; gap 4,697 / 4,756 |
 
 Keep raw and same-format totals alongside the ledger. A deletion shared by two
 slices is counted once. Documentation and this measurement recipe are not runtime
-savings. No Rust tests/builds are required or claimed for this documentation pass.
+savings. The baseline measurement was documentation-only; implementation checks
+are recorded with each owning backlog item. The protocol equality derive changes
+neither raw (442) nor same-format (527) code lines in `protocol/src/lib.rs`.

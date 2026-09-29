@@ -1,4 +1,4 @@
-use super::controls::Controls;
+use super::controls::{ButtonStyle, Controls};
 use super::{Context, Event, Frame, Id, Request, Widget};
 use crate::{
     app::{
@@ -14,7 +14,7 @@ use sanscale::Rect;
 use std::collections::{BTreeSet, HashMap};
 use tau_protocol::*;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum CardChoice {
     Attachment(String, String, String, bool),
     SaveAttachment(String, String, String),
@@ -141,8 +141,7 @@ impl Widget for AttachmentCard {
                 );
                 layer.images.push((path.clone(), image_rect, clip));
                 if clip.width > 0. && clip.height > 0. {
-                    self.controls.place_key(
-                        "preview",
+                    self.controls.place(
                         CardChoice::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true),
                         preview,
                         viewport,
@@ -336,31 +335,12 @@ impl Widget for AttachmentCard {
                 continue;
             }
             let enabled = action.is_some();
-            if enabled && layer.interaction.hover.is_some_and(|p| contains(clip, p)) {
-                layer.clipped_rounded_rect(r, target / 2., layer.control_color(r, color(0x18212b)), viewport);
-            }
-            let label_width = cx.services.renderer.label_width(label, 14. * s, false);
-            let label_height = cx.services.renderer.label_height(label, width, 14. * s, false);
-            cx.services.renderer.ellipsized_label(
-                layer,
-                label,
-                Rect::new(
-                    r.x + (width - label_width) / 2.,
-                    r.y + (target - label_height) / 2.,
-                    label_width.ceil() + 1.,
-                    label_height,
-                ),
-                14. * s,
-                color(if enabled { 0x67d4ff } else { 0x687e8f }),
-                false,
-                false,
-                viewport,
-            );
-            let control = &mut self
-                .controls
-                .place_key(&format!("action:{index}"), action.unwrap_or(CardChoice::Noop), r, viewport, true)
-                .control;
-            control.enabled = enabled;
+            let button = self.controls.place_in(Some(index), action.unwrap_or(CardChoice::Noop), r, viewport, true);
+            button.control.enabled = enabled;
+            button.label = label.into();
+            button.style = ButtonStyle::Quiet;
+            button.visit_perframe(&mut Frame { layer, bounds: r, clip: viewport }, cx);
+            let control = &mut button.control;
             control.info = description.map(|description| Info::Attachment(
                 format!("{info_key}:action:{index}"),
                 description.into(),
@@ -525,7 +505,8 @@ impl Widget for AttachmentBrowser {
         if self.scroll.bar_event(event, cx) {
             return true;
         }
-        if let Some(choice) = self.form.event(event, &mut [], cx) {
+        let (handled, choice) = self.form.event(event, &mut [], cx);
+        if let Some(choice) = choice {
             match choice {
                 BrowserChoice::Close => cx.ui.requests.push_back(Request::Attachments(false)),
                 BrowserChoice::History => {
@@ -535,6 +516,7 @@ impl Widget for AttachmentBrowser {
             }
             return true;
         }
+        if handled { return true; }
         let child = self.cards.event(event, cx);
         let handled = self.scroll.event(event, child, cx);
         // Header/backdrop space belongs to this pane, never the transcript behind it.

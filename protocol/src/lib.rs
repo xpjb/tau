@@ -129,7 +129,7 @@ impl ClientCommand {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",

@@ -5,7 +5,7 @@ use crate::{
     details::{Line as DetailLine, Tools},
     editor::Editor,
     icons::Icon,
-    render::{Interaction, Layer, Renderer, color, contains},
+    render::{Layer, Renderer, color, contains},
     scroll::Autoscroll,
     store::Store,
     tooltip::Content,
@@ -94,7 +94,7 @@ pub enum PlatformAction {
     InputMenu,
     Background,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SavedAction {
     Open,
     #[cfg(not(target_os = "android"))]
@@ -200,12 +200,7 @@ impl App {
         self.sync_navigation();
         self.services.renderer.clear_scenes();
         let bounds = Rect::new(self.ui.origin.x, self.ui.origin.y, self.ui.size.0 as f32, self.ui.size.1 as f32);
-        let interaction = Interaction {
-            hover: self.ui.capture.map(|c| c.point).or(self.ui.hover),
-            pressed: self.ui.capture.filter(|c| !c.dragged).map(|c| c.start),
-            held: self.ui.capture.is_some(),
-        };
-        let mut layer = Layer::new(interaction);
+        let mut layer = Layer::default();
         layer.rect(bounds, color(0x0e141b));
         self.with_ui(|root, cx| root.visit_perframe(&mut ui::Frame { layer: &mut layer, bounds, clip: bounds }, cx));
         if let Err(error) = self.finish_ui_requests() {
@@ -285,7 +280,9 @@ impl App {
                 C::NsResize
             };
         }
-        self.ui.hot.map_or(C::Default, |(_, text)| if text { C::Text } else { C::Pointer })
+        self.ui.hot.map_or(C::Default, |(_, cursor)| match cursor {
+            ui::Cursor::Default => C::Default, ui::Cursor::Pointer => C::Pointer, ui::Cursor::Text => C::Text,
+        })
     }
     pub(super) fn open_download_notice(&mut self, target: DownloadTarget) -> Result<()> {
         self.with_ui(|root, cx| root.workspace.open_download(target, cx))?;
@@ -496,8 +493,6 @@ mod connection_tests;
 mod control_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod editor_tests;
-#[cfg(all(test, not(target_os = "android")))]
-mod hover_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod navigation_tests;
 #[cfg(all(test, not(target_os = "android")))]

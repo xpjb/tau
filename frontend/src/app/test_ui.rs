@@ -321,18 +321,6 @@ impl App {
     pub(super) fn rows(&self, session: &str) -> Vec<Row> {
         projection::rows(&self.controller, session)
     }
-    pub(super) fn test_ripple(&self) -> Option<&Ripple> {
-        self.root
-            .workspace
-            .chat
-            .transcript
-            .rows
-            .iter()
-            .find_map(|r| r.ripple.as_ref().or_else(|| r.parts.iter().find_map(|p| p.ripple.as_ref())))
-    }
-    pub(super) fn section_at(&self, point: Vec2) -> Option<(&str, Rect)> {
-        self.root.workspace.chat.transcript.section_at(point)
-    }
     pub(super) fn set_transcript_scroll(&mut self, value: f32) {
         self.with_ui(|root, cx| root.workspace.chat.transcript.set_scroll(value, cx));
     }

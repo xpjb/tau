@@ -241,12 +241,7 @@ impl Widget for RootWidget {
         handled
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
-        let input = frame.layer.interaction;
-        if self.dialog.is_some() || self.viewer.is_some() || self.menu.is_some() {
-            frame.layer.interaction = crate::render::Interaction::default();
-        }
         self.workspace.visit_perframe(frame, cx);
-        frame.layer.interaction = input;
         self.tooltips.usage.region = self.workspace.chat.composer.usage_rect;
         self.tooltips.usage.content = self.workspace.chat.composer.usage.clone();
         if self.tooltips.usage.region.width <= 0. {
@@ -294,6 +289,8 @@ pub(super) struct Services {
     pub(super) counter_bucket: Option<u128>,
     pub(super) dot_color: u32,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Cursor { Default, Pointer, Text }
 pub(crate) struct UiState {
     pub(crate) size: (u32, u32),
     pub(crate) origin: Vec2,
@@ -315,7 +312,7 @@ pub(crate) struct UiState {
     pub(super) hint: Option<(Rect, super::Info)>,
     pub(super) menu_chat: Option<String>,
     pub(super) menu_section: Option<String>,
-    pub(super) hot: Option<(Target, bool)>, // bool: text cursor
+    pub(super) hot: Option<(Target, Cursor)>,
     pub(super) requests: VecDeque<Request>,
     pub(super) return_to: Option<(String, Option<String>, Option<String>)>,
     pub(super) native: Option<NativeEdit>,

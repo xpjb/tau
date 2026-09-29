@@ -1,4 +1,4 @@
-use super::controls::{Controls, TextField, button, icon_button};
+use super::controls::{ButtonStyle, Controls, TextField};
 use super::{Context, DialogSpec, Event, Frame, Id, Request, Widget};
 use crate::{
     app::{PlatformAction, context_usage_display},
@@ -9,7 +9,7 @@ use crate::{
 };
 use sanscale::Rect;
 use tau_protocol::*;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum Choice {
     RetryCreate,
     Attach,
@@ -20,7 +20,7 @@ pub(in crate::app) enum Choice {
     RemoveFile(String),
     Suggest(String),
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum ModelChoice {
     Select(String, String),
     Configure,
@@ -279,15 +279,14 @@ impl Widget for Composer {
             self.model_status(cx, chrome, summary.as_ref(), status_rect);
         }
         if creating && cx.model.epoch.is_some() {
-            button(
-                &mut cx.services.renderer,
+            self.controls.button(
+                cx,
                 chrome,
-                &mut self.controls,
                 Rect::new(x + width - 88. * s, composer_top + 6. * s, 88. * s, 24. * s),
                 "Retry",
                 Choice::RetryCreate,
-                s,
-                false,
+                ButtonStyle::Tonal,
+                frame.clip,
             );
         }
         chrome.rect(Rect::new(b.x, composer_top, b.width, s), color(0x2a3541));
@@ -307,21 +306,31 @@ impl Widget for Composer {
         self.field.visit_perframe(&mut Frame { layer: chrome, bounds: composer_rect, clip: frame.clip }, cx);
         let iy = field.y + (field.height - 40. * s) / 2.;
         let connected = cx.model.epoch.is_some();
-        icon_button(
+        self.controls.icon(
             cx,
-            &mut self.controls,
             chrome,
             Rect::new(field.x + 4. * s, iy, 36. * s, 40. * s),
             Icon::Attach,
             22.,
             Choice::Attach,
-            false,
+            ButtonStyle::Quiet,
             true,
+            frame.clip,
         );
         let usage_rect = Rect::new(field.x + field.width - 84. * s, iy, 40. * s, 40. * s);
         let usage = summary.as_ref().and_then(|s| s.context_usage);
         let (ratio, usage_text) = context_usage_display(usage);
-        icon_button(cx, &mut self.controls, chrome, usage_rect, Icon::Context(ratio), 20., Choice::Usage, false, true);
+        self.controls.icon(
+            cx,
+            chrome,
+            usage_rect,
+            Icon::Context(ratio),
+            20.,
+            Choice::Usage,
+            ButtonStyle::Quiet,
+            true,
+            frame.clip,
+        );
         self.usage_rect = usage_rect;
         self.usage = usage_text;
         if usage.is_some()
@@ -345,44 +354,43 @@ impl Widget for Composer {
         }
         let can_send =
             (!self.field.editor.value.trim().is_empty() || !files.is_empty()) && (!in_code || self.code_ready);
-        icon_button(
+        self.controls.icon(
             cx,
-            &mut self.controls,
             chrome,
             Rect::new(field.x + field.width - 44. * s, iy, 40. * s, 40. * s),
             Icon::Send,
             20.,
             Choice::Send,
-            true,
+            ButtonStyle::Primary,
             can_send,
+            frame.clip,
         );
         let controls_y = field.y + field.height + 4. * s;
         if !in_code && self.away_from_tail {
-            icon_button(
+            self.controls.icon(
                 cx,
-                &mut self.controls,
                 chrome,
                 Rect::new(x + width - 40. * s, composer_top - 48. * s, 40. * s, 40. * s),
                 Icon::ChevronDown,
                 20.,
                 Choice::Tail,
+                ButtonStyle::Primary,
                 true,
-                true,
+                frame.clip,
             );
         }
         let queue = &cx.model.chats[session].feed.queue;
         if let Some(control) = &queue.control
             && matches!(control.status.as_str(), "waiting" | "applying")
         {
-            button(
-                &mut cx.services.renderer,
+            self.controls.button(
+                cx,
                 chrome,
-                &mut self.controls,
                 Rect::new(x, controls_y, 100. * s, 30. * s),
                 "Cancel control",
                 Choice::Queue(QueueOperation::Cancel { control_id: control.command_id.clone() }),
-                s,
-                false,
+                ButtonStyle::Tonal,
+                frame.clip,
             );
         }
         let mut fx = x;
@@ -392,15 +400,14 @@ impl Widget for Composer {
             if fx + fw > x + width {
                 break;
             }
-            button(
-                &mut cx.services.renderer,
+            self.controls.button(
+                cx,
                 chrome,
-                &mut self.controls,
                 Rect::new(fx, controls_y + if controls { 40. * s } else { 0. }, fw, 30. * s),
                 &label,
                 Choice::RemoveFile(file.id),
-                s,
-                false,
+                ButtonStyle::Tonal,
+                frame.clip,
             );
             fx += fw + 6. * s;
         }
@@ -423,15 +430,14 @@ impl Widget for Composer {
                 }
             }
             for (i, text) in suggestions.into_iter().take(5).enumerate() {
-                button(
-                    &mut cx.services.renderer,
+                self.controls.button(
+                    cx,
                     chrome,
-                    &mut self.controls,
                     Rect::new(x, composer_top - (i + 1) as f32 * 36. * s, width, 34. * s),
                     text.trim(),
                     Choice::Suggest(text.clone()),
-                    s,
-                    false,
+                    ButtonStyle::Tonal,
+                    frame.clip,
                 );
             }
         }
@@ -522,7 +528,11 @@ impl Widget for QuickModels {
             let selected = current.as_deref() == Some(selector.as_str());
             let enabled = connected && !busy && valid;
             let base = color(if selected { 0x303a66 } else { 0x18212b });
-            layer.clipped_rounded_rect(r, 12. * s, if enabled { layer.control_color(r, base) } else { base }, clip);
+            layer.clipped_rounded_rect(r, 12. * s, base, clip);
+            let control = &mut self.controls.place(ModelChoice::Select(session.into(), selector.clone()), r, clip, false).control;
+            control.enabled = enabled;
+            control.corners = Some([12. * s; 4]);
+            control.highlight(layer, cx.ui, false);
             cx.services.renderer.clipped_label(
                 layer,
                 selector,
@@ -552,12 +562,10 @@ impl Widget for QuickModels {
                 false,
                 crate::render::intersect(r, clip),
             );
-            if enabled {
-                self.controls.place(ModelChoice::Select(session.into(), selector.clone()), r, clip, false);
-            }
         }
         let r = Rect::new(b.x, b.y + b.height - 40. * s, b.width, 32. * s);
-        layer.clipped_rounded_rect(r, 16. * s, layer.control_color(r, color(0x18212b)), clip);
+        layer.clipped_rounded_rect(r, 16. * s, color(0x18212b), clip);
+        self.controls.place(ModelChoice::Configure, r, clip, true).control.highlight(layer, cx.ui, false);
         cx.services.renderer.clipped_label(
             layer,
             "Configure quick models…",
@@ -567,7 +575,6 @@ impl Widget for QuickModels {
             false,
             crate::render::intersect(r, clip),
         );
-        self.controls.place(ModelChoice::Configure, r, clip, true);
         self.controls.finish(cx);
     }
 }

@@ -64,10 +64,10 @@ impl Widget for ImageViewer {
             cx.ui.requests.push_back(Request::CloseViewer(self.id));
             return true;
         }
-        let choice = match event {
-            Event::Back | Event::Key { key: "Escape", .. } => Some(Choice::Back),
+        let (handled, choice) = match event {
+            Event::Back | Event::Key { key: "Escape", .. } => (true, Some(Choice::Back)),
             _ if self.pointer.is_none() => self.form.event(event, &mut [], cx),
-            _ => None,
+            _ => (false, None),
         };
         if let Some(choice) = choice {
             match choice {
@@ -88,6 +88,7 @@ impl Widget for ImageViewer {
             cx.ui.dirty = true;
             return true;
         }
+        if handled { return true; }
         match *event {
             Event::Cancel => {
                 self.pointer = None;

@@ -250,12 +250,14 @@ impl Menu {
             control.rect = Some(rect);
             control.clip = clip;
             control.enabled = !matches!(choice, Choice::Noop);
-            if cx.ui.hover.is_some_and(|p| control.contains(p))
+            control.corners = Some([4. * s; 4]);
+            if cx.ui.hot.is_some_and(|(target, _)| target == control.target)
                 || active && cx.ui.hover.is_none() && self.selected == i
                 || !active && matches!(choice, Choice::MoveMenu(_))
             {
                 frame.layer.clipped_rounded_rect(rect, 4. * s, color(0x494750), clip);
             }
+            control.highlight(frame.layer, cx.ui, false);
             cx.services.renderer.clipped_label(
                 frame.layer,
                 label,

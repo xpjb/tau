@@ -97,6 +97,11 @@ impl Widget for TooltipHost {
                 cx.ui.dirty = true;
                 return true;
             }
+            Event::Hover(Some(point)) if self.info.contains_card(point) || self.usage.contains_card(point) => {
+                self.info.hover(self.info.contains(point));
+                self.usage.hover(self.usage.contains(point));
+                return true;
+            }
             Event::Down { point, .. } | Event::Context(point) | Event::Middle { point, .. }
                 if self.info.contains_card(point) || self.usage.contains_card(point) =>
             {

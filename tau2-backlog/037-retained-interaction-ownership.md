@@ -1,6 +1,7 @@
 # 037 — One retained control and child-traversal contract
 
-Status: **Selected.** Depends on 036's paint-order contract. Absorbs unfinished
+Status: **In progress. Control migration implemented; composition/lifetime slice next.**
+Depends on 036's paint-order contract. Absorbs unfinished
 005/008/009/028 and residual 030/031 work. Keep the concrete Widget tree and broad
 sibling-borrowed Context/Services; do not add another framework.
 
@@ -58,3 +59,41 @@ Use the surviving nested-control/lifetime cases in 042, not a test for every
 button's coordinates. Inspect subdued highlights/ripples at desktop/phone scales;
 005/008/009 remain visually unaccepted until that check. Publish net production
 and test deltas after the pilot and migration; do not expand a growing wrapper.
+
+## Control checkpoint — September 29, 2026
+
+The nested-control pilot and control-consumer migration use the existing
+`Control` for placed geometry, capture, hot target, cursor and ripple ownership.
+Text/icon buttons both visit the retained Button; attachment actions, sidebar
+rows/topic tabs, quick models and other custom surfaces use the same owned
+feedback. Scroll chrome reads its routed owner, not raw pointer containment.
+Folder and its header peers request an explicit tonal style.
+
+Deleted the free paint-then-register button/icon helpers, icon-based background
+whitelist, renderer `Interaction`/raw-pointer colour helpers, transcript-wide
+speculative ripple dispatch, per-row ripple lifecycle loops and Debug-serialized
+control keys. Dynamic identity compares typed action values plus an optional
+local slot. The only protocol change derives equality for QueueOperation; wire
+and storage are unchanged and its raw/normalized code-line delta is zero.
+Form and Controls now both return consumed separately from activated. Viewer and
+attachment-browser parents respect consumed-without-action. Parent frame clips
+are passed to the common button visit. Tooltip cards block underlying hover.
+
+Validation: frontend all-target compiler check; **165/165 frontend library tests**,
+zero skipped (`ccede3fe-331d-4e40-b5a9-427f16e6c7f1`), then 5/5 targeted checks after
+the final title-feedback/disabled-ripple changes. The six historical diagnostic
+probes now all pass (`78fef44f-089d-45f4-a3ae-0474bbcdda7c`, 8/8 including two
+surviving checks). The temporary probe's parent-ripple observation was adjusted
+only to its new control owner; the probe module was removed afterwards. Desktop
+attachment idle/hover renders were inspected: only the child highlights, and
+Folder now has an idle surface. Physical device/interaction acceptance stays open.
+
+This checkpoint is **not all of 037**: parent-local active-child order, removal of
+`ui/routes.rs`'s descendant knowledge, leaf/hide validation before another frame,
+and non-consumable lifecycle/Tick traversal are the next closed slice. Do not
+start the forms/model rewrite by declaring those remaining contracts done.
+
+Net checkpoint reduction relative to 036: production **137 raw / 129 same-format**,
+tests **166 raw / 185 same-format**. Cumulative reduction from the original
+baseline: **303 raw / 244 same-format**, including 036's correction costs. No new
+paint or input framework was added. See the whole-tree size ledger for the gap.

@@ -7,7 +7,7 @@ use std::{borrow::Cow, sync::Arc};
 use tau_code_viewer::{Document, Selection};
 use tau_protocol::files::*;
 use ui::controls::{Controls, TextField};
-use ui::controls::{button as retained_button, icon_button as retained_icon};
+use ui::controls::ButtonStyle;
 use ui::scroll::ScrollState;
 use ui::{Context, Event as InputEvent, Frame};
 
@@ -187,7 +187,7 @@ impl ParagraphSource for Source<'_> {
         Some(Cow::Borrowed(self.0))
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum Choice {
     Files,
     FileClose,
@@ -1159,37 +1159,34 @@ impl Widget for CodeBrowser {
             && (code.selection.is_some() || cx.ui.composer.is_some() && cx.ui.focus == cx.ui.composer);
         let bottom = self.composer_bottom.unwrap_or(b.y + b.height);
         layer.rect(Rect::new(b.x, b.y, b.width, 124. * s), color(0x0e141b));
-        retained_button(
-            &mut cx.services.renderer,
+        self.controls.button(
+            cx,
             layer,
-            &mut self.controls,
             Rect::new(b.x + 8. * s, b.y + 6. * s, 64. * s, 40. * s),
             "‹ Chat",
             Choice::FileChat,
-            s,
-            false,
+            ButtonStyle::Tonal,
+            frame.clip,
         );
         if code.search.is_some() {
-            retained_button(
-                &mut cx.services.renderer,
+            self.controls.button(
+                cx,
                 layer,
-                &mut self.controls,
                 Rect::new(b.x + 76. * s, b.y + 6. * s, 44. * s, 40. * s),
                 "Here",
                 Choice::FileFindHere,
-                s,
-                false,
+                ButtonStyle::Tonal,
+                frame.clip,
             );
         } else if code.parent.is_some() || code.document.is_some() {
-            retained_button(
-                &mut cx.services.renderer,
+            self.controls.button(
+                cx,
                 layer,
-                &mut self.controls,
                 Rect::new(b.x + 76. * s, b.y + 6. * s, 44. * s, 40. * s),
                 "Up",
                 Choice::FileUp,
-                s,
-                false,
+                ButtonStyle::Tonal,
+                frame.clip,
             );
         }
         cx.services.renderer.label(
@@ -1200,26 +1197,25 @@ impl Widget for CodeBrowser {
             color(0xe5eaf0),
             true,
         );
-        retained_button(
-            &mut cx.services.renderer,
+        self.controls.button(
+            cx,
             layer,
-            &mut self.controls,
             Rect::new(b.x + b.width - 104. * s, b.y + 6. * s, 60. * s, 40. * s),
             if code.search.is_some() { "Browse" } else { "Find" },
             Choice::FileFind,
-            s,
-            code.search.is_some(),
+            if code.search.is_some() { ButtonStyle::Primary } else { ButtonStyle::Tonal },
+            frame.clip,
         );
-        retained_icon(
+        self.controls.icon(
             cx,
-            &mut self.controls,
             layer,
             Rect::new(b.x + b.width - 44. * s, b.y + 6. * s, 40. * s, 40. * s),
             Icon::Close,
             18.,
             Choice::FileClose,
-            false,
+            ButtonStyle::Quiet,
             true,
+            frame.clip,
         );
         cx.services.renderer.label(
             layer,
@@ -1240,9 +1236,15 @@ impl Widget for CodeBrowser {
                 color(0x82909f),
                 false,
             );
-            retained_button(&mut cx.services.renderer, layer, &mut self.controls,
-                Rect::new(b.x + 12.*s, b.y + 162.*s, 128.*s, 32.*s),
-                if code.show_hidden { "✓ Show hidden" } else { "Show hidden" }, Choice::FileHidden, s, code.show_hidden);
+            self.controls.button(
+                cx,
+                layer,
+                Rect::new(b.x + 12. * s, b.y + 162. * s, 128. * s, 32. * s),
+                if code.show_hidden { "✓ Show hidden" } else { "Show hidden" },
+                Choice::FileHidden,
+                if code.show_hidden { ButtonStyle::Primary } else { ButtonStyle::Tonal },
+                frame.clip,
+            );
             cx.services.renderer.label(layer, if cx.ui.mobile { "Tap to preview · Open" } else { "↑↓ / Ctrl-N/P · Enter open · Esc back" },
                 Rect::new(b.x + 150.*s, b.y + 170.*s, (b.width - 164.*s).max(1.), 20.*s), 11.*s, color(0x82909f), false);
             b.y + 200. * s
@@ -1273,31 +1275,35 @@ impl Widget for CodeBrowser {
                 false,
             );
             if comments {
-                retained_button(
-                    &mut cx.services.renderer,
+                self.controls.button(
+                    cx,
                     layer,
-                    &mut self.controls,
                     Rect::new(b.x + b.width - 140. * s, b.y + 84. * s, 62. * s, 40. * s),
                     "Copy",
                     Choice::FileCopy,
-                    s,
-                    false,
+                    ButtonStyle::Tonal,
+                    frame.clip,
                 );
-                retained_button(
-                    &mut cx.services.renderer,
+                self.controls.button(
+                    cx,
                     layer,
-                    &mut self.controls,
                     Rect::new(b.x + b.width - 74. * s, b.y + 84. * s, 62. * s, 40. * s),
                     "Clear",
                     Choice::FileClear,
-                    s,
-                    false,
+                    ButtonStyle::Tonal,
+                    frame.clip,
                 );
             }
             if code.document.is_none() {
-                retained_button(&mut cx.services.renderer, layer, &mut self.controls,
-                    Rect::new(b.x + b.width - 140.*s, b.y + 84.*s, 128.*s, 32.*s),
-                    if code.show_hidden { "✓ Show hidden" } else { "Show hidden" }, Choice::FileHidden, s, code.show_hidden);
+                self.controls.button(
+                    cx,
+                    layer,
+                    Rect::new(b.x + b.width - 140. * s, b.y + 84. * s, 128. * s, 32. * s),
+                    if code.show_hidden { "✓ Show hidden" } else { "Show hidden" },
+                    Choice::FileHidden,
+                    if code.show_hidden { ButtonStyle::Primary } else { ButtonStyle::Tonal },
+                    frame.clip,
+                );
             }
             b.y + 124. * s
         };
@@ -1357,7 +1363,7 @@ impl Widget for CodeBrowser {
                 }
                 if hit.height > 0. {
                     let action = if code.search.is_some() { Choice::FileSelect(entry.path.clone()) } else { Choice::FileOpen(entry.path.clone(), entry.directory) };
-                    self.controls.place(action, rect, viewport, false);
+                    self.controls.place(action, rect, viewport, false).control.highlight(layer, cx.ui, false);
                 }
             }
             code.paints.retain(|id, (_, paint)| {
@@ -1395,7 +1401,15 @@ impl Widget for CodeBrowser {
             let title = selected.as_ref().map(|e| e.path.strip_prefix(code.path.as_deref().unwrap_or("")).unwrap_or(&e.path).trim_start_matches('/')).unwrap_or("Preview");
             cx.services.renderer.label(layer, title, Rect::new(b.x + 14.*s, header_y + 9.*s, (b.width - 100.*s).max(1.), 24.*s), 12.*s, color(0xb7c2ce), false);
             if selected.is_some() {
-                retained_button(&mut cx.services.renderer, layer, &mut self.controls, Rect::new(b.x + b.width - 76.*s, header_y + 2.*s, 64.*s, 32.*s), "Open", Choice::FileAccept, s, false);
+                self.controls.button(
+                    cx,
+                    layer,
+                    Rect::new(b.x + b.width - 76. * s, header_y + 2. * s, 64. * s, 32. * s),
+                    "Open",
+                    Choice::FileAccept,
+                    ButtonStyle::Tonal,
+                    frame.clip,
+                );
             }
             let preview = Rect::new(b.x, header_y + 36.*s, b.width, (bottom - header_y - 36.*s).max(1.));
             code.preview_viewport = preview;
@@ -1414,27 +1428,25 @@ impl Widget for CodeBrowser {
         if paging {
             let y = bottom - 44. * s;
             if code.pages.len() > 1 {
-                retained_button(
-                    &mut cx.services.renderer,
+                self.controls.button(
+                    cx,
                     layer,
-                    &mut self.controls,
                     Rect::new(b.x + 12. * s, y, 88. * s, 40. * s),
                     "Previous",
                     Choice::FilePage(false),
-                    s,
-                    false,
+                    ButtonStyle::Tonal,
+                    frame.clip,
                 );
             }
             if code.next.is_some() {
-                retained_button(
-                    &mut cx.services.renderer,
+                self.controls.button(
+                    cx,
                     layer,
-                    &mut self.controls,
                     Rect::new(b.x + b.width - 100. * s, y, 88. * s, 40. * s),
                     "Next",
                     Choice::FilePage(true),
-                    s,
-                    false,
+                    ButtonStyle::Tonal,
+                    frame.clip,
                 );
             }
         }

@@ -208,7 +208,7 @@ impl Widget for OperationDialog {
             {
                 Some(Choice::Submit)
             }
-            _ => self.form.event(event, &mut self.value.iter_mut().collect::<Vec<_>>(), cx),
+            _ => self.form.event(event, &mut self.value.iter_mut().collect::<Vec<_>>(), cx).1,
         };
         let result = match choice {
             Some(Choice::Close) => {

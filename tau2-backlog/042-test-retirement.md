@@ -61,3 +61,21 @@ Working allocation: 2,000 net test code lines toward the overall target, measure
 separately from production and including replacement tests/helpers. Current total
 frontend test code is 8,551 raw / 11,434 same-format lines; app/UI test code occupies
 4,744 physical lines. These inventories do not prove a particular deletion yield.
+
+## Deletion ledger so far
+
+- **036:** deleted `icon_controls_tests.rs` and composer-centering assertions;
+  kept actual Settings/Tail actions in compact occlusion/selection scenarios.
+- **037 controls:** deleted `hover_tests.rs`'s separate GPU setup, section-key
+  assertions and ripple adapter accessors. One actual nested attachment case
+  verifies child-only pixels/capture/action and parent blank-space ownership.
+- **037 controls:** collapsed `render_download_state_matrix`'s all-state × size ×
+  hover/press/tooltip gallery into one narrow-card fit check; removed exact target
+  height, one-draw and text-only implementation assertions. Existing download
+  action/failure/source and Extract single-flight tests remain. Their required
+  shared fixture is not yet retired.
+- **037 controls:** existing clip/control case also checks a disabled foreground
+  Form consumes without an action. Ripple timing still checks elapsed-time fade
+  and idle behavior, no longer an obsolete string-key check.
+- `test_ui.rs` remains, minus the obsolete ripple/section forwarders. It is **not
+  deleted yet**; the rest of 042 and its 2,000-line test allocation are still open.

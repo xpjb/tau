@@ -70,12 +70,6 @@ struct Vertex {
     corners: [f32; 4],
     ripple: [f32; 4],
 }
-#[derive(Clone, Copy, Default)]
-pub struct Interaction {
-    pub hover: Option<Vec2>,
-    pub pressed: Option<Vec2>,
-    pub held: bool,
-}
 struct Shape {
     rect: Rect,
     clip: Rect,
@@ -87,7 +81,6 @@ struct Shape {
 pub struct Layer {
     rects: Vec<Shape>,
     boundaries: Vec<(usize, usize, usize)>,
-    pub interaction: Interaction,
     pub draws: Vec<Draw>,
     pub images: Vec<(PathBuf, Rect, Rect)>,
 }
@@ -121,12 +114,6 @@ impl Layer {
             start = end;
             Some(batch)
         })
-    }
-    pub fn new(interaction: Interaction) -> Self {
-        Self {
-            interaction,
-            ..Default::default()
-        }
     }
     /// Apply a container clip to the shapes, text and images appended by one
     /// child visit without changing its layout coordinates or editor geometry.
@@ -162,9 +149,6 @@ impl Layer {
             });
         }
     }
-    pub fn control_color(&self, rect: Rect, base: Color) -> Color {
-        self.surface_color(rect, [0.; 4], rect, base)
-    }
     /// Draws beneath text/images. Hover is quiet; a press is an expanding,
     /// rounded-surface-clipped circle instead of brightening the entire panel.
     pub fn surface_highlight(
@@ -173,12 +157,9 @@ impl Layer {
         corners: [f32; 4],
         clip: Rect,
         pinned: bool,
-        hoverable: bool,
+        hovering: bool,
         ripple: Option<(Vec2, f32, f32)>,
     ) {
-        let inside = |p| contains(clip, p) && contains_rounded(rect, corners, p);
-        let hovering = hoverable && self.interaction.hover.is_some_and(inside)
-            && (!self.interaction.held || self.interaction.pressed.is_some_and(inside));
         let strength = if pinned { 0.035 } else if hovering { 0.018 } else { 0. };
         if strength > 0. {
             self.clipped_corners(rect, corners, Color([1., 1., 1., strength]), clip);
@@ -197,30 +178,8 @@ impl Layer {
             }
         }
     }
-    pub fn surface_color(
-        &self,
-        rect: Rect,
-        corners: [f32; 4],
-        clip: Rect,
-        mut base: Color,
-    ) -> Color {
-        let inside = |p| contains(clip, p) && contains_rounded(rect, corners, p);
-        let input = self.interaction;
-        if input.hover.is_some_and(inside) {
-            let mix = if input.pressed.is_some_and(inside) {
-                0.09
-            } else if !input.held {
-                0.018
-            } else {
-                0.
-            };
-            for c in &mut base.0[..3] {
-                *c += (1. - *c) * mix;
-            }
-        }
-        base
-    }
 }
+
 pub struct MessageView {
     pub source: String,
     pub doc: Document,
@@ -999,7 +958,7 @@ mod tests {
     #[test]
     fn subtle_hover_and_circle_have_separate_clipped_shapes() {
         let rect = Rect::new(10., 10., 120., 80.);
-        let mut layer = Layer::new(Interaction { hover: Some(Vec2::new(30., 40.)), ..Default::default() });
+        let mut layer = Layer::default();
         layer.surface_highlight(rect, [12.; 4], rect, false, true, None);
         assert_eq!(layer.rects.len(), 1);
         assert_eq!(layer.rects[0].color.0[3], 0.018);

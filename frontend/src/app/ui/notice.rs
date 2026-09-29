@@ -3,7 +3,7 @@ use super::{Context, Event, Frame, Id, Request, Widget};
 use crate::{
     app::notices::NoticePopup,
     icons::Icon,
-    render::{color, contains},
+    render::color,
 };
 use sanscale::Rect;
 use std::time::Instant;
@@ -106,6 +106,8 @@ impl Widget for NoticeWidget {
         self.body.clip = frame.clip;
         frame.layer.above();
         frame.layer.rounded_rect(rect, 12. * s, color(0x263340));
+        self.body.corners = Some([12. * s; 4]);
+        self.body.highlight(frame.layer, cx.ui, false);
         cx.services.renderer.clipped_label(
             frame.layer,
             notice,
@@ -118,9 +120,7 @@ impl Widget for NoticeWidget {
         let close = Rect::new(rect.x + width - 44. * s, rect.y + (height - 40. * s) / 2., 40. * s, 40. * s);
         self.close.rect = Some(close);
         self.close.clip = frame.clip;
-        if cx.ui.hover.is_some_and(|p| contains(close, p)) {
-            frame.layer.rounded_rect(close, 20. * s, color(0x354454));
-        }
+        self.close.highlight(frame.layer, cx.ui, false);
         cx.services.renderer.icon(
             &cx.services.gpu,
             frame.layer,

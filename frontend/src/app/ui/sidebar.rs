@@ -1,20 +1,20 @@
 use super::{Context, DialogSpec, Event, Frame, Id, Request, TopicEdit, Widget};
 use super::{
-    controls::{Controls, button},
+    controls::{ButtonStyle, Controls},
     scroll::ScrollState,
 };
 use crate::{app::Info, icons::Icon, render::color};
 use sanscale::Rect;
 use std::time::Instant;
 use tau_protocol::*;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum Choice {
     Select(String),
     New,
     Settings,
     Info(Info),
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum TopicChoice {
     Select(String),
     New,
@@ -111,14 +111,15 @@ impl Widget for Sidebar {
         layer.rect(Rect::new(b.x + b.width - s, b.y, s, b.height), color(0x2a3541));
         let indicator = Rect::new(b.x + 72. * s, b.y + 22. * s, 28. * s, 34. * s);
 
-        layer.rounded_rect(indicator, 8. * s, layer.control_color(indicator, color(0x0e141b)));
+        let control = &mut self.controls.place(Choice::Info(Info::Connection), indicator, frame.clip, false).control;
+        control.info = Some(Info::Connection);
+        control.corners = Some([8. * s; 4]);
+        control.highlight(layer, cx.ui, false);
         layer.rounded_rect(
             Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s),
             4. * s,
             color(cx.model.health.color(Instant::now())),
         );
-        self.controls.place(Choice::Info(Info::Connection), indicator, frame.clip, false).control.info =
-            Some(Info::Connection);
         cx.services.renderer.label(
             layer,
             "Tau",
@@ -127,26 +128,25 @@ impl Widget for Sidebar {
             color(0xe5eaf0),
             true,
         );
-        super::controls::icon_button(
+        self.controls.icon(
             cx,
-            &mut self.controls,
             layer,
             Rect::new(b.x + b.width - 56. * s, b.y + 16. * s, 40. * s, 40. * s),
             Icon::Gear,
             22.,
             Choice::Settings,
-            false,
+            ButtonStyle::Quiet,
             true,
+            frame.clip,
         );
-        button(
-            &mut cx.services.renderer,
+        self.controls.button(
+            cx,
             layer,
-            &mut self.controls,
             Rect::new(b.x + 16. * s, b.y + 84. * s, b.width - 32. * s, 40. * s),
             "New chat",
             Choice::New,
-            s,
-            true,
+            ButtonStyle::Primary,
+            frame.clip,
         );
         // Reserve the sidebar's rightmost column for its separator. The
         // scrolling tabs (including the clipped add tab) must not paint over it.
@@ -175,21 +175,11 @@ impl Widget for Sidebar {
             }
             let selected = cx.model.account.selected.as_ref() == Some(&session.id);
             let targeted = cx.ui.menu_chat.as_ref() == Some(&session.id);
-            layer.clipped_rounded_rect(
-                rect,
-                12. * s,
-                layer.control_color(
-                    rect,
-                    color(if targeted {
-                        0x35415a
-                    } else if selected {
-                        0x303a66
-                    } else {
-                        0x0e141b
-                    }),
-                ),
-                clip,
-            );
+            layer.clipped_rounded_rect(rect, 12. * s,
+                color(if targeted { 0x35415a } else if selected { 0x303a66 } else { 0x0e141b }), clip);
+            let control = &mut self.controls.place(Choice::Select(session.id.clone()), rect, clip, false).control;
+            control.corners = Some([12. * s; 4]);
+            control.highlight(layer, cx.ui, false);
             let rect = crate::render::intersect(rect, clip);
 
             let unread = cx.model.unread(session);
@@ -245,14 +235,15 @@ impl Widget for Sidebar {
                 false,
                 clip,
             );
-            self.controls.place(Choice::Select(session.id.clone()), rect, clip, false);
             let ring = Rect::new(rect.x + rect.width - 33. * s, y + 11. * s, 18. * s, 18. * s);
             let (ratio, tint) = cx.model.cache_ttl(session).meter();
             cx.services.renderer.clipped_icon(&cx.services.gpu, layer, Icon::CacheTtl(ratio), ring, tint, clip);
             let target = crate::render::intersect(Rect::new(ring.x - 7. * s, ring.y - 7. * s, 32. * s, 32. * s), clip);
             if target.height > 0. {
                 let info = Info::CacheTtl(session.id.clone());
-                self.controls.place(Choice::Info(info.clone()), target, clip, false).control.info = Some(info.clone());
+                let control = &mut self.controls.place(Choice::Info(info.clone()), target, clip, true).control;
+                control.info = Some(info);
+                control.highlight(layer, cx.ui, false);
             }
         }
         if self.scroll.max == 0.
@@ -337,7 +328,9 @@ impl Widget for ProjectTabs {
             let hit = crate::render::intersect(r, b);
             if hit.width > 0. {
                 let selected = p.id == cx.model.account.selected_project;
-                layer.clipped_rounded_rect(r, 4. * s, layer.control_color(r, color(0x0e141b)), b);
+                let control = &mut self.controls.place(TopicChoice::Select(p.id.clone()), r, b, false).control;
+                control.corners = Some([4. * s; 4]);
+                control.highlight(layer, cx.ui, false);
                 let label = Rect::new(x + 8. * s, b.y + 8. * s, w - 24. * s, 18. * s);
                 cx.services.renderer.clipped_label(
                     layer,
@@ -364,14 +357,15 @@ impl Widget for ProjectTabs {
                         b,
                     );
                 }
-                self.controls.place(TopicChoice::Select(p.id.clone()), r, b, false);
             }
             x += w;
         }
         let add = Rect::new(x, b.y, 36. * s, b.height);
         let hit = crate::render::intersect(add, b);
         if hit.width > 0. {
-            layer.clipped_rounded_rect(add, 8. * s, layer.control_color(add, color(0x0e141b)), b);
+            let control = &mut self.controls.place(TopicChoice::New, add, b, false).control;
+            control.corners = Some([8. * s; 4]);
+            control.highlight(layer, cx.ui, false);
             cx.services.renderer.clipped_label(
                 layer,
                 "+",
@@ -381,7 +375,6 @@ impl Widget for ProjectTabs {
                 false,
                 b,
             );
-            self.controls.place(TopicChoice::New, add, b, false);
         }
         layer.rect(Rect::new(b.x, b.y + b.height, b.width, s), color(0x2a3541));
         self.controls.finish(cx);

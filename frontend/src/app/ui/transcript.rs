@@ -26,7 +26,6 @@ pub(in crate::app) struct Transcript {
     pub interests: BTreeSet<String>,
     selection: Target,
     pub(super) selecting: bool,
-    hovered: Option<String>,
     binding: Option<(String, Option<String>, Option<String>)>,
 }
 impl Transcript {
@@ -47,7 +46,6 @@ impl Transcript {
             interests: BTreeSet::new(),
             selection: Target { scope: id, widget: Id::new() },
             selecting: false,
-            hovered: None,
             binding: None,
         }
     }
@@ -82,11 +80,9 @@ impl Transcript {
         self.autoscroll = None;
         self.expansion_pin = None;
         for row in &mut self.rows {
-            row.release_visual(true);
+            row.control.ripple = None;
+            for part in &mut row.parts { part.control.ripple = None; }
         }
-    }
-    pub fn section_at(&self, point: Vec2) -> Option<(&str, Rect)> {
-        self.rows.iter().rev().find_map(|r| r.section(point))
     }
     pub fn set_scroll(&mut self, value: f32, cx: &mut Context<'_>) {
         self.download = None;
@@ -473,9 +469,6 @@ impl Transcript {
                 auto.pointer = point;
                 cx.ui.dirty = true;
             }
-            let hovered = point.and_then(|p| self.section_at(p).map(|(key, _)| key.to_owned()));
-            cx.ui.dirty |= self.hovered != hovered;
-            self.hovered = hovered;
         }
         if let Event::Middle { pressed, point } = *event {
             if pressed {
@@ -514,10 +507,6 @@ impl Transcript {
             }
             self.expansion_pin = None;
             self.history_attempt = None;
-            for row in &mut self.rows {
-                row.release_visual(true);
-                row.press_visual(point);
-            }
         }
         if self.scroll.bar_event(event, cx) {
             self.download = None;
@@ -565,11 +554,6 @@ impl Transcript {
                 let c = cx.ui.capture.as_mut().unwrap();
                 c.point = point;
                 c.dragged |= (point.x - c.start.x).abs() + (point.y - c.start.y).abs() > 4. * cx.ui.scale;
-                if c.dragged {
-                    for row in &mut self.rows {
-                        row.release_visual(true);
-                    }
-                }
                 cx.ui.dirty = true;
                 return true;
             }
@@ -636,11 +620,8 @@ impl Transcript {
             if !matches!(event, Event::Move { .. }) { self.horizontal.event(event, v, cx) } else { v }
         };
         if let Event::Up { pointer, .. } = *event
-            && let Some(c) = capture.filter(|c| c.pointer == pointer)
+            && capture.is_some_and(|c| c.pointer == pointer)
         {
-            for row in &mut self.rows {
-                row.release_visual(c.dragged);
-            }
             self.remember_scroll(cx);
             if let Some(session) = &cx.model.account.selected {
                 let result = cx.model.save_chat(session);
@@ -652,19 +633,14 @@ impl Transcript {
             self.remember_scroll(cx);
             cx.ui.dirty = true;
         }
-        if cx.ui.capture.is_some_and(|c| c.dragged) {
-            for row in &mut self.rows {
-                row.release_visual(true);
-            }
-        }
         if let Event::Hover(Some(point)) = *event
             && !child
             && contains(self.scroll.rect, point)
         {
             if cx.services.renderer.hit_link(point).is_some() {
-                cx.ui.hot = Some((self.selection, false));
+                cx.ui.hot = Some((self.selection, super::Cursor::Pointer));
             } else if cx.services.renderer.nearest_text(point).is_some() {
-                cx.ui.hot = Some((self.selection, true));
+                cx.ui.hot = Some((self.selection, super::Cursor::Text));
             }
         }
         handled

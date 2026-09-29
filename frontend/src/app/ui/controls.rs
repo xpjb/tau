@@ -1,7 +1,7 @@
 use super::{Capture, Context, Event, Frame, Id, Target, Widget};
 use crate::{
     editor::Editor,
-    render::{Interaction, Layer, Renderer, color, contains, contains_rounded},
+    render::{Layer, color, contains, contains_rounded},
 };
 use sanscale::{Rect, Vec2};
 
@@ -14,6 +14,7 @@ pub(in crate::app) struct Control {
     pub corners: Option<[f32; 4]>,
     clicked: bool,
     pub info: Option<crate::app::Info>,
+    pub ripple: Option<crate::app::Ripple>,
 }
 impl Control {
     pub fn new(scope: Id, rounded: bool) -> Self {
@@ -26,6 +27,7 @@ impl Control {
             corners: None,
             clicked: false,
             info: None,
+            ripple: None,
         }
     }
     pub fn contains(&self, point: Vec2) -> bool {
@@ -47,7 +49,7 @@ impl Control {
         match *event {
             Event::Hover(Some(point)) if self.contains(point) => {
                 if self.enabled {
-                    cx.ui.hot = Some((self.target, text));
+                    cx.ui.hot = Some((self.target, if text { super::Cursor::Text } else { super::Cursor::Pointer }));
                 }
                 if let Some(info) = &self.info {
                     cx.ui.hint = Some((self.rect.unwrap(), info.clone()));
@@ -56,6 +58,9 @@ impl Control {
             }
             Event::Down { pointer, point, touch } if self.contains(point) => {
                 if self.enabled && cx.ui.capture.is_none() {
+                    if !text {
+                        self.ripple = Some(crate::app::Ripple::new(self.rect.unwrap(), point));
+                    }
                     cx.ui.capture = Some(Capture {
                         target: self.target,
                         pointer,
@@ -80,6 +85,9 @@ impl Control {
                 capture.dragged |=
                     (point.x - capture.start.x).abs() + (point.y - capture.start.y).abs() > 7. * cx.ui.scale;
                 capture.point = point;
+                if capture.dragged {
+                    self.ripple = None;
+                }
                 cx.ui.dirty = true;
                 true
             }
@@ -88,6 +96,13 @@ impl Control {
             {
                 let capture = cx.ui.capture.take().unwrap();
                 self.clicked = self.enabled && !capture.dragged && self.contains(point);
+                if self.clicked {
+                    if let Some(ripple) = &mut self.ripple {
+                        ripple.release();
+                    }
+                } else {
+                    self.ripple = None;
+                }
                 if self.clicked
                     && capture.touch
                     && capture.started.elapsed().as_millis() >= 450
@@ -99,20 +114,51 @@ impl Control {
                 cx.ui.dirty = true;
                 true
             }
+            Event::Cancel => {
+                self.ripple = None;
+                false
+            }
             _ => false,
         }
     }
+    pub fn highlight(&mut self, layer: &mut Layer, ui: &mut super::UiState, pinned: bool) {
+        let Some(rect) = self.rect else {
+            return;
+        };
+        if !self.enabled { self.ripple = None; }
+        let capture = ui.capture.filter(|c| c.target == self.target && !c.dragged);
+        let now = std::time::Instant::now();
+        let ripple = self.ripple.as_ref().and_then(|r| r.paint(rect, now, capture.is_some()));
+        if ripple.is_none() {
+            self.ripple = None;
+        }
+        ui.dirty |= self.ripple.as_ref().is_some_and(|r| r.animating(now));
+        let hovering = self.enabled
+            && ui.hot.is_some_and(|(target, _)| target == self.target)
+            && ui.hover.is_some_and(|p| self.contains(p))
+            && (ui.capture.is_none() || capture.is_some_and(|c| self.contains(c.point)));
+        let corners = self.corners.unwrap_or([if self.rounded { rect.height / 2. } else { 0. }; 4]);
+        layer.surface_highlight(rect, corners, self.clip, pinned, hovering, ripple);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum ButtonStyle {
+    Primary,
+    Tonal,
+    Quiet,
+    Destructive,
 }
 
 pub(in crate::app) struct Button {
     pub control: Control,
     pub label: String,
-    pub primary: bool,
-    pub destructive: bool,
+    pub style: ButtonStyle,
+    pub icon: Option<(crate::icons::Icon, f32)>,
 }
 impl Button {
     pub fn new(scope: Id, label: &str) -> Self {
-        Self { control: Control::new(scope, true), label: label.into(), primary: false, destructive: false }
+        Self { control: Control::new(scope, true), label: label.into(), style: ButtonStyle::Tonal, icon: None }
     }
 }
 impl Widget for Button {
@@ -120,83 +166,55 @@ impl Widget for Button {
         self.control.handle(event, cx, false)
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
-        self.control.rect = Some(frame.bounds);
+        let rect = frame.bounds;
+        self.control.rect = Some(rect);
         self.control.clip = frame.clip;
-        let old = frame.layer.interaction;
-        let capture =
-            cx.ui.capture.filter(|c| c.target == self.control.target && !c.dragged && self.control.contains(c.point));
-        frame.layer.interaction = Interaction {
-            hover: cx.ui.hover.filter(|p| self.control.contains(*p)),
-            pressed: capture.map(|c| c.start),
-            held: capture.is_some(),
+        let (background, ink) = match self.style {
+            ButtonStyle::Primary => (Some(0x67d4ff), 0x003546),
+            ButtonStyle::Tonal => (Some(0x18212b), 0x67d4ff),
+            ButtonStyle::Quiet => (None, 0x67d4ff),
+            ButtonStyle::Destructive => (Some(0x402b30), 0xffb4ab),
         };
+        let enabled = self.control.enabled;
         frame.layer.with_clip(frame.clip, |layer| {
-            paint_button(
-                &mut cx.services.renderer,
-                layer,
-                frame.bounds,
-                &self.label,
-                cx.ui.scale,
-                self.primary,
-                self.destructive,
-            )
-        });
-        frame.layer.interaction = old;
-    }
-}
-
-pub(in crate::app) fn paint_button(
-    renderer: &mut Renderer,
-    layer: &mut Layer,
-    rect: Rect,
-    label: &str,
-    scale: f32,
-    primary: bool,
-    destructive: bool,
-) {
-    if rect.width <= 0. || rect.height <= 0. {
-        return;
-    }
-    layer.rounded_rect(
-        rect,
-        rect.height * 0.5,
-        layer.control_color(
-            rect,
-            color(if destructive {
-                0x402b30
-            } else if primary {
-                0x67d4ff
+            if let Some(background) = background {
+                layer.rounded_rect(rect, rect.height / 2., color(if enabled { background } else { 0x303942 }));
+            }
+            self.control.highlight(layer, cx.ui, cx.ui.focus == Some(self.control.target));
+            if let Some((icon, size)) = self.icon {
+                let size = size * cx.ui.scale;
+                cx.services.renderer.icon(
+                    &cx.services.gpu,
+                    layer,
+                    icon,
+                    Rect::new(rect.x + (rect.width - size) / 2., rect.y + (rect.height - size) / 2., size, size),
+                    if enabled { ink } else { 0x68727e },
+                );
             } else {
-                0x18212b
-            }),
-        ),
-    );
-    let style = sanscale::Style {
-        chain: renderer.faces.prose[0],
-        wrap_em: None,
-        align: sanscale::Align::Left,
-        line_spacing: 1.,
-    };
-    if let Some(block) = renderer.text.shape_transient(label, &style) {
-        let layout = renderer.text.measure(block);
-        let size = (if label.chars().count() == 1 { 22. } else { 14. } * scale)
-            .min((rect.width - 12. * scale).max(1.) / layout.width_em().max(1.));
-        layer.draws.push(sanscale::Draw {
-            block,
-            at: Vec2::new(
-                rect.x + (rect.width - layout.width_em() * size) / 2.,
-                rect.y + (rect.height - layout.height_em() * size) / 2.,
-            ),
-            size,
-            color: color(if destructive {
-                0xffb4ab
-            } else if primary {
-                0x003546
-            } else {
-                0x67d4ff
-            }),
-            clip: Some(rect),
-            ..Default::default()
+                let renderer = &mut cx.services.renderer;
+                let style = sanscale::Style {
+                    chain: renderer.faces.prose[0],
+                    wrap_em: None,
+                    align: sanscale::Align::Left,
+                    line_spacing: 1.,
+                };
+                if let Some(block) = renderer.text.shape_transient(&self.label, &style) {
+                    let layout = renderer.text.measure(block);
+                    let size = (if self.label.chars().count() == 1 { 22. } else { 14. } * cx.ui.scale)
+                        .min((rect.width - 12. * cx.ui.scale).max(1.) / layout.width_em().max(1.));
+                    layer.draws.push(sanscale::Draw {
+                        block,
+                        at: Vec2::new(
+                            rect.x + (rect.width - layout.width_em() * size) / 2.,
+                            rect.y + (rect.height - layout.height_em() * size) / 2.,
+                        ),
+                        size,
+                        color: color(if enabled { ink } else { 0x68727e }),
+                        clip: Some(rect),
+                        ..Default::default()
+                    });
+                }
+            }
         });
     }
 }
@@ -348,7 +366,12 @@ impl<A: Clone + PartialEq> Form<A> {
     pub fn new(id: Id, buttons: &[(A, &str)]) -> Self {
         Self { id, buttons: buttons.iter().map(|(action, label)| (action.clone(), Button::new(id, label))).collect() }
     }
-    pub fn event(&mut self, event: &Event<'_>, fields: &mut [&mut TextField], cx: &mut Context<'_>) -> Option<A> {
+    pub fn event(
+        &mut self,
+        event: &Event<'_>,
+        fields: &mut [&mut TextField],
+        cx: &mut Context<'_>,
+    ) -> (bool, Option<A>) {
         if let Event::Key { key: "Tab", ctrl: false, shift } = event
             && !fields.iter().any(|f| f.editor.composing())
         {
@@ -363,25 +386,25 @@ impl<A: Clone + PartialEq> Form<A> {
                 cx.ui.focus = Some(eligible[i]);
                 cx.ui.dirty = true;
             }
-            return None;
+            return (true, None);
         }
         // Controls and fields are painted in this same stacking order. No field
         // list is reconstructed from last frame's semantic hit registrations.
         for (action, button) in self.buttons.iter_mut().rev() {
             let handled = button.handle_event(event, cx);
             if button.control.take_click() {
-                return Some(action.clone());
+                return (true, Some(action.clone()));
             }
             if handled {
-                return None;
+                return (true, None);
             }
         }
         for field in fields.iter_mut().rev() {
             if field.handle_event(event, cx) {
-                break;
+                return (true, None);
             }
         }
-        None
+        (false, None)
     }
     pub fn begin_frame(&mut self) {
         for (_, button) in &mut self.buttons {
@@ -398,19 +421,24 @@ impl<A: Clone + PartialEq> Form<A> {
         cx: &mut Context<'_>,
     ) {
         let button = &mut self.buttons.iter_mut().find(|(a, _)| *a == action).expect("declared form button").1;
-        button.primary = primary;
-        button.destructive = destructive;
+        button.style = if destructive {
+            ButtonStyle::Destructive
+        } else if primary {
+            ButtonStyle::Primary
+        } else {
+            ButtonStyle::Tonal
+        };
         button.visit_perframe(&mut Frame { layer: frame.layer, bounds: rect, clip: frame.clip }, cx);
     }
 }
 
-/// A component's retained buttons. Keys include the semantic destination so an
+/// A component's retained buttons. Typed keys include the semantic destination so an
 /// in-flight press never activates a newly rebound item. No root hit/action table.
 pub(in crate::app) struct Controls<A> {
     pub id: Id,
-    pub items: Vec<(String, Button, A)>,
+    pub items: Vec<(Option<usize>, Button, A)>,
 }
-impl<A: Clone + std::fmt::Debug> Controls<A> {
+impl<A: Clone + PartialEq> Controls<A> {
     pub fn new(id: Id) -> Self {
         Self { id, items: vec![] }
     }
@@ -430,14 +458,14 @@ impl<A: Clone + std::fmt::Debug> Controls<A> {
         });
     }
     pub fn place(&mut self, choice: A, rect: Rect, clip: Rect, rounded: bool) -> &mut Button {
-        self.place_key("", choice, rect, clip, rounded)
+        self.place_in(None, choice, rect, clip, rounded)
     }
-    pub fn place_key(&mut self, slot: &str, choice: A, rect: Rect, clip: Rect, rounded: bool) -> &mut Button {
-        let key = format!("{slot}:{choice:?}");
-        let index = self.items.iter().position(|(k, _, _)| k == &key).unwrap_or_else(|| {
-            self.items.push((key, Button::new(self.id, ""), choice));
-            self.items.len() - 1
-        });
+    pub fn place_in(&mut self, slot: Option<usize>, choice: A, rect: Rect, clip: Rect, rounded: bool) -> &mut Button {
+        let index =
+            self.items.iter().position(|(key, _, action)| *key == slot && *action == choice).unwrap_or_else(|| {
+                self.items.push((slot, Button::new(self.id, ""), choice));
+                self.items.len() - 1
+            });
         let item = self.items.remove(index);
         self.items.push(item);
         let button = &mut self.items.last_mut().unwrap().1;
@@ -459,7 +487,7 @@ impl<A: Clone + std::fmt::Debug> Controls<A> {
     }
 }
 
-impl<A: Clone + std::fmt::Debug> Controls<A> {
+impl<A: Clone + PartialEq> Controls<A> {
     pub fn context(&self, event: &Event<'_>, cx: &Context<'_>) -> Option<(A, Vec2)> {
         let point = match *event {
             Event::Context(point) => point,
@@ -491,68 +519,39 @@ impl<A: Clone + std::fmt::Debug> Controls<A> {
             .filter(|(r, _)| r.width > 0. && r.height > 0.)
     }
 }
-pub(in crate::app) fn button<A: Clone + std::fmt::Debug>(
-    renderer: &mut Renderer,
-    layer: &mut Layer,
-    controls: &mut Controls<A>,
-    rect: Rect,
-    label: &str,
-    choice: A,
-    scale: f32,
-    primary: bool,
-) {
-    paint_button(renderer, layer, rect, label, scale, primary, false);
-    let b = controls.place(choice, rect, rect, true);
-    b.label = label.into();
-    b.primary = primary;
-}
-pub(in crate::app) fn icon_button<A: Clone + std::fmt::Debug>(
-    cx: &mut Context<'_>,
-    controls: &mut Controls<A>,
-    layer: &mut Layer,
-    r: Rect,
-    icon: crate::icons::Icon,
-    size: f32,
-    choice: A,
-    primary: bool,
-    enabled: bool,
-) {
-    use crate::icons::Icon;
-    let hovered = layer.interaction.hover.is_some_and(|p| contains(r, p));
-    let tonal = matches!(icon, Icon::Stop | Icon::Play | Icon::Attachments);
-    if primary || tonal || enabled && hovered {
-        layer.rounded_rect(
-            r,
-            r.height / 2.,
-            layer.control_color(
-                r,
-                color(if !enabled {
-                    0x303942
-                } else if primary {
-                    0x67d4ff
-                } else if tonal {
-                    0x18212b
-                } else {
-                    0x24303b
-                }),
-            ),
-        );
+impl<A: Clone + PartialEq> Controls<A> {
+    pub fn button(
+        &mut self,
+        cx: &mut Context<'_>,
+        layer: &mut Layer,
+        rect: Rect,
+        label: &str,
+        choice: A,
+        style: ButtonStyle,
+        clip: Rect,
+    ) {
+        let button = self.place(choice, rect, clip, true);
+        button.label = label.into();
+        button.style = style;
+        button.icon = None;
+        button.visit_perframe(&mut Frame { layer, bounds: rect, clip }, cx);
     }
-    let pixels = size * cx.ui.scale;
-    cx.services.renderer.icon(
-        &cx.services.gpu,
-        layer,
-        icon,
-        Rect::new(r.x + (r.width - pixels) / 2., r.y + (r.height - pixels) / 2., pixels, pixels),
-        if !enabled {
-            0x68727e
-        } else if primary {
-            0x003546
-        } else if matches!(icon, Icon::Attach) {
-            0xb7c2ce
-        } else {
-            0x67d4ff
-        },
-    );
-    controls.place(choice, r, r, true).control.enabled = enabled;
+    pub fn icon(
+        &mut self,
+        cx: &mut Context<'_>,
+        layer: &mut Layer,
+        rect: Rect,
+        icon: crate::icons::Icon,
+        size: f32,
+        choice: A,
+        style: ButtonStyle,
+        enabled: bool,
+        clip: Rect,
+    ) {
+        let button = self.place(choice, rect, clip, true);
+        button.style = style;
+        button.icon = Some((icon, size));
+        button.control.enabled = enabled;
+        button.visit_perframe(&mut Frame { layer, bounds: rect, clip }, cx);
+    }
 }

@@ -155,3 +155,35 @@ fn nested_capture_is_clipped_and_cannot_activate_a_replaced_card_or_another_poin
     h.app.with_ui(|root, cx| root.workspace.attachments.handle_event(&Event::Cancel, cx));
     assert!(h.app.root.workspace.attachments.scroll.velocity == 0.);
 }
+
+#[test]
+fn child_feedback_and_activation_do_not_belong_to_the_enclosing_message() {
+    let mut h = Harness::new();
+    h.app.root.workspace.attachments.show = false;
+    h.frame();
+    let row = h.app.root.workspace.chat.transcript.rows.iter()
+        .find(|r| r.attachment.as_ref().is_some_and(|c| c.target.entry == "entry-19")).unwrap();
+    let (_, button, _) = row.attachment.as_ref().unwrap().controls.items.iter()
+        .find(|(_, _, a)| matches!(a, CardChoice::UseSaved(_, _, SavedAction::Open))).unwrap();
+    let (parent, outer, target, inner) = (row.control.target, row.control.rect.unwrap(), button.control.target, button.control.rect.unwrap());
+    let point = Vec2::new(inner.x + inner.width / 2., inner.y + inner.height / 2.);
+    let before = h.ctx.read_rgba8().unwrap();
+    h.app.hover(Some(point));
+    assert_eq!(h.app.ui.hot.unwrap().0, target);
+    h.frame();
+    let after = h.ctx.read_rgba8().unwrap();
+    let width = h.ctx.size().0 as usize;
+    for (i, (old, new)) in before.chunks_exact(4).zip(after.chunks_exact(4)).enumerate() {
+        let p = Vec2::new((i % width) as f32 + 0.5, (i / width) as f32 + 0.5);
+        if contains(outer, p) && !contains(inner, p) { assert_eq!(old, new, "Child hover changed its parent"); }
+    }
+    h.app.press(1, point, true);
+    assert_eq!(h.app.ui.capture.unwrap().target, target);
+    assert!(h.app.root.workspace.chat.transcript.rows.iter().all(|r| r.control.ripple.is_none()));
+    h.app.release(1, point);
+    assert!(matches!(&h.app.actions()[..], [PlatformAction::UseDownload(_, SavedAction::Open, t)] if t.entry == "entry-19"));
+    let blank = Vec2::new(outer.x + outer.width / 2., outer.y + 12.);
+    h.app.press(2, blank, true);
+    assert_eq!(h.app.ui.capture.unwrap().target, parent, "Blank parent space still owns its touch");
+    h.app.cancel_pointer();
+}

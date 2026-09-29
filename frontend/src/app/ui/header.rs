@@ -1,9 +1,9 @@
-use super::controls::{Control, Controls, button, icon_button};
+use super::controls::{ButtonStyle, Control, Controls};
 use super::{Context, Event, Frame, Id, Request, Widget};
 use crate::{icons::Icon, render::color};
 use sanscale::Rect;
 use tau_protocol::*;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum Choice {
     Back,
     Attachments,
@@ -79,15 +79,14 @@ impl Widget for Header {
         chrome.rect(header, color(0x0e141b));
         chrome.rect(Rect::new(b.x, b.y + 56. * s, b.width, s), color(0x2a3541));
         if !wide {
-            button(
-                &mut cx.services.renderer,
+            self.controls.button(
+                cx,
                 chrome,
-                &mut self.controls,
                 Rect::new(b.x + 8. * s, header.y + (header.height - 40. * s) / 2., 40. * s, 40. * s),
                 "‹",
                 Choice::Back,
-                s,
-                false,
+                ButtonStyle::Tonal,
+                frame.clip,
             );
         }
         let title_x = b.x + if wide { 14. * s } else { 64. * s };
@@ -98,6 +97,7 @@ impl Widget for Header {
         let title_width = (b.x + b.width - if running || paused { 152. * s } else { 108. * s } - title_x).max(1.);
         self.title.rect = Some(Rect::new(title_x, b.y, title_width, header.height));
         self.title.clip = frame.clip;
+        self.title.highlight(chrome, cx.ui, false);
         let title = summary
             .as_ref()
             .map(|s| {
@@ -136,9 +136,8 @@ impl Widget for Header {
             color(if cx.model.epoch.is_some() { 0x4ade80 } else { 0xfbbf24 }),
             false,
         );
-        icon_button(
+        self.controls.icon(
             cx,
-            &mut self.controls,
             chrome,
             Rect::new(
                 b.x + b.width - if running || paused { 96. * s } else { 52. * s },
@@ -149,8 +148,9 @@ impl Widget for Header {
             Icon::Attachments,
             22.,
             Choice::Attachments,
-            self.attachments_open,
+            if self.attachments_open { ButtonStyle::Primary } else { ButtonStyle::Tonal },
             true,
+            frame.clip,
         );
         if running || paused {
             let (icon, action) = if running {
@@ -163,21 +163,20 @@ impl Widget for Header {
                     }),
                 )
             };
-            icon_button(
+            self.controls.icon(
                 cx,
-                &mut self.controls,
                 chrome,
                 Rect::new(b.x + b.width - 52. * s, header.y + (header.height - 40. * s) / 2., 40. * s, 40. * s),
                 icon,
                 20.,
                 action,
-                false,
+                ButtonStyle::Tonal,
                 connected,
+                frame.clip,
             );
         }
-        icon_button(
+        self.controls.icon(
             cx,
-            &mut self.controls,
             chrome,
             Rect::new(
                 b.x + b.width - if running || paused { 140. * s } else { 96. * s },
@@ -188,8 +187,9 @@ impl Widget for Header {
             Icon::Folder,
             22.,
             Choice::Files,
-            false,
+            ButtonStyle::Tonal,
             true,
+            frame.clip,
         );
         self.controls.finish(cx);
     }

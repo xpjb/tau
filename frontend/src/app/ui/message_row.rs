@@ -1,24 +1,21 @@
 use super::{Context, Event, Frame, Id, Menu, MenuChoice, Request, Widget};
 use super::{attachments::AttachmentCard, controls::Control};
 use crate::{
-    app::{DetailLine, Ripple, Row},
+    app::{DetailLine, Row},
     icons::Icon,
     render::color,
 };
 use sanscale::{Rect, Vec2};
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 pub(in crate::app) struct Part {
     pub line: DetailLine,
-    pub key: String,
     pub control: Control,
-    pub ripple: Option<Ripple>,
 }
 pub(in crate::app) struct MessageRow {
     pub row: Row,
     pub control: Control,
     pub parts: Vec<Part>,
     pub attachment: Option<AttachmentCard>,
-    pub ripple: Option<Ripple>,
     pub toggle: Option<(String, bool)>,
     pub layout: Vec<(f32, f32)>,
     pub corners: [f32; 4],
@@ -32,7 +29,6 @@ impl MessageRow {
             control: Control::new(id, false),
             parts: vec![],
             attachment: None,
-            ripple: None,
             toggle: None,
             layout: vec![],
             corners: [0.; 4],
@@ -50,9 +46,7 @@ impl MessageRow {
         for line in &row.details {
             let mut part = old.remove(&line.key).unwrap_or_else(|| Part {
                 line: line.clone(),
-                key: format!("{session}/{}", line.key),
                 control: Control::new(self.control.target.scope, false),
-                ripple: None,
             });
             part.line = line.clone();
             part.control.rect = None;
@@ -90,38 +84,6 @@ impl MessageRow {
             cx.ui.detach(card.controls.id);
         }
     }
-    pub fn section(&self, point: Vec2) -> Option<(&str, Rect)> {
-        self.parts
-            .iter()
-            .rev()
-            .find(|p| p.control.contains(point))
-            .map(|p| (p.key.as_str(), p.control.rect.unwrap()))
-            .or_else(|| self.control.contains(point).then(|| (self.row.key.as_str(), self.control.rect.unwrap())))
-    }
-    pub fn press_visual(&mut self, point: Vec2) {
-        if let Some(part) = self.parts.iter_mut().rev().find(|p| p.control.contains(point)) {
-            part.ripple = Some(Ripple::new(part.key.clone(), part.control.rect.unwrap(), point));
-        } else if self.control.contains(point) {
-            self.ripple = Some(Ripple::new(self.row.key.clone(), self.control.rect.unwrap(), point));
-        }
-    }
-    pub fn release_visual(&mut self, dragged: bool) {
-        for ripple in std::iter::once(&mut self.ripple).chain(self.parts.iter_mut().map(|p| &mut p.ripple)) {
-            if dragged {
-                *ripple = None;
-            } else if let Some(r) = ripple {
-                r.release();
-            }
-        }
-    }
-    pub fn tick_visual(&mut self, cx: &mut Context<'_>) {
-        for ripple in std::iter::once(&mut self.ripple).chain(self.parts.iter_mut().map(|p| &mut p.ripple)) {
-            if ripple.as_ref().is_some_and(|r| r.finished(Instant::now())) {
-                *ripple = None;
-            }
-            cx.ui.dirty |= ripple.as_ref().is_some_and(|r| r.animating(Instant::now()));
-        }
-    }
     fn menu(&self, point: Vec2, cx: &mut Context<'_>) {
         let mut options = vec![];
         if cx.services.renderer.selected_text().is_some_and(|s| !s.is_empty()) {
@@ -140,17 +102,16 @@ impl MessageRow {
 }
 impl Widget for MessageRow {
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if let Event::Tick(_) = event {
-            self.tick_visual(cx);
-        }
         if let Some(card) = &mut self.attachment
             && card.handle_event(event, cx)
         {
             return true;
         }
         for part in self.parts.iter_mut().rev() {
-            if part.line.toggle.is_some() {
-                let handled = part.control.handle(event, cx, false);
+            if part.line.toggle.is_some() || !part.line.source.is_empty() && matches!(event, Event::Hover(_)) {
+                let text = part.line.toggle.is_none()
+                    && !cx.ui.hover.is_some_and(|p| cx.services.renderer.hit_link(p).is_some());
+                let handled = part.control.handle(event, cx, text);
                 if part.control.take_click() {
                     self.toggle = Some((part.line.key.clone(), !part.line.toggle.unwrap()));
                 }
@@ -174,7 +135,12 @@ impl Widget for MessageRow {
             self.menu(p, cx);
             return true;
         }
-        if matches!(event, Event::Down { touch: false, .. } | Event::Hover(_)) {
+        if matches!(event, Event::Hover(_)) {
+            let text =
+                !self.row.source.is_empty() && !cx.ui.hover.is_some_and(|p| cx.services.renderer.hit_link(p).is_some());
+            return self.control.handle(event, cx, text);
+        }
+        if matches!(event, Event::Down { touch: false, .. }) {
             return false;
         }
         let handled = self.control.handle(event, cx, false);
@@ -196,7 +162,6 @@ impl Widget for MessageRow {
         let text_width = rect.width - 28. * s;
         let corners = self.corners;
         let joined_above = corners[0] == 0.;
-        let paint_at = Instant::now();
         let session = cx.model.account.selected.clone().unwrap();
         let layer = &mut *frame.layer;
         layer.clipped_corners(rect, corners, color(if row.user { 0x164e63 } else { 0x18212b }), viewport);
@@ -211,6 +176,7 @@ impl Widget for MessageRow {
         self.control.clip = viewport;
         self.control.corners = Some(corners);
         let pinned = cx.ui.menu_section.as_deref() == Some(row.key.as_str());
+        self.control.highlight(layer, cx.ui, pinned);
         cx.services.renderer.clipped_label(
             layer,
             &row.timestamp,
@@ -226,7 +192,6 @@ impl Widget for MessageRow {
                 let line = &part.line;
                 let lx = x + 14. * s + line.indent * s;
                 let line_rect = Rect::new(lx - 4. * s, top + offset, text_width - line.indent * s + 8. * s, *h);
-                let line_key = format!("{session}/{}", line.key);
                 let inner_corners = [4. * s; 4];
                 part.control.rect = Some(line_rect);
                 part.control.clip = viewport;
@@ -272,25 +237,8 @@ impl Widget for MessageRow {
                         viewport,
                     );
                 }
-                layer.surface_highlight(
-                    line_rect,
-                    inner_corners,
-                    viewport,
-                    false,
-                    true,
-                    part.ripple.as_ref().and_then(|r| r.paint(&line_key, line_rect, paint_at)),
-                );
+                part.control.highlight(layer, cx.ui, false);
             }
-            let inner_hover =
-                layer.interaction.hover.is_some_and(|point| self.parts.iter().any(|part| part.control.contains(point)));
-            layer.surface_highlight(
-                rect,
-                corners,
-                viewport,
-                pinned,
-                !inner_hover,
-                self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)),
-            );
             return;
         }
         let label_rect = Rect::new(x + 14. * s, top + 28. * s, text_width, 20. * s);
@@ -324,13 +272,5 @@ impl Widget for MessageRow {
         if let Some(card) = &mut self.attachment {
             card.visit_perframe(&mut Frame { layer, bounds: rect, clip: viewport }, cx);
         }
-        layer.surface_highlight(
-            rect,
-            corners,
-            viewport,
-            pinned,
-            true,
-            self.ripple.as_ref().and_then(|r| r.paint(&row.key, rect, paint_at)),
-        );
     }
 }

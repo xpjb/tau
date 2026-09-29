@@ -225,7 +225,7 @@ impl Widget for ConnectionDialog {
                         cx.ui.dirty = true;
                     }
                 }
-                self.form.event(event, &mut [&mut self.url, &mut self.token], cx)
+                self.form.event(event, &mut [&mut self.url, &mut self.token], cx).1
             }
             Event::Back | Event::Key { key: "Escape", .. } if !composing => {
                 Some(if self.tools { ConnectionChoice::Main } else { ConnectionChoice::Cancel })
@@ -233,8 +233,8 @@ impl Widget for ConnectionDialog {
             Event::Submit | Event::Key { key: "Enter", shift: false, .. } if !composing && !self.tools => {
                 Some(ConnectionChoice::Connect)
             }
-            _ if self.tools => self.form.event(event, &mut [], cx),
-            _ => self.form.event(event, &mut [&mut self.url, &mut self.token], cx),
+            _ if self.tools => self.form.event(event, &mut [], cx).1,
+            _ => self.form.event(event, &mut [&mut self.url, &mut self.token], cx).1,
         };
         match choice {
             Some(ConnectionChoice::Connect) => {
@@ -716,13 +716,13 @@ impl Widget for TopicDialog {
                     }
                 }
                 let fields = &mut self.name.iter_mut().chain(self.prompt.iter_mut()).collect::<Vec<_>>();
-                self.form.event(event, fields, cx)
+                self.form.event(event, fields, cx).1
             }
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(TopicChoice::Cancel),
             Event::Submit if !composing => Some(TopicChoice::Save),
             _ => {
                 let fields = &mut self.name.iter_mut().chain(self.prompt.iter_mut()).collect::<Vec<_>>();
-                self.form.event(event, fields, cx)
+                self.form.event(event, fields, cx).1
             }
         };
         match choice {

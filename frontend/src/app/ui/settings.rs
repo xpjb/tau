@@ -93,7 +93,7 @@ impl Widget for ModelsDialog {
                         return true;
                     }
                 }
-                self.form.event(event, &mut [&mut self.models, &mut self.search], cx)
+                self.form.event(event, &mut [&mut self.models, &mut self.search], cx).1
             }
         };
         match choice {
@@ -398,7 +398,7 @@ impl Widget for DaemonDialog {
         let choice = match event {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(SettingChoice::Close),
             Event::Submit if !composing => Some(SettingChoice::Save),
-            _ => self.form.event(event, &mut self.value.iter_mut().collect::<Vec<_>>(), cx),
+            _ => self.form.event(event, &mut self.value.iter_mut().collect::<Vec<_>>(), cx).1,
         };
         if let Some(choice) = choice {
             let result = self.choose(choice, cx);

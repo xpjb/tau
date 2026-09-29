@@ -137,7 +137,7 @@ fn claimed_text_selection_is_not_taken_by_its_scroll_parent() {
         let mut scroll = scroll::ScrollState::new(Id::new(), false);
         scroll.rect = Rect::new(0., 0., 300., 300.);
         scroll.max = 1000.;
-        let mut layer = crate::render::Layer::new(crate::render::Interaction::default());
+        let mut layer = crate::render::Layer::default();
         field.visit_perframe(
             &mut Frame { layer: &mut layer, bounds: Rect::new(10., 10., 250., 100.), clip: scroll.rect },
             cx,

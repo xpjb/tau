@@ -5,7 +5,7 @@ use super::download_render_tests::{Case, cases, install, controls, panel, save, 
 use chad::{Config, HeadlessCtx};
 use std::{sync::Arc, time::Duration};
 
-fn fixture(size: (u32, u32), mobile: bool) -> (App, HeadlessCtx, tempfile::TempDir) {
+pub(super) fn fixture(size: (u32, u32), mobile: bool) -> (App, HeadlessCtx, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let ctx = HeadlessCtx::new(&Config { size, device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
     let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(|| {}), mobile).unwrap();
@@ -37,7 +37,7 @@ fn verified(app: &mut App, case: &Case) {
     app.controller.account.source_lineage = Some(lineage);
 }
 fn paint(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment) {
-    let layer = panel(app, ctx, case, file, Interaction::default(), Rect::new(0.,0.,ctx.size().0 as f32,ctx.size().1 as f32));
+    let layer = panel(app, ctx, case, file, Rect::new(0.,0.,ctx.size().0 as f32,ctx.size().1 as f32));
     app.services.renderer.draw(ctx, ctx.view(), &[layer]);
 }
 fn tap(app: &mut App, index: usize, touch: bool) {
@@ -252,7 +252,7 @@ fn extraction_busy_state_is_shared_by_chat_and_sidebar_and_survives_navigation()
         app.root.workspace.chat.transcript.rows.iter().filter_map(|r| r.attachment.as_ref())
             .chain(app.root.workspace.attachments.cards.cards.values())
             .flat_map(|c| c.controls.items.iter())
-            .filter(|(key, _, _)| key.starts_with("action:2:"))
+            .filter(|(key, _, _)| *key == Some(2))
             .filter_map(|(_, b, _)| b.control.rect.map(|r| (r, b.control.enabled, b.control.info.is_some())))
             .collect::<Vec<_>>()
     };

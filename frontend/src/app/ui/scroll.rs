@@ -16,7 +16,6 @@ pub(in crate::app) struct ScrollState {
     pub(in crate::app) wheel: Option<(f32, Instant)>,
     candidate: Option<Capture>,
     drag: Option<f32>,
-    hovered: bool,
 }
 impl ScrollState {
     pub fn new(scope: Id, horizontal: bool) -> Self {
@@ -30,7 +29,6 @@ impl ScrollState {
             wheel: None,
             candidate: None,
             drag: None,
-            hovered: false,
         }
     }
     pub fn stop(&mut self) {
@@ -68,7 +66,7 @@ impl ScrollState {
     pub fn paint(&self, layer: &mut Layer, cx: &mut Context<'_>) {
         if let Some((track, thumb)) = self.thumb(cx.ui.scale) {
             layer.above();
-            let active = self.drag.is_some() || cx.ui.hover.is_some_and(|p| contains(track, p));
+            let active = cx.ui.capture.is_some_and(|c| c.target == self.target) || cx.ui.hot.is_some_and(|(target, _)| target == self.target);
             let w = if active { 8. } else { 6. } * cx.ui.scale;
             layer.rounded_rect(
                 Rect::new(track.x + (track.width - w) / 2., thumb.y, w, thumb.height),
@@ -82,10 +80,8 @@ impl ScrollState {
     pub fn bar_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if let Event::Hover(point) = *event {
             let over = point.is_some_and(|p| self.thumb(cx.ui.scale).is_some_and(|(track, _)| contains(track, p)));
-            cx.ui.dirty |= self.hovered != over;
-            self.hovered = over;
             if over {
-                cx.ui.hot = None;
+                cx.ui.hot = Some((self.target, super::Cursor::Default));
                 return true;
             }
         }
