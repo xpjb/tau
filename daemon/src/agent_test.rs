@@ -269,13 +269,14 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     manager.shutdown().await; server.abort();
 }
 
-fn codex(text: &str, extra: Vec<Value>) -> Reply {
+fn codex(text: &str, extra: Vec<Value>) -> Reply { codex_with_tokens(text,extra,120) }
+fn codex_with_tokens(text: &str, extra: Vec<Value>, tokens: u64) -> Reply {
     let mut output = extra;
     if !text.is_empty() { output.push(json!({"type":"message","id":"msg_fixture","role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]})); }
     let mut frames = format!("data: {}\n\ndata: {}\n\n", json!({"type":"response.reasoning_summary_text.delta","delta":"Thinking π🧠"}), json!({"type":"response.output_text.delta","delta":text}));
     for (index, item) in output.iter().enumerate() { frames.push_str(&format!("data: {}\n\n", json!({"type":"response.output_item.done","output_index":index,"item":item}))); }
     // Codex often omits output in the terminal event. Replay must use completed items.
-    frames.push_str(&format!("data: {}\n\n", json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}})));
+    frames.push_str(&format!("data: {}\n\n", json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":tokens.saturating_sub(20),"output_tokens":20,"total_tokens":tokens}}})));
     Reply { status:200, bytes:frames.into_bytes(), gate:None, body_gate:None }
 }
 
@@ -1108,3 +1109,6 @@ mod control;
 
 #[path="agent_test_thinking.rs"]
 mod thinking;
+
+#[path="agent_test_compaction.rs"]
+mod compaction;

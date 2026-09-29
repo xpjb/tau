@@ -101,6 +101,47 @@ fn call_ids(message:&Value)->Vec<String> {
         .filter(|id|seen.insert(*id)).map(str::to_owned).collect()
 }
 
+
+/// Prefer whole user turns within the retention budget, but a long single task
+/// must also be compactable between completed assistant/tool exchanges. Never
+/// strand a result on the other side of its call, including multi-call batches.
+pub fn compaction_cut(entries: &[Value], keep_tokens: u64) -> Result<usize> {
+    let mut boundaries = Vec::new();
+    let mut pending = HashSet::new();
+    let mut size = 0u64;
+    let mut have_history = false;
+    for (index, entry) in entries.iter().enumerate() {
+        let message = &entry["message"];
+        let role = message["role"].as_str();
+        if entry["type"] == "message" {
+            if role == Some("assistant") && matches!(message["stopReason"].as_str(), Some("error" | "aborted")) { continue; }
+            if have_history && pending.is_empty() && matches!(role, Some("user" | "assistant")) {
+                boundaries.push((index, size, role == Some("user")));
+            }
+            if role == Some("assistant") {
+                pending.extend(message.get("tauModelMessage").map(call_ids).unwrap_or_else(|| {
+                    message["content"].as_array().into_iter().flatten().filter(|part| part["type"] == "toolCall")
+                        .filter_map(|part| part["id"].as_str().map(str::to_owned)).collect()
+                }));
+            } else if role == Some("toolResult") && let Some(id) = message["toolCallId"].as_str() && !pending.remove(id) {
+                // Imported history may use call|item on only one side. An
+                // ambiguous alias cannot settle two distinct native calls.
+                let mut aliases = pending.iter().filter(|call| call.split('|').next() == id.split('|').next());
+                let alias = aliases.next().cloned().filter(|_| aliases.next().is_none());
+                if let Some(alias) = alias { pending.remove(&alias); }
+            }
+        }
+        if matches!(entry["type"].as_str(), Some("message" | "tau_attachment" | "custom_message")) {
+            have_history = true;
+            size = size.saturating_add(estimate_tokens(if entry["type"] == "custom_message" { &entry["content"] } else { message }));
+        }
+    }
+    boundaries.iter().find(|(_,before,user)| *user && size.saturating_sub(*before) <= keep_tokens)
+        .or_else(|| boundaries.iter().find(|(_,before,_)| size.saturating_sub(*before) <= keep_tokens))
+        .or_else(|| boundaries.last()).map(|(index,_,_)| *index)
+        .context("Not enough completed exchanges to compact safely; reduce the input or fork an earlier turn")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
