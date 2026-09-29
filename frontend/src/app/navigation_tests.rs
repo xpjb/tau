@@ -31,8 +31,7 @@ impl Harness {
                 }
                 event
             }).collect();
-            app.controller.message(ServerMessage::TranscriptSnapshot { session_id: session.into(), snapshot: TranscriptSnapshot {
-                generation: session.into(), sequence: 0, events, queue: QueueState::default(), before: None, delivered: vec![] } }).unwrap();
+            app.controller.preview(&(session), events, QueueState::default(), None).unwrap();
         }
         app.resize(size, scale, Vec2::new(0., 0.)); app.tick(0.);
         Self { app, ctx, _root: root }
@@ -115,33 +114,27 @@ fn download_destination_survives_empty_loading_and_multiple_older_pages() {
     let mut h = Harness::new((420, 780), 1., true);
     let events = h.app.controller.chats["demo"].feed.events.values().cloned().collect::<Vec<_>>();
     h.app.with_ui(|root, cx| root.workspace.navigate_chat("two", cx)).unwrap(); h.frame();
-    h.app.controller.chats.get_mut("demo").unwrap().feed = crate::feed::Feed::default();
+    h.app.controller.clear_replica().unwrap();
     h.complete("entry-20"); h.click_notice(false);
     assert!(h.app.root.workspace.chat.transcript.download.is_some(), "An empty cache is not a deleted widget");
     let before = h.app.controller.chats["demo"].local.position.clone();
-    h.app.controller.chats.get_mut("demo").unwrap().feed.snapshot(TranscriptSnapshot {
-        generation: "paged".into(), sequence: 0, events: events[50..].to_vec(), queue: QueueState::default(), before: Some(50), delivered: vec![] }).unwrap();
-    h.app.controller.chats.get_mut("demo").unwrap().reconcile();
+    h.app.controller.preview("demo", events[50..].to_vec(), QueueState::default(), Some(50)).unwrap();
     h.app.controller.epoch = Some(1); // Allow the existing near-edge paging gate.
     h.app.frame(&h.ctx, h.ctx.view());
     assert_eq!(h.app.root.workspace.chat.transcript.history_attempt.as_ref().unwrap().2, 50);
     assert!(h.app.root.workspace.chat.transcript.download.is_some());
     assert_eq!(h.app.controller.chats["demo"].local.position.key, before.key);
-    h.app.controller.chats.get_mut("demo").unwrap().feed.page("paged", 50, HistoryPage {
-        events: events[30..50].to_vec(), before: Some(30) }).unwrap();
-    h.app.controller.chats.get_mut("demo").unwrap().reconcile();
+    h.app.controller.preview("demo", events[30..].to_vec(), QueueState::default(), Some(30)).unwrap();
     h.app.frame(&h.ctx, h.ctx.view());
     assert_eq!(h.app.root.workspace.chat.transcript.history_attempt.as_ref().unwrap().2, 30);
     assert!(h.app.root.workspace.chat.transcript.download.is_some());
-    h.app.controller.chats.get_mut("demo").unwrap().feed.page("paged", 30, HistoryPage {
-        events: events[..30].to_vec(), before: None }).unwrap();
-    h.app.controller.chats.get_mut("demo").unwrap().reconcile();
+    h.app.controller.preview("demo", events[0..].to_vec(), QueueState::default(), None).unwrap();
     h.app.controller.epoch = None;
     h.frame(); h.assert_target_visible("entry-20");
 
     // A deliberate scroll/new destination cancels pending navigation; a late
     // history page must never drag the user back after they have moved on.
-    h.app.controller.chats.get_mut("demo").unwrap().feed = crate::feed::Feed::default();
+    h.app.controller.clear_replica().unwrap();
     h.complete("entry-20"); h.click_notice(false);
     assert!(h.app.root.workspace.chat.transcript.download.is_some());
     let rect=h.app.root.workspace.chat.transcript.scroll.rect;
@@ -175,8 +168,8 @@ fn dismiss_replacement_failure_and_stale_destinations_do_not_navigate() {
         assert!(h.app.open_download_notice(stale).is_err());
         assert_eq!(h.app.controller.account.selected.as_deref(), Some("two"));
     }
-    h.app.controller.chats.get_mut("demo").unwrap().feed.events.retain(|_, e| e.entry_id != "entry-20");
-    h.app.controller.chats.get_mut("demo").unwrap().reconcile();
+    let events = h.app.controller.chats["demo"].feed.events.values().filter(|e| e.entry_id != "entry-20").cloned().collect();
+    h.app.controller.preview("demo", events, Default::default(), None).unwrap();
     h.complete("entry-20"); h.click_notice(false);
     assert!(h.app.root.workspace.chat.transcript.download.is_none());
     assert_eq!(h.app.controller.notice.as_deref(), Some("The download widget is no longer available in this chat."));

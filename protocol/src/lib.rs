@@ -210,26 +210,6 @@ pub enum ServerMessage {
     Sessions {
         sessions: Vec<SessionSummary>,
     },
-    #[serde(skip)] // Rendering/provider adapter, not a control message.
-    TranscriptSnapshot {
-        session_id: String,
-        snapshot: TranscriptSnapshot,
-    },
-    #[serde(skip)] // Rendering/provider adapter, not a control message.
-    TranscriptPage {
-        request_id: String,
-        session_id: String,
-        generation: String,
-        cursor: u64,
-        page: HistoryPage,
-    },
-    #[serde(skip)] // Rendering/provider adapter, not a control message.
-    TranscriptUpdate {
-        session_id: String,
-        generation: String,
-        sequence: u64,
-        change: TranscriptChange,
-    },
     SessionState {
         session_id: String,
         #[serde(default)] revision:u64,

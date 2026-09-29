@@ -43,9 +43,7 @@ fn topic_activity_tracks_contained_chat_bumps_without_unpinning_general() {
     assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "opening a chat is not activity");
     c.message(ServerMessage::SessionState { session_id: "alpha-old".into(), revision: 1,
         restore_review: None, status: SessionStatus::Running, context_usage: None, detail: None }).unwrap();
-    c.message(ServerMessage::TranscriptSnapshot { session_id: "alpha-old".into(),
-        snapshot: TranscriptSnapshot { generation: "history".into(), sequence: 1, events: vec![],
-            queue: QueueState::default(), before: None, delivered: vec![] } }).unwrap();
+    c.preview(&("alpha-old"), vec![], QueueState::default(), None).unwrap();
     assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "status and streaming do not bump");
     c.draft("alpha draft".into()).unwrap();
     assert_eq!(topics(&c), ["general", "alpha", "beta", "empty"], "an older chat bumps its entire topic");
@@ -193,13 +191,7 @@ fn chat_activity_source_completion_wins_without_bumping_intermediate_or_replayed
         }).unwrap();
         assert_eq!(order(&c), ["a", "c", "b"], "status/usage updates alone are not new activity");
     }
-    c.message(ServerMessage::TranscriptSnapshot {
-        session_id: "b".into(),
-        snapshot: TranscriptSnapshot {
-            generation: "history".into(), sequence: 1, events: vec![],
-            queue: QueueState::default(), before: None, delivered: vec![],
-        },
-    }).unwrap();
+    c.preview(&("b"), vec![], QueueState::default(), None).unwrap();
     catalog(&mut c, &sessions);
     assert_eq!(order(&c), ["a", "c", "b"]);
     sessions[1].updated_at_ms = 31; // durable settled-run bump

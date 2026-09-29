@@ -149,12 +149,14 @@ impl Feed {
         }
     }
     pub(crate) fn native_view(&mut self,mut view:crate::blocks::View)->Result<Vec<String>> {
-        if self.generation == view.snapshot.generation {
+        let mut ids = HashSet::new(); let mut orders = HashSet::new();
+        ensure!(view.events.iter().all(|e| !e.id.is_empty() && ids.insert(&e.id) && orders.insert(e.order)), "Duplicate native event identity/order");
+        if self.generation == view.generation {
             if view.queue_changed {
                 for (i,q) in self.queue.requests.iter().enumerate() {
-                    if !view.snapshot.queue.requests.iter().any(|next|next.request_id==q.request_id)
+                    if !view.queue.requests.iter().any(|next|next.request_id==q.request_id)
                         && let Some(revision) = view.queue_removals.get(&q.request_id) {
-                        view.snapshot.queue.requests.insert(i.min(view.snapshot.queue.requests.len()),q.clone());
+                        view.queue.requests.insert(i.min(view.queue.requests.len()),q.clone());
                         self.queue_transitions.insert(q.request_id.clone(),*revision);
                         let id=format!("queued:{}",q.request_id);
                         if let Some(body) = self.bodies.get(&id) { view.bodies.insert(id.clone(), body.clone()); }
@@ -162,213 +164,37 @@ impl Feed {
                     }
                 }
             } else {
-                self.queue.requests.retain(|q| self.queue_transitions.get(&q.request_id).is_none_or(|revision| *revision > view.snapshot.sequence));
+                self.queue.requests.retain(|q| self.queue_transitions.get(&q.request_id).is_none_or(|revision| *revision > view.sequence));
             }
-            self.queue_transitions.retain(|_,revision| *revision > view.snapshot.sequence);
+            self.queue_transitions.retain(|_,revision| *revision > view.sequence);
         } else { self.queue_transitions.clear(); }
-        let delivered=view.snapshot.delivered.clone();
+        let delivered=view.delivered.clone();
         if !view.partial {while let Some((_,ids,_))=self.previews.pop_front() {self.drop_preview(&ids);}}
         for (root,_,_) in &view.previews {
             if let Some(i)=self.previews.iter().position(|(old,_,_)|old==root) {let (_,ids,_)=self.previews.remove(i).unwrap();self.drop_preview(&ids);}
         }
         if view.partial {
             if view.queue_changed {self.incomplete.retain(|id|!id.starts_with("queued:"));self.bodies.retain(|id,_|!id.starts_with("queued:"));}
-            for event in &view.snapshot.events {self.incomplete.remove(&event.id);self.parents.remove(&event.id);self.block_states.remove(&event.id);}
-            self.native_patch(view.snapshot,view.queue_changed)?;
+            for event in &view.events {self.incomplete.remove(&event.id);self.parents.remove(&event.id);self.block_states.remove(&event.id);}
+            ensure!(self.generation == view.generation && view.sequence >= self.sequence, "Native generation changed");
+            for event in &view.events {
+                if let Some(old) = self.event(&event.id) { ensure!(old.order == event.order, "Event order changed"); }
+                if let Some(old) = self.events.get(&event.order) { ensure!(old.id == event.id, "Event order collision"); }
+            }
             self.bodies.extend(view.bodies);self.incomplete.extend(view.incomplete);self.block_states.extend(view.states);self.parents.extend(view.parents);
         } else {
-            self.generation.clear();self.snapshot(view.snapshot)?;self.bodies=view.bodies;self.incomplete=view.incomplete;self.block_states=view.states;self.parents=view.parents;
+            self.events.clear(); self.by_id.clear(); self.loading = false; self.synchronized = true;
+            self.bodies=view.bodies;self.incomplete=view.incomplete;self.block_states=view.states;self.parents=view.parents;
         }
+        for event in view.events { self.by_id.insert(event.id.clone(), event.order); self.events.insert(event.order, event); }
+        self.generation = view.generation; self.sequence = view.sequence; self.before = view.before;
+        if view.queue_changed { self.queue = view.queue; }
+        self.revision += 1;
         self.previews.extend(view.previews.into_iter().filter(|(_,_,bytes)|*bytes>0));
         let mut bytes=self.previews.iter().map(|(_,_,bytes)|bytes).sum::<usize>();
         while self.previews.len()>128 || bytes>8*1024*1024 {
             let (_,ids,size)=self.previews.pop_front().unwrap();bytes-=size;self.drop_preview(&ids);
         }
         Ok(delivered)
-    }
-
-    /// Sparse projection of already-verified native cache commits. Unlike the
-    /// legacy wire adapter, body progress may share a directory cursor.
-    pub(crate) fn native_patch(&mut self,snapshot:TranscriptSnapshot,queue:bool)->Result<()> {
-        ensure!(self.generation==snapshot.generation && snapshot.sequence>=self.sequence,"Native projection generation changed");
-        for event in &snapshot.events {
-            if let Some(old)=self.event(&event.id) {ensure!(old.order==event.order,"Event order changed");}
-            if let Some(old)=self.events.get(&event.order) {ensure!(old.id==event.id,"Event order collision");}
-        }
-        for event in snapshot.events {self.by_id.insert(event.id.clone(),event.order);self.events.insert(event.order,event);}
-        self.sequence=snapshot.sequence;self.before=snapshot.before;if queue {self.queue=snapshot.queue;}
-        self.revision+=1;Ok(())
-    }
-    /// Replace the authoritative tail. Older saved history survives only when
-    /// the new cut overlaps it; a gap must never look like a continuous history.
-    pub fn snapshot(&mut self, snapshot: TranscriptSnapshot) -> Result<bool> {
-        if self.generation == snapshot.generation && snapshot.sequence < self.sequence {
-            return Ok(false);
-        }
-        ensure!(
-            !snapshot.generation.is_empty(),
-            "Empty transcript generation"
-        );
-        let continuing = self.generation == snapshot.generation;
-        let connected = continuing
-            && snapshot.before.is_some_and(|before| {
-                snapshot
-                    .events
-                    .iter()
-                    .any(|e| e.order >= before && self.by_id.contains_key(&e.id))
-            });
-        let mut events = BTreeMap::new();
-        if connected {
-            for (n, e) in self.events.range(..snapshot.before.unwrap()) {
-                if e.phase != EventPhase::Live {
-                    events.insert(*n, e.clone());
-                }
-            }
-        }
-        let mut ids = HashSet::new();
-        for event in snapshot.events {
-            ensure!(
-                !event.id.is_empty() && ids.insert(event.id.clone()),
-                "Duplicate/empty event ID"
-            );
-            if continuing && let Some(old) = self.event(&event.id) {
-                ensure!(old.order == event.order, "Event order changed");
-            }
-            ensure!(
-                events.insert(event.order, event).is_none(),
-                "Duplicate event order"
-            );
-        }
-        let by_id: HashMap<_, _> = events.values().map(|e| (e.id.clone(), e.order)).collect();
-        ensure!(by_id.len() == events.len(), "Duplicate event ID");
-        self.by_id = by_id;
-        self.events = events;
-        self.generation = snapshot.generation;
-        self.sequence = snapshot.sequence;
-        self.queue = snapshot.queue;
-        self.before = if connected {
-            self.before.map(|n| n.min(snapshot.before.unwrap()))
-        } else {
-            snapshot.before
-        };
-        self.synchronized = true;
-        self.loading = false;
-        self.revision += 1;
-        Ok(true)
-    }
-
-    /// Validate the entire patch before mutating anything. A gap or malformed
-    /// delta invalidates the feed and triggers a fresh OpenSession, never replay.
-    pub fn update(
-        &mut self,
-        generation: &str,
-        sequence: u64,
-        change: TranscriptChange,
-    ) -> Result<bool> {
-        if generation == self.generation && sequence <= self.sequence {
-            return Ok(false);
-        }
-        let check = (|| -> Result<()> {
-            ensure!(
-                self.synchronized
-                    && generation == self.generation
-                    && self.sequence.checked_add(1) == Some(sequence),
-                "Transcript gap"
-            );
-            let removed: HashSet<_> = change.removed.iter().collect();
-            let mut ids = HashSet::new();
-            let mut orders = HashSet::new();
-            for event in &change.events {
-                ensure!(
-                    !event.id.is_empty() && ids.insert(&event.id) && orders.insert(event.order),
-                    "Duplicate/empty event"
-                );
-                if let Some(old) = self.event(&event.id) {
-                    ensure!(old.order == event.order, "Event order changed");
-                }
-                if let Some(owner) = self.events.get(&event.order) {
-                    ensure!(
-                        owner.id == event.id || removed.contains(&owner.id),
-                        "Event order collision"
-                    );
-                }
-            }
-            if let Some(delta) = &change.delta {
-                ensure!(
-                    self.event(&delta.event_id)
-                        .is_some_and(|e| e.phase == EventPhase::Live)
-                        && !removed.contains(&delta.event_id),
-                    "Delta without a live event"
-                );
-            }
-            Ok(())
-        })();
-        if let Err(error) = check {
-            self.synchronized = false;
-            return Err(error);
-        }
-        for id in change.removed {
-            if let Some(order) = self.by_id.remove(&id) {
-                self.events.remove(&order);
-            }
-        }
-        if let Some(delta) = change.delta {
-            self.events
-                .get_mut(&self.by_id[&delta.event_id])
-                .unwrap()
-                .text
-                .push_str(&delta.text);
-        }
-        for event in change.events {
-            self.by_id.insert(event.id.clone(), event.order);
-            self.events.insert(event.order, event);
-        }
-        if let Some(queue) = change.queue {
-            self.queue = queue;
-        }
-        self.sequence = sequence;
-        self.revision += 1;
-        Ok(true)
-    }
-
-    pub fn page(&mut self, generation: &str, cursor: u64, page: HistoryPage) -> Result<bool> {
-        if generation != self.generation || Some(cursor) != self.before {
-            return Ok(false);
-        }
-        ensure!(
-            !page.events.is_empty() && page.before.is_none_or(|n| n < cursor),
-            "History cursor did not advance"
-        );
-        let mut ids = HashSet::new();
-        let mut previous = None;
-        for event in &page.events {
-            ensure!(
-                !event.id.is_empty()
-                    && ids.insert(&event.id)
-                    && event.order < cursor
-                    && page.before.is_none_or(|n| event.order >= n),
-                "Invalid history event"
-            );
-            ensure!(
-                previous.is_none_or(|n| n < event.order),
-                "Unordered history"
-            );
-            previous = Some(event.order);
-            if let Some(old) = self.event(&event.id) {
-                ensure!(old.order == event.order, "History order changed");
-            }
-            if let Some(old) = self.events.get(&event.order) {
-                ensure!(old.id == event.id, "History order collision");
-            }
-        }
-        for event in page.events {
-            self.by_id.insert(event.id.clone(), event.order);
-            // A late history page must not replace a newer live update.
-            self.events.entry(event.order).or_insert(event);
-        }
-        self.before = page.before;
-        self.loading = false;
-        self.revision += 1;
-        Ok(true)
     }
 }

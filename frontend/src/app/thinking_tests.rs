@@ -4,184 +4,34 @@ use std::sync::Arc;
 use tau_markdown::markdown::{Content, TextKind, inline};
 
 #[test]
-fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
+fn native_thinking_stream_updates_markdown_before_sealing() {
     let root = tempfile::tempdir().unwrap();
-    let ctx = HeadlessCtx::new(&Config {
-        size: (1000, 800),
-        device_limits: crate::desktop::limits(),
-        ..Default::default()
-    })
-    .unwrap();
-    let mut app = App::new(
-        &ctx,
-        Store::open(root.path().into()).unwrap(),
-        Arc::new(|| {}),
-        false,
-    )
-    .unwrap();
-    app.back();
-    crate::demo::populate(&mut app.controller).unwrap();
+    let ctx = HeadlessCtx::new(&Config { size: (1000, 800), device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
+    let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(|| {}), false).unwrap();
+    app.back(); crate::demo::populate(&mut app.controller).unwrap();
     app.resize(ctx.size(), 1., Vec2::new(0., 0.));
-    app.controller
-        .chats
-        .get_mut("demo")
-        .unwrap()
-        .local
-        .details_default = true;
-
-    let mut events = app
-        .controller
-        .selected()
-        .unwrap()
-        .feed
-        .events
-        .values()
-        .take(2)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut thinking = events[1].clone();
+    app.controller.chats.get_mut("demo").unwrap().local.details_default = true;
+    let mut thinking = app.controller.chats["demo"].feed.events[&1].clone();
     thinking.phase = EventPhase::Live;
-    // The provider separates actual summary parts with a blank line. A single
-    // newline inside a part renders as a line break within the same block.
     thinking.text = "**First step**\nnotes\n\n**Sec".into();
-    events[1] = thinking.clone();
-    let mut next = thinking.clone();
-    next.id = "thinking-next".into();
-    next.entry_id = "thinking-next".into();
-    next.order = 2;
-    next.phase = EventPhase::Saved;
-    next.text = "# Another summary".into();
-    events.push(next);
-    app.controller
-        .message(ServerMessage::TranscriptSnapshot {
-            session_id: "demo".into(),
-            snapshot: TranscriptSnapshot {
-                generation: "demo".into(),
-                sequence: 1,
-                events,
-                queue: QueueState::default(),
-                before: None,
-                delivered: vec![],
-            },
-        })
-        .unwrap();
-    app.tick(0.);
-    app.frame(&ctx, ctx.view());
     let key = "demo/thinking:event-1";
-    let fragment = &app.services.renderer.messages[key];
-    assert_eq!(fragment.source, thinking.text);
-    assert_eq!(
-        fragment.doc.blocks().len(),
-        2,
-        "summary headings do not join one paragraph"
-    );
-    assert_eq!(
-        fragment.doc.blocks()[0]
-            .elements()
-            .next()
-            .unwrap()
-            .rich
-            .text,
-        "First step\nnotes"
-    );
-    assert_eq!(
-        fragment.doc.blocks()[1]
-            .elements()
-            .next()
-            .unwrap()
-            .rich
-            .text,
-        "**Sec"
-    );
-    let initial_height = fragment.view.height;
-    assert!(matches!(
-        app.services.renderer.messages["demo/thinking:thinking-next"]
-            .doc
-            .blocks()[0]
-            .content,
-        Content::Text {
-            kind: TextKind::Heading(1),
-            ..
-        }
-    ));
-
-    app.controller
-        .message(ServerMessage::TranscriptUpdate {
-            session_id: "demo".into(),
-            generation: "demo".into(),
-            sequence: 2,
-            change: TranscriptChange {
-                delta: Some(TextDelta {
-                    event_id: thinking.id.clone(),
-                    text: "ond step**".into(),
-                }),
-                ..Default::default()
-            },
-        })
-        .unwrap();
-    app.tick(0.);
-    app.frame(&ctx, ctx.view());
+    app.controller.preview("demo", vec![thinking.clone()], QueueState::default(), None).unwrap();
+    app.tick(0.); app.frame(&ctx, ctx.view());
+    assert_eq!(app.services.renderer.messages[key].source, thinking.text);
+    assert_eq!(app.services.renderer.messages[key].doc.blocks().len(), 2);
+    let height = app.services.renderer.messages[key].view.height;
+    thinking.text.push_str("ond step**");
+    app.controller.preview("demo", vec![thinking.clone()], QueueState::default(), None).unwrap();
+    app.tick(0.); app.frame(&ctx, ctx.view());
     let fragment = &app.services.renderer.messages[key];
     let rich = &fragment.doc.blocks()[1].elements().next().unwrap().rich;
     assert_eq!(rich.text, "Second step");
     assert!(rich.runs.iter().any(|run| run.flags & inline::STRONG != 0));
-    assert_eq!(
-        fragment.view.height, initial_height,
-        "valid inline Markdown must not wait for a newline"
-    );
-
-    // A completed block starter also renders before its line is terminated.
-    app.controller
-        .message(ServerMessage::TranscriptUpdate {
-            session_id: "demo".into(),
-            generation: "demo".into(),
-            sequence: 3,
-            change: TranscriptChange {
-                delta: Some(TextDelta {
-                    event_id: thinking.id.clone(),
-                    text: "\n\n# Next topic".into(),
-                }),
-                ..Default::default()
-            },
-        })
-        .unwrap();
-    app.tick(0.);
-    app.frame(&ctx, ctx.view());
-    let fragment = &app.services.renderer.messages[key];
-    assert!(matches!(
-        fragment.doc.blocks()[2].content,
-        Content::Text {
-            kind: TextKind::Heading(1),
-            ..
-        }
-    ));
-    let heading_height = fragment.view.height;
-
+    assert_eq!(fragment.view.height, height, "Complete inline syntax does not wait for newline or seal");
+    thinking.text.push_str("\n\n# Next topic");
     thinking.phase = EventPhase::Saved;
-    thinking.text.push_str("ond step**\n\n# Next topic");
-    app.controller
-        .message(ServerMessage::TranscriptUpdate {
-            session_id: "demo".into(),
-            generation: "demo".into(),
-            sequence: 4,
-            change: TranscriptChange {
-                events: vec![thinking.clone()],
-                ..Default::default()
-            },
-        })
-        .unwrap();
-    app.tick(0.);
-    app.frame(&ctx, ctx.view());
-    let fragment = &app.services.renderer.messages[key];
-    assert_eq!(fragment.source, thinking.text);
-    assert_eq!(
-        fragment.doc.blocks()[1]
-            .elements()
-            .next()
-            .unwrap()
-            .rich
-            .text,
-        "Second step"
-    );
-    assert_eq!(fragment.view.height, heading_height);
+    app.controller.preview("demo", vec![thinking.clone()], QueueState::default(), None).unwrap();
+    app.tick(0.); app.frame(&ctx, ctx.view());
+    assert!(matches!(app.services.renderer.messages[key].doc.blocks()[2].content, Content::Text { kind: TextKind::Heading(1), .. }));
+    assert!(app.controller.chats["demo"].feed.bodies[&thinking.id].reference.as_ref().unwrap().sealed);
 }

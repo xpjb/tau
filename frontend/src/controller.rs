@@ -239,6 +239,18 @@ impl Controller {
         }
         Ok(())
     }
+    /// Explicit offline rendering input. Uses committed native records, never a
+    /// synthetic ServerMessage or a second history/delta algorithm.
+    #[cfg(not(target_os = "android"))]
+    pub fn preview(&mut self, scope: &str, events: Vec<Event>, queue: QueueState, before: Option<u64>) -> Result<()> {
+        ensure!(self.network.is_none(), "Preview requires a disconnected controller");
+        self.ensure_chat(scope)?;
+        let view = self.remote.seed_preview(scope, events, queue, before)?;
+        let chat = self.chats.get_mut(scope).unwrap();
+        let delivered = chat.feed.native_view(view)?;
+        chat.local.reconcile_complete(&chat.feed.queue, &delivered, &chat.feed.incomplete);
+        self.save_chat(scope)
+    }
     pub fn save_chat(&mut self, id: &str) -> Result<()> {
         self.plan_dirty.set(true);
         if let Some(chat) = self.chats.get_mut(id) {
@@ -1527,69 +1539,6 @@ impl Controller {
                     if self.viewing_chat { self.account.read_at.insert(id.clone(), s.updated_at_ms); }
                 }
                 self.store.put(&self.identity, "account", &self.account)?;
-            }
-            ServerMessage::TranscriptSnapshot {
-                session_id,
-                snapshot,
-            } => {
-                self.ensure_chat(&session_id)?;
-                let mut delivered = snapshot.delivered.clone();
-                delivered.extend(
-                    snapshot
-                        .events
-                        .iter()
-                        .filter(|e| e.phase == EventPhase::Saved)
-                        .filter_map(|e| e.origin.request_id.clone()),
-                );
-                let chat = self.chats.get_mut(&session_id).unwrap();
-                chat.feed.opening = false;
-                if chat.feed.snapshot(snapshot)? {
-                    chat.local.reconcile_complete(&chat.feed.queue, &delivered,&chat.feed.incomplete);
-            chat.reconcile();
-                    self.save_chat(&session_id)?;
-                }
-            }
-            ServerMessage::TranscriptUpdate {
-                session_id,
-                generation,
-                sequence,
-                change,
-            } => {
-                self.ensure_chat(&session_id)?;
-                let mut delivered = change.delivered.clone();
-                delivered.extend(
-                    change
-                        .events
-                        .iter()
-                        .filter(|e| e.phase == EventPhase::Saved)
-                        .filter_map(|e| e.origin.request_id.clone()),
-                );
-                let chat = self.chats.get_mut(&session_id).unwrap();
-                match chat.feed.update(&generation, sequence, change) {
-                    Ok(true) => {
-                        chat.local.reconcile_complete(&chat.feed.queue, &delivered,&chat.feed.incomplete);
-            chat.reconcile();
-                        self.save_chat(&session_id)?;
-                    }
-                    Ok(false) => {}
-                    Err(_) => {
-                        if self.epoch.is_some() {
-                            self.open(&session_id)?;
-                        }
-                    }
-                }
-            }
-            ServerMessage::TranscriptPage {
-                session_id,
-                generation,
-                cursor,
-                page,
-                ..
-            } => {
-                if let Some(chat) = self.chats.get_mut(&session_id) {
-                    chat.feed.loading = false;
-                    chat.feed.page(&generation, cursor, page)?;chat.reconcile();
-                }
             }
             ServerMessage::SessionState {
                 session_id,revision,restore_review,

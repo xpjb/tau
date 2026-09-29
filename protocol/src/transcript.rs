@@ -124,17 +124,6 @@ impl QueueState {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TranscriptSnapshot {
-    pub generation: String,
-    pub sequence: u64,
-    pub events: Vec<Event>,
-    pub queue: QueueState,
-    pub before: Option<u64>,
-    pub delivered: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct HistoryPage {
     pub events: Vec<Event>,
     pub before: Option<u64>,

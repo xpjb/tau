@@ -86,13 +86,12 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After deleting the rich projection/Row/Line path, frontend Rust is **26,460 raw /
-32,505 same-format**: production **18,773 / 21,861**, tests **7,687 / 10,644**.
-Outside growth remains **92 / 127** (production **56 / 90**, tests **36 / 37**).
-The **charged reduction is 1,173 / 386**, with **3,827 / 4,614 remaining**.
-Charged production is **345 raw smaller / 367 same-format larger**. The direct
-owner replacement has not delivered normalized production savings; this is not
-simplification acceptance and formatting compression is not credit.
+After legacy feed/protocol adapter retirement, frontend Rust is **26,028 raw /
+32,209 same-format**: production **18,593 / 21,799**, tests **7,435 / 10,410**.
+Outside growth is now **62 / 97** (production **26 / 60**, tests **36 / 37**).
+The **charged reduction is 1,635 / 712**, with **3,365 / 4,288 remaining**.
+Charged production is **555 raw smaller / 275 same-format larger**. The 5,000-line
+and normalized production-simplification gates are still not met.
 Deltas below use reduction-positive values and show raw / same-format:
 
 | Slice / commit | Deleted path | Replacement cost | Net production reduction | Net test reduction | Outside charge | Cumulative / remaining |
@@ -112,11 +111,14 @@ Deltas below use reduction-positive values and show raw / same-format:
 
 | 041 direct retained transcript | projection.rs, rich Row, Line, Tools::lines, Part reconstruction and per-frame body measurement | Concrete native tool/message owners, ID/height cache and actual handoff/measurement checks | +209 / −215 | +15 / +1 | 0 new (Hash derives have zero line delta) | Charged reduction 1,173 / 386; gap 3,827 / 4,614 |
 
+| 041 legacy adapter retirement | Feed update/page/legacy overlap, skipped Transcript wire variants/type, old delta/page tests | Native full/sparse installation, offline native preview and compact thinking check | +180 / +62 frontend | +252 / +234 | −30 / −30 production; cumulative 62 / 97 | Charged reduction 1,635 / 712; gap 3,365 / 4,288 |
+
 Outside-code measurement compares every tracked Rust source in `daemon` and
 `protocol` with the same counter/formatter and reviewed test boundaries in the
 changed files. Baseline combined totals: **8,454 / 13,425**, production
 **7,447 / 11,767**. Candidate: **8,531 / 13,531**, production **7,488 / 11,836**.
-Only `daemon/src/blocks.rs` and `protocol/src/blocks.rs` add code; the earlier
+Only `daemon/src/blocks.rs` and `protocol/src/blocks.rs` add code; legacy types/variants
+were deleted from `protocol/src/lib.rs` and `protocol/src/transcript.rs`; the earlier
 `protocol/src/lib.rs` equality derive still has zero code-line delta. No other
 crate, language, generated code or runtime host acquired replacement logic.
 

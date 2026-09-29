@@ -47,8 +47,7 @@ fn retained_messages_keep_identity_on_streaming_and_prepend_but_not_source_repla
     }
     let events = chat.feed.events.values().cloned().collect();
     chat.feed = crate::feed::Feed::default();
-    chat.feed.snapshot(tau_protocol::TranscriptSnapshot { generation: "fixture".into(), sequence: 0, events, queue: Default::default(), before: None, delivered: vec![] }).unwrap();
-    chat.reconcile();
+    h.app.controller.preview("demo", events, Default::default(), None).unwrap();
     h.frame();
     let row =
         h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == "demo/row-119").unwrap();
@@ -62,8 +61,7 @@ fn retained_messages_keep_identity_on_streaming_and_prepend_but_not_source_repla
     let mut prepended = template;
     prepended.id = "prepended".into(); prepended.order = 0;
     let mut events = vec![prepended]; events.extend(chat.feed.events.values().cloned());
-    chat.feed.snapshot(tau_protocol::TranscriptSnapshot { generation: "fixture".into(), sequence: 1, events, queue: Default::default(), before: None, delivered: vec![] }).unwrap();
-    chat.reconcile();
+    h.app.controller.preview("demo", events, Default::default(), None).unwrap();
     h.frame();
     let row =
         h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == "demo/row-119").unwrap();
@@ -285,11 +283,9 @@ fn selection_follows_scrolled_text_and_tail_returns_to_latest() {
     event.text = (0..120).map(|i| format!("Selectable paragraph {i}.\n\n")).collect();
     event.attachment = None;
     let chat = h.app.controller.chats.get_mut("demo").unwrap();
-    chat.feed.events.clear();
-    chat.feed.events.insert(event.order, event);
-    chat.reconcile();
     chat.local.position.follow = false;
     chat.local.position.key = None;
+    h.app.controller.preview("demo", vec![event], Default::default(), None).unwrap();
     h.frame();
     let viewport = h.app.root.workspace.chat.transcript.scroll.rect;
     let start = Vec2::new(viewport.x + viewport.width / 2., viewport.y + 40.);
@@ -328,11 +324,9 @@ fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
     let mut event = chat.feed.events.values().next().unwrap().clone();
     event.text = "A scrolling transcript paragraph.\n\n".repeat(120);
     event.attachment = None;
-    chat.feed.events.clear();
-    chat.feed.events.insert(event.order, event);
-    chat.reconcile();
     chat.local.position.follow = false;
     chat.local.position.key = None;
+    h.app.controller.preview("demo", vec![event], Default::default(), None).unwrap();
     h.frame();
     h.app.wheel(200., false, center(h.app.root.workspace.chat.transcript.scroll.rect));
     h.app.root.workspace.chat.transcript.scroll.wheel.as_mut().unwrap().1 -= std::time::Duration::from_millis(100);
@@ -384,7 +378,7 @@ fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
     let (_, head) = plan.blocks.iter().find(|(id, _)| id == &input).expect("Visible input must request its native body");
     let (_, length, _, cached) = head.unwrap(); assert!(cached < length);
     source.body(&input);
-    assert_eq!(source.cache.snapshot("chat").unwrap().unwrap().snapshot.events.iter().find(|e| e.id == tool.id).unwrap().text, tool.text);
+    assert_eq!(source.cache.snapshot("chat").unwrap().unwrap().events.iter().find(|e| e.id == tool.id).unwrap().text, tool.text);
 }
 
 #[test]

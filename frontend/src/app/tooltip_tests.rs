@@ -136,7 +136,9 @@ async fn quota_refreshes_without_opening_a_tooltip_and_stops_when_hidden_or_non_
     while app.controller.epoch.is_none() {
         assert!(Instant::now()<deadline); app.tick(0.); tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    crate::demo::populate(&mut app.controller).unwrap();
+    app.controller.account.sessions = crate::demo::sessions();
+    app.controller.account.selected = Some("demo".into());
+    app.controller.ensure_chat("demo").unwrap();
     app.controller.account.sessions.iter_mut().find(|s|s.id=="demo").unwrap().model.as_mut().unwrap().provider="openai-codex".into();
     for expected in 1..=2 {
         let deadline = Instant::now() + Duration::from_secs(5);

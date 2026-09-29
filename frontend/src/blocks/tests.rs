@@ -36,7 +36,7 @@ fn body_identity_availability_and_authored_loading_text_are_independent() {
     f.put("tool", None, 1, BlockKind::Tool, event("tool", 1, "tool"), b"");
     f.page(None, None);
     let view = f.cache.snapshot("chat").unwrap().unwrap();
-    assert!(view.snapshot.events[0].text.is_empty());
+    assert!(view.events[0].text.is_empty());
     assert!(view.bodies["text"].missing());
     assert!(view.bodies["tool"].reference.is_none());
     assert!(view.incomplete.contains("tool"), "unknown input is not completed empty input");
@@ -45,7 +45,7 @@ fn body_identity_availability_and_authored_loading_text_are_independent() {
     assert!(original.sealed);
     f.body("text");
     let view = f.cache.snapshot("chat").unwrap().unwrap();
-    assert_eq!(view.snapshot.events[0].text, "Loading…");
+    assert_eq!(view.events[0].text, "Loading…");
     assert!(view.bodies["text"].complete());
     assert_eq!(view.bodies["text"].reference.as_ref(), Some(&original));
     assert_eq!(f.cache.copy_ready("chat", &["text".into()]).unwrap().unwrap(), "Loading…");
@@ -65,16 +65,16 @@ fn queue_directory_paginates_fully_and_partial_text_is_not_editable() {
         f.put(&format!("queued:{id}"),Some(QUEUE),n,BlockKind::Text,meta,b"whole message");
     }
     f.page(None,None);f.body(QUEUE);f.page(Some(QUEUE),None);
-    let view=f.cache.snapshot("chat").unwrap().unwrap();assert!(!view.snapshot.queue.available);assert_eq!(view.snapshot.queue.requests.len(),MAX_FEED_PAGE);
+    let view=f.cache.snapshot("chat").unwrap().unwrap();assert!(!view.queue.available);assert_eq!(view.queue.requests.len(),MAX_FEED_PAGE);
     loop {
         let plan=f.cache.plan("chat",&LocalChat::default(),&[]).unwrap();
         if plan.older.is_empty() {break;}
         for (parent,before) in plan.older {f.page(Some(&parent),Some(before));}
     }
-    let view=f.cache.snapshot("chat").unwrap().unwrap();assert!(view.snapshot.queue.available);assert_eq!(view.snapshot.queue.requests.len(),99);
+    let view=f.cache.snapshot("chat").unwrap().unwrap();assert!(view.queue.available);assert_eq!(view.queue.requests.len(),99);
     assert_eq!(view.incomplete.len(),99);
     f.body("queued:request-0");let view=f.cache.snapshot("chat").unwrap().unwrap();
-    assert!(!view.incomplete.contains("queued:request-0"));assert_eq!(view.snapshot.queue.requests[0].text,"whole message");
+    assert!(!view.incomplete.contains("queued:request-0"));assert_eq!(view.queue.requests[0].text,"whole message");
 }
 
 #[test]
@@ -104,8 +104,8 @@ fn text_prefix_handles_split_utf8_and_old_connections_cannot_pollute_new_cache()
     f.put("text",None,0,BlockKind::Text,event("text",0,"text"),text.as_bytes());f.page(None,None);
     let range=tau_blocks::read(&f.source,&f.cache.block_request("chat","text").unwrap()).unwrap();
     f.cache.range(&f.lineage,"chat",&range).unwrap();let view=f.cache.snapshot("chat").unwrap().unwrap();
-    assert_eq!(view.snapshot.events[0].text.len(),BLOCK_CHUNK_BYTES-1);assert!(view.incomplete.contains("text"));
-    f.body("text");let view=f.cache.snapshot("chat").unwrap().unwrap();assert_eq!(view.snapshot.events[0].text,text);assert!(view.incomplete.is_empty());
+    assert_eq!(view.events[0].text.len(),BLOCK_CHUNK_BYTES-1);assert!(view.incomplete.contains("text"));
+    f.body("text");let view=f.cache.snapshot("chat").unwrap().unwrap();assert_eq!(view.events[0].text,text);assert!(view.incomplete.is_empty());
     f.cache.configure("other-source").unwrap();assert!(f.cache.range(&f.lineage,"chat",&range).is_err());
     assert!(f.cache.header(&f.lineage,"chat",&range.header).is_err());assert!(f.cache.snapshot("chat").unwrap().is_none());
 }
@@ -164,8 +164,8 @@ fn sparse_projection_and_retained_previews_are_bounded_across_many_updates() {
     let mut feed=crate::feed::Feed::default();feed.native_view(f.cache.changes("chat",None,true).unwrap().unwrap()).unwrap();
     for i in 0..128 {
         let id=format!("e{i:03}");f.body(&id);let visible=BTreeSet::from([id.clone()]);
-        let view=f.cache.changes("chat",Some(&visible),false).unwrap().unwrap();assert!(view.partial);assert_eq!(view.snapshot.events.len(),1);
-        assert!(view.incomplete.contains(&id));assert!(view.bodies[&id].limited);assert!(!view.snapshot.events[0].text.contains("Preview limited"));
+        let view=f.cache.changes("chat",Some(&visible),false).unwrap().unwrap();assert!(view.partial);assert_eq!(view.events.len(),1);
+        assert!(view.incomplete.contains(&id));assert!(view.bodies[&id].limited);assert!(!view.events[0].text.contains("Preview limited"));
         feed.native_view(view).unwrap();
         assert!(feed.events.values().map(|e|e.text.len()).sum::<usize>()<=8*1024*1024+16000);
     }
@@ -227,7 +227,7 @@ fn native_tool_membership_preserves_provider_ids_for_display_copy_and_demand() {
     f.page(Some("a"),None);f.page(Some("b"),None);
     for id in ["one","error","two","orphan"] {f.body(id);}
     let view=f.cache.snapshot("chat").unwrap().unwrap();
-    assert!(view.snapshot.events.iter().all(|e|e.tool_call_id.as_deref()==Some("provider-reused")),
+    assert!(view.events.iter().all(|e|e.tool_call_id.as_deref()==Some("provider-reused")),
         "Native membership must not rewrite provider metadata");
     let mut local=LocalChat {details_default:true,..Default::default()};
     local.expansion.extend([("tool:a".into(),true),("tool:b".into(),true),("tool:a:Error".into(),true),("tool:b:Output".into(),true)]);
@@ -252,7 +252,7 @@ fn visible_file_captions_load_full_metadata_without_requesting_binary_payloads()
     meta["fullEvent"]=json!({"id":"card/meta","length":bytes.len(),"hash":blake3::hash(&bytes).to_hex().to_string()});
     f.put("card",None,0,BlockKind::Code,meta,b"");f.put("card/meta",Some("card"),0,BlockKind::State,json!({"eventMetadata":true}),&bytes);f.page(None,None);
     let visible=BTreeSet::from(["card".into()]);let plan=f.cache.plan_visible("chat",&LocalChat::default(),&[],Some(&visible)).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="card/meta"));assert!(!plan.blocks.iter().any(|(id,_)|id.starts_with("file:")));
-    f.body("card/meta");let view=f.cache.preview("chat",Some(&visible)).unwrap().unwrap();assert_eq!(view.snapshot.events[0].attachment.as_ref().unwrap().caption.as_deref(),Some(caption.as_str()));
+    f.body("card/meta");let view=f.cache.preview("chat",Some(&visible)).unwrap().unwrap();assert_eq!(view.events[0].attachment.as_ref().unwrap().caption.as_deref(),Some(caption.as_str()));
 }
 
 #[test]
@@ -368,9 +368,9 @@ fn local_body_reuse_survives_queue_to_history_and_restart_without_downloading_in
             "bodyHash":blake3::hash(text.as_bytes()).to_hex().to_string()}), text.as_bytes());
     f.page(None,None); f.body(QUEUE); f.page(Some(QUEUE),None);
     let view = f.cache.snapshot("chat").unwrap().unwrap();
-    assert_eq!(view.snapshot.queue.requests[0].text, text);
+    assert_eq!(view.queue.requests[0].text, text);
     assert!(!view.incomplete.contains("queued:request"));
-    local.reconcile_complete(&view.snapshot.queue, &view.snapshot.delivered, &view.incomplete);
+    local.reconcile_complete(&view.queue, &view.delivered, &view.incomplete);
     assert!(local.pending.is_empty(), "the queue has a complete confirmed copy now");
 
     // The queue can disappear before the history directory arrives. This must
@@ -389,8 +389,8 @@ fn local_body_reuse_survives_queue_to_history_and_restart_without_downloading_in
         "a complete sealed body must not start a content stream");
     let view = f.cache.preview("chat",None).unwrap().unwrap();
     assert!(view.incomplete.contains("saved"), "the large message uses a bounded display preview");
-    assert_eq!(view.snapshot.delivered, ["request"], "preview truncation is not missing canonical bytes");
-    assert!(!view.snapshot.events[0].text.starts_with("Loading"));
+    assert_eq!(view.delivered, ["request"], "preview truncation is not missing canonical bytes");
+    assert!(!view.events[0].text.starts_with("Loading"));
 }
 
 #[test]
@@ -399,7 +399,7 @@ fn header_first_reuse_requires_matching_scope_request_digest_and_source() {
     let local = local_prompt("request", "same sized text");
     f.put("saved",None,1,BlockKind::Text,user_body("saved","request","same sized text"),b"same sized text");
     f.page(None,None);
-    assert!(f.cache.snapshot("chat").unwrap().unwrap().snapshot.delivered.is_empty());
+    assert!(f.cache.snapshot("chat").unwrap().unwrap().delivered.is_empty());
     f.cache.remember_local("other-chat", &local, &f.lineage).unwrap();
     f.cache.remember_local("chat", &local, "other-source").unwrap();
     f.cache.remember_local("chat", &local_prompt("other-request", "same sized text"), &f.lineage).unwrap();
@@ -407,7 +407,7 @@ fn header_first_reuse_requires_matching_scope_request_digest_and_source() {
     assert_eq!(f.cache.block_request("chat","saved").unwrap().offset, 0);
     f.cache.remember_local("chat", &local, &f.lineage).unwrap();
     assert_eq!(f.cache.block_request("chat","saved").unwrap().offset, 15);
-    assert_eq!(f.cache.snapshot("chat").unwrap().unwrap().snapshot.delivered, ["request"]);
+    assert_eq!(f.cache.snapshot("chat").unwrap().unwrap().delivered, ["request"]);
     f.cache.configure("restored-source").unwrap();
     assert_eq!(f.cache.db.lock().unwrap().query_row("SELECT count(*) FROM local_echoes",[],|r|r.get::<_,u64>(0)).unwrap(), 0);
 }
@@ -421,13 +421,13 @@ fn changed_or_legacy_body_keeps_authored_copy_until_complete_canonical_replaceme
     f.put("saved",None,1,BlockKind::Text,user_body("saved","request","server changed text"),b"server changed text");
     f.page(None,None);
     let view = f.cache.snapshot("chat").unwrap().unwrap();
-    assert!(view.snapshot.delivered.is_empty());
-    local.reconcile_complete(&view.snapshot.queue,&view.snapshot.delivered,&view.incomplete);
+    assert!(view.delivered.is_empty());
+    local.reconcile_complete(&view.queue,&view.delivered,&view.incomplete);
     assert_eq!(local.pending[0].text,"authored text");
     f.body("saved");
     let view = f.cache.snapshot("chat").unwrap().unwrap();
-    assert_eq!(view.snapshot.events[0].text,"server changed text");
-    local.reconcile_complete(&view.snapshot.queue,&view.snapshot.delivered,&view.incomplete);
+    assert_eq!(view.events[0].text,"server changed text");
+    local.reconcile_complete(&view.queue,&view.delivered,&view.incomplete);
     assert!(local.pending.is_empty());
 
     let mut meta = user_body("legacy","legacy-request","authored text");
@@ -449,11 +449,11 @@ fn accepted_queue_header_does_not_retire_local_input_before_its_body_arrives() {
         json!({"request":{"requestId":"request","revision":0,"kind":"steer","text":"","images":0}}),b"authored text");
     f.page(None,None); f.body(QUEUE); f.page(Some(QUEUE),None);
     let view = f.cache.snapshot("chat").unwrap().unwrap();
-    local.reconcile_complete(&view.snapshot.queue,&view.snapshot.delivered,&view.incomplete);
+    local.reconcile_complete(&view.queue,&view.delivered,&view.incomplete);
     assert_eq!(local.pending.len(),1);
     f.body("queued:request");
     let view = f.cache.snapshot("chat").unwrap().unwrap();
-    local.reconcile_complete(&view.snapshot.queue,&view.snapshot.delivered,&view.incomplete);
+    local.reconcile_complete(&view.queue,&view.delivered,&view.incomplete);
     assert!(local.pending.is_empty());
 }
 
@@ -565,11 +565,11 @@ fn known_input_is_not_retired_before_the_viewport_can_display_its_cached_body() 
     f.page(None,None);
     let stale_viewport=BTreeSet::new(); // The last frame still displayed the pending row.
     let view=f.cache.preview("chat",Some(&stale_viewport)).unwrap().unwrap();
-    assert!(view.snapshot.delivered.is_empty(),"keep the authored overlay until its replacement is displayable");
+    assert!(view.delivered.is_empty(),"keep the authored overlay until its replacement is displayable");
     assert!(view.incomplete.contains("saved"));
     let current_viewport=BTreeSet::from(["saved".into()]);
     let view=f.cache.preview("chat",Some(&current_viewport)).unwrap().unwrap();
-    assert_eq!(view.snapshot.events[0].text,"own input");assert_eq!(view.snapshot.delivered,["request"]);
+    assert_eq!(view.events[0].text,"own input");assert_eq!(view.delivered,["request"]);
 }
 
 #[test]
@@ -702,7 +702,7 @@ fn disk_reads_refresh_eviction_recency_and_saved_anchors_hydrate_offline() {
     let mut local = LocalChat::default();local.position.follow=false;local.position.key=Some("chat/e001".into());
     let visible = f.cache.resume_viewport("chat",&local).unwrap().unwrap();
     assert!(visible.contains("e001"));assert!(!visible.contains("e069"));
-    assert_eq!(f.cache.preview("chat",Some(&visible)).unwrap().unwrap().snapshot.events.iter().find(|e|e.id=="e001").unwrap().text,"body 01");
+    assert_eq!(f.cache.preview("chat",Some(&visible)).unwrap().unwrap().events.iter().find(|e|e.id=="e001").unwrap().text,"body 01");
     f.cache.preview("chat",Some(&BTreeSet::from(["e001".into()]))).unwrap();
     f.body("e003");
     let mut db = f.cache.db.lock().unwrap();let tx=db.transaction().unwrap();
@@ -724,7 +724,7 @@ fn foreground_projection_precedes_retained_scrollback_and_stays_byte_bounded() {
     let retained=(0..32).map(|n|format!("e{n:03}")).collect();
     let visible=BTreeSet::from(["e039".into()]);
     let view=f.cache.changes_retaining("chat",Some(&visible),&retained,true).unwrap().unwrap();
-    assert_eq!(view.snapshot.events.iter().find(|e|e.id=="e039").unwrap().text.len(),bytes.len());
+    assert_eq!(view.events.iter().find(|e|e.id=="e039").unwrap().text.len(),bytes.len());
     assert!(view.previews.iter().map(|(_,_,size)|size).sum::<usize>()<=8*1024*1024);
     let mut feed=crate::feed::Feed::default();feed.native_view(view).unwrap();
     assert_eq!(feed.event("e039").unwrap().text.len(),bytes.len());

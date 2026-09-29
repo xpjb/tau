@@ -132,8 +132,7 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
             let file=install(&mut app,&case);
             events.push(event(&app,&case,file,events.len() as u64));
         }
-        app.controller.message(ServerMessage::TranscriptSnapshot {session_id:"demo".into(),snapshot:TranscriptSnapshot {
-            generation:"demo".into(),sequence:1,events,queue:QueueState::default(),before:None,delivered:vec![]}}).unwrap();
+        app.controller.preview(&("demo"), events, QueueState::default(), None).unwrap();
         app.controller.account.sessions[0].title="Inline file downloads".into();
         app.root.workspace.show_chats=false; app.tick(0.); app.frame(&ctx,ctx.view());
         save(&ctx,&format!("context-{name}-chat"));
@@ -228,9 +227,7 @@ fn extraction_busy_state_is_shared_by_chat_and_sidebar_and_survives_navigation()
     let case = cases().into_iter().find(|c| c.id == "18-saved-zip").unwrap();
     let file = install(&mut app, &case);
     let item = event(&app, &case, file, 0);
-    app.controller.message(ServerMessage::TranscriptSnapshot { session_id: "demo".into(), snapshot: TranscriptSnapshot {
-        generation: "demo".into(), sequence: 1, events: vec![item], queue: QueueState::default(), before: None, delivered: vec![],
-    }}).unwrap();
+    app.controller.preview(&("demo"), vec![item], QueueState::default(), None).unwrap();
     app.root.workspace.attachments.show = true;
     app.tick(0.); app.frame(&ctx, ctx.view());
     let extract_controls = |app: &App| {

@@ -15,79 +15,11 @@ use std::{
 };
 use tau_frontend::{
     controller::Controller,
-    feed::Feed,
     store::{Delivery, Settings, Store},
     transport::{Command, Event as NetworkEvent, Network},
 };
 use tau_protocol::*;
 
-fn event(id: &str, order: u64, phase: &str) -> Value {
-    json!({"id":id,"order":order,"entryId":id,"phase":phase,"origin":{},"role":"assistant","kind":"text","text":"Hello **","timestamp":null,"timestampMs":null,"toolCallId":null,"toolName":null,"stopReason":null,"errorMessage":null,"isError":false,"attachment":null})
-}
-fn snapshot(events: Vec<Value>, before: Option<u64>, sequence: u64) -> TranscriptSnapshot {
-    serde_json::from_value(json!({"generation":"g","sequence":sequence,"events":events,"queue":{"available":true,"requests":[],"runId":null,"paused":false,"control":null,"capabilities":[],"boundaries":[]},"before":before,"delivered":[]})).unwrap()
-}
-#[test]
-fn retained_history_delta_gap_and_stale_page_are_transactional() {
-    let mut feed = Feed::default();
-    feed.snapshot(snapshot(vec![event("live", 2, "live")], Some(2), 4))
-        .unwrap();
-    feed.page(
-        "g",
-        2,
-        HistoryPage {
-            events: vec![serde_json::from_value(event("older", 1, "saved")).unwrap()],
-            before: Some(1),
-        },
-    )
-    .unwrap();
-    // The renderer's internal delta adapter is not a network message.
-    let change:TranscriptChange=serde_json::from_value(json!({"delta":{"eventId":"live","text":"world** 🦀"}})).unwrap();
-    feed.update("g",5,change).unwrap();
-    assert_eq!(feed.event("live").unwrap().text, "Hello **world** 🦀");
-    let change: TranscriptChange =
-        serde_json::from_value(json!({"events":[event("collision",1,"saved")],"removed":["live"]}))
-            .unwrap();
-    assert!(feed.update("g", 6, change).is_err());
-    assert_eq!(feed.events.len(), 2);
-    assert!(feed.event("live").is_some());
-    assert_eq!(feed.sequence, 5);
-    assert!(!feed.synchronized);
-    // A reconnect cut with overlap preserves loaded older saved history.
-    feed.snapshot(snapshot(vec![event("live", 2, "saved")], Some(2), 6))
-        .unwrap();
-    assert!(feed.event("older").is_some());
-    assert_eq!(feed.before, Some(1));
-    assert!(
-        !feed
-            .page(
-                "old-generation",
-                1,
-                HistoryPage {
-                    events: vec![],
-                    before: None
-                }
-            )
-            .unwrap()
-    );
-    let old = feed.events.clone();
-    assert!(
-        feed.page(
-            "g",
-            1,
-            HistoryPage {
-                events: vec![serde_json::from_value(event("older", 0, "saved")).unwrap()],
-                before: None
-            }
-        )
-        .is_err()
-    );
-    assert_eq!(feed.events, old);
-    // A cut without overlap drops the stale window rather than hiding a gap.
-    feed.snapshot(snapshot(vec![event("new-tail", 50, "saved")], Some(50), 10))
-        .unwrap();
-    assert_eq!(feed.events.len(), 1);
-}
 
 #[test]
 fn offline_new_chat_and_send_are_durable_before_any_server_ack() {

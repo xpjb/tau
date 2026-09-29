@@ -8,13 +8,13 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
 use std::{collections::{BTreeSet, HashMap}, path::Path, sync::{Arc, Mutex}, time::Duration};
 use tau_blocks::*;
-use tau_protocol::{Event, EventKind, QueueState, TranscriptSnapshot};
+use tau_protocol::{Event, EventKind, QueueState};
 use tau_transfer::blocks::{Client, Header};
 use tokio::sync::{mpsc, watch};
 use crate::store::LocalChat;
 
 pub const QUEUE: &str = "@queue";
-pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub bodies:HashMap<String,Body>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,ToolState>, pub parents:HashMap<String,String> }
+pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub generation:String,pub sequence:u64,pub events:Vec<Event>,pub queue:QueueState,pub before:Option<u64>,pub delivered:Vec<String>, pub bodies:HashMap<String,Body>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,ToolState>, pub parents:HashMap<String,String> }
 /// Verified preview state, separate from both authored bytes and finality.
 /// None means the body directory/header has not arrived, not a completed empty body.
 #[derive(Clone, Debug, Hash)]
@@ -38,6 +38,52 @@ struct Prefetched {
 #[derive(Clone)]
 pub struct Cache { prefetched:Arc<Mutex<Prefetched>>,exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
 impl Cache {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn seed_preview(&self, scope: &str, events: Vec<Event>, mut queue: QueueState, before: Option<u64>) -> Result<View> {
+        let ids = events.iter().map(|e| e.id.clone()).collect::<BTreeSet<_>>();
+        {
+            let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
+            let mut wanted = BTreeSet::from([QUEUE.to_owned()]);
+            let mut parents = BTreeSet::from([None, Some(QUEUE.to_owned())]);
+            let mut put = |id: String, parent: Option<String>, order, kind, meta, sealed, bytes: &[u8]| -> Result<()> {
+                wanted.insert(id.clone());
+                tau_blocks::put(&tx, scope, BlockHeader { id, parent, order, kind, meta, sealed, version: 0, length: 0, revision: 0 }, bytes)?;
+                Ok(())
+            };
+            for mut event in events {
+                let text = std::mem::take(&mut event.text);
+                let kind = match event.kind { EventKind::Tool => BlockKind::Tool, EventKind::Thinking => BlockKind::Thinking, _ => BlockKind::Text };
+                let sealed = event.phase != tau_protocol::EventPhase::Live;
+                let mut meta = serde_json::json!({"event": event});
+                if kind == BlockKind::Tool {
+                    meta["toolState"] = serde_json::to_value(if sealed { ToolState::Completed } else { ToolState::Writing })?;
+                }
+                put(event.id.clone(), None, event.order, kind, meta, sealed, if kind == BlockKind::Tool { b"" } else { text.as_bytes() })?;
+                if kind == BlockKind::Tool {
+                    parents.insert(Some(event.id.clone()));
+                    put(tool_input_id(&event.id), Some(event.id.clone()), 0, BlockKind::Code, serde_json::json!({"inputFor": event.id}), sealed, text.as_bytes())?;
+                }
+            }
+            let requests = std::mem::take(&mut queue.requests);
+            put(QUEUE.into(), None, i64::MAX as u64, BlockKind::Queue, serde_json::json!({}), true, &serde_json::to_vec(&queue)?)?;
+            for (order, mut q) in requests.into_iter().enumerate() {
+                let text = std::mem::take(&mut q.text);
+                put(format!("queued:{}", q.request_id), Some(QUEUE.into()), order as u64, BlockKind::Text, serde_json::json!({"request": q}), true, text.as_bytes())?;
+            }
+            let old = tx.prepare("SELECT id FROM blocks WHERE scope=?1")?.query_map([scope], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in old { if !wanted.contains(&id) { tau_blocks::remove(&tx, scope, &id)?; } }
+            tx.execute("DELETE FROM block_cache_feeds WHERE scope=?1", [scope])?;
+            for parent in parents {
+                let request = FeedRequest { scope: scope.into(), parent: parent.clone(), cursor: None, floor: 0, before: None };
+                // All scripted records above are already committed bodies. This
+                // declares their directory coverage, not a fake transport delta.
+                tau_blocks::cache_page(&tx, &request, &FeedPage { reset: false, records: vec![], cursor: tau_blocks::cursor(&tx)?, floor: 0,
+                    before: if parent.is_none() { before.map(|order| FeedPosition { order, id: String::new() }) } else { None }, more: false })?;
+            }
+            tx.commit()?;
+        }
+        self.snapshot_inner(scope, Some(&ids), &BTreeSet::new(), true, None, true, true)?.context("Preview has no native directory")
+    }
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path.parent().context("Cache path has no parent")?)?;
         let _directory=crate::disk::replica_directory_lease(path.parent().unwrap())?;
@@ -224,6 +270,7 @@ impl Cache {
                         if preview {body_budget-=bytes.len();*allowance-=bytes.len();}
                     } else {incomplete.insert(h.id.clone());}
                 }
+                ensure!(event.id == h.id, "Event metadata has a different native identity");
                 let body = if h.kind == BlockKind::Tool { tool_input_id(&h.id) } else { h.id.clone() };
                 let bytes = if wanted(h) {read(&body,if preview {(*allowance).min(body_budget)} else {MAX_BLOCK_BYTES as usize})?} else {vec![]};
                 if preview {body_budget=body_budget.saturating_sub(bytes.len());*allowance=allowance.saturating_sub(bytes.len());}
@@ -283,16 +330,16 @@ impl Cache {
         }).collect::<Vec<_>>();
         // Feed's bounded LRU evicts retained/offscreen groups before the viewport.
         previews.sort_by_key(|(root,_,_)| (visible.contains(root), root.clone()));
-        Ok(Some(View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,snapshot:TranscriptSnapshot { generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
-            events,queue,before:page.before.as_ref().map(|p|p.order),delivered },bodies,incomplete,states,parents }))
+        Ok(Some(View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
+            events,queue,before:page.before.as_ref().map(|p|p.order),delivered,bodies,incomplete,states,parents }))
     }
     pub fn copy_ready(&self, scope:&str, ids:&[String]) -> Result<Option<String>> {
         ensure!(ids.len()<=4096,"Copy fewer than 4097 sections at a time");
         let mut seen=BTreeSet::new();let ids=ids.iter().filter(|id|seen.insert(*id)).cloned().collect::<Vec<_>>();let ids=ids.as_slice();
         if !copy_complete(&self.db.lock().unwrap(),scope,ids)? {return Ok(None);}
         let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false,true)?.context("Details are not cached")?;
-        let group=ids.iter().filter_map(|id|view.snapshot.events.iter().find(|e|&e.id==id)).collect::<Vec<_>>();
-        let text=crate::details::copy(&group, view.snapshot.events.iter(), &view.parents);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
+        let group=ids.iter().filter_map(|id|view.events.iter().find(|e|&e.id==id)).collect::<Vec<_>>();
+        let text=crate::details::copy(&group, view.events.iter(), &view.parents);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
     }
     pub fn history_cursor(&self, scope: &str) -> Result<Option<FeedPosition>> {
         Ok(tau_blocks::cached_feed(&self.db.lock().unwrap(),scope,None)?.and_then(|p|p.before))

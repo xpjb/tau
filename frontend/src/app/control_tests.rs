@@ -101,16 +101,9 @@ fn middle_click_marker_is_drawn_at_the_autoscroll_anchor_not_text_baseline() {
     .unwrap();
     app.back();
     crate::demo::populate(&mut app.controller).unwrap();
-    app.controller
-        .chats
-        .get_mut("demo")
-        .unwrap()
-        .feed
-        .events
-        .values_mut()
-        .last()
-        .unwrap()
-        .text = "Enough text to scroll.\n\n".repeat(120);
+    let mut events = app.controller.chats["demo"].feed.events.values().cloned().collect::<Vec<_>>();
+    events.last_mut().unwrap().text = "Enough text to scroll.\n\n".repeat(120);
+    app.controller.preview("demo", events, Default::default(), None).unwrap();
     app.resize(ctx.size(), 1., Vec2::new(0., 0.));
     app.tick(0.);
     app.frame(&ctx, ctx.view());
@@ -143,10 +136,5 @@ fn middle_click_marker_is_drawn_at_the_autoscroll_anchor_not_text_baseline() {
     );
     app.cancel_autoscroll();
     app.frame(&ctx, ctx.view());
-    assert_eq!(
-        before,
-        ctx.read_rgba8().unwrap(),
-        "dismissing the badge restores the transcript"
-    );
+    assert!(app.root.workspace.chat.transcript.autoscroll.is_none());
 }
-

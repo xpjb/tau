@@ -97,3 +97,31 @@ new actual handoff. Compiler checks pass. The source deletion is real, but the
 replacement costs **214 normalized lines** (raw saves 224); it does not meet the
 simplification gate. Legacy fixture update/page retirement, event-boundary cleanup,
 remaining pruning and final cross-platform/physical acceptance remain open.
+
+## Legacy adapter retirement — September 29, 2026
+
+Deleted `Feed::update`, `Feed::page`, the legacy full-snapshot overlap algorithm,
+all three skipped-wire Transcript variants/controller handlers and the shared
+`TranscriptSnapshot` type. Provider `HistoryPage`, `TranscriptChange`, `TextDelta`
+and Event remain because daemon execution/history uses them. The native View is
+flat; native full-window replacement and sparse installation share the existing
+Feed, with duplicate identity/order checks and unchanged root/queue cursor barriers.
+The native decoder also checks metadata identity against its actual header.
+
+Offline preview now commits ordinary native headers/bodies/directories and uses
+that same native decoder/model boundary. It explicitly refuses a connected
+controller. No second legacy protocol or test action bus replaces the deleted
+paths. The quota network test supplies session metadata rather than injecting
+an offline transcript into its connected cache. Navigation loading tests clear the
+actual replica and install cumulative native windows; real cache/history tests
+still exercise actual native paging/reset semantics. Thinking now has one compact
+native streaming/Markdown check; the obsolete delta/page algorithm test and its
+helpers are deleted. Manual long-body fixtures now publish native content rather
+than being silently overwritten by real viewport hydration.
+
+Fresh frontend **194/194**, zero skipped, pass
+(`ebfa166d-d4e6-424b-8633-4095a65ef5ca`). After the final identity-validation check,
+frontend/daemon/protocol all-target compilation and 35 native contract tests pass
+(`db018803-8bd7-49de-83aa-acc90d494588`). Net cross-workspace saving: **462 raw /
+326 normalized**, including deletion of 30 shared protocol code lines. Event
+boundary cleanup, broader pruning and the final size/device gates remain open.

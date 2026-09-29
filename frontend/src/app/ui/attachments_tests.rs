@@ -56,18 +56,7 @@ impl Harness {
                 .unwrap();
             events.push(event);
         }
-        app.controller
-            .message(ServerMessage::TranscriptSnapshot {
-                session_id: "demo".into(),
-                snapshot: TranscriptSnapshot {
-                    generation: "nested".into(),
-                    sequence: 1,
-                    events,
-                    queue: QueueState::default(),
-                    before: None,
-                    delivered: vec![],
-                },
-            })
+        app.controller.preview(&("demo"), events, QueueState::default(), None)
             .unwrap();
         app.root.workspace.attachments.show = true;
         let mut h = Self { app, ctx, _dir: dir };
