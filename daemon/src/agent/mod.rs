@@ -169,6 +169,9 @@ impl AgentManager {
                 if let Some(agent) = &content.agent { let _ = agent.store.project_live(&id,interrupted.events.iter().cloned().map(|e|(e,None)).collect(),vec![]).await; }
                 let _ = content.publish(&id, interrupted);
             }
+            if let Err(error) = &result && !cancelled {
+                tracing::warn!(session=%id, error=%bounded(&error.to_string(),480), "Agent run failed; waiting for explicit resume");
+            }
             manager.set_runtime_state(&id, &runtime, if result.is_err() && !cancelled { SessionStatus::Error } else { SessionStatus::Idle },
                 result.err().map(|e| bounded(&e.to_string(), 480)), Some(usage));
             if resume { manager.start_run(&id, &runtime, &mut content); }
@@ -369,14 +372,7 @@ impl AgentManager {
         };
         let entries=tokio::select! {_=cancel.cancelled()=>bail!("Compaction cancelled"),result=store.context(id,&selected)=>result?};
         let (first_kept,prefix)={
-            let users = entries.iter().enumerate().filter(|(_, entry)| entry["message"]["role"] == "user").map(|(index,_)| index).collect::<Vec<_>>();
-            if users.len() < 2 { bail!("Not enough completed turns to compact safely"); }
-            let mut cut = *users.last().unwrap(); let mut size = 0;
-            for (index, entry) in entries.iter().enumerate().rev() {
-                if matches!(entry["type"].as_str(), Some("message" | "tau_attachment")) { size += history::estimate_tokens(&entry["message"]); }
-                if entry["message"]["role"] == "user" && size <= settings.agent.compaction.keep_recent_tokens { cut = index; }
-            }
-            if cut <= users[0] { cut = users[1]; }
+            let cut = history::compaction_cut(&entries, settings.agent.compaction.keep_recent_tokens)?;
             let mut prefix = entries[..cut].to_vec();
             // An earlier checkpoint can sit after its retained boundary in append order.
             prefix.extend(entries[cut..].iter().filter(|entry| entry["type"] == "compaction").cloned());

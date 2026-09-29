@@ -240,12 +240,11 @@ impl Widget for Sidebar {
                 if unread { "●  " } else { "" },
                 if cx.model.is_creating(&session.id) {
                     "Creating…"
-                } else if cx.model.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) {
-                    "Paused"
                 } else {
                     match session.status {
                         SessionStatus::Running => "Working",
                         SessionStatus::Error => "Error",
+                        _ if cx.model.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) => "Paused",
                         SessionStatus::Idle => "Ready",
                         SessionStatus::Sleeping => "Sleeping",
                     }

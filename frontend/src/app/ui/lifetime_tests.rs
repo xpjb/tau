@@ -411,3 +411,27 @@ fn native_handoff_keeps_the_actual_message_control_and_authored_text() {
     assert_eq!(h.app.services.renderer.messages[&key].source, crate::app::literal("One **authored** message"));
     assert!(transcript.interests.contains("canonical"));
 }
+
+#[test]
+fn failed_run_header_opens_the_full_reason_without_resuming_or_submitting() {
+    for mobile in [false, true] {
+        let mut h = Harness::new(mobile);
+        let reason = "Context compaction failed; history is unchanged. The provider connection was interrupted.";
+        h.app.controller.epoch = Some(1);
+        let session = h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap();
+        session.status = tau_protocol::SessionStatus::Error;
+        session.detail = Some(reason.into());
+        h.app.controller.chats.get_mut("demo").unwrap().feed.queue.paused = true;
+        h.frame();
+        let pending = h.app.controller.chats["demo"].local.pending.len();
+        let p = center(h.app.root.workspace.chat.header.title.rect.unwrap());
+        h.app.press(1,p,mobile); h.app.release(1,p);
+        assert_eq!(h.app.controller.notice.as_deref(),Some(reason));
+        assert!(h.app.controller.chats["demo"].feed.queue.paused);
+        assert_eq!(h.app.controller.chats["demo"].local.pending.len(),pending,"Reading an error is not a Resume or prompt");
+        h.app.controller.notice = None;
+        h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().status = tau_protocol::SessionStatus::Running;
+        h.frame(); h.app.press(2,p,mobile); h.app.release(2,p);
+        assert!(h.app.controller.notice.is_none(),"A stale error detail cannot be opened after the run restarts");
+    }
+}

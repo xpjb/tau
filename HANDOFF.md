@@ -1,23 +1,29 @@
-# Simplification: transcript reading ownership — source only
+# Simplification and single-task compaction — integrated source, not deployed
 
-On `feat/tau2-simplification` in `/root/tau2-simplification`, the existing Transcript
-now owns follow/anchor/download reading policy and scoped checkpoints. Navigation
-no longer resets its layout or saves another owner's geometry. The expansion
-registry/separate pin and duplicate layout-session flag are deleted. Saved anchors
-survive partial/clamped windows; same-chat jumps reuse measurement caches. Native
-cold hydration recognizes the direct Tool/Thinking row bookmark keys.
+The user authorized practical closeout and source integration rather than more
+speculative rewrites to meet the unmet size target. `feat/tau2-simplification`
+through `7be1ac1` is merged into `tau2-integration` as `73a617f`. The tested
+`fix/tau2-compaction-pause` through `1f75f4d` is merged alongside it; the unrelated
+old `tau2/qa-remove-pause` WIP is preserved, not included.
 
-Fresh managed workspace/all-target check, **325/325 workspace nextest tests**, zero
-skipped (`0f842d26-834d-433a-b9e7-f9a173b04277`), Windows MSVC/Android ARM64 library
-checks and frontend rustdoc pass. Before/after evidence and the baseline patch are
-in `tau2-backlog/041-direct-retained-transcript.md`. Physical-device QA remains open.
+Both conflict sides' substantive work is retained: the header/sidebar keep the
+new update/control ownership and expose genuine agent failures, and the lifetime
+suite keeps both the simplification regressions and the pause-reason interaction.
+The daemon can compact repeated complete exchanges inside one long user task
+without tool replay. Genuine abort/failure/recovery pauses remain.
 
-The user prioritizes whole redundant subsystem removals over line-by-line
-squeezing. This closes the reading-ownership slice, **not** the reduction target:
-charged savings are **1,554 raw / 546 normalized**, and this correctness slice itself
-grows 63 / 119 lines including coverage. See the completion-size ledger. No merge,
-release, deployment, service restart, settings/schema or live-data changes occurred.
-The independent compaction/pause fix is not merged into this branch.
+The last bounded deletion removed three unused hit-test entry points, not product
+features. Remaining size debt, queue-content lifetime, outage diagnosis, optional
+test pruning and device acceptance are in `tau2-backlog/044-closeout-and-followups.md`.
+The original reduction target is **not achieved**. The measurement report's binary
+asset handling and daemon test classification are corrected; no savings are
+claimed from reclassification.
+
+Merged-tree compiler/nextest/platform/rustdoc validation is being recorded after
+this merge; do not substitute earlier per-branch results for that acceptance.
+No deployment, release package, version/protocol/schema bump, service restart,
+settings/live-data change or physical Windows/Android QA is authorized or claimed.
+
 
 ---
 

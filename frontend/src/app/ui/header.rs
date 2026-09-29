@@ -76,7 +76,13 @@ impl Widget for Header {
             }
             return true;
         }
-        handled || self.title.handle(event, cx, false)
+        if handled { return true; }
+        let handled = self.title.handle(event, cx, false);
+        if self.title.take_click() && let Some(session) = cx.model.account.sessions.iter()
+            .find(|s| Some(&s.id) == cx.model.account.selected.as_ref() && s.status == SessionStatus::Error) {
+            cx.model.notice = Some(session.detail.as_deref().unwrap_or("The agent stopped without an error detail").into());
+        }
+        handled
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         self.controls.begin();
@@ -105,6 +111,7 @@ impl Widget for Header {
         let summary = cx.model.account.sessions.iter().find(|s| s.id == session).cloned();
         let running = summary.as_ref().is_some_and(|s| s.status == SessionStatus::Running);
         let paused = cx.model.chats[&session].feed.queue.paused;
+        let failed = summary.as_ref().is_some_and(|s| s.status == SessionStatus::Error);
         let connected = cx.model.epoch.is_some();
         let title_width = (b.x + b.width - if running || paused { 152. * s } else { 108. * s } - title_x).max(1.);
         self.title.rect = Some(Rect::new(title_x, b.y, title_width, header.height));
@@ -136,16 +143,18 @@ impl Widget for Header {
                 if cx.model.epoch.is_none() { "Saved locally · offline" } else { "Creating…" }
             } else if cx.model.epoch.is_none() {
                 "Offline"
-            } else if cx.model.chats[&session].feed.queue.paused {
+            } else if failed {
+                summary.as_ref().and_then(|s| s.detail.as_deref()).unwrap_or("Error · tap for details")
+            } else if running {
+                summary.as_ref().and_then(|s| s.detail.as_deref()).unwrap_or("Working")
+            } else if paused {
                 "Paused · resume needed"
-            } else if summary.as_ref().is_some_and(|s| s.status == SessionStatus::Running) {
-                "Working"
             } else {
                 "Ready"
             },
             Rect::new(title_x, b.y + 30. * s, title_width, 18. * s),
             12. * s,
-            color(if cx.model.epoch.is_some() { 0x4ade80 } else { 0xfbbf24 }),
+            color(if !connected { 0xfbbf24 } else if failed { 0xf87171 } else if paused && !running { 0xfbbf24 } else { 0x4ade80 }),
             false,
         );
         self.controls.icon(
