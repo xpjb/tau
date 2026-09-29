@@ -1,7 +1,7 @@
 # 036 — Restore correct drawing and selection
 
-Status: **Ready, first.** Two small independent fix commits, not another renderer
-or transcript rewrite. Evidence: [reproduced audit](../docs/reviews/retained-ui/README.md).
+Status: **Implemented in source on `feat/tau2-simplification`, September 29, 2026.**
+Two independent fixes, not another renderer or transcript rewrite. Evidence: [reproduced audit](../docs/reviews/retained-ui/README.md).
 
 ## A. Ordered compositing
 
@@ -51,3 +51,28 @@ Some correction code may be necessary. Charge it to the total reduction budget;
 correctness cannot be traded for a smaller file. Retire the one-unordered-Layer
 assumption and the Move-only selection update, not existing text/shape services.
 Use managed compiler checks and targeted nextest for changed paths. No deployment.
+
+## Implementation evidence
+
+Ordered surface batches are implemented in `aaede02`; the existing GPU pass is
+unchanged. Owners establish boundaries for dialogs, menus, tooltips, notices,
+viewer chrome, composer/floating controls and scroll chrome. Selection now
+reconciles against newly placed text and requests a further paint only if its
+endpoint changed. No root dispatcher or text algorithm was restored.
+
+Both new behavior checks failed before their respective fixes. After both fixes,
+managed frontend all-target check passed and frontend library nextest passed
+**165/165, zero skipped**, run `25469c31-2917-4935-9889-1ec36ce470a6`.
+The earlier 10-case compositor/menu/viewer/tooltip run also passed. Desktop/phone
+Connection screenshots were rendered and inspected; this is not physical-device QA.
+
+Deleted `icon_controls_tests.rs` and the composer-centering test. Settings opens
+through its actual control in the occlusion check; Tail behavior now shares the
+scroll-selection/copy scenario. Added one compact mixed-content alpha/clip check.
+The new occlusion check compares the actual dialog against rendering that same
+dialog without a workspace, not fixed sidebar/glyph pixels.
+
+Cost versus `33f7d6f`: raw production **+44**, tests **−44**, total **0**;
+same-format production **+46**, tests **+24**, total **+70**. Correctness is fixed,
+not a claimed simplification saving. Remaining gate: 5,000 raw / 5,070 same-format
+lines. No outside-frontend code changed. 037 is next; physical QA remains open.

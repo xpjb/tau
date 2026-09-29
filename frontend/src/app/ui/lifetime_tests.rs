@@ -260,11 +260,6 @@ fn opaque_dialog_covers_the_workspace_not_just_its_shapes() {
             &mut Frame { layer: &mut layer, bounds, clip: bounds }, cx));
         h.app.services.renderer.draw(&h.ctx, h.ctx.view(), &[layer]);
         assert!(actual == h.ctx.read_rgba8().unwrap(), "Opaque dialog leaked lower content (mobile={mobile})");
-        if let Some(dir) = std::env::var_os("TAU_RETAINED_UI_PREVIEW_DIR") {
-            std::fs::create_dir_all(&dir).unwrap();
-            image::save_buffer(std::path::PathBuf::from(dir).join(if mobile { "opaque-phone.png" } else { "opaque-desktop.png" }),
-                &actual, h.ctx.size().0, h.ctx.size().1, image::ColorType::Rgba8).unwrap();
-        }
     }
 }
 
@@ -297,4 +292,46 @@ fn ordered_surfaces_keep_alpha_and_inherited_clips() {
         let inside = contains(clip, Vec2::new((i % width) as f32 + 0.5, (i / width) as f32 + 0.5));
         assert_eq!(new, if inside { sample } else { old }, "surface order or inherited clip at pixel {i}");
     }
+}
+
+#[test]
+fn selection_follows_scrolled_text_and_tail_returns_to_latest() {
+    let mut h = Harness::new(false);
+    let mut event = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
+    event.text = (0..120).map(|i| format!("Selectable paragraph {i}.\n\n")).collect();
+    event.attachment = None;
+    let chat = h.app.controller.chats.get_mut("demo").unwrap();
+    chat.feed.events.clear();
+    chat.feed.events.insert(event.order, event);
+    chat.local.position.follow = false;
+    chat.local.position.key = None;
+    h.frame();
+    let viewport = h.app.root.workspace.chat.transcript.scroll.rect;
+    let start = Vec2::new(viewport.x + viewport.width / 2., viewport.y + 40.);
+    let end = Vec2::new(start.x, viewport.y + viewport.height - 2.);
+    h.app.press(1, start, false);
+    h.app.motion(1, end);
+    let before = h.app.services.renderer.selected_text().unwrap();
+    let scroll = h.app.root.workspace.chat.transcript.scroll.value;
+    for _ in 0..16 {
+        h.app.ui_event(Event::Tick(0.05));
+        h.frame();
+    }
+    assert!(h.app.root.workspace.chat.transcript.scroll.value > scroll);
+    let renderer = &h.app.services.renderer;
+    assert!(renderer.selection.as_ref().unwrap().focus == renderer.nearest_text(end).unwrap(),
+        "Stationary selection must follow the newly placed text");
+    let selected = renderer.selected_text().unwrap();
+    assert!(selected.starts_with(&before) && selected.len() > before.len());
+    h.app.release(1, end);
+    h.app.key("c", true, false);
+    assert!(h.app.actions().iter().any(|a| matches!(a, crate::app::PlatformAction::Copy(text) if text == &selected)));
+    let tail = h.app.root.workspace.chat.composer.controls.items.iter()
+        .find(|(_, _, choice)| matches!(choice, super::composer::Choice::Tail)).unwrap().1.control.rect.unwrap();
+    h.app.press(2, center(tail), false);
+    h.app.release(2, center(tail));
+    h.frame();
+    assert!(h.app.controller.chats["demo"].local.position.follow);
+    let scroll = &h.app.root.workspace.chat.transcript.scroll;
+    assert_eq!(scroll.value, scroll.max);
 }

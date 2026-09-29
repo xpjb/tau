@@ -86,12 +86,14 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-At triage there are **zero implemented savings** and a **5,000-line remaining gap**.
-Populate one ledger as implementation proceeds:
+After 036, raw frontend code remains **27,725**; same-format code is **33,088**.
+The remaining gap is **5,000 raw / 5,070 same-format** lines. No simplification
+saving is claimed for the correctness fixes. Deltas below use reduction-positive
+values and show raw / same-format:
 
 | Slice / commit | Deleted path | Replacement cost | Net production reduction | Net test reduction | Outside charge | Cumulative / remaining |
 | --- | --- | --- | ---: | ---: | ---: | --- |
-| Planning only | None | No runtime changes | 0 | 0 | 0 | 0 / 5,000 |
+| 036 | Unordered surface batching; Move-only selection; icon/centering tests | Ordered surface boundaries + three behavior checks | −44 / −46 | +44 / −24 | 0 | Reduction 0 / −70; gap 5,000 / 5,070 |
 
 Keep raw and same-format totals alongside the ledger. A deletion shared by two
 slices is counted once. Documentation and this measurement recipe are not runtime

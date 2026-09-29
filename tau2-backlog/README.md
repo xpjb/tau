@@ -4,7 +4,8 @@
 
 Triaged **September 29, 2026**, against freshly fetched `origin/tau2` at
 `33f7d6f`. This supersedes the earlier implementation ordering, not the recorded
-bug evidence. These are implementation tasks **not yet implemented**.
+bug evidence. Implementation is on `feat/tau2-simplification`; **036 is source-complete**.
+Remaining slices are not complete.
 
 The retained rewrite established ownership but did not finish shared input/paint
 semantics or simplify the transcript. Finish those boundaries and remove their
@@ -14,7 +15,7 @@ predecessors; do not add another UI or replication framework.
 
 | Item | Deliverable / deletion | Dependency |
 | --- | --- | --- |
-| [036 Correct drawing and selection](036-drawing-and-selection-correctness.md) | Ordered compositing; selection follows scrolled text | First; two independent fixes |
+| [036 Correct drawing and selection](036-drawing-and-selection-correctness.md) | Ordered compositing; selection follows scrolled text | Source-complete; device QA open |
 | [037 One control and child-traversal contract](037-retained-interaction-ownership.md) | Delete paint/register bypasses and root-maintained descendant routing | 036 compositing contract |
 | [038 Finish forms and chrome](038-forms-and-chrome.md) | Delete repeated field/footer/layout and migrated control plumbing | 037 |
 | [039 Native tool records, used directly](039-native-tool-records.md) | Delete native tool re-pairing and display-key parsing | Tool-widget consumer uses 037 |

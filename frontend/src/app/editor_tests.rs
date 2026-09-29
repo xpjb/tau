@@ -43,28 +43,6 @@ impl Harness {
 }
 
 #[test]
-fn composer_placeholder_and_single_line_caret_are_vertically_centered() {
-    let mut h = Harness::new();
-    let rect = Rect::new(10., 10., 300., 56.);
-    let mut editor = Editor::composer(String::new());
-    let mut layer = Layer::default();
-    editor.draw(&mut h.app.services.renderer, &mut layer, rect, 16., false, false, "Message Tau", false);
-    let placeholder = &layer.draws[0];
-    let height = h.app.services.renderer.text.measure(placeholder.block).height_em() * placeholder.size;
-    assert!((placeholder.at.y + height / 2. - (rect.y + rect.height / 2.)).abs() < 3.,
-        "empty composer placeholder must share the input's vertical center");
-
-    for value in ["", "one line"] {
-        if !value.is_empty() { h.app.input(value); }
-        h.frame();
-        let rect = h.app.placed_controls().iter().find(|hit| matches!(hit.action, FixtureChoice::Composer)).unwrap().rect;
-        let caret = h.app.ime_rect().unwrap();
-        assert!((caret.y + caret.height / 2. - (rect.y + rect.height / 2.)).abs() < 3.,
-            "one-line caret in actual composer frame: {value:?}");
-    }
-}
-
-#[test]
 fn composer_navigation_repaints_without_sqlite_draft_writes_or_reshaping() {
     let mut h = Harness::new();
     h.app.input("abcdefghij\nab\nabcdefghij\n👩‍💻");

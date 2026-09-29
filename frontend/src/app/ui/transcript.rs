@@ -438,6 +438,14 @@ impl Widget for Transcript {
             removed.detach(cx);
         }
         self.interests = interests;
+        // Tick/reflow can move text under a stationary held pointer. Resolve
+        // against the new scenes, not only when the host sends pointer motion.
+        if self.selecting
+            && let Some(capture) = cx.ui.capture.filter(|c| c.target == self.selection)
+            && let Some(caret) = cx.services.renderer.nearest_text(capture.point)
+        {
+            cx.ui.dirty |= cx.services.renderer.extend_selection(caret);
+        }
         self.scroll.paint(frame.layer, cx);
         if let Some(auto) = &self.autoscroll {
             paint_autoscroll(frame.layer, auto.anchor, s, cx);
