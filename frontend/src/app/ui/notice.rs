@@ -104,6 +104,7 @@ impl Widget for NoticeWidget {
         let rect = Rect::new(b.x + (b.width - width) / 2., b.y + 16. * s, width, height);
         self.body.rect = Some(rect);
         self.body.clip = frame.clip;
+        frame.layer.above();
         frame.layer.rounded_rect(rect, 12. * s, color(0x263340));
         cx.services.renderer.clipped_label(
             frame.layer,

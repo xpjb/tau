@@ -155,6 +155,7 @@ impl Widget for ImageViewer {
         let s = cx.ui.scale;
         self.form.begin_frame();
         self.image = None;
+        frame.layer.above();
         frame.layer.rect(b, color(0x06090d));
         match cx.services.renderer.image_size(&cx.services.gpu, &self.spec.path) {
             Ok((w, h)) => {
@@ -182,6 +183,7 @@ impl Widget for ImageViewer {
                 );
             }
         }
+        frame.layer.above();
         for (i, choice) in
             [Choice::Back, Choice::Smaller, Choice::Fit, Choice::Larger, Choice::Save].into_iter().enumerate()
         {

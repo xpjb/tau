@@ -120,6 +120,7 @@ impl Widget for Dialog {
         }
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
+        frame.layer.above();
         match self {
             Self::Connection(d) => d.visit_perframe(frame, cx),
             Self::Topic(d) => d.visit_perframe(frame, cx),

@@ -102,6 +102,7 @@ impl Tooltip {
         let t = self.progress;
         let pivot = (anchor.x + anchor.width / 2.).clamp(full.x, full.x + full.width);
         let animated = Rect::new(pivot + (x - pivot) * t, if above { y + height * (1. - t) } else { y }, width * t, height * t);
+        layer.above();
         layer.rounded_rect(animated, 8. * scale, color(0xe5e1e6));
         let clip = crate::render::intersect(bounds, Rect::new(animated.x + 6. * scale, animated.y + 6. * scale,
             (animated.width - 12. * scale).max(0.), (animated.height - 12. * scale).max(0.)));

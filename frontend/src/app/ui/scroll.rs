@@ -67,6 +67,7 @@ impl ScrollState {
     }
     pub fn paint(&self, layer: &mut Layer, cx: &mut Context<'_>) {
         if let Some((track, thumb)) = self.thumb(cx.ui.scale) {
+            layer.above();
             let active = self.drag.is_some() || cx.ui.hover.is_some_and(|p| contains(track, p));
             let w = if active { 8. } else { 6. } * cx.ui.scale;
             layer.rounded_rect(

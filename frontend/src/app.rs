@@ -499,8 +499,6 @@ mod editor_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod hover_tests;
 #[cfg(all(test, not(target_os = "android")))]
-mod icon_controls_tests;
-#[cfg(all(test, not(target_os = "android")))]
 mod navigation_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod project_tests;

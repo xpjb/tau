@@ -236,6 +236,7 @@ impl Menu {
         let r = frame.bounds;
         let s = cx.ui.scale;
         self.rect = r;
+        frame.layer.above();
         frame.layer.rounded_rect(r, 8. * s, color(0x36343b));
         let clip = crate::render::intersect(
             Rect::new(r.x + 4. * s, r.y + 4. * s, r.width - 8. * s, (r.height - 8. * s).max(0.)),

@@ -244,6 +244,7 @@ impl Widget for Composer {
         let session = session.as_str();
         let b = frame.bounds;
         let chrome = &mut *frame.layer;
+        chrome.above();
         let s = cx.ui.scale;
         self.controls.begin();
         let in_code = self.in_code;

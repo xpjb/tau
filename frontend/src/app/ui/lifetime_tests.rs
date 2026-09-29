@@ -237,3 +237,64 @@ fn a_download_notice_waits_for_the_form_without_an_expired_wake_loop() {
     assert!(h.app.root.notice.popup.visible(), "The destination can still be followed when the form closes");
     assert_eq!(h.app.controller.notice, Some(notice));
 }
+
+#[test]
+fn opaque_dialog_covers_the_workspace_not_just_its_shapes() {
+    for mobile in [false, true] {
+        let mut h = Harness::new(mobile);
+        h.app.root.workspace.show_chats = true;
+        h.frame();
+        let rect = h.app.root.workspace.sidebar.controls.items.iter()
+            .find(|(_, _, choice)| matches!(choice, super::sidebar::Choice::Settings))
+            .unwrap().1.control.rect.unwrap();
+        let point = center(rect);
+        h.app.press(1, point, mobile); h.app.release(1, point);
+        h.frame();
+        assert!(matches!(h.app.root.dialog, Some(Dialog::Connection(_))));
+        let actual = h.ctx.read_rgba8().unwrap();
+        // An opaque dialog must look identical with or without the workspace's
+        // text, icons and shapes beneath it. No sidebar coordinates or glyph pixels.
+        let bounds = Rect::new(0., 0., h.ctx.size().0 as f32, h.ctx.size().1 as f32);
+        let mut layer = crate::render::Layer::default();
+        h.app.with_ui(|root, cx| root.dialog.as_mut().unwrap().visit_perframe(
+            &mut Frame { layer: &mut layer, bounds, clip: bounds }, cx));
+        h.app.services.renderer.draw(&h.ctx, h.ctx.view(), &[layer]);
+        assert!(actual == h.ctx.read_rgba8().unwrap(), "Opaque dialog leaked lower content (mobile={mobile})");
+        if let Some(dir) = std::env::var_os("TAU_RETAINED_UI_PREVIEW_DIR") {
+            std::fs::create_dir_all(&dir).unwrap();
+            image::save_buffer(std::path::PathBuf::from(dir).join(if mobile { "opaque-phone.png" } else { "opaque-desktop.png" }),
+                &actual, h.ctx.size().0, h.ctx.size().1, image::ColorType::Rgba8).unwrap();
+        }
+    }
+}
+
+#[test]
+fn ordered_surfaces_keep_alpha_and_inherited_clips() {
+    use crate::{icons::Icon, render::{Layer, color, contains}};
+    let h = &mut Harness::new(false);
+    let renderer = &mut h.app.services.renderer;
+    let bounds = Rect::new(20., 20., 160., 80.);
+    let clip = Rect::new(bounds.x, bounds.y, bounds.width / 2., bounds.height);
+    let mut layer = Layer::default();
+    layer.rect(bounds, color(0xff0000));
+    renderer.label(&mut layer, "Lower text", bounds, 20., color(0xffffff), false);
+    renderer.icon(&h.ctx, &mut layer, Icon::Gear,
+        Rect::new(bounds.x + 10., bounds.y + 35., 32., 32.), 0xffffff);
+    renderer.draw(&h.ctx, h.ctx.view(), std::slice::from_ref(&layer));
+    let before = h.ctx.read_rgba8().unwrap();
+    layer.with_clip(clip, |layer| {
+        layer.above();
+        layer.rect(bounds, color(0x0000ff));
+        layer.above();
+        layer.rect(bounds, sanscale::Color([1., 0., 0., 0.5]));
+    });
+    renderer.draw(&h.ctx, h.ctx.view(), &[layer]);
+    let after = h.ctx.read_rgba8().unwrap();
+    let width = h.ctx.size().0 as usize;
+    let sample = &after[((clip.y as usize + 1) * width + clip.x as usize + 1) * 4..][..4];
+    assert!(sample[0] > 0 && sample[2] > 0 && sample[1] == 0, "alpha keeps both upper red and lower blue");
+    for (i, (old, new)) in before.chunks_exact(4).zip(after.chunks_exact(4)).enumerate() {
+        let inside = contains(clip, Vec2::new((i % width) as f32 + 0.5, (i / width) as f32 + 0.5));
+        assert_eq!(new, if inside { sample } else { old }, "surface order or inherited clip at pixel {i}");
+    }
+}

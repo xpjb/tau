@@ -86,11 +86,42 @@ struct Shape {
 #[derive(Default)]
 pub struct Layer {
     rects: Vec<Shape>,
+    boundaries: Vec<(usize, usize, usize)>,
     pub interaction: Interaction,
     pub draws: Vec<Draw>,
     pub images: Vec<(PathBuf, Rect, Rect)>,
 }
+struct PaintBatch<'a> {
+    rects: &'a [Shape],
+    draws: &'a [Draw],
+    images: &'a [(PathBuf, Rect, Rect)],
+}
 impl Layer {
+    /// Start a surface above everything already painted. Within a surface,
+    /// shapes sit below images/text; batching must never cross this boundary.
+    /// Container clipping still applies to every primitive appended by a child.
+    pub fn above(&mut self) {
+        let end = self.end();
+        if end != (0, 0, 0) && self.boundaries.last() != Some(&end) {
+            self.boundaries.push(end);
+        }
+    }
+    fn end(&self) -> (usize, usize, usize) {
+        (self.rects.len(), self.draws.len(), self.images.len())
+    }
+    fn batches(&self) -> impl Iterator<Item = PaintBatch<'_>> {
+        let mut start = (0, 0, 0);
+        self.boundaries.iter().copied().chain(std::iter::once(self.end())).filter_map(move |end| {
+            if start == end { return None; }
+            let batch = PaintBatch {
+                rects: &self.rects[start.0..end.0],
+                draws: &self.draws[start.1..end.1],
+                images: &self.images[start.2..end.2],
+            };
+            start = end;
+            Some(batch)
+        })
+    }
     pub fn new(interaction: Interaction) -> Self {
         Self {
             interaction,
@@ -789,13 +820,14 @@ impl Renderer {
         self.text
             .set_transform(TextService::pixel_ortho(width, height));
         let ndc = |x: f32, y: f32| [x / width as f32 * 2. - 1., 1. - y / height as f32 * 2.];
+        let layers = layers.iter().flat_map(Layer::batches).collect::<Vec<_>>();
         let mut batches = vec![];
         let mut shapes = vec![];
         let mut image_buffers = vec![];
-        for layer in layers {
-            batches.push(self.text.prepare(ctx.device(), ctx.queue(), &layer.draws));
+        for layer in &layers {
+            batches.push(self.text.prepare(ctx.device(), ctx.queue(), layer.draws));
             let mut vertices = vec![];
-            for shape in &layer.rects {
+            for shape in layer.rects {
                 let r = shape.clip;
                 let full = shape.rect;
                 for [x, y] in [

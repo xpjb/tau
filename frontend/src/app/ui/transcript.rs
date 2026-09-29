@@ -663,6 +663,7 @@ impl Transcript {
     }
 }
 fn paint_autoscroll(layer: &mut crate::render::Layer, a: Vec2, s: f32, cx: &mut Context<'_>) {
+    layer.above();
     let radius = 13.5 * s;
     layer.rounded_rect(Rect::new(a.x - radius, a.y - radius, radius * 2., radius * 2.), radius, color(0x67d4ff));
     layer.rounded_rect(
