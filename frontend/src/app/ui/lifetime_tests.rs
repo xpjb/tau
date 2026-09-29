@@ -51,8 +51,11 @@ fn retained_messages_keep_identity_on_streaming_and_prepend_but_not_source_repla
     chat.reconcile();
     h.frame();
     let row =
-        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.row.block.as_deref() == Some("row-119")).unwrap();
+        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == "demo/row-119").unwrap();
     let target = row.control.target;
+    let measured = h.app.services.renderer.message_measurements;
+    h.frame();
+    assert_eq!(h.app.services.renderer.message_measurements, measured, "Idle redraw must not remeasure all loaded messages");
     assert!(h.app.root.workspace.chat.transcript.rows.len() < 40, "Only overscan rows own interaction widgets");
     let chat = h.app.controller.chats.get_mut("demo").unwrap();
     chat.feed.events.get_mut(&120).unwrap().text.push_str(" streamed");
@@ -63,8 +66,9 @@ fn retained_messages_keep_identity_on_streaming_and_prepend_but_not_source_repla
     chat.reconcile();
     h.frame();
     let row =
-        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.row.block.as_deref() == Some("row-119")).unwrap();
+        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == "demo/row-119").unwrap();
     assert_eq!(row.control.target, target);
+    assert!(h.app.services.renderer.message_measurements - measured < 10, "Only changed or newly mounted text is measured");
     let p = center(crate::render::intersect(row.control.rect.unwrap(), row.control.clip));
     h.app.press(1, p, true);
     assert_eq!(h.app.ui.capture.unwrap().target, target);
@@ -74,7 +78,7 @@ fn retained_messages_keep_identity_on_streaming_and_prepend_but_not_source_repla
     assert!(h.app.root.menu.is_none());
     h.frame();
     let replacement =
-        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.row.block.as_deref() == Some("row-119")).unwrap();
+        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == "demo/row-119").unwrap();
     assert_ne!(replacement.control.target, target);
 }
 
@@ -183,7 +187,7 @@ fn captured_transcript_release_crosses_a_sibling_attachment_backdrop() {
         .transcript
         .rows
         .iter()
-        .find(|r| r.row.details.is_empty() && r.control.rect.is_some())
+        .find(|r| matches!(r.item, message_row::ItemId::Message(_)) && r.control.rect.is_some())
         .unwrap();
     let point = center(crate::render::intersect(row.control.rect.unwrap(), row.control.clip));
     h.app.press(30, point, false);
@@ -374,12 +378,37 @@ fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
     });
     h.frame();
     let transcript = &h.app.root.workspace.chat.transcript;
-    assert!(transcript.rows.iter().flat_map(|r| &r.parts).filter(|p| p.line.toggle.is_some())
-        .all(|p| p.control.rect.is_none_or(|r| r.y + r.height < transcript.scroll.rect.y)), "Headings are above the viewport");
+    assert!(transcript.expansion_positions.values().all(|top| *top < transcript.scroll.value), "Headings are above the viewport");
     let chat = &h.app.controller.chats["chat"];
     let plan = source.cache.plan_visible("chat", &chat.local, &[], Some(&transcript.interests)).unwrap();
     let (_, head) = plan.blocks.iter().find(|(id, _)| id == &input).expect("Visible input must request its native body");
     let (_, length, _, cached) = head.unwrap(); assert!(cached < length);
     source.body(&input);
     assert_eq!(source.cache.snapshot("chat").unwrap().unwrap().snapshot.events.iter().find(|e| e.id == tool.id).unwrap().text, tool.text);
+}
+
+#[test]
+fn native_handoff_keeps_the_actual_message_control_and_authored_text() {
+    let mut h = Harness::new(false);
+    let mut source = crate::blocks::tests::Fixture::new();
+    let mut session = h.app.controller.account.sessions[0].clone(); session.id = "chat".into();
+    h.app.controller.account.sessions.push(session); h.app.controller.select("chat").unwrap();
+    h.app.controller.account.source_lineage = Some(source.lineage.clone());
+    h.app.controller.draft("One **authored** message".into()).unwrap(); h.app.controller.send_prompt().unwrap();
+    let request = h.app.controller.chats["chat"].local.pending[0].request.id.clone();
+    let key = format!("message:chat:{request}");
+    h.frame();
+    let target = h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == key).unwrap().control.target;
+    let meta = serde_json::json!({"event":{"id":"canonical","entryId":"canonical","order":0,"phase":"saved",
+        "origin":{"requestId":request},"role":"user","kind":"text","text":"","isError":false}});
+    source.put("canonical", None, 0, tau_protocol::blocks::BlockKind::Text, meta, b"One **authored** message");
+    source.page(None, None); source.body("canonical");
+    let chat = h.app.controller.chats.get_mut("chat").unwrap();
+    let delivered = chat.feed.native_view(source.cache.snapshot("chat").unwrap().unwrap()).unwrap();
+    chat.local.reconcile_complete(&chat.feed.queue, &delivered, &chat.feed.incomplete); chat.reconcile();
+    h.frame();
+    let transcript = &h.app.root.workspace.chat.transcript;
+    assert_eq!(transcript.rows.iter().find(|r| r.key == key).unwrap().control.target, target);
+    assert_eq!(h.app.services.renderer.messages[&key].source, crate::app::literal("One **authored** message"));
+    assert!(transcript.interests.contains("canonical"));
 }

@@ -238,6 +238,7 @@ pub struct Renderer {
     scenes: HashMap<String, (tau_markdown::Scene, Rect)>,
     pub selection: Option<Selection>,
     message_order: Vec<String>,
+    #[cfg(test)] pub message_measurements: usize,
     tooltip_labels: HashMap<&'static str, crate::tooltip::text::RichLabel>,
 }
 impl Renderer {
@@ -368,6 +369,7 @@ impl Renderer {
             scenes: HashMap::new(),
             selection: None,
             message_order: vec![],
+            #[cfg(test)] message_measurements: 0,
             tooltip_labels: HashMap::new(),
         })
     }
@@ -479,6 +481,7 @@ impl Renderer {
             color: color(crate::tooltip::INK), paint: label.paint, clip: Some(intersect(rect, clip)) });
     }
     pub fn message_height(&mut self, key: &str, source: &str, width: f32, size: f32) -> f32 {
+        #[cfg(test)] { self.message_measurements += 1; }
         self.message_order.push(key.to_owned());
         let message = self.messages.entry(key.into()).or_insert_with(|| {
             let namespace = self.next_namespace;
@@ -635,6 +638,9 @@ impl Renderer {
             })
             .collect::<Vec<_>>();
         Some(parts.join("\n\n"))
+    }
+    pub(crate) fn order_messages(&mut self, keys: impl Iterator<Item = String>) {
+        self.message_order = keys.collect();
     }
     pub fn retain_messages(&mut self, keys: &std::collections::HashSet<String>) {
         if self

@@ -86,13 +86,13 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After model message ownership, frontend Rust is **26,684 raw / 32,291 same-format**:
-production **18,982 / 21,646**, tests **7,702 / 10,645**. Outside growth remains
-**92 / 127** (production **56 / 90**, tests **36 / 37**).
-The **charged reduction is 949 / 600**, with **4,051 / 4,400 remaining**.
-Charged production is **136 raw smaller / 152 same-format larger**. The model
-migration has not yet produced normalized production savings; 041 must delete the
-remaining description pipeline, not keep this transitional presentation consumer.
+After deleting the rich projection/Row/Line path, frontend Rust is **26,460 raw /
+32,505 same-format**: production **18,773 / 21,861**, tests **7,687 / 10,644**.
+Outside growth remains **92 / 127** (production **56 / 90**, tests **36 / 37**).
+The **charged reduction is 1,173 / 386**, with **3,827 / 4,614 remaining**.
+Charged production is **345 raw smaller / 367 same-format larger**. The direct
+owner replacement has not delivered normalized production savings; this is not
+simplification acceptance and formatting compression is not credit.
 Deltas below use reduction-positive values and show raw / same-format:
 
 | Slice / commit | Deleted path | Replacement cost | Net production reduction | Net test reduction | Outside charge | Cumulative / remaining |
@@ -109,6 +109,8 @@ Deltas below use reduction-positive values and show raw / same-format:
 | 039 explicit body state | Length-only map; injected/reversed authored placeholders; obsolete attachment Row test | Shared body identity, separate preview availability and native literal/version regression | −15 / −32 frontend | +4 / −6 frontend | +15 / +21 production; cumulative 92 / 127 | Charged reduction 848 / 678; gap 4,152 / 4,322 |
 
 | 040 model message ownership | Paint-time reconciliation, own-message GPU/Row matrix | ID-only Feed ownership, Controller update hooks and native handoff test; transitional presentation consumes it | +107 / −88 | −6 / +10 | 0 new | Charged reduction 949 / 600; gap 4,051 / 4,400 |
+
+| 041 direct retained transcript | projection.rs, rich Row, Line, Tools::lines, Part reconstruction and per-frame body measurement | Concrete native tool/message owners, ID/height cache and actual handoff/measurement checks | +209 / −215 | +15 / +1 | 0 new (Hash derives have zero line delta) | Charged reduction 1,173 / 386; gap 3,827 / 4,614 |
 
 Outside-code measurement compares every tracked Rust source in `daemon` and
 `protocol` with the same counter/formatter and reviewed test boundaries in the

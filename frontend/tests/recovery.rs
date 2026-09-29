@@ -419,6 +419,11 @@ fn accepted_queue_edit_retains_optimistic_text_until_complete_replication_after_
     chat.feed.queue=QueueState::native();chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:1,kind:"steer".into(),text:"new".into(),images:0,timestamp_ms:None});
     chat.feed.incomplete.insert("queued:queued".into());
     chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);assert_eq!(chat.local.pending.len(),1);
+    chat.reconcile();
+    let id=tau_frontend::feed::MessageId::Request("queued".into());
+    assert_eq!(chat.feed.order, [id.clone()]);
+    assert_eq!(chat.feed.messages[&id].text(&chat.feed,&chat.local),"new complete text");
+    assert_eq!(chat.feed.messages[&id].intent.as_deref(),Some("edit"));
     chat.feed.queue.requests[0].text="new complete text".into();chat.feed.incomplete.clear();
     chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);assert!(chat.local.pending.is_empty());
 }

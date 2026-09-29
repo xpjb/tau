@@ -171,8 +171,12 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
         .unwrap();
     c.draft("queued café 😀".repeat(4096)).unwrap();
     c.send_prompt().unwrap();
+    let queued_request = c.selected().unwrap().local.pending.last().unwrap().request.id.clone();
     until(&mut c, |c| {
-        c.selected().unwrap().feed.queue.requests.len() == 1
+        let feed = &c.selected().unwrap().feed;
+        feed.queue.requests.first().is_some_and(|q| q.request_id == queued_request)
+            && !feed.queue_transitions.contains_key(&queued_request)
+            && !feed.incomplete.contains(&format!("queued:{queued_request}"))
     })
     .await;
     let queued = c.selected().unwrap().feed.queue.requests[0].clone();

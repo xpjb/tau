@@ -35,7 +35,7 @@ pub struct BlockHeader {
 
 /// A body address is meaningful only within its source lineage and chat scope.
 /// Availability belongs to the reader, not this immutable native identity.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BodyRef {
     pub source: String,
     pub scope: String,

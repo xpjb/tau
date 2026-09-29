@@ -1154,8 +1154,7 @@ impl Controller {
         // cache. Native views fetch missing bytes as an explicit copy interest.
         if !self.remote.has_snapshot(scope)? {
             let chat=self.chats.get(scope).context("Unknown chat")?;
-            let tools=crate::details::Tools::new(chat.feed.events.values(), &chat.feed.parents);
-            self.copied=Some(tools.copy(&ids.iter().filter_map(|id|chat.feed.event(id)).collect::<Vec<_>>()));
+            self.copied=Some(crate::details::copy(&ids.iter().filter_map(|id|chat.feed.event(id)).collect::<Vec<_>>(), chat.feed.events.values(), &chat.feed.parents));
         } else {
             self.copy=Some((scope.into(),ids));self.notice=Some("Fetching details to copy…".into());
             self.watch_blocks()?;

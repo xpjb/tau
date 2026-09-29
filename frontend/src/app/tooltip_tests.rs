@@ -69,7 +69,7 @@ fn rich_tooltips_fit_desktop_phone_and_scaled_phone_without_clipping() {
 
         app.root.tooltips.usage = Tooltip::default(); app.root.workspace.show_chats = true;
         let session = app.controller.account.sessions.iter_mut().find(|s|s.id=="two").unwrap();
-        session.updated_at_ms = clock::now_ms().unwrap() - 52 * 60_000;
+        session.updated_at_ms = crate::clock::now_ms().unwrap() - 52 * 60_000;
         app.root.tooltips.target = Info::CacheTtl("two".into());
         app.root.tooltips.info.pinned = true; app.root.tooltips.info.progress = 1.;
         app.frame(&ctx,ctx.view());

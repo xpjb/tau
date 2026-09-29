@@ -17,7 +17,7 @@ impl MessageId {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MessageBody { Remote(String), Queue(String), Local(String) }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
@@ -51,6 +51,7 @@ pub struct Feed {
     pub incomplete: HashSet<String>,
     pub block_states: HashMap<String,blocks::ToolState>,
     pub parents: HashMap<String,String>,
+    pub children: HashMap<String, Vec<String>>,
     pub before: Option<u64>,
     pub synchronized: bool,
     pub loading: bool,
@@ -109,6 +110,10 @@ impl Feed {
                 event: None, queue: Some(q.request_id.clone()), intent: pending.or(original).map(|p| p.request.id.clone()),
                 body: editing.or(original).map_or_else(|| MessageBody::Queue(q.request_id.clone()), |p| MessageBody::Local(p.request.id.clone())),
             });
+        }
+        self.children.clear();
+        for e in self.events.values() {
+            if let Some(parent) = self.parents.get(&e.id) { self.children.entry(parent.clone()).or_default().push(e.id.clone()); }
         }
         self.order = order;
         self.messages = messages;

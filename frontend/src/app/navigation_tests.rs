@@ -176,6 +176,7 @@ fn dismiss_replacement_failure_and_stale_destinations_do_not_navigate() {
         assert_eq!(h.app.controller.account.selected.as_deref(), Some("two"));
     }
     h.app.controller.chats.get_mut("demo").unwrap().feed.events.retain(|_, e| e.entry_id != "entry-20");
+    h.app.controller.chats.get_mut("demo").unwrap().reconcile();
     h.complete("entry-20"); h.click_notice(false);
     assert!(h.app.root.workspace.chat.transcript.download.is_none());
     assert_eq!(h.app.controller.notice.as_deref(), Some("The download widget is no longer available in this chat."));

@@ -1,8 +1,6 @@
 use crate::{
-    clock,
     connection::{COUNTER_REFRESH, CounterTicker},
     controller::Controller,
-    details::{Line as DetailLine, Tools},
     editor::Editor,
     icons::Icon,
     render::{Layer, Renderer, color, contains},
@@ -25,7 +23,6 @@ use tau_protocol::*;
 
 mod attachments;
 mod notices;
-mod projection;
 use crate::notice::DownloadTarget;
 mod mobile_input;
 mod ui;
@@ -48,31 +45,6 @@ impl Info {
     }
 }
 
-#[derive(Clone)]
-struct Row {
-    block: Option<String>, // Native interest, independent of the stable display identity.
-    details: Vec<DetailLine>,
-    header: bool,
-    key: String,
-    title: String,
-    timestamp: String,
-    sender: EventRole,
-    source: String,
-    user: bool,
-    error: bool,
-    actions: Vec<(String, ui::MenuChoice)>,
-    attachment: Option<(String, ChatAttachment)>,
-}
-impl Row {
-    fn joins(&self, next: Option<&Self>) -> bool {
-        next.is_some_and(|row| self.sender == row.sender)
-    }
-}
-struct Placed {
-    key: String,
-    top: f32,
-    height: f32,
-}
 
 struct Pointer {
     id: u64,

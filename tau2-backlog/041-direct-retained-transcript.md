@@ -62,3 +62,38 @@ Keep a compact native-seeded transcript integration scenario and model/renderer
 checks at their real boundaries. Delete rich-Row/part-key assumptions and redundant
 GPU matrices under 042. Publish the removed path inventory and net counts; if the
 change is another adapter or only moves code, it is not complete.
+
+## Rich projection removed — September 29, 2026
+
+Deleted `app/projection.rs`, `app.rs::Row`, `details::Line`, `Tools::lines`,
+`MessageRow.row`, whole-row cloning and Part reconstruction. Complete Copy is now
+an explicit formatting function, not the surviving UI builder. Feed supplies IDs
+and body ownership; Transcript groups only child identities and retains a lightweight
+height/text-key index. Real message, Details disclosure, thinking and tool owners
+are independently virtualized (a huge Details group no longer retains all its
+controls). Tools directly own Input/Output disclosures/text controls and use native
+children; text under an offscreen heading still requests its native root.
+
+Renderer Markdown/shaping/selection documents remain the text owner. Model/width
+changes invalidate measurements by content/availability/disclosure signature;
+hover/idle does not reassemble or remeasure loaded bodies. A counter on the actual
+renderer measurement call verifies zero idle measurement and bounded changed-text
+work in the existing retained-identity case. A compact native handoff smoke checks
+the actual control, literal authored source and canonical interest, not another
+transition matrix. Selection/order, prepend, navigation and source-cancellation
+coverage remain. Persisted Details keys still resolve before rebasing an anchor.
+
+Queue-edit logical assertions now live in the existing restart/recovery test;
+removed their extra GPU/Row assertion. Removed obsolete Line assertions rather
+than porting them to the new controls. The real-daemon integration exposed a fixture
+race: its `queue.len()==1` wait sometimes selected the previous synchronizing `hold`
+row, then tried to edit that deleted request. The wait now requires the new original
+request ID, complete body and no removal barrier, like the real action eligibility.
+No production revision fence was weakened to make this pass.
+
+Fresh **195/195 frontend tests**, zero skipped, pass
+(`e0984339-948c-45be-afcc-b7f96f072832`), including native two-client/daemon and the
+new actual handoff. Compiler checks pass. The source deletion is real, but the
+replacement costs **214 normalized lines** (raw saves 224); it does not meet the
+simplification gate. Legacy fixture update/page retirement, event-boundary cleanup,
+remaining pruning and final cross-platform/physical acceptance remain open.

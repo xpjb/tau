@@ -94,15 +94,6 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
         "**Sec"
     );
     let initial_height = fragment.view.height;
-    let rows = projection::rows(&app.controller, "demo");
-    assert_eq!(
-        rows[1]
-            .details
-            .iter()
-            .filter(|line| line.key.starts_with("thinking:"))
-            .count(),
-        2
-    );
     assert!(matches!(
         app.services.renderer.messages["demo/thinking:thinking-next"]
             .doc
@@ -193,5 +184,4 @@ fn live_summary_sections_are_distinct_markdown_blocks_before_and_after_save() {
         "Second step"
     );
     assert_eq!(fragment.view.height, heading_height);
-    assert_eq!(projection::rows(&app.controller, "demo")[1].details[1].source, thinking.text);
 }

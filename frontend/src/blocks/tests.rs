@@ -91,10 +91,6 @@ fn disclosure_interests_are_per_group_and_large_input_is_explicit() {
     let plan=f.cache.plan("chat",&local,&[]).unwrap();
     assert!(!plan.parents.contains(&Some("a".into())));assert!(plan.parents.contains(&Some("b".into())));
     assert!(!plan.blocks.iter().any(|(id,_)|id.ends_with("/input")));
-    let view=f.cache.snapshot("chat").unwrap().unwrap();
-    let tools=crate::details::Tools::new(view.snapshot.events.iter(), &view.parents).with_bodies(&view.bodies).with_states(&view.states);
-    let lines=tools.lines(&[view.snapshot.events.iter().find(|e|e.id=="b").unwrap()],&local);
-    assert!(lines.iter().any(|line|line.label=="Input" && line.toggle==Some(false)),"An unfetched input still has an expansion control");
     local.expansion.insert("tool:b:Input".into(),true);
     let plan=f.cache.plan("chat",&local,&[]).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="b/input"));assert!(!plan.blocks.iter().any(|(id,_)|id=="a/input"));
     let plan=f.cache.plan("chat",&LocalChat::default(),&["a".into()]).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="a/input"));
@@ -233,15 +229,8 @@ fn native_tool_membership_preserves_provider_ids_for_display_copy_and_demand() {
     let view=f.cache.snapshot("chat").unwrap().unwrap();
     assert!(view.snapshot.events.iter().all(|e|e.tool_call_id.as_deref()==Some("provider-reused")),
         "Native membership must not rewrite provider metadata");
-    let tools=crate::details::Tools::new(view.snapshot.events.iter(), &view.parents);
-    let group=["a","b","orphan"].map(|id|view.snapshot.events.iter().find(|e|e.id==id).unwrap());
     let mut local=LocalChat {details_default:true,..Default::default()};
     local.expansion.extend([("tool:a".into(),true),("tool:b".into(),true),("tool:a:Error".into(),true),("tool:b:Output".into(),true)]);
-    let lines=tools.lines(&group,&local);
-    let output=|key|lines.iter().find(|line|line.key==key).unwrap().source.as_str();
-    assert!(output("tool:a:Error:text").contains("first") && output("tool:a:Error:text").contains("failure"));
-    assert!(!output("tool:a:Error:text").contains("second"));
-    assert!(output("tool:b:Output:text").contains("second"));
     let copied=f.cache.copy_ready("chat",&["a".into()]).unwrap().unwrap();
     assert!(copied.contains("Output\nfirst") && copied.contains("Error\nfailure"));
     assert!(!copied.contains("second") && !copied.contains("alone"));

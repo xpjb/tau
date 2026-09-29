@@ -17,7 +17,7 @@ pub const QUEUE: &str = "@queue";
 pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub bodies:HashMap<String,Body>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,ToolState>, pub parents:HashMap<String,String> }
 /// Verified preview state, separate from both authored bytes and finality.
 /// None means the body directory/header has not arrived, not a completed empty body.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct Body {
     pub reference: Option<BodyRef>,
     pub resident: u64,
@@ -291,9 +291,8 @@ impl Cache {
         let mut seen=BTreeSet::new();let ids=ids.iter().filter(|id|seen.insert(*id)).cloned().collect::<Vec<_>>();let ids=ids.as_slice();
         if !copy_complete(&self.db.lock().unwrap(),scope,ids)? {return Ok(None);}
         let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false,true)?.context("Details are not cached")?;
-        let tools=crate::details::Tools::new(view.snapshot.events.iter(), &view.parents);
         let group=ids.iter().filter_map(|id|view.snapshot.events.iter().find(|e|&e.id==id)).collect::<Vec<_>>();
-        let text=tools.copy(&group);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
+        let text=crate::details::copy(&group, view.snapshot.events.iter(), &view.parents);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
     }
     pub fn history_cursor(&self, scope: &str) -> Result<Option<FeedPosition>> {
         Ok(tau_blocks::cached_feed(&self.db.lock().unwrap(),scope,None)?.and_then(|p|p.before))

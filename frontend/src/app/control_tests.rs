@@ -3,7 +3,7 @@ use chad::{Config, HeadlessCtx};
 use std::sync::Arc;
 
 #[test]
-fn queue_controls_follow_run_state_and_pending_edits_stay_with_their_message() {
+fn queue_controls_follow_run_state() {
     use ui::composer::Choice as Composer;
     use ui::header::Choice as Header;
     let root = tempfile::tempdir().unwrap();
@@ -19,41 +19,6 @@ fn queue_controls_follow_run_state_and_pending_edits_stay_with_their_message() {
         app.frame(&ctx, ctx.view());
     };
     frame(&mut app);
-    let chat = app.controller.chats.get_mut("demo").unwrap();
-    chat.feed.queue.requests.push(QueuedRequest {
-        request_id: "queued".into(),
-        revision: 0,
-        kind: "steer".into(),
-        text: "old text".into(),
-        images: 0,
-        timestamp_ms: None,
-    });
-    chat.local.pending.push(crate::store::Pending {
-        request: ClientRequest {
-            id: "edit".into(),
-            command: ClientCommand::QueueControl {
-                session_id: "demo".into(),
-                generation: "demo".into(),
-                operation: QueueOperation::Edit { request_id: "queued".into(), revision: 0, text: "new text".into() },
-            },
-        },
-        started_at_ms: None,
-        text: "new text".into(),
-        files: vec![],
-        status: crate::store::Delivery::Sending,
-        detail: None,
-    });
-    chat.reconcile();
-    let rows = projection::rows(&app.controller, "demo");
-    assert!(
-        rows.iter()
-            .any(|r| r.key == "message:demo:queued" && r.source == literal("new text") && r.title.contains("saving"))
-    );
-    assert!(!rows.iter().any(|r| r.key == "pending:edit"));
-    let chat = app.controller.chats.get_mut("demo").unwrap();
-    chat.local.pending.clear();
-    chat.feed.queue.requests.clear();
-    chat.reconcile();
     assert!(app.root.workspace.chat.header.controls.placed().any(|(a, _)| matches!(a, Header::Abort)));
     app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().status = SessionStatus::Idle;
     let queue = &mut app.controller.chats.get_mut("demo").unwrap().feed.queue;
