@@ -389,8 +389,7 @@ mod tests {
         event.text = "Loading…".into();
         event.attachment = Some(file(Some(1024)));
         feed.incomplete.insert(event.id.clone());
-        let row = app
-            .rows("demo")
+        let row = projection::rows(&app.controller, "demo")
             .into_iter()
             .find(|row| row.key == "demo/event-0")
             .unwrap();

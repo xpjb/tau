@@ -83,11 +83,6 @@ impl Transcript {
             for part in &mut row.parts { part.control.ripple = None; }
         }
     }
-    pub fn set_scroll(&mut self, value: f32, cx: &mut Context<'_>) {
-        self.download = None;
-        self.scroll.set(value);
-        self.remember_scroll(cx);
-    }
     pub fn remember_scroll(&mut self, cx: &mut Context<'_>) {
         if self.download.is_some()
             || self.binding.as_ref().is_none_or(|(identity, lineage, session)| {

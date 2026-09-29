@@ -1,6 +1,6 @@
 # 042 — Delete brittle/redundant tests and their compatibility code
 
-Status: **Selected; starts immediately and accompanies every slice.** Supersedes
+Status: **In progress: cosmetic matrices, global test action adapter and old scroll scenario retired; model/transcript coverage consolidation remains.** Supersedes
 old 034's “preserve all assertions” policy. No coverage-percentage or test-count
 quota. Fewer tests with stronger guarantees is the intended result.
 
@@ -77,8 +77,9 @@ frontend test code is 8,551 raw / 11,434 same-format lines; app/UI test code occ
 - **037 controls:** existing clip/control case also checks a disabled foreground
   Form consumes without an action. Ripple timing still checks elapsed-time fade
   and idle behavior, no longer an obsolete string-key check.
-- `test_ui.rs` remains, minus the obsolete ripple/section forwarders. It is **not
-  deleted yet**; the rest of 042 and its 2,000-line test allocation are still open.
+- At the 037-controls checkpoint `test_ui.rs` remained, minus obsolete ripple/section
+  forwarders. Its later full deletion is recorded below; the 2,000-line test
+  allocation and broader 042 audit remain open.
 
 ### 037 ownership retirement
 
@@ -123,3 +124,42 @@ across 10 binaries, zero skipped** (`c5568c42-b06e-49e2-b482-eb19fa8b5115`).
 Net reduction from `55c11f0`: production **5 / 5**, tests **105 / 171**, total
 **110 / 176** raw / same-format. Cumulative reduction is **405 / 400**, not the
 5,000-line acceptance gate. No physical device check is claimed.
+
+### Global test action adapter retired — September 29, 2026
+
+Deleted **`app/test_ui.rs`**, `FixtureChoice`, `PlacedControl`, App's global
+`placed_controls` reconstruction, action-conversion/fixture dispatch and forwarding
+methods. Form/navigation setup now calls the real owner; pointer assertions use
+real placed controls with their existing local choice types. One test-only
+`Controls::placed` iterator filters that owner's enabled clipped controls. It is
+not another App-wide action registry, does not translate choices and constructs
+no shadow tree. The composer IME case now actually taps its field; quota pinning
+actually clicks its indicator.
+
+Deleted the explicitly unwanted **`app/scroll_tests.rs`** now rather than port its
+199-line scenario to another selector API. Existing download-navigation cases keep
+source/chat/draft and pending-destination checks; deliberate cancellation now uses
+a real wheel event, not a test-only `set_scroll` method. Deleted that method and
+the unused App composer-replacement forwarder. 041's reading-state ownership
+review and any genuinely missing compact owner assertions are still required;
+this deletion does not declare the scrolling audit complete.
+
+Reduced the queue-control test to one actual owner/state case. Deleted fixed
+Stop/Resume/Cancel/editor geometry, glyph inequality and conditional-overlap
+assertions. Kept pending edit display identity, correct run/control IDs and actual
+offline disabled state. Removed file-header gap / exit-button spacing assumptions;
+real browser exit, selection, preview, callback/source and IME behavior survives.
+The replacement control test was formatted before counting; formatting compression
+is not part of its reported reduction.
+
+Found a false-positive stale-download check: the old fixture selector was unsupported
+and always returned an error, without reaching navigation validation. The existing
+case now calls `open_download_notice` for wrong account/source/deleted-chat targets.
+No runtime fence was claimed fixed by changing that test. Also removed the leaked
+fixture-type name from the actual saved-intent dialog title.
+
+Validation: frontend all-target check and **194/194 tests across 10 binaries,
+zero skipped** (`b9c64ab1-9068-4fb0-a0ca-677d5740cd71`). Net reduction from
+`873b3c0`: production **8 / 8**, tests **552 / 464**, total **560 / 472** raw /
+same-format. No new outside code. Charged cumulative reduction is **874 / 737**;
+most of the required production/projection simplification still remains.

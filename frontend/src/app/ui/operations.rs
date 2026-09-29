@@ -69,7 +69,7 @@ impl OperationDialog {
                 (format!("Open link?\n{url}"), None, "Open")
             }
             Operation::Outbox(_) => ("Saved immutable actions".into(), None, ""),
-            Operation::Inspect(key) => (format!("FixtureChoice {key}"), None, ""),
+            Operation::Inspect(key) => (format!("Saved intent {key}"), None, ""),
             Operation::ForgetControl(_) => ("Forget this saved intent? This does NOT undo or cancel a daemon action.".into(), None, "Forget locally"),
             Operation::ForgetRecovered(_) => ("Forget this local chat, its drafts and files? This does not undo or cancel source work. Saved daemon actions remain in Settings.".into(), None, "Forget local chat"),
             Operation::Review(_) => ("Restored history may omit external effects or paid work. Inspect those outcomes first. This acknowledgment only permits future explicit execution; it does not resume or resend anything.".into(), None, "Allow future explicit execution"),

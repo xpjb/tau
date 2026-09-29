@@ -168,7 +168,7 @@ fn context_hover_and_pinned_card_show_native_codex_account_quota_not_context_cap
     assert!(app.root.tooltips.usage.progress>0.99,"Context hover opens the quota card");
     assert!(app.root.tooltips.usage.content.text.contains("Codex quota · pro · last known\n5-hour · 74% remaining\nResets in 2m"));
     assert!(app.root.tooltips.usage.content.text.contains("Context · ~9% used"),"The context gauge is independent");
-    app.fixture(FixtureChoice::Usage).unwrap();app.hover(None);app.tick(0.);app.frame(&ctx,ctx.view());
+    app.press(1,point,false);app.release(1,point);app.hover(None);app.tick(0.);app.frame(&ctx,ctx.view());
     assert!(app.root.tooltips.usage.pinned && app.root.tooltips.usage.progress>0.99,"Pinned cards retain the quota on desktop and touch");
     app.controller.epoch=Some(1);
     app.controller.codex_usage.in_flight=Some(("pending".into(),Instant::now()));
@@ -293,16 +293,17 @@ fn saved_actions_and_restore_warning_fit_mobile_and_preserve_intents() {
         let mut app=App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),size.0<500).unwrap();app.back();app.resize(ctx.size(),1.,Vec2::new(0.,0.));
         for n in 0..12 {let id=format!("saved-{n:02}");app.controller.account.pending_controls.insert(id.clone(),PendingControl {request:ClientRequest {id,command:ClientCommand::RenameSession {session_id:"chat".into(),title:"Owned title".into()}},deleted_chats:vec![],blocked:true,accepted:false});}
         app.controller.store.put(&app.controller.identity,"account",&app.controller.account).unwrap();
-        for action in [FixtureChoice::Settings,FixtureChoice::Outbox(0),FixtureChoice::Outbox(1),FixtureChoice::InspectControl("saved-00".into()),FixtureChoice::ReviewRestore("chat".into())] {
-            app.fixture(action).unwrap();app.tick(0.);app.frame(&ctx,ctx.view());
-            let rects = if let Some(dialog) = &app.root.dialog {
-                dialog.buttons().into_iter().map(|(_, rect)| rect).chain(dialog.fields().into_iter().filter_map(|field| field.control.rect)).collect::<Vec<_>>()
-            } else { app.placed_controls().iter().map(|hit| hit.rect).collect() };
+        for spec in [ui::DialogSpec::Connection,ui::DialogSpec::Operation(ui::Operation::Outbox(0)),
+            ui::DialogSpec::Operation(ui::Operation::Outbox(1)),ui::DialogSpec::Operation(ui::Operation::Inspect("saved-00".into())),
+            ui::DialogSpec::Operation(ui::Operation::Review("chat".into()))] {
+            app.open_ui(spec).unwrap();app.tick(0.);app.frame(&ctx,ctx.view());
+            let dialog=app.root.dialog.as_ref().unwrap();
+            let rects=dialog.buttons().into_iter().map(|(_, rect)| rect).chain(dialog.fields().into_iter().filter_map(|field| field.control.rect));
             for rect in rects { assert!(rect.y >= 0. && rect.y + rect.height <= size.1 as f32, "Unreachable modal action at {rect:?}"); }
         }
         let ui::Dialog::Operation(modal)=app.root.dialog.as_ref().unwrap() else { panic!("operation dialog"); };let width=(size.0 as f32-24.).min(620.)-40.;assert!(app.services.renderer.label_height(&modal.title,width,17.,true)>60.,"Fixture must exercise the complete multi-line warning");
         if size.0<500 {image::save_buffer("/tmp/tau2-restore-mobile.png",&ctx.read_rgba8().unwrap(),size.0,size.1,image::ColorType::Rgba8).unwrap();}
-        app.fixture(FixtureChoice::ForgetControl("saved-00".into())).unwrap();
+        app.open_ui(ui::DialogSpec::Operation(ui::Operation::ForgetControl("saved-00".into()))).unwrap();
         app.tick(0.); app.frame(&ctx, ctx.view());
         assert_eq!(app.controller.account.pending_controls.len(), 12);
         let rect = app.root.dialog.as_ref().unwrap().button("Forget locally").unwrap();

@@ -74,16 +74,19 @@ fn download_notice_selects_current_topic_chat_and_exact_widget_on_desktop_and_ph
     for (size, scale, mobile, name) in [((1000, 800), 1., false, "desktop"), ((360, 720), 1., true, "phone"), ((900, 1800), 2.5, true, "scaled-phone")] {
         let mut h = Harness::new(size, scale, mobile);
         h.frame();
-        h.app.fixture(FixtureChoice::Select("two".into())).unwrap(); h.frame();
+        h.app.with_ui(|root, cx| root.workspace.navigate_chat("two", cx)).unwrap(); h.frame();
         h.app.controller.draft("Keep my other chat's draft".into()).unwrap();
-        h.app.set_transcript_scroll(h.app.root.workspace.chat.transcript.scroll.max * 0.4); h.app.save().unwrap();
+        h.app.with_ui(|root,cx| {
+            let transcript=&mut root.workspace.chat.transcript;
+            transcript.scroll.set(transcript.scroll.max * 0.4);transcript.remember_scroll(cx);
+        }); h.app.save().unwrap();
         let position = h.app.controller.chats["two"].local.position.clone();
         h.complete("entry-20");
         // Membership is resolved on click, not captured when the save finishes.
         h.app.controller.account.projects.push(Project { id: "moved".into(), name: "Moved files".into(), prompt: String::new(), revision: 1 });
         h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().project_id = "moved".into();
         h.app.root.workspace.attachments.show = true;
-        h.app.fixture(FixtureChoice::Delete("two".into())).unwrap(); h.frame();
+        h.app.open_ui(ui::DialogSpec::Operation(ui::Operation::Delete("two".into()))).unwrap(); h.frame();
         assert!(h.app.root.notice.body.rect.is_none(),
             "A download notification must not navigate away from an open form");
         assert!(h.app.controller.notice.as_ref().is_some_and(|n| n.download.is_some()));
@@ -102,7 +105,7 @@ fn download_notice_selects_current_topic_chat_and_exact_widget_on_desktop_and_ph
         }
         // Reselecting this same chat still navigates, and identical names/locations
         // do not alias two different widgets.
-        h.app.fixture(FixtureChoice::Tail).unwrap(); h.frame();
+        h.app.with_ui(|root, cx| root.workspace.chat.transcript.tail(cx)); h.frame();
         h.complete("entry-45"); h.click_notice(false); h.assert_target_visible("entry-45");
     }
 }
@@ -111,7 +114,7 @@ fn download_notice_selects_current_topic_chat_and_exact_widget_on_desktop_and_ph
 fn download_destination_survives_empty_loading_and_multiple_older_pages() {
     let mut h = Harness::new((420, 780), 1., true);
     let events = h.app.controller.chats["demo"].feed.events.values().cloned().collect::<Vec<_>>();
-    h.app.fixture(FixtureChoice::Select("two".into())).unwrap(); h.frame();
+    h.app.with_ui(|root, cx| root.workspace.navigate_chat("two", cx)).unwrap(); h.frame();
     h.app.controller.chats.get_mut("demo").unwrap().feed = crate::feed::Feed::default();
     h.complete("entry-20"); h.click_notice(false);
     assert!(h.app.root.workspace.chat.transcript.download.is_some(), "An empty cache is not a deleted widget");
@@ -138,23 +141,24 @@ fn download_destination_survives_empty_loading_and_multiple_older_pages() {
     h.app.controller.chats.get_mut("demo").unwrap().feed = crate::feed::Feed::default();
     h.complete("entry-20"); h.click_notice(false);
     assert!(h.app.root.workspace.chat.transcript.download.is_some());
-    h.app.set_transcript_scroll(0.);
+    let rect=h.app.root.workspace.chat.transcript.scroll.rect;
+    h.app.wheel(100.,false,Vec2::new(rect.x+rect.width/2.,rect.y+rect.height/2.));
     assert!(h.app.root.workspace.chat.transcript.download.is_none());
     h.complete("entry-20"); h.click_notice(false);
-    h.app.fixture(FixtureChoice::Select("two".into())).unwrap();
+    h.app.with_ui(|root, cx| root.workspace.navigate_chat("two", cx)).unwrap();
     assert!(h.app.root.workspace.chat.transcript.download.is_none());
 }
 
 #[test]
 fn dismiss_replacement_failure_and_stale_destinations_do_not_navigate() {
     let mut h = Harness::new((1000, 800), 1., false);
-    h.app.fixture(FixtureChoice::Select("two".into())).unwrap(); h.frame();
+    h.app.with_ui(|root, cx| root.workspace.navigate_chat("two", cx)).unwrap(); h.frame();
     h.complete("entry-20"); h.click_notice(true);
     assert_eq!(h.app.controller.account.selected.as_deref(), Some("two"));
     assert!(h.app.controller.notice.is_none());
     h.complete("entry-20");
     h.app.controller.notice = Some("An unrelated error".into()); h.frame();
-    assert!(!h.app.placed_controls().iter().any(|hit| matches!(hit.action, FixtureChoice::OpenDownloadNotice(_))));
+    assert!(h.app.controller.notice.as_ref().unwrap().download.is_none());
     h.click_notice(true);
     h.app.begin_save("demo", "entry-20", h._root.path().join("cached"), "same-name.zip".into());
     h.app.services.platform.clear();
@@ -165,7 +169,7 @@ fn dismiss_replacement_failure_and_stale_destinations_do_not_navigate() {
     for stale in [DownloadTarget { identity: "other-account".into(), ..target.clone() },
         DownloadTarget { lineage: "other-source".into(), ..target.clone() },
         DownloadTarget { session: "deleted-chat".into(), ..target.clone() }] {
-        assert!(h.app.fixture(FixtureChoice::OpenDownloadNotice(stale)).is_err());
+        assert!(h.app.open_download_notice(stale).is_err());
         assert_eq!(h.app.controller.account.selected.as_deref(), Some("two"));
     }
     h.app.controller.chats.get_mut("demo").unwrap().feed.events.retain(|_, e| e.entry_id != "entry-20");
@@ -180,16 +184,16 @@ fn ordinary_chat_topic_and_new_chat_navigation_rebind_editor_before_next_input()
         let mut h = Harness::new(if mobile { (360, 720) } else { (1000, 800) }, 1., mobile);
         h.app.controller.draft("Draft from demo".into()).unwrap(); h.frame();
         h.app.controller.chats.get_mut("two").unwrap().local.draft = "Draft from two".into();
-        h.app.fixture(FixtureChoice::Select("two".into())).unwrap();
+        h.app.with_ui(|root, cx| root.workspace.navigate_chat("two", cx)).unwrap();
         // Deliberately no tick/frame between navigation and the next input event.
         assert_eq!(h.app.root.workspace.chat.composer.field.editor.value, "Draft from two");
         assert!(h.app.root.workspace.chat.transcript.placed.is_empty());
         h.app.input("!");
         assert_eq!(h.app.controller.chats["demo"].local.draft, "Draft from demo");
         assert!(h.app.controller.chats["two"].local.draft.contains("Draft from two"));
-        h.app.fixture(FixtureChoice::SelectProject("files".into())).unwrap();
+        h.app.with_ui(|root, cx| root.workspace.navigate_project("files", cx)).unwrap();
         assert_eq!(h.app.root.workspace.chat.composer.field.editor.value, if mobile { "" } else { "Draft from demo" });
-        h.app.fixture(FixtureChoice::New).unwrap();
+        h.app.with_ui(|root, cx| root.workspace.new_chat(cx)).unwrap();
         assert!(h.app.root.workspace.chat.composer.field.editor.value.is_empty());
         h.app.input("New chat only");
         assert_eq!(h.app.controller.selected().unwrap().local.draft, "New chat only");
@@ -216,9 +220,9 @@ fn remote_browser_yields_to_chat_and_download_navigation_without_retargeting_dra
     for (size,mobile) in [((1000,800),false),((360,720),true)] {
         let mut h=Harness::new(size,1.,mobile);
         h.app.controller.draft("Keep this code comment draft".into()).unwrap();h.frame();
-        h.app.fixture(FixtureChoice::Files).unwrap();h.frame();assert!(h.app.root.workspace.chat.code.view.is_some());
+        h.app.with_ui(|root, cx| root.workspace.files(cx)).unwrap();h.frame();assert!(h.app.root.workspace.chat.code.view.is_some());
         let browser_generation=h.app.controller.viewer_generation();
-        h.app.fixture(FixtureChoice::Select("two".into())).unwrap();
+        h.app.with_ui(|root, cx| root.workspace.navigate_chat("two", cx)).unwrap();
         assert!(h.app.root.workspace.chat.code.view.is_none(),"Chat selection cancels the browser before the next input event");
         assert!(h.app.controller.viewer_generation()>browser_generation);
         h.app.input("New chat text");
@@ -226,8 +230,8 @@ fn remote_browser_yields_to_chat_and_download_navigation_without_retargeting_dra
         assert!(h.app.controller.chats["two"].local.draft.contains("New chat text"));
         assert!(!h.app.controller.chats["two"].local.draft.contains("code comment"));
         for session in ["two","demo"] {
-            h.app.fixture(FixtureChoice::Select(session.into())).unwrap();h.frame();
-            h.app.fixture(FixtureChoice::Files).unwrap();h.frame();assert!(h.app.root.workspace.chat.code.view.is_some());
+            h.app.with_ui(|root, cx| root.workspace.navigate_chat(session, cx)).unwrap();h.frame();
+            h.app.with_ui(|root, cx| root.workspace.files(cx)).unwrap();h.frame();assert!(h.app.root.workspace.chat.code.view.is_some());
             h.complete("entry-20");h.click_notice(false);
             assert!(h.app.root.workspace.chat.code.view.is_none(),"Same-chat and cross-chat notices must reveal the transcript, not the browser");
             h.assert_target_visible("entry-20");

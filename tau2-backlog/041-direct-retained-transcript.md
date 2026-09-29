@@ -32,8 +32,9 @@ source/chat-bound reading state. Persist only meaningful view preference; empty
 loading frames cannot overwrite an established anchor, and a release cannot save
 old layout under a new chat. Layout placement is disposable, not another authority.
 
-Delete `frontend/src/app/scroll_tests.rs` as requested, rather than adapting its
-199-line old test again. Preserve necessary navigation/anchor guarantees through
+`frontend/src/app/scroll_tests.rs` was deleted under 042 during test-adapter
+retirement, rather than porting its 199-line old scenario. Still preserve necessary
+navigation/anchor guarantees through
 small assertions on the new owner and existing download-navigation coverage;
 do not recreate the whole deleted GPU scenario. No new scroll database/schema.
 Use 036's post-layout selection correction; do not resurrect an App dispatcher.

@@ -508,6 +508,14 @@ pub(in crate::app) struct Controls<A> {
     pub items: Vec<(Option<usize>, Button, A)>,
 }
 impl<A: Clone + PartialEq> Controls<A> {
+    #[cfg(test)]
+    pub fn placed(&self) -> impl Iterator<Item = (&A, Rect)> {
+        self.items.iter().filter_map(|(_, button, choice)| {
+            let rect = crate::render::intersect(button.control.rect?, button.control.clip);
+            (button.control.enabled && rect.width > 0. && rect.height > 0.).then_some((choice, rect))
+        })
+    }
+
     pub fn owns(&self, target: Target) -> bool {
         self.items.iter().any(|(_, b, _)| b.control.target == target && b.control.rect.is_some())
     }

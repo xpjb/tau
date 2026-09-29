@@ -85,7 +85,7 @@ mod render_tests {
                     image::save_buffer(root.join(format!("notice-{variant}-{name}.png")), &ctx.read_rgba8().unwrap(), size.0,size.1,image::ColorType::Rgba8).unwrap();
                 }
                  let mut layer = Layer::default();
-                app.notice_frame(&ctx,&mut layer,bounds);
+                app.with_ui(|root,cx| root.notice.visit_perframe(&mut ui::Frame {layer:&mut layer,bounds,clip:bounds},cx));
                 let card = app.root.notice.body.rect.unwrap(); let close = app.root.notice.close.rect.unwrap();
                 assert!((card.y + card.height/2. - close.y - close.height/2.).abs() < 0.01);
                 assert!(card.x >= 0. && card.x + card.width <= bounds.width && card.y + card.height <= bounds.height);

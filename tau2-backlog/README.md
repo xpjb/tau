@@ -8,7 +8,8 @@ bug evidence. Implementation is on `feat/tau2-simplification`; **036 is source-c
 037's control/composition/lifetime and 038's form reuse are implemented.
 039 is in progress: viewport-key decoding and provider-ID rewriting/pairing are gone;
 explicit body state and direct retained tool children remain.
-042's independent test pruning and test-only Submit retirement are also committed.
+042 has retired test-only Submit, the global test action adapter and the old scroll
+scenario, alongside independent matrix pruning. No replacement test registry was added.
 Remaining slices and the 5,000-line gate are not complete.
 
 The retained rewrite established ownership but did not finish shared input/paint

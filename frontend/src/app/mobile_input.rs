@@ -42,9 +42,6 @@ impl App {
         }
         self.ui.dirty = true;
     }
-    pub(super) fn replace_composer(&mut self, value: String) {
-        self.with_ui(|root, cx| root.workspace.chat.composer.replace(value, cx));
-    }
 }
 
 #[cfg(test)]
@@ -79,12 +76,7 @@ mod tests {
             let r = if let Some(d) = self.app.root.dialog.as_ref() {
                 d.fields()[field.unwrap()].control.rect.unwrap()
             } else {
-                self.app
-                    .placed_controls()
-                    .iter()
-                    .find(|h| matches!(h.action, FixtureChoice::Composer) && field.is_none())
-                    .unwrap()
-                    .rect
+                self.app.root.workspace.chat.composer.field.control.rect.unwrap()
             };
             let p = Vec2::new(r.x + r.width / 2., r.y + r.height / 2.);
             self.app.press(1, p, true);
@@ -126,7 +118,7 @@ mod tests {
             assert_eq!(resized.text, text);
             assert!(h.app.root.workspace.chat.transcript.scroll.rect.height < full_height);
             assert!(resized.rect[1] + resized.rect[3] <= reduced.1 as f32);
-            let send = h.app.placed_controls().iter().find(|h| matches!(h.action, FixtureChoice::Send)).unwrap().rect;
+            let send = h.app.root.workspace.chat.composer.controls.placed().find(|(a,_)| matches!(a, ui::composer::Choice::Send)).unwrap().1;
             assert!(send.y + send.height <= reduced.1 as f32, "Send stays above the IME");
             assert!(h.app.ime_rect().unwrap().y < reduced.1 as f32);
             if let Some(dir) = std::env::var_os("TAU_INLINE_INPUT_PREVIEW_DIR") {
@@ -189,7 +181,7 @@ mod tests {
             "same-field native snapshots never restart or overwrite the IME"
         );
         assert_eq!(db.query_row("SELECT count(*) FROM edits", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
-        h.app.fixture(FixtureChoice::Settings).unwrap();
+        h.app.open_ui(ui::DialogSpec::Connection).unwrap();
         h.frame();
         assert!(h.app.native_input().is_none());
         h.tap(Some(0));
@@ -213,7 +205,7 @@ mod tests {
         h.frame();
         assert!(h.app.native_input().is_none());
         assert_eq!(h.app.controller.selected().unwrap().local.draft, "a😀word");
-        h.app.fixture(FixtureChoice::Select("three".into())).unwrap();
+        h.app.with_ui(|root, cx| root.workspace.navigate_chat("three", cx)).unwrap();
         h.edit(&composer, "late after chat switch");
         h.frame();
         assert!(h.app.controller.selected().unwrap().local.draft.is_empty());

@@ -495,8 +495,6 @@ mod navigation_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod project_tests;
 #[cfg(all(test, not(target_os = "android")))]
-mod scroll_tests;
-#[cfg(all(test, not(target_os = "android")))]
 mod thinking_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod tooltip_tests;
@@ -540,8 +538,4 @@ mod download_interaction_tests;
 mod composer_status_tests;
 
 #[cfg(test)]
-mod test_ui;
-#[cfg(test)]
 use crate::tooltip::Tooltip;
-#[cfg(test)]
-use test_ui::FixtureChoice;
