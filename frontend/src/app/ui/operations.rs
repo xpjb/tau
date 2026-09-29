@@ -1,7 +1,7 @@
 //! Short, instance-bound forms. The field and each choice live on the dialog;
 //! submission uses the captured destination, never a current-chat field index.
-use super::controls::{Form, TextField};
-use super::{Context, DialogSpec, Event, Frame, Id, Request, Widget};
+use super::controls::{ButtonStyle, Form, TextField};
+use super::{Context, Controller, DialogSpec, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{editor::Editor, render::color};
 use anyhow::Result;
 use sanscale::Rect;
@@ -69,7 +69,7 @@ impl OperationDialog {
                 (format!("Open link?\n{url}"), None, "Open")
             }
             Operation::Outbox(_) => ("Saved immutable actions".into(), None, ""),
-            Operation::Inspect(key) => (format!("FixtureChoice {key}"), None, ""),
+            Operation::Inspect(key) => (format!("Saved intent {key}"), None, ""),
             Operation::ForgetControl(_) => ("Forget this saved intent? This does NOT undo or cancel a daemon action.".into(), None, "Forget locally"),
             Operation::ForgetRecovered(_) => ("Forget this local chat, its drafts and files? This does not undo or cancel source work. Saved daemon actions remain in Settings.".into(), None, "Forget local chat"),
             Operation::Review(_) => ("Restored history may omit external effects or paid work. Inspect those outcomes first. This acknowledgment only permits future explicit execution; it does not resume or resend anything.".into(), None, "Allow future explicit execution"),
@@ -110,7 +110,7 @@ impl OperationDialog {
                     .account
                     .pending_controls
                     .get(key)
-                    .ok_or_else(|| anyhow::anyhow!("FixtureChoice already reconciled"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Saved intent already reconciled"))?;
                 buttons.extend([
                     (Choice::Copy(serde_json::to_string_pretty(&saved.request)?), "Copy complete saved intent".into()),
                     (Choice::Check(key.clone()), "Check daemon receipt (no execution)".into()),
@@ -194,6 +194,15 @@ impl OperationDialog {
     }
 }
 impl Widget for OperationDialog {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
+            cx.ui.requests.push_back(Request::Close(self.id));
+        }
+    }
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.form.owns(target) || self.value.as_ref().is_some_and(|f| f.control.target == target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
             cx.ui.requests.push_back(Request::Close(self.id));
@@ -202,13 +211,12 @@ impl Widget for OperationDialog {
         let composing = self.value.as_ref().is_some_and(|f| f.editor.composing());
         let choice = match event {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(Choice::Close),
-            Event::Submit if !composing => Some(Choice::Submit),
             Event::Key { key: "Enter", shift: false, .. }
                 if !composing && !cx.ui.mobile && matches!(self.operation, Operation::Rename(_)) =>
             {
                 Some(Choice::Submit)
             }
-            _ => self.form.event(event, &mut self.value.iter_mut().collect::<Vec<_>>(), cx),
+            _ => self.form.event(event, self.value.iter_mut(), cx).1,
         };
         let result = match choice {
             Some(Choice::Close) => {
@@ -249,7 +257,7 @@ impl Widget for OperationDialog {
             }),
             None => return true,
         };
-        cx.report(result);
+        self.form.report(result, cx);
         true
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
@@ -291,47 +299,19 @@ impl Widget for OperationDialog {
         let footer = y + height - 10. * s - count as f32 * (button_h + 6. * s);
         if let Some(field) = &mut self.value {
             let top = y + title_h + 20. * s;
-            cx.services.renderer.label(
-                frame.layer,
-                &field.label,
-                Rect::new(x + 20. * s, top, w - 40. * s, 18. * s),
-                11. * s,
-                color(0xb7c2ce),
-                false,
-            );
-            field.visit_perframe(
-                &mut Frame {
-                    layer: frame.layer,
-                    bounds: Rect::new(
-                        x + 20. * s,
-                        top + 20. * s,
-                        w - 40. * s,
-                        (footer - feedback_h - top - 24. * s).max(1.),
-                    ),
-                    clip: frame.clip,
-                },
+            field.labeled(
+                Rect::new(x + 20. * s, top, w - 40. * s, (footer - feedback_h - top - 4. * s).max(1.)),
+                frame,
                 cx,
             );
         }
-        if let Some(text) = feedback {
-            cx.services.renderer.label(
-                frame.layer,
-                &text,
-                Rect::new(x + 20. * s, footer - feedback_h, w - 40. * s, (feedback_h - 8. * s).max(1.)),
-                13. * s,
-                color(0xffb4ab),
-                false,
-            );
-        }
-        let choices = self.form.buttons.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>();
-        for (i, choice) in choices.into_iter().enumerate() {
-            let primary = choice == Choice::Submit;
-            self.form.button(
-                choice,
+        frame.feedback(Rect::new(x + 20. * s, footer - feedback_h, w - 40. * s, feedback_h), "", cx);
+        // These are the fixed owned choices; don't build a list to look them up again.
+        for (i, (choice, button)) in self.form.buttons.iter_mut().enumerate() {
+            button.style = if *choice == Choice::Submit { ButtonStyle::Primary } else { ButtonStyle::Tonal };
+            frame.visit(
                 Rect::new(x + 20. * s, footer + i as f32 * (button_h + 6. * s), w - 40. * s, button_h),
-                primary,
-                false,
-                frame,
+                button,
                 cx,
             );
         }

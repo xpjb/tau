@@ -5,19 +5,16 @@ const EXPAND: Duration = Duration::from_millis(340);
 const MIN_HOLD: Duration = Duration::from_millis(180);
 const FADE: Duration = Duration::from_millis(220);
 
-/// A press follows its logical section, not its old screen position when a
-/// transcript update/scroll moves that section. The sole active ripple is
-/// discarded on a new press, drag, session change or after its fade.
+/// The owning control retains the click origin through reflow. Abandoned
+/// gestures disappear; a normal release finishes its short fade.
 pub(super) struct Ripple {
-    pub key: String,
     offset: Vec2,
     started: Instant,
     fade_at: Option<Instant>,
 }
 impl Ripple {
-    pub fn new(key: String, rect: Rect, point: Vec2) -> Self {
+    pub fn new(rect: Rect, point: Vec2) -> Self {
         Self {
-            key,
             offset: Vec2::new(point.x - rect.x, point.y - rect.y),
             started: Instant::now(),
             fade_at: None,
@@ -33,8 +30,8 @@ impl Ripple {
     pub fn finished(&self, now: Instant) -> bool {
         self.fade_at.is_some_and(|fade| now >= fade + FADE)
     }
-    pub fn paint(&self, key: &str, rect: Rect, now: Instant) -> Option<(Vec2, f32, f32)> {
-        if self.key != key || self.finished(now) {
+    pub fn paint(&self, rect: Rect, now: Instant, held: bool) -> Option<(Vec2, f32, f32)> {
+        if self.finished(now) || self.fade_at.is_none() && !held {
             return None;
         }
         let center = Vec2::new(rect.x + self.offset.x, rect.y + self.offset.y);
@@ -65,23 +62,22 @@ mod tests {
     #[test]
     fn grows_from_press_until_it_covers_the_section_then_fades_only_after_release() {
         let rect = Rect::new(50., 100., 200., 80.);
-        let mut ripple = Ripple::new("message".into(), rect, Vec2::new(60., 110.));
+        let mut ripple = Ripple::new(rect, Vec2::new(60., 110.));
         let start = ripple.started;
-        assert_eq!(ripple.paint("other", rect, start), None);
         let (center, small, _) = ripple
-            .paint("message", rect, start + Duration::from_millis(20))
+            .paint(rect, start + Duration::from_millis(20), true)
             .unwrap();
         assert_eq!((center.x, center.y), (60., 110.));
         let moved = Rect::new(50., 130., 200., 80.);
         assert_eq!(
             ripple
-                .paint("message", moved, start + Duration::from_millis(20))
+                .paint(moved, start + Duration::from_millis(20), true)
                 .unwrap()
                 .0
                 .y,
             140.
         );
-        let (_, full, alpha) = ripple.paint("message", rect, start + EXPAND).unwrap();
+        let (_, full, alpha) = ripple.paint(rect, start + EXPAND, true).unwrap();
         assert!(full > small && full >= 190.);
         assert_eq!(alpha, 0.11);
         assert!(
@@ -91,8 +87,8 @@ mod tests {
         ripple.release();
         let fade = ripple.fade_at.unwrap();
         assert!(ripple.animating(fade + FADE / 2));
-        assert!(ripple.paint("message", rect, fade + FADE / 2).unwrap().2 < alpha);
+        assert!(ripple.paint(rect, fade + FADE / 2, false).unwrap().2 < alpha);
         assert!(ripple.finished(fade + FADE));
-        assert!(ripple.paint("message", rect, fade + FADE).is_none());
+        assert!(ripple.paint(rect, fade + FADE, false).is_none());
     }
 }

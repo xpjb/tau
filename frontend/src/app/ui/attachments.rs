@@ -1,5 +1,5 @@
-use super::controls::Controls;
-use super::{Context, Event, Frame, Id, Request, Widget};
+use super::controls::{ButtonStyle, Controls};
+use super::{Context, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     app::{
         Info, PlatformAction, SavedAction,
@@ -14,12 +14,13 @@ use sanscale::Rect;
 use std::collections::{BTreeSet, HashMap};
 use tau_protocol::*;
 
-#[derive(Clone, Debug)]
+// Destinations belong to the mounted card, not to a second per-button route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::app) enum CardChoice {
-    Attachment(String, String, String, bool),
-    SaveAttachment(String, String, String),
-    UseSaved(String, String, SavedAction),
-    CancelDownload(String),
+    Acquire,
+    Save,
+    UseSaved(SavedAction),
+    Cancel,
     Noop,
 }
 pub(in crate::app) struct AttachmentCard {
@@ -37,11 +38,30 @@ impl AttachmentCard {
             controls: Controls::new(Id::new()),
         }
     }
+    pub fn bind_file(&mut self, file: &ChatAttachment, cx: &mut Context<'_>) {
+        if self.file != *file {
+            cx.ui.detach(self.controls.id);
+            self.controls = Controls::new(Id::new());
+            self.file = file.clone();
+        }
+    }
     pub fn hide(&mut self) {
         self.controls.begin();
     }
 }
 impl Widget for AttachmentCard {
+    fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
+        self.controls.owns(target)
+            && model.account.selected.as_ref() == Some(&self.target.session)
+            && self.target.matches_source(&model.identity, model.account.source_lineage.as_deref())
+            && model.selected().is_some_and(|chat| {
+                chat.feed
+                    .events
+                    .values()
+                    .any(|e| e.entry_id == self.target.entry && e.attachment.as_ref() == Some(&self.file))
+            })
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if !self.target.matches_source(&cx.model.identity, cx.model.account.source_lineage.as_deref())
             || Some(&self.target.session) != cx.model.account.selected.as_ref()
@@ -57,16 +77,19 @@ impl Widget for AttachmentCard {
             return true;
         }
         let (handled, choice) = self.controls.event(event, cx);
+        let session = &self.target.session;
+        let entry = &self.target.entry;
         let result = match choice {
-            Some(CardChoice::Attachment(session, entry, name, image)) => {
-                cx.download_attachment(&session, &entry, &name, image, false)
-            }
-            Some(CardChoice::SaveAttachment(session, entry, name)) => {
-                cx.download_attachment(&session, &entry, &name, self.file.kind == AttachmentKind::Image, true)
-            }
-            Some(CardChoice::UseSaved(session, entry, action)) => {
-                if let Some(saved) = cx.model.saved_download(&session, &entry) {
-                    let target = cx.export_target(&session, &entry);
+            Some(CardChoice::Acquire | CardChoice::Save) => cx.download_attachment(
+                session,
+                entry,
+                &self.file.file_name,
+                self.file.kind == AttachmentKind::Image,
+                choice == Some(CardChoice::Save),
+            ),
+            Some(CardChoice::UseSaved(action)) => {
+                if let Some(saved) = cx.model.saved_download(session, entry) {
+                    let target = self.target.clone();
                     // Claim before queueing, not on repaint or in the OS worker:
                     // another click/card can arrive before either of those runs.
                     #[cfg(not(target_os = "android"))]
@@ -79,7 +102,8 @@ impl Widget for AttachmentCard {
                 }
                 Ok(())
             }
-            Some(CardChoice::CancelDownload(key)) => {
+            Some(CardChoice::Cancel) => {
+                let key = Controller::download_key(session, entry);
                 cx.services.transfers.pending_exports.remove(&key);
                 cx.services.transfers.export_targets.remove(&key);
                 cx.model.cancel_download(&key)
@@ -141,13 +165,7 @@ impl Widget for AttachmentCard {
                 );
                 layer.images.push((path.clone(), image_rect, clip));
                 if clip.width > 0. && clip.height > 0. {
-                    self.controls.place_key(
-                        "preview",
-                        CardChoice::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true),
-                        preview,
-                        viewport,
-                        false,
-                    );
+                    self.controls.place(CardChoice::Acquire, preview, viewport, false);
                 }
             } else {
                 let download = cx.model.downloads.get(&key);
@@ -208,56 +226,36 @@ impl Widget for AttachmentCard {
             if display.control == Control::View && !preview_available { Control::Save } else { display.control };
         let action = match control {
             Control::Download | Control::Retry if image && cx.services.transfers.export_errors.contains_key(&key) => {
-                Some(CardChoice::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone()))
+                Some(CardChoice::Save)
             }
-            Control::Download | Control::Retry | Control::View => {
-                Some(CardChoice::Attachment(session.into(), entry.into(), attachment.file_name.clone(), image))
-            }
-            Control::Save => {
-                Some(CardChoice::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone()))
-            }
-            Control::Open => Some(CardChoice::UseSaved(session.into(), entry.into(), SavedAction::Open)),
-            Control::Cancel => Some(CardChoice::CancelDownload(key.clone())),
+            Control::Download | Control::Retry | Control::View => Some(CardChoice::Acquire),
+            Control::Save => Some(CardChoice::Save),
+            Control::Open => Some(CardChoice::UseSaved(SavedAction::Open)),
+            Control::Cancel => Some(CardChoice::Cancel),
             Control::Busy => None,
         };
         let mut actions = vec![(control.label(), Some(control.description()), action)];
         if exported.is_some() {
             if image && preview_available {
-                actions.push((
-                    "View",
-                    Some("View image"),
-                    Some(CardChoice::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true)),
-                ));
+                actions.push(("View", Some("View image"), Some(CardChoice::Acquire)));
             }
             #[cfg(not(target_os = "android"))]
             if !cx.ui.mobile {
-                actions.push((
-                    "Show",
-                    Some("Show in folder"),
-                    Some(CardChoice::UseSaved(session.into(), entry.into(), SavedAction::Show)),
-                ));
+                actions.push(("Show", Some("Show in folder"), Some(CardChoice::UseSaved(SavedAction::Show))));
                 if attachment.file_name.to_ascii_lowercase().ends_with(".zip") {
                     let extracting = cx.services.transfers.extracting_downloads.contains(&self.target);
                     actions.push((
                         if extracting { "Extracting…" } else { "Extract" },
                         None,
-                        (!extracting).then(|| CardChoice::UseSaved(session.into(), entry.into(), SavedAction::Extract)),
+                        (!extracting).then(|| CardChoice::UseSaved(SavedAction::Extract)),
                     ));
                 }
             }
         } else if image && preview_available && control == Control::View {
-            actions.push((
-                "Save",
-                Some("Save to Downloads"),
-                Some(CardChoice::SaveAttachment(session.into(), entry.into(), attachment.file_name.clone())),
-            ));
+            actions.push(("Save", Some("Save to Downloads"), Some(CardChoice::Save)));
         } else if image && preview_available && control == Control::Retry {
             // Retrying an OS save must not hide or discard a perfectly good preview.
-            actions.push((
-                "View",
-                Some("View image"),
-                Some(CardChoice::Attachment(session.into(), entry.into(), attachment.file_name.clone(), true)),
-            ));
+            actions.push(("View", Some("View image"), Some(CardChoice::Acquire)));
         }
         layer.clipped_rounded_rect(panel, 10. * s, color(0x101820), viewport);
         let target = if cx.ui.mobile { 44. } else { 40. } * s;
@@ -336,99 +334,18 @@ impl Widget for AttachmentCard {
                 continue;
             }
             let enabled = action.is_some();
-            if enabled && layer.interaction.hover.is_some_and(|p| contains(clip, p)) {
-                layer.clipped_rounded_rect(r, target / 2., layer.control_color(r, color(0x18212b)), viewport);
-            }
-            let label_width = cx.services.renderer.label_width(label, 14. * s, false);
-            let label_height = cx.services.renderer.label_height(label, width, 14. * s, false);
-            cx.services.renderer.ellipsized_label(
-                layer,
-                label,
-                Rect::new(
-                    r.x + (width - label_width) / 2.,
-                    r.y + (target - label_height) / 2.,
-                    label_width.ceil() + 1.,
-                    label_height,
-                ),
-                14. * s,
-                color(if enabled { 0x67d4ff } else { 0x687e8f }),
-                false,
-                false,
-                viewport,
-            );
-            let control = &mut self
-                .controls
-                .place_key(&format!("action:{index}"), action.unwrap_or(CardChoice::Noop), r, viewport, true)
-                .control;
-            control.enabled = enabled;
-            control.info = description.map(|description| Info::Attachment(
-                format!("{info_key}:action:{index}"),
-                description.into(),
-                attachment.file_name.clone(),
-            ));
+            let button = self.controls.place_in(Some(index), action.unwrap_or(CardChoice::Noop), r, viewport, true);
+            button.control.enabled = enabled;
+            button.label = label.into();
+            button.style = ButtonStyle::Quiet;
+            button.visit_perframe(&mut Frame { layer, bounds: r, clip: viewport }, cx);
+            let control = &mut button.control;
+            control.info = description.map(|description| {
+                Info::Attachment(format!("{info_key}:action:{index}"), description.into(), attachment.file_name.clone())
+            });
         }
 
         self.controls.finish(cx);
-    }
-}
-
-/// The owner reconciles by source/session/entry/surface, retaining child identity
-/// across repaint and dropping controls with the corresponding content.
-pub(in crate::app) struct CardDeck {
-    pub cards: HashMap<String, AttachmentCard>,
-    seen: BTreeSet<String>,
-}
-impl CardDeck {
-    pub fn new() -> Self {
-        Self { cards: HashMap::new(), seen: BTreeSet::new() }
-    }
-    pub fn begin(&mut self) {
-        self.seen.clear();
-        for card in self.cards.values_mut() {
-            card.hide();
-        }
-    }
-    pub fn finish(&mut self, cx: &mut Context<'_>) {
-        self.cards.retain(|key, card| {
-            if self.seen.contains(key) {
-                true
-            } else {
-                cx.ui.detach(card.controls.id);
-                false
-            }
-        });
-    }
-    pub fn paint(
-        &mut self,
-        session: &str,
-        entry: &str,
-        file: &ChatAttachment,
-        surface: &'static str,
-        frame: &mut Frame<'_>,
-        cx: &mut Context<'_>,
-    ) {
-        let key = format!("{}:{:?}:{session}:{entry}:{surface}", cx.model.identity, cx.model.account.source_lineage);
-        self.seen.insert(key.clone());
-        let card = self.cards.entry(key).or_insert_with(|| AttachmentCard::new(session, entry, file, surface, cx));
-        card.file = file.clone();
-        card.visit_perframe(frame, cx);
-    }
-    pub fn event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        self.cards
-            .values_mut()
-            .any(|card| cx.ui.routes_pointer_to(event, card.controls.id) && card.handle_event(event, cx))
-    }
-    pub fn hints(&self) -> impl Iterator<Item = (Rect, &Info)> {
-        self.cards
-            .values()
-            .flat_map(|c| c.controls.items.iter())
-            .filter_map(|(_, b, _)| {
-                b.control
-                    .rect
-                    .zip(b.control.info.as_ref())
-                    .map(|(r, i)| (crate::render::intersect(r, b.control.clip), i))
-            })
-            .filter(|(r, _)| r.width > 0. && r.height > 0.)
     }
 }
 
@@ -441,7 +358,7 @@ pub(in crate::app) struct AttachmentBrowser {
     pub show: bool,
     pub side: bool,
     pub scroll: super::scroll::ScrollState,
-    pub cards: CardDeck,
+    pub cards: HashMap<String, AttachmentCard>,
     form: super::controls::Form<BrowserChoice>,
     bounds: Rect,
     binding: Option<(String, Option<String>, String)>,
@@ -455,7 +372,7 @@ impl AttachmentBrowser {
             show: false,
             side: false,
             scroll: super::scroll::ScrollState::new(id, false),
-            cards: CardDeck::new(),
+            cards: HashMap::new(),
             form: super::controls::Form::new(
                 id,
                 &[(BrowserChoice::Close, "Back"), (BrowserChoice::History, "Load older files")],
@@ -470,7 +387,7 @@ impl AttachmentBrowser {
         self.scroll.stop();
         self.scroll.value = 0.;
         self.scroll.max = 0.;
-        self.cards = CardDeck::new();
+        self.cards.clear();
         self.binding = None;
         self.history_attempt = None;
         self.hide();
@@ -478,15 +395,17 @@ impl AttachmentBrowser {
     pub fn hide(&mut self) {
         self.bounds = Rect::new(0., 0., 0., 0.);
         self.scroll.rect = self.bounds;
-        self.cards.begin();
+        for card in self.cards.values_mut() {
+            card.hide();
+        }
         self.form.begin_frame();
         self.interests.clear();
     }
-    fn bound(&self, cx: &Context<'_>) -> bool {
+    fn bound(&self, model: &Controller) -> bool {
         self.binding.as_ref().is_some_and(|(identity, lineage, session)| {
-            identity == &cx.model.identity
-                && lineage == &cx.model.account.source_lineage
-                && Some(session) == cx.model.account.selected.as_ref()
+            identity == &model.identity
+                && lineage == &model.account.source_lineage
+                && Some(session) == model.account.selected.as_ref()
         })
     }
     fn history(&mut self, cx: &mut Context<'_>) {
@@ -510,12 +429,21 @@ impl AttachmentBrowser {
     }
 }
 impl Widget for AttachmentBrowser {
-    fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if matches!(event, Event::Cancel) {
-            self.scroll.stop();
-            return false;
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        if self.show && self.bound(cx.model) {
+            self.scroll.update(dt, cx);
         }
-        if !self.show || !self.bound(cx) {
+    }
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        self.show
+            && self.bound(model)
+            && (self.scroll.target == target
+                || self.form.owns(target)
+                || self.cards.values().any(|c| c.owns(target, model, ui)))
+    }
+
+    fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
+        if !self.show || !self.bound(cx.model) {
             return false;
         }
         if matches!(event, Event::Back) {
@@ -525,7 +453,8 @@ impl Widget for AttachmentBrowser {
         if self.scroll.bar_event(event, cx) {
             return true;
         }
-        if let Some(choice) = self.form.event(event, &mut [], cx) {
+        let (handled, choice) = self.form.event(event, std::iter::empty(), cx);
+        if let Some(choice) = choice {
             match choice {
                 BrowserChoice::Close => cx.ui.requests.push_back(Request::Attachments(false)),
                 BrowserChoice::History => {
@@ -535,7 +464,10 @@ impl Widget for AttachmentBrowser {
             }
             return true;
         }
-        let child = self.cards.event(event, cx);
+        if handled {
+            return true;
+        }
+        let child = self.cards.values_mut().any(|card| card.dispatch(event, cx));
         let handled = self.scroll.event(event, child, cx);
         // Header/backdrop space belongs to this pane, never the transcript behind it.
         handled
@@ -607,8 +539,7 @@ impl Widget for AttachmentBrowser {
                 if self.side { 40. * s } else { 64. * s },
                 40. * s,
             ),
-            false,
-            false,
+            ButtonStyle::Tonal,
             frame,
             cx,
         );
@@ -626,11 +557,12 @@ impl Widget for AttachmentBrowser {
             }
             if y + height >= viewport.y && y <= viewport.y + viewport.height {
                 frame.layer.clipped_corners(rect, [12. * s; 4], color(0x18212b), viewport);
-                self.cards.paint(
-                    &session,
-                    entry,
-                    file,
-                    "attachments",
+                let card = self
+                    .cards
+                    .entry(entry.clone())
+                    .or_insert_with(|| AttachmentCard::new(&session, entry, file, "attachments", cx));
+                card.bind_file(file, cx);
+                card.visit_perframe(
                     &mut Frame {
                         layer: frame.layer,
                         bounds: rect,
@@ -674,8 +606,7 @@ impl Widget for AttachmentBrowser {
                 self.form.button(
                     BrowserChoice::History,
                     r,
-                    false,
-                    false,
+                    ButtonStyle::Tonal,
                     &mut Frame { layer: frame.layer, bounds: b, clip: viewport },
                     cx,
                 );
@@ -685,7 +616,13 @@ impl Widget for AttachmentBrowser {
             }
         }
         self.scroll.paint(frame.layer, cx);
-        self.cards.finish(cx);
+        self.cards.retain(|_, card| {
+            let mounted = card.controls.items.iter().any(|(_, button, _)| button.control.rect.is_some());
+            if !mounted {
+                cx.ui.detach(card.controls.id);
+            }
+            mounted
+        });
     }
 }
 

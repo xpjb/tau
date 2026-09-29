@@ -1,5 +1,7 @@
 # 010 — Account usage remaining in context hover
 
+**September 29 triage:** shipped behavior is not new implementation. Keep pending live-provider/device acceptance explicit; it is separate from the frontend line-reduction target.
+
 Priority: context hover. Status: shipped in Tau2 beta 0.7.6 / protocol 19.
 Live provider and device acceptance remains pending.
 

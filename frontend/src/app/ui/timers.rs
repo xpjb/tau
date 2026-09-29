@@ -41,8 +41,6 @@ impl RootWidget {
         if self.dialog.is_some() || self.viewer.is_some() {
             self.tooltips.usage.dismiss();
             self.tooltips.info.dismiss();
-            self.workspace.chat.transcript.autoscroll = None;
-            self.workspace.chat.transcript.scroll.stop();
         }
         let now = Instant::now();
         let dot_color = cx.model.health.color(now);

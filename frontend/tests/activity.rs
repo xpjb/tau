@@ -43,9 +43,7 @@ fn topic_activity_tracks_contained_chat_bumps_without_unpinning_general() {
     assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "opening a chat is not activity");
     c.message(ServerMessage::SessionState { session_id: "alpha-old".into(), revision: 1,
         restore_review: None, status: SessionStatus::Running, context_usage: None, detail: None }).unwrap();
-    c.message(ServerMessage::TranscriptSnapshot { session_id: "alpha-old".into(),
-        snapshot: TranscriptSnapshot { generation: "history".into(), sequence: 1, events: vec![],
-            queue: QueueState::default(), before: None, delivered: vec![] } }).unwrap();
+    c.preview(&("alpha-old"), vec![], QueueState::default(), None).unwrap();
     assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "status and streaming do not bump");
     c.draft("alpha draft".into()).unwrap();
     assert_eq!(topics(&c), ["general", "alpha", "beta", "empty"], "an older chat bumps its entire topic");
@@ -193,13 +191,7 @@ fn chat_activity_source_completion_wins_without_bumping_intermediate_or_replayed
         }).unwrap();
         assert_eq!(order(&c), ["a", "c", "b"], "status/usage updates alone are not new activity");
     }
-    c.message(ServerMessage::TranscriptSnapshot {
-        session_id: "b".into(),
-        snapshot: TranscriptSnapshot {
-            generation: "history".into(), sequence: 1, events: vec![],
-            queue: QueueState::default(), before: None, delivered: vec![],
-        },
-    }).unwrap();
+    c.preview(&("b"), vec![], QueueState::default(), None).unwrap();
     catalog(&mut c, &sessions);
     assert_eq!(order(&c), ["a", "c", "b"]);
     sessions[1].updated_at_ms = 31; // durable settled-run bump
@@ -280,4 +272,39 @@ fn chat_activity_ties_are_deterministic_and_old_local_records_still_load() {
     drop(c);
     let c = controller(root.path());
     assert_eq!(order(&c), ["a", "m", "z"]);
+}
+
+#[test]
+fn topic_resume_persists_and_rejects_deleted_or_moved_chats() {
+    for resume in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut c = controller(root.path());
+        c.message(ServerMessage::Projects { projects: vec![Project::general(), project("work")] }).unwrap();
+        let mut sessions = vec![session("home", 30), in_topic("latest", "work", 20), in_topic("older", "work", 10)];
+        catalog(&mut c, &sessions);
+        c.select("home").unwrap();
+        c.account.last_chat_by_project.clear(); // Upgrade from an account with only global selection.
+        c.select_project("work", resume).unwrap();
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("latest"));
+        c.select("older").unwrap();
+        c.select_project(GENERAL_PROJECT_ID, resume).unwrap();
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("home"));
+        c.select_project("work", resume).unwrap();
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("older"));
+        drop(c);
+        let mut c = controller(root.path());
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("older"));
+        assert_eq!(c.account.last_chat_by_project.get(GENERAL_PROJECT_ID).map(String::as_str), Some("home"));
+        assert_eq!(c.account.last_chat_by_project.get("work").map(String::as_str), Some("older"));
+        sessions.retain(|s| s.id != "older");
+        catalog(&mut c, &sessions);
+        assert!(!c.account.last_chat_by_project.contains_key("work"));
+        c.select_project(GENERAL_PROJECT_ID, resume).unwrap();
+        c.select_project("work", resume).unwrap();
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("latest"));
+        sessions.iter_mut().find(|s| s.id == "latest").unwrap().project_id = GENERAL_PROJECT_ID.into();
+        catalog(&mut c, &sessions);
+        c.select_project("work", resume).unwrap();
+        assert!(c.account.selected.is_none(), "An empty topic cannot resurrect its former chat");
+    }
 }

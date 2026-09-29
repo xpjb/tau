@@ -1,6 +1,8 @@
-# 012 — Revisit chat scroll-position architecture (deferred)
+# 012 — Revisit chat scroll-position ownership and delete the old tests
 
-Status: **Open. Do not take this on during the current session.** The user considers both the pre-existing scroll/selection flow and the quick fix in `frontend/src/app.rs` likely poor design. Do not treat the quick fix or the passing checks as architecture acceptance. Re-examine ownership, layout identity, persistence, switching, empty/loading frames, paging, and whether scroll restoration belongs in this UI flow at all before deciding on a replacement.
+Status: **Source ownership complete in [041](041-direct-retained-transcript.md), September 29, 2026; physical acceptance remains open.** The bounded implementation deletes competing reading bookkeeping and external layout resets. Existing navigation coverage plus one checkpoint case cover restoration and old-release/source boundaries. This is not completion of the whole-refactor size gate.
+
+Review source/chat-bound ownership of reading position, persistence, switching, empty/loading frames, prepend/expansion and layout identity. Preserve useful reading behavior, not the provisional mechanism. Consolidate policy into the actual Transcript owner rather than introduce another state store. Fix stationary-pointer selection immediately in 036; it does not wait for this work.
 
 ## Statement to preserve verbatim
 
@@ -8,4 +10,4 @@ Status: **Open. Do not take this on during the current session.** The user consi
 I found the cause: after switching chats, the pointer-release save could write the old chat’s layout into the newly selected chat’s scroll position. I’ve added a check tying each measured layout to its chat, saved the old chat before switching, and prevented an empty loading frame from erasing an anchor. The switch regression passes on desktop and narrow layouts; I’m running the full suite now.
 ```
 
-The user requested that the newly added `frontend/src/app/scroll_tests.rs` tests be **deleted later**, not during this session. Remove them when revisiting this architecture; do not pile on further tests now. The quick fix is provisional, not a reason to close this backlog item.
+The user requested deletion of `frontend/src/app/scroll_tests.rs`. **Delete that file and its module declaration in 041; do not mechanically update it again.** The current request expressly allows pruning brittle/redundant tests. Keep only small, useful reading-state assertions at the new owner/existing navigation boundary, not a rewritten copy of the old GPU scenario. The quick fix and its passing tests were never architecture acceptance.

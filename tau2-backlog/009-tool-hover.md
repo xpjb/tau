@@ -1,5 +1,7 @@
 # 009 — Hover feedback on nested tool disclosures
 
+**September 29 triage:** retained detail controls exist, but nested visual ownership is not uniformly correct. Finish under [037](037-retained-interaction-ownership.md); the confirmed attachment child/parent feedback leak is evidence, not proof every disclosure has the same bug.
+
 Priority: visual. Status: open.
 
 Tool expanders and nested Input/Output/Error headers/submenus lack their own hover

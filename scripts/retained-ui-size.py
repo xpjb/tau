@@ -66,9 +66,8 @@ def item_end(mask, start):
 
 
 def production(text):
-    # All cfg(test) *module declarations* in the production files selected here
-    # start their file's test-only suffix. Imports, helpers and gallery fields
-    # before that suffix are individually removed, not treated as suffixes.
+    # Remove each test-only item, not the entire suffix after a test module:
+    # app/attachments.rs has production export handling after its inline tests.
     attr = re.compile(r"^[ \t]*#\[cfg\((?:test|all\(test,\s*not\(target_os\s*=\s*\"android\"\)\))\)\]", re.M)
     while m := attr.search(text):
         start = m.end()
@@ -77,8 +76,6 @@ def production(text):
             if text.startswith("#[", start):
                 start = text.index("]", start) + 1
             else: break
-        if re.match(r"mod\b", text[start:]):
-            return text[:m.start()]
         end = item_end(code_mask(text), start)
         if text[end:end+1] == "\n": end += 1
         text = text[:m.start()] + text[end:]
@@ -86,7 +83,11 @@ def production(text):
 
 
 def test_only(path):
-    return "/tests/" in path or path.endswith("/tests.rs") or path.endswith("_tests.rs") or path.endswith("/test_ui.rs")
+    # These daemon modules are reached only through lib.rs's cfg(test) entries;
+    # their singular/family filenames must not charge test fixtures as production.
+    daemon_tests = path.startswith("daemon/src/agent_test") or path in {
+        "daemon/src/protocol_audit_test.rs", "daemon/src/transcript_legacy_test.rs"}
+    return daemon_tests or "/tests/" in path or path.endswith("/tests.rs") or path.endswith("_tests.rs") or path.endswith("/test_ui.rs")
 
 
 def in_scope(path):
@@ -112,7 +113,11 @@ def formatted(path, text):
 def main():
     paths = {rev: set(git("ls-tree", "-r", "--name-only", rev, "frontend").splitlines()) for rev in [BASE, CURRENT]}
     touched = set(git("diff", "--name-only", BASE, CURRENT, "--", "frontend").splitlines())
-    relevant = sorted(p for p in paths[BASE] | paths[CURRENT] if in_scope(p) or p in touched)
+    # Changed image/font assets are not source lines. Keep textual host changes
+    # (including Java) in the outside-scope charge, rather than filtering to Rust.
+    binary = {line.split("\t", 2)[2] for line in git("diff", "--numstat", BASE, CURRENT, "--", "frontend").splitlines()
+              if line.startswith("-\t-\t")}
+    relevant = sorted(p for p in paths[BASE] | paths[CURRENT] if p not in binary and (in_scope(p) or p in touched))
     totals = {mode: {rev: {group: [0, 0] for group in ["scope", "other", "tests", "all"]} for rev in [BASE, CURRENT]}
               for mode in ["physical", "normalized"]}
     rows = []
@@ -137,7 +142,9 @@ def main():
         rows.append(row)
     # This historical reproduction guards against accidentally counting test
     # fixtures or losing the formerly excluded two-line attachment test import.
-    if BASE == "415aeff": assert totals["physical"][BASE]["scope"] == [6620, 6582], totals["physical"][BASE]
+    # Per-item cfg(test) stripping retains five blank separators discarded by the
+    # old test-module suffix shortcut; the 6,582 nonblank lines are unchanged.
+    if BASE == "415aeff": assert totals["physical"][BASE]["scope"] == [6625, 6582], totals["physical"][BASE]
     print(json.dumps({"base": BASE, "current": CURRENT, "units": ["physical", "nonblank"], "totals": totals,
                       "normalized_per_file_churn": {"deleted": churn[0], "added": churn[1], "unchanged": churn[2]},
                       "files": rows}, indent=2))

@@ -4,12 +4,12 @@ use anyhow::{Context, Result, ensure};
 use futures_util::FutureExt;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use tau_blocks::{BlockHeader, BlockKind};
+use tau_blocks::{BlockHeader, BlockKind, ToolBody, ToolState};
 use tau_protocol::{Event, EventKind, EventPhase, EventRole, QueueState};
 use crate::{manager::AgentManager, state::StateStore};
 
 pub const QUEUE: &str = "@queue";
-pub fn input_id(event: &str) -> String { format!("{event}/input") }
+pub use tau_protocol::blocks::tool_input_id as input_id;
 pub fn file_id(entry: &str) -> String { format!("file:{entry}") }
 
 fn header(id: String, parent: Option<String>, order: u64, kind: BlockKind, meta: Value, sealed: bool) -> BlockHeader {
@@ -72,7 +72,7 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
         // The card itself carries no argument bytes, even while they stream.
         tau_blocks::put(db,session,h,b"")?;
         let input = header(input_id(&value.id),Some(value.id.clone()),0,BlockKind::Code,
-            json!({"inputFor":value.id,"language":"json","label":"Input"}),sealed);
+            json!({"inputFor":value.id,"language":"json","label":ToolBody::Input.label()}),sealed);
         write(input,value.text.as_bytes())?;
     } else {
         write(h,value.text.as_bytes())?;
@@ -85,7 +85,7 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
         // A collapsed tool can show completion/error without downloading output.
         if let Some(mut call) = tau_blocks::header(db,session,&parent)? {
             call.meta["event"]["isError"] = json!(value.is_error);
-            call.meta["toolState"] = json!(if value.is_error { "failed" } else { "completed" });
+            call.meta["toolState"] = json!(if value.is_error { ToolState::Failed } else { ToolState::Completed });
             tau_blocks::put(db,session,call,b"")?;
         }
     }
@@ -159,7 +159,7 @@ fn recover(db: &Connection) -> Result<()> {
         let mut h: BlockHeader = serde_json::from_str(&raw)?;
         h.meta["event"]["phase"] = json!("interrupted"); h.sealed = true;
         if h.kind == BlockKind::Tool {
-            h.meta["toolState"] = json!("interrupted");
+            h.meta["toolState"] = json!(ToolState::Interrupted);
             h.meta["event"]["errorMessage"] = json!("Interrupted; execution outcome may be unknown");
             if let Some(mut input) = tau_blocks::header(db,&scope,&input_id(&h.id))? { input.sealed = true; tau_blocks::set_header(db,&scope,input)?; }
         }
@@ -374,4 +374,41 @@ mod tests {
         let card=tau_blocks::header(&db,"chat",&finished.id).unwrap().unwrap();assert_eq!(card.length,0);
         assert!(serde_json::to_vec(&card).unwrap().len()<2048);assert_eq!(tau_blocks::children(&db,"chat",Some(&card.id)).unwrap().len(),1);
     }
+    #[tokio::test]
+    async fn published_tool_contract_handles_reused_ids_orphans_overflow_and_interruption() {
+        let root=tempfile::tempdir().unwrap();let state=StateStore::load(root.path().join("state.db")).await.unwrap();
+        state.access(|db| {
+            let tx=db.transaction()?;
+            let provider="provider-reused".repeat(180);
+            let mut ids=std::collections::HashMap::new();
+            for (order,(id,call,error,parent)) in [
+                ("orphan",false,false,None), ("a",true,false,None), ("one",false,false,Some("a")),
+                ("b",true,false,None), ("two",false,false,Some("b")), ("error",false,true,Some("b")),
+                ("unfinished",true,false,None),
+            ].into_iter().enumerate() {
+                let message=if call {json!({"role":"assistant","content":[{"type":"toolCall","id":provider,"name":"bash","arguments":{"command":"true"}}]})}
+                    else {json!({"role":"toolResult","toolCallId":provider,"toolName":"bash","isError":error,"content":[{"type":"text","text":id}]})};
+                let mut value=Event::from_entry(&json!({"type":"message","id":id,"message":message}),false)?.remove(0);
+                value.order=order as u64;event(&tx,"chat",&value)?;ids.insert(id,value.id.clone());
+                let h=tau_blocks::header(&tx,"chat",&value.id)?.unwrap();
+                assert_eq!(h.parent.as_ref(),parent.map(|p|&ids[p]));
+                let metadata=tau_blocks::cached_content(&tx,"chat",h.meta["fullEvent"]["id"].as_str().unwrap())?;
+                assert_eq!(serde_json::from_slice::<Event>(&metadata)?.tool_call_id.as_deref(),Some(provider.as_str()));
+                if call {
+                    let input=tau_blocks::header(&tx,"chat",&input_id(&h.id))?.unwrap();
+                    assert_eq!(input.tool_body(),Some(ToolBody::Input));
+                    assert_eq!(h.tool_state(),Some(ToolState::Running));
+                } else {assert_eq!(h.tool_body(),Some(if error {ToolBody::Error} else {ToolBody::Output}));}
+            }
+            for (id,expected) in [("a",ToolState::Completed),("b",ToolState::Failed)] {
+                assert_eq!(tau_blocks::header(&tx,"chat",&ids[id])?.unwrap().tool_state(),Some(expected));
+            }
+            recover(&tx)?;
+            let interrupted=tau_blocks::header(&tx,"chat",&ids["unfinished"])?.unwrap();
+            assert_eq!(interrupted.tool_state(),Some(ToolState::Interrupted));
+            assert!(interrupted.sealed && tau_blocks::header(&tx,"chat",&input_id(&interrupted.id))?.unwrap().sealed);
+            tx.commit()?;Ok(())
+        }).await.unwrap();
+    }
+
 }

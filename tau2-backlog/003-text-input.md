@@ -1,5 +1,7 @@
 # 003 — Complete shared text input navigation
 
+**September 29 triage:** retain implemented shared editing. Remaining physical checks feed [043](043-simplification-acceptance.md); no separate editor rewrite.
+
 Priority: next editor work. Status: merged via frontend into tau2; device acceptance pending. Depends on 004; coordinate 006/007.
 
 Reported in the running Tau 2 composer: Left/Right inconsistently stop at line

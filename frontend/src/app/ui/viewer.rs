@@ -1,5 +1,5 @@
-use super::controls::Form;
-use super::{Context, Event, Frame, Id, Request, Widget};
+use super::controls::{ButtonStyle, Form};
+use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     notice::DownloadTarget,
     render::{color, contains},
@@ -31,6 +31,8 @@ pub(in crate::app) struct ImageViewer {
     second: Option<(u64, Vec2)>,
 }
 impl ImageViewer {
+    pub fn cancel_pointer(&mut self) { self.pointer = None; self.second = None; }
+
     pub fn new(spec: ImageSpec) -> Self {
         let id = Id::new();
         Self {
@@ -59,15 +61,25 @@ impl ImageViewer {
     }
 }
 impl Widget for ImageViewer {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if !self.spec.target.matches_source(&cx.model.identity, cx.model.account.source_lineage.as_deref()) {
+            cx.ui.requests.push_back(Request::CloseViewer(self.id));
+        }
+    }
+    fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
+        self.spec.target.matches_source(&model.identity, model.account.source_lineage.as_deref())
+            && self.form.owns(target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if !self.spec.target.matches_source(&cx.model.identity, cx.model.account.source_lineage.as_deref()) {
             cx.ui.requests.push_back(Request::CloseViewer(self.id));
             return true;
         }
-        let choice = match event {
-            Event::Back | Event::Key { key: "Escape", .. } => Some(Choice::Back),
-            _ if self.pointer.is_none() => self.form.event(event, &mut [], cx),
-            _ => None,
+        let (handled, choice) = match event {
+            Event::Back | Event::Key { key: "Escape", .. } => (true, Some(Choice::Back)),
+            _ if self.pointer.is_none() => self.form.event(event, std::iter::empty(), cx),
+            _ => (false, None),
         };
         if let Some(choice) = choice {
             match choice {
@@ -88,11 +100,11 @@ impl Widget for ImageViewer {
             cx.ui.dirty = true;
             return true;
         }
+        if handled {
+            return true;
+        }
         match *event {
-            Event::Cancel => {
-                self.pointer = None;
-                self.second = None;
-            }
+
             Event::Down { pointer, point, .. } if cx.ui.capture.is_none() => {
                 if let Some((id, _, _, _)) = self.pointer {
                     if id != pointer && self.second.is_none() {
@@ -155,6 +167,7 @@ impl Widget for ImageViewer {
         let s = cx.ui.scale;
         self.form.begin_frame();
         self.image = None;
+        frame.layer.above();
         frame.layer.rect(b, color(0x06090d));
         match cx.services.renderer.image_size(&cx.services.gpu, &self.spec.path) {
             Ok((w, h)) => {
@@ -182,14 +195,14 @@ impl Widget for ImageViewer {
                 );
             }
         }
+        frame.layer.above();
         for (i, choice) in
             [Choice::Back, Choice::Smaller, Choice::Fit, Choice::Larger, Choice::Save].into_iter().enumerate()
         {
             self.form.button(
                 choice,
                 Rect::new(b.x + (12. + i as f32 * 66.) * s, b.y + 8. * s, 60. * s, 38. * s),
-                false,
-                false,
+                ButtonStyle::Tonal,
                 frame,
                 cx,
             );

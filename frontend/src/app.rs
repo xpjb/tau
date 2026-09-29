@@ -1,11 +1,9 @@
 use crate::{
-    clock,
     connection::{COUNTER_REFRESH, CounterTicker},
     controller::Controller,
-    details::{Line as DetailLine, Tools},
     editor::Editor,
     icons::Icon,
-    render::{Interaction, Layer, Renderer, color, contains},
+    render::{Layer, Renderer, color, contains},
     scroll::Autoscroll,
     store::Store,
     tooltip::Content,
@@ -25,7 +23,6 @@ use tau_protocol::*;
 
 mod attachments;
 mod notices;
-mod projection;
 use crate::notice::DownloadTarget;
 mod mobile_input;
 mod ui;
@@ -48,31 +45,6 @@ impl Info {
     }
 }
 
-#[derive(Clone)]
-struct Row {
-    block: Option<String>, // Native interest, independent of the stable display identity.
-    details: Vec<DetailLine>,
-    header: bool,
-    key: String,
-    title: String,
-    timestamp: String,
-    sender: EventRole,
-    source: String,
-    user: bool,
-    error: bool,
-    actions: Vec<(String, ui::MenuChoice)>,
-    attachment: Option<(String, ChatAttachment)>,
-}
-impl Row {
-    fn joins(&self, next: Option<&Self>) -> bool {
-        next.is_some_and(|row| self.sender == row.sender)
-    }
-}
-struct Placed {
-    key: String,
-    top: f32,
-    height: f32,
-}
 
 struct Pointer {
     id: u64,
@@ -94,7 +66,7 @@ pub enum PlatformAction {
     InputMenu,
     Background,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SavedAction {
     Open,
     #[cfg(not(target_os = "android"))]
@@ -123,15 +95,12 @@ impl App {
         let controller = Controller::new(store, wake.clone())?;
         let needs_setup = controller.settings.url().is_err();
         let root = ui::RootWidget {
-            id: ui::Id::new(),
             workspace: ui::Workspace::new(&controller),
             dialog: None,
             viewer: None,
             menu: None,
             notice: ui::NoticeWidget::new(),
             tooltips: ui::TooltipHost::default(),
-            #[cfg(test)]
-            test_cards: ui::CardDeck::new(),
         };
         let services = ui::Services {
             renderer: Renderer::new(ctx).map_err(anyhow::Error::msg)?,
@@ -172,7 +141,8 @@ impl App {
         }
     }
     pub fn save(&mut self) -> Result<()> {
-        self.with_ui(|root, cx| root.workspace.save(cx))
+        self.sync_navigation();
+        self.with_ui(|root, cx| root.workspace.chat.transcript.save(cx))
     }
     pub fn tick(&mut self, dt: f32) -> bool {
         self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
@@ -191,7 +161,7 @@ impl App {
             self.ui.dirty = true;
         }
         self.sync_navigation();
-        self.ui_event(ui::Event::Tick(dt));
+        self.update_widgets(dt);
         self.with_ui(|root, cx| root.timers(cx));
         let waiting = self.ui.capture.is_some_and(|c| c.touch && !c.dragged && c.started.elapsed().as_millis() < 450);
         std::mem::take(&mut self.ui.dirty) || waiting
@@ -200,18 +170,13 @@ impl App {
         self.sync_navigation();
         self.services.renderer.clear_scenes();
         let bounds = Rect::new(self.ui.origin.x, self.ui.origin.y, self.ui.size.0 as f32, self.ui.size.1 as f32);
-        let interaction = Interaction {
-            hover: self.ui.capture.map(|c| c.point).or(self.ui.hover),
-            pressed: self.ui.capture.filter(|c| !c.dragged).map(|c| c.start),
-            held: self.ui.capture.is_some(),
-        };
-        let mut layer = Layer::new(interaction);
+        let mut layer = Layer::default();
         layer.rect(bounds, color(0x0e141b));
         self.with_ui(|root, cx| root.visit_perframe(&mut ui::Frame { layer: &mut layer, bounds, clip: bounds }, cx));
         if let Err(error) = self.finish_ui_requests() {
             self.report(Err(error));
         }
-        self.reconcile_routes();
+        self.reconcile_targets();
         self.services.renderer.draw(ctx, view, &[layer]);
         if let Some(point) = self.ui.hover {
             self.ui_event(ui::Event::Hover(Some(point)));
@@ -255,19 +220,13 @@ impl App {
         self.ui_event(ui::Event::Preedit(&text, cursor));
     }
     pub fn cancel_autoscroll(&mut self) -> bool {
-        let active = self.root.workspace.chat.transcript.autoscroll.take().is_some();
-        self.ui.dirty |= active;
-        active
+        self.with_ui(|root, cx| root.workspace.chat.transcript.cancel_autoscroll(cx))
     }
     pub fn cancel_pointer(&mut self) {
+        if self.ui.native.is_none() { self.cancel_preedit(); }
         self.with_ui(|root, cx| {
             root.workspace.cancel(cx);
-            if let Some(dialog) = &mut root.dialog {
-                dialog.handle_event(&ui::Event::Cancel, cx);
-            }
-            if let Some(viewer) = &mut root.viewer {
-                viewer.handle_event(&ui::Event::Cancel, cx);
-            }
+            if let Some(viewer) = &mut root.viewer { viewer.cancel_pointer(); }
             root.tooltips.dismiss();
         });
         self.root.menu = None;
@@ -285,7 +244,9 @@ impl App {
                 C::NsResize
             };
         }
-        self.ui.hot.map_or(C::Default, |(_, text)| if text { C::Text } else { C::Pointer })
+        self.ui.hot.map_or(C::Default, |(_, cursor)| match cursor {
+            ui::Cursor::Default => C::Default, ui::Cursor::Pointer => C::Pointer, ui::Cursor::Text => C::Text,
+        })
     }
     pub(super) fn open_download_notice(&mut self, target: DownloadTarget) -> Result<()> {
         self.with_ui(|root, cx| root.workspace.open_download(target, cx))?;
@@ -497,15 +458,9 @@ mod control_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod editor_tests;
 #[cfg(all(test, not(target_os = "android")))]
-mod hover_tests;
-#[cfg(all(test, not(target_os = "android")))]
-mod icon_controls_tests;
-#[cfg(all(test, not(target_os = "android")))]
 mod navigation_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod project_tests;
-#[cfg(all(test, not(target_os = "android")))]
-mod scroll_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod thinking_tests;
 #[cfg(all(test, not(target_os = "android")))]
@@ -550,8 +505,4 @@ mod download_interaction_tests;
 mod composer_status_tests;
 
 #[cfg(test)]
-mod test_ui;
-#[cfg(test)]
 use crate::tooltip::Tooltip;
-#[cfg(test)]
-use test_ui::FixtureChoice;

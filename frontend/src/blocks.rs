@@ -8,13 +8,26 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
 use std::{collections::{BTreeSet, HashMap}, path::Path, sync::{Arc, Mutex}, time::Duration};
 use tau_blocks::*;
-use tau_protocol::{Event, EventKind, QueueState, TranscriptSnapshot};
+use tau_protocol::{Event, EventKind, QueueState};
 use tau_transfer::blocks::{Client, Header};
 use tokio::sync::{mpsc, watch};
 use crate::store::LocalChat;
 
 pub const QUEUE: &str = "@queue";
-pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub lengths:HashMap<String,u64>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,String> }
+pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub generation:String,pub sequence:u64,pub events:Vec<Event>,pub queue:QueueState,pub before:Option<u64>,pub delivered:Vec<String>, pub bodies:HashMap<String,Body>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,ToolState>, pub parents:HashMap<String,String> }
+/// Verified preview state, separate from both authored bytes and finality.
+/// None means the body directory/header has not arrived, not a completed empty body.
+#[derive(Clone, Debug, Hash)]
+pub struct Body {
+    pub reference: Option<BodyRef>,
+    pub resident: u64,
+    pub limited: bool,
+}
+impl Body {
+    pub fn length(&self) -> u64 { self.reference.as_ref().map_or(0, |r| r.length) }
+    pub fn complete(&self) -> bool { self.reference.as_ref().is_some_and(|r| self.resident == r.length) }
+    pub fn missing(&self) -> bool { self.resident == 0 && !self.complete() }
+}
 #[derive(Default)]
 struct Dirty {full:bool,viewing:bool,ids:BTreeSet<String>}
 #[derive(Default)]
@@ -25,6 +38,52 @@ struct Prefetched {
 #[derive(Clone)]
 pub struct Cache { prefetched:Arc<Mutex<Prefetched>>,exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
 impl Cache {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn seed_preview(&self, scope: &str, events: Vec<Event>, mut queue: QueueState, before: Option<u64>) -> Result<View> {
+        let ids = events.iter().map(|e| e.id.clone()).collect::<BTreeSet<_>>();
+        {
+            let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
+            let mut wanted = BTreeSet::from([QUEUE.to_owned()]);
+            let mut parents = BTreeSet::from([None, Some(QUEUE.to_owned())]);
+            let mut put = |id: String, parent: Option<String>, order, kind, meta, sealed, bytes: &[u8]| -> Result<()> {
+                wanted.insert(id.clone());
+                tau_blocks::put(&tx, scope, BlockHeader { id, parent, order, kind, meta, sealed, version: 0, length: 0, revision: 0 }, bytes)?;
+                Ok(())
+            };
+            for mut event in events {
+                let text = std::mem::take(&mut event.text);
+                let kind = match event.kind { EventKind::Tool => BlockKind::Tool, EventKind::Thinking => BlockKind::Thinking, _ => BlockKind::Text };
+                let sealed = event.phase != tau_protocol::EventPhase::Live;
+                let mut meta = serde_json::json!({"event": event});
+                if kind == BlockKind::Tool {
+                    meta["toolState"] = serde_json::to_value(if sealed { ToolState::Completed } else { ToolState::Writing })?;
+                }
+                put(event.id.clone(), None, event.order, kind, meta, sealed, if kind == BlockKind::Tool { b"" } else { text.as_bytes() })?;
+                if kind == BlockKind::Tool {
+                    parents.insert(Some(event.id.clone()));
+                    put(tool_input_id(&event.id), Some(event.id.clone()), 0, BlockKind::Code, serde_json::json!({"inputFor": event.id}), sealed, text.as_bytes())?;
+                }
+            }
+            let requests = std::mem::take(&mut queue.requests);
+            put(QUEUE.into(), None, i64::MAX as u64, BlockKind::Queue, serde_json::json!({}), true, &serde_json::to_vec(&queue)?)?;
+            for (order, mut q) in requests.into_iter().enumerate() {
+                let text = std::mem::take(&mut q.text);
+                put(format!("queued:{}", q.request_id), Some(QUEUE.into()), order as u64, BlockKind::Text, serde_json::json!({"request": q}), true, text.as_bytes())?;
+            }
+            let old = tx.prepare("SELECT id FROM blocks WHERE scope=?1")?.query_map([scope], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in old { if !wanted.contains(&id) { tau_blocks::remove(&tx, scope, &id)?; } }
+            tx.execute("DELETE FROM block_cache_feeds WHERE scope=?1", [scope])?;
+            for parent in parents {
+                let request = FeedRequest { scope: scope.into(), parent: parent.clone(), cursor: None, floor: 0, before: None };
+                // All scripted records above are already committed bodies. This
+                // declares their directory coverage, not a fake transport delta.
+                tau_blocks::cache_page(&tx, &request, &FeedPage { reset: false, records: vec![], cursor: tau_blocks::cursor(&tx)?, floor: 0,
+                    before: if parent.is_none() { before.map(|order| FeedPosition { order, id: String::new() }) } else { None }, more: false })?;
+            }
+            tx.commit()?;
+        }
+        self.snapshot_inner(scope, Some(&ids), &BTreeSet::new(), true, None, true, true)?.context("Preview has no native directory")
+    }
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path.parent().context("Cache path has no parent")?)?;
         let _directory=crate::disk::replica_directory_lease(path.parent().unwrap())?;
@@ -156,6 +215,7 @@ impl Cache {
         let roots = tau_blocks::children(&db, scope, None)?;
         let anchor = roots.iter().position(|h| {
             key == &format!("{scope}/{}",h.id) || key == &format!("{scope}/details:{}",h.id)
+                || key == &format!("{scope}/tool:{}",h.id) || key == &format!("{scope}/thinking:{}",h.id)
                 || h.meta.pointer("/event/origin/requestId").and_then(|v|v.as_str())
                     .is_some_and(|request| key == &format!("message:{scope}:{request}"))
         });
@@ -189,12 +249,12 @@ impl Cache {
             if wanted(root) || only.is_some() { all.extend(tau_blocks::children(&db,scope,Some(&root.id))?); }
         }
         let mut delivered = Vec::new();
-        let mut events = vec![]; let mut sizes = HashMap::new(); let mut queue = QueueState::default();
-        let mut incomplete=std::collections::HashSet::new(); let mut states=HashMap::new();
+        let mut events = vec![]; let mut bodies = HashMap::new(); let mut queue = QueueState::default();
+        let mut incomplete=std::collections::HashSet::new(); let mut states=HashMap::new(); let mut parents=HashMap::new();
         for h in &all {
             if let Some(value) = h.meta.get("event") {
-                let mut event=native_event(h,value)?;
-                let call_key=event.tool_call_id.clone();
+                let mut event:Event=serde_json::from_value(value.clone())?;
+                if let Some(parent)=&h.parent {parents.insert(h.id.clone(),parent.clone());}
                 let group=h.parent.as_deref().unwrap_or(&h.id);
                 let allowance=group_budgets.entry(group).or_insert(256*1024usize);
                 preview_ids.entry(group.into()).or_default().push(h.id.clone());
@@ -210,13 +270,14 @@ impl Cache {
                         event=full;
                         if preview {body_budget-=bytes.len();*allowance-=bytes.len();}
                     } else {incomplete.insert(h.id.clone());}
-                    event.tool_call_id=call_key;
                 }
-                let body = if h.kind == BlockKind::Tool { format!("{}/input",h.id) } else { h.id.clone() };
+                ensure!(event.id == h.id, "Event metadata has a different native identity");
+                let body = if h.kind == BlockKind::Tool { tool_input_id(&h.id) } else { h.id.clone() };
                 let bytes = if wanted(h) {read(&body,if preview {(*allowance).min(body_budget)} else {MAX_BLOCK_BYTES as usize})?} else {vec![]};
                 if preview {body_budget=body_budget.saturating_sub(bytes.len());*allowance=allowance.saturating_sub(bytes.len());}
                 event.text = text_prefix(&bytes)?;
-                let length = tau_blocks::header(&db,scope,&body)?.map_or(0,|b|b.length);
+                let reference = tau_blocks::header(&db,scope,&body)?.map(|b| b.body_ref(&page.cursor.lineage, scope));
+                let length = reference.as_ref().map_or(0, |b| b.length);
                 // Acceptance/header arrival is not display convergence. Only
                 // retire the local message after the canonical body is resident.
                 // A bounded preview can still be incomplete while its full body
@@ -227,14 +288,10 @@ impl Cache {
                     && let Some(request) = &event.origin.request_id {
                     delivered.push(request.clone());
                 }
-                sizes.insert(event.id.clone(),length);
-                if bytes.len() as u64 != length {incomplete.insert(event.id.clone());}
-                if preview && wanted(h) && (length>256*1024 || body_budget==0 || *allowance==0) && (bytes.len() as u64)<length {event.text.push_str("\n\n[Preview limited. Fetch the complete message with Copy.]");}
-                if h.kind==BlockKind::Tool {
-                    states.insert(event.id.clone(),h.meta.get("toolState").and_then(|v|v.as_str()).unwrap_or(if h.sealed {"running"} else {"writing"}).into());
-                }
-                if event.text.is_empty() && length > 0 && (event.role != tau_protocol::EventRole::Tool || h.parent.is_none())
-                    && event.kind != EventKind::Tool { event.text = "Loading…".into(); }
+                bodies.insert(event.id.clone(), Body { reference, resident: bytes.len() as u64,
+                    limited: preview && wanted(h) && (length>256*1024 || body_budget==0 || *allowance==0) && (bytes.len() as u64)<length });
+                if bodies[&event.id].reference.is_none() || bytes.len() as u64 != length {incomplete.insert(event.id.clone());}
+                if let Some(state)=h.tool_state() {states.insert(event.id.clone(),state);}
                 events.push(event);
             }
         }
@@ -248,7 +305,7 @@ impl Cache {
                 let bytes=read(&h.id,MAX_BLOCK_BYTES as usize)?;
                 if bytes.len() as u64 != h.length {incomplete.insert(h.id.clone());}
                 request.text = text_prefix(&bytes)?;
-                if request.text.is_empty() && h.length > 0 { request.text = "Loading…".into(); }
+                bodies.insert(h.id.clone(), Body { reference: Some(h.body_ref(&page.cursor.lineage, scope)), resident: bytes.len() as u64, limited: false });
                 queue.requests.push(request);
             }
         }
@@ -274,17 +331,16 @@ impl Cache {
         }).collect::<Vec<_>>();
         // Feed's bounded LRU evicts retained/offscreen groups before the viewport.
         previews.sort_by_key(|(root,_,_)| (visible.contains(root), root.clone()));
-        Ok(Some(View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,snapshot:TranscriptSnapshot { generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
-            events,queue,before:page.before.as_ref().map(|p|p.order),delivered },lengths:sizes,incomplete,states }))
+        Ok(Some(View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
+            events,queue,before:page.before.as_ref().map(|p|p.order),delivered,bodies,incomplete,states,parents }))
     }
     pub fn copy_ready(&self, scope:&str, ids:&[String]) -> Result<Option<String>> {
         ensure!(ids.len()<=4096,"Copy fewer than 4097 sections at a time");
         let mut seen=BTreeSet::new();let ids=ids.iter().filter(|id|seen.insert(*id)).cloned().collect::<Vec<_>>();let ids=ids.as_slice();
         if !copy_complete(&self.db.lock().unwrap(),scope,ids)? {return Ok(None);}
         let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false,true)?.context("Details are not cached")?;
-        let tools=crate::details::Tools::new(view.snapshot.events.iter());
-        let group=ids.iter().filter_map(|id|view.snapshot.events.iter().find(|e|&e.id==id)).collect::<Vec<_>>();
-        let text=tools.copy(&group);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
+        let group=ids.iter().filter_map(|id|view.events.iter().find(|e|&e.id==id)).collect::<Vec<_>>();
+        let text=crate::details::copy(&group, view.events.iter(), &view.parents);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
     }
     pub fn history_cursor(&self, scope: &str) -> Result<Option<FeedPosition>> {
         Ok(tau_blocks::cached_feed(&self.db.lock().unwrap(),scope,None)?.and_then(|p|p.before))
@@ -378,8 +434,8 @@ impl Cache {
                 blocks.insert(id.clone());metadata.push(h);
             }
         }
-        let mut events = metadata.iter().filter_map(|h| h.meta.get("event").map(|value|(h,value))).map(|(h,value)| {
-            let mut event=native_event(h,value)?;
+        let mut events = roots.iter().filter_map(|h| h.meta.get("event").map(|value|(h,value))).map(|(h,value)| {
+            let mut event:Event=serde_json::from_value(value.clone())?;
             if h.length > 0 {event.text = "x".into();}
             Ok(event)
         }).collect::<Result<Vec<_>>>()?;
@@ -403,24 +459,31 @@ impl Cache {
                 let key = format!("tool:{call}");
                 if copy.contains(&h.id) || visible.contains(&h.id) && local.expansion.get(&key).copied().unwrap_or(false) {
                     parents.insert(Some(h.id.clone()));
-                    for child in tau_blocks::children(&db,scope,Some(&h.id))? {
-                        if child.meta.get("attachment").is_some() { continue; }
-                        let input = child.meta.get("inputFor").is_some();
-                        let label = if input { "Input" } else if child.meta.pointer("/event/isError").and_then(|v|v.as_bool()) == Some(true) { "Error" } else { "Output" };
-                        if copy.contains(&h.id) || child.length <= 1200 || local.expansion.get(&format!("{key}:{label}")).copied().unwrap_or(false) {
+                    let children = tau_blocks::children(&db,scope,Some(&h.id))?;
+                    let error = h.meta.pointer("/event/isError").and_then(|v|v.as_bool()) == Some(true)
+                        || children.iter().filter(|c|c.meta.get("event").is_some()).next_back()
+                            .is_some_and(|c|c.meta.pointer("/event/isError").and_then(|v|v.as_bool()) == Some(true));
+                    let output = if error { ToolBody::Error } else { ToolBody::Output };
+                    let output_length = children.iter().filter(|c|matches!(c.tool_body(),Some(ToolBody::Output | ToolBody::Error))).map(|c|c.length).sum::<u64>();
+                    for child in children {
+                        let Some(body) = child.tool_body() else { continue; };
+                        // The UI presents one result section. Its disclosure and
+                        // aggregate size govern every member, including mixed success/error results.
+                        let (section,length) = if body == ToolBody::Input {(body,child.length)} else {(output,output_length)};
+                        if copy.contains(&h.id) || length <= 1200 || local.expansion.get(&format!("{key}:{}",section.label())).copied().unwrap_or(false) {
                             blocks.insert(child.id);
                         }
                     }
                 }
             } else if h.meta.get("event").is_some() {
-                let is_tool = h.meta.pointer("/event/role").and_then(|v|v.as_str()) == Some("tool");
-                if is_tool {
+                if let Some(body) = h.tool_body() {
                     let call=h.parent.as_deref().unwrap_or(&h.id);
                     let key = format!("tool:{call}");
-                    let label = if h.meta.pointer("/event/isError").and_then(|v|v.as_bool()) == Some(true) {"Error"} else {"Output"};
+                    let label = body.label();
                     if copy.contains(&h.id) || visible.contains(&h.id) && local.expansion.get(&key).copied().unwrap_or(false)
                         && (h.length <= 1200 || local.expansion.get(&format!("{key}:{label}")).copied().unwrap_or(false)) {blocks.insert(h.id);}
-                } else if copy.contains(&h.id) || h.kind != BlockKind::Thinking || visible.contains(&h.id) {blocks.insert(h.id);}
+                } else if h.meta.pointer("/event/role").and_then(|v|v.as_str()) != Some("tool")
+                    && (copy.contains(&h.id) || h.kind != BlockKind::Thinking || visible.contains(&h.id)) {blocks.insert(h.id);}
             }
         }
         for h in tau_blocks::children(&db,scope,Some(QUEUE))? { blocks.insert(h.id); }
@@ -464,13 +527,6 @@ impl Cache {
         Ok(Plan { scope:scope.into(),parents,blocks:heads,older,foreground,background:false })
     }
 }
-fn native_event(h:&BlockHeader,value:&serde_json::Value)->Result<Event> {
-    let mut event:Event=serde_json::from_value(value.clone())?;
-    // Display pairing follows the native tree, not provider IDs that may repeat
-    // across turns. Full provider IDs remain untouched in canonical context.
-    if event.kind==EventKind::Tool || event.role==tau_protocol::EventRole::Tool {event.tool_call_id=Some(h.parent.as_ref().unwrap_or(&h.id).clone());}
-    Ok(event)
-}
 fn replica_epoch(db:&Connection)->Result<u64> {Ok(db.query_row("SELECT epoch FROM replica_epoch WHERE singleton=1",[],|r|r.get(0))?)}
 fn metadata_length(db:&Connection,scope:&str,reference:&serde_json::Value)->Result<Option<u64>> {
     let id=reference["id"].as_str().context("Invalid metadata reference")?;
@@ -485,12 +541,12 @@ fn copy_complete(db:&Connection,scope:&str,ids:&[String])->Result<bool> {
     };
     for id in ids {
         let h=tau_blocks::header(db,scope,id)?.context("Details block no longer exists")?;
-        ready&=h.sealed && (h.kind!=BlockKind::Tool || matches!(h.meta["toolState"].as_str(),Some("completed"|"failed"|"interrupted")));
+        ready&=h.sealed && (h.kind!=BlockKind::Tool || h.tool_state().is_some_and(ToolState::finished));
         inspect(&h)?;
         if h.kind==BlockKind::Tool {
             ready&=tau_blocks::cached_feed(db,scope,Some(id))?.is_some_and(|p|p.before.is_none() && p.cursor.sequence>=h.revision);
             for child in tau_blocks::children(db,scope,Some(id))? {
-                if child.meta.get("inputFor").is_some() || child.meta.pointer("/event/kind").and_then(|v|v.as_str())==Some("text") {
+                if child.tool_body().is_some() {
                     inspect(&child)?;bodies.insert(child.id.clone(),child);
                 }
             }
@@ -770,7 +826,7 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod checkpoint_tests;

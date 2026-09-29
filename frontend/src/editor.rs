@@ -242,7 +242,6 @@ impl Editor {
         Vec2::new(inner.x - self.scroll.x * view.size, inner.y + center - self.scroll.y * view.size)
     }
     pub fn hide(&mut self) { self.visible = false; }
-    pub fn contains(&self, point: Vec2) -> bool { self.visible && self.view.is_some_and(|v| contains(v.rect, point)) }
     fn place(&mut self, caret: Caret, secret: bool, extend: bool) {
         self.caret = Caret { byte_index: self.source_byte(caret.byte_index, secret), ..caret };
         if !extend { self.anchor = self.caret.byte_index; }

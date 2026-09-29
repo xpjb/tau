@@ -70,12 +70,6 @@ struct Vertex {
     corners: [f32; 4],
     ripple: [f32; 4],
 }
-#[derive(Clone, Copy, Default)]
-pub struct Interaction {
-    pub hover: Option<Vec2>,
-    pub pressed: Option<Vec2>,
-    pub held: bool,
-}
 struct Shape {
     rect: Rect,
     clip: Rect,
@@ -86,16 +80,40 @@ struct Shape {
 #[derive(Default)]
 pub struct Layer {
     rects: Vec<Shape>,
-    pub interaction: Interaction,
+    boundaries: Vec<(usize, usize, usize)>,
     pub draws: Vec<Draw>,
     pub images: Vec<(PathBuf, Rect, Rect)>,
 }
+struct PaintBatch<'a> {
+    rects: &'a [Shape],
+    draws: &'a [Draw],
+    images: &'a [(PathBuf, Rect, Rect)],
+}
 impl Layer {
-    pub fn new(interaction: Interaction) -> Self {
-        Self {
-            interaction,
-            ..Default::default()
+    /// Start a surface above everything already painted. Within a surface,
+    /// shapes sit below images/text; batching must never cross this boundary.
+    /// Container clipping still applies to every primitive appended by a child.
+    pub fn above(&mut self) {
+        let end = self.end();
+        if end != (0, 0, 0) && self.boundaries.last() != Some(&end) {
+            self.boundaries.push(end);
         }
+    }
+    fn end(&self) -> (usize, usize, usize) {
+        (self.rects.len(), self.draws.len(), self.images.len())
+    }
+    fn batches(&self) -> impl Iterator<Item = PaintBatch<'_>> {
+        let mut start = (0, 0, 0);
+        self.boundaries.iter().copied().chain(std::iter::once(self.end())).filter_map(move |end| {
+            if start == end { return None; }
+            let batch = PaintBatch {
+                rects: &self.rects[start.0..end.0],
+                draws: &self.draws[start.1..end.1],
+                images: &self.images[start.2..end.2],
+            };
+            start = end;
+            Some(batch)
+        })
     }
     /// Apply a container clip to the shapes, text and images appended by one
     /// child visit without changing its layout coordinates or editor geometry.
@@ -131,9 +149,6 @@ impl Layer {
             });
         }
     }
-    pub fn control_color(&self, rect: Rect, base: Color) -> Color {
-        self.surface_color(rect, [0.; 4], rect, base)
-    }
     /// Draws beneath text/images. Hover is quiet; a press is an expanding,
     /// rounded-surface-clipped circle instead of brightening the entire panel.
     pub fn surface_highlight(
@@ -142,12 +157,9 @@ impl Layer {
         corners: [f32; 4],
         clip: Rect,
         pinned: bool,
-        hoverable: bool,
+        hovering: bool,
         ripple: Option<(Vec2, f32, f32)>,
     ) {
-        let inside = |p| contains(clip, p) && contains_rounded(rect, corners, p);
-        let hovering = hoverable && self.interaction.hover.is_some_and(inside)
-            && (!self.interaction.held || self.interaction.pressed.is_some_and(inside));
         let strength = if pinned { 0.035 } else if hovering { 0.018 } else { 0. };
         if strength > 0. {
             self.clipped_corners(rect, corners, Color([1., 1., 1., strength]), clip);
@@ -166,30 +178,8 @@ impl Layer {
             }
         }
     }
-    pub fn surface_color(
-        &self,
-        rect: Rect,
-        corners: [f32; 4],
-        clip: Rect,
-        mut base: Color,
-    ) -> Color {
-        let inside = |p| contains(clip, p) && contains_rounded(rect, corners, p);
-        let input = self.interaction;
-        if input.hover.is_some_and(inside) {
-            let mix = if input.pressed.is_some_and(inside) {
-                0.09
-            } else if !input.held {
-                0.018
-            } else {
-                0.
-            };
-            for c in &mut base.0[..3] {
-                *c += (1. - *c) * mix;
-            }
-        }
-        base
-    }
 }
+
 pub struct MessageView {
     pub source: String,
     pub doc: Document,
@@ -248,6 +238,7 @@ pub struct Renderer {
     scenes: HashMap<String, (tau_markdown::Scene, Rect)>,
     pub selection: Option<Selection>,
     message_order: Vec<String>,
+    #[cfg(test)] pub message_measurements: usize,
     tooltip_labels: HashMap<&'static str, crate::tooltip::text::RichLabel>,
 }
 impl Renderer {
@@ -378,6 +369,7 @@ impl Renderer {
             scenes: HashMap::new(),
             selection: None,
             message_order: vec![],
+            #[cfg(test)] message_measurements: 0,
             tooltip_labels: HashMap::new(),
         })
     }
@@ -489,6 +481,7 @@ impl Renderer {
             color: color(crate::tooltip::INK), paint: label.paint, clip: Some(intersect(rect, clip)) });
     }
     pub fn message_height(&mut self, key: &str, source: &str, width: f32, size: f32) -> f32 {
+        #[cfg(test)] { self.message_measurements += 1; }
         self.message_order.push(key.to_owned());
         let message = self.messages.entry(key.into()).or_insert_with(|| {
             let namespace = self.next_namespace;
@@ -545,18 +538,6 @@ impl Renderer {
     pub fn clear_scenes(&mut self) {
         self.scenes.clear();
         self.message_order.clear();
-    }
-    pub fn hit_text(&self, point: Vec2) -> Option<(String, usize)> {
-        for (key, (scene, viewport)) in &self.scenes {
-            if !contains(*viewport, point) {
-                continue;
-            }
-            let m = &self.messages[key];
-            if let Some(byte) = m.view.hit_source(scene, point, &self.text, &m.doc) {
-                return Some((key.clone(), byte));
-            }
-        }
-        None
     }
     pub fn hit_link(&self, point: Vec2) -> Option<String> {
         for (key, (scene, viewport)) in &self.scenes {
@@ -645,6 +626,9 @@ impl Renderer {
             })
             .collect::<Vec<_>>();
         Some(parts.join("\n\n"))
+    }
+    pub(crate) fn order_messages(&mut self, keys: impl Iterator<Item = String>) {
+        self.message_order = keys.collect();
     }
     pub fn retain_messages(&mut self, keys: &std::collections::HashSet<String>) {
         if self
@@ -789,13 +773,14 @@ impl Renderer {
         self.text
             .set_transform(TextService::pixel_ortho(width, height));
         let ndc = |x: f32, y: f32| [x / width as f32 * 2. - 1., 1. - y / height as f32 * 2.];
+        let layers = layers.iter().flat_map(Layer::batches).collect::<Vec<_>>();
         let mut batches = vec![];
         let mut shapes = vec![];
         let mut image_buffers = vec![];
-        for layer in layers {
-            batches.push(self.text.prepare(ctx.device(), ctx.queue(), &layer.draws));
+        for layer in &layers {
+            batches.push(self.text.prepare(ctx.device(), ctx.queue(), layer.draws));
             let mut vertices = vec![];
-            for shape in &layer.rects {
+            for shape in layer.rects {
                 let r = shape.clip;
                 let full = shape.rect;
                 for [x, y] in [
@@ -967,7 +952,7 @@ mod tests {
     #[test]
     fn subtle_hover_and_circle_have_separate_clipped_shapes() {
         let rect = Rect::new(10., 10., 120., 80.);
-        let mut layer = Layer::new(Interaction { hover: Some(Vec2::new(30., 40.)), ..Default::default() });
+        let mut layer = Layer::default();
         layer.surface_highlight(rect, [12.; 4], rect, false, true, None);
         assert_eq!(layer.rects.len(), 1);
         assert_eq!(layer.rects[0].color.0[3], 0.018);

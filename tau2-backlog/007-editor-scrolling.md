@@ -1,5 +1,7 @@
 # 007 — Repair text box scrolling
 
+**September 29 triage:** shared Editor retains this responsibility. Relevant physical acceptance feeds [043](043-simplification-acceptance.md); do not fold editor caret policy into Transcript.
+
 Priority: editor. Status: merged via frontend into tau2; device acceptance pending. Related: 003/004.
 
 The user reports bad scrolling in the composer and recalls fixes in Compendium or

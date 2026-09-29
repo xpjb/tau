@@ -32,7 +32,7 @@ fn center(r: Rect) -> Vec2 {
 }
 
 #[test]
-fn retained_rows_keep_identity_on_streaming_and_reorder_but_not_source_replacement() {
+fn retained_messages_keep_identity_on_streaming_and_prepend_but_not_source_replacement() {
     let mut h = Harness::new(false);
     let template = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
     let chat = h.app.controller.chats.get_mut("demo").unwrap();
@@ -41,44 +41,42 @@ fn retained_rows_keep_identity_on_streaming_and_reorder_but_not_source_replaceme
         let mut event = template.clone();
         event.id = format!("row-{order}");
         event.entry_id = event.id.clone();
-        event.order = order;
+        event.order = order + 1;
         event.text = format!("Message {order}");
-        chat.feed.events.insert(order, event);
+        chat.feed.events.insert(order + 1, event);
     }
+    let events = chat.feed.events.values().cloned().collect();
+    chat.feed = crate::feed::Feed::default();
+    h.app.controller.preview("demo", events, Default::default(), None).unwrap();
     h.frame();
     let row =
-        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.row.block.as_deref() == Some("row-119")).unwrap();
+        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == "demo/row-119").unwrap();
     let target = row.control.target;
+    let measured = h.app.services.renderer.message_measurements;
+    h.frame();
+    assert_eq!(h.app.services.renderer.message_measurements, measured, "Idle redraw must not remeasure all loaded messages");
     assert!(h.app.root.workspace.chat.transcript.rows.len() < 40, "Only overscan rows own interaction widgets");
     let chat = h.app.controller.chats.get_mut("demo").unwrap();
-    chat.feed.events.get_mut(&119).unwrap().text.push_str(" streamed");
-    let mut reordered = chat.feed.events.remove(&119).unwrap();
-    reordered.order = 118;
-    chat.feed.events.insert(118, reordered);
+    chat.feed.events.get_mut(&120).unwrap().text.push_str(" streamed");
+    let mut prepended = template;
+    prepended.id = "prepended".into(); prepended.order = 0;
+    let mut events = vec![prepended]; events.extend(chat.feed.events.values().cloned());
+    h.app.controller.preview("demo", events, Default::default(), None).unwrap();
     h.frame();
     let row =
-        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.row.block.as_deref() == Some("row-119")).unwrap();
+        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == "demo/row-119").unwrap();
     assert_eq!(row.control.target, target);
+    assert!(h.app.services.renderer.message_measurements - measured < 10, "Only changed or newly mounted text is measured");
     let p = center(crate::render::intersect(row.control.rect.unwrap(), row.control.clip));
     h.app.press(1, p, true);
     assert_eq!(h.app.ui.capture.unwrap().target, target);
-    assert_eq!(
-        h.app.ui.capture_route,
-        vec![
-            h.app.root.id,
-            h.app.root.workspace.id,
-            h.app.root.workspace.chat.id,
-            h.app.root.workspace.chat.transcript.scroll.target.scope,
-            target.scope
-        ]
-    );
     h.app.controller.account.source_lineage = Some("replacement-history".into());
     h.app.release(1, p); // no frame can mediate the source fence
     assert!(h.app.ui.capture.is_none());
     assert!(h.app.root.menu.is_none());
     h.frame();
     let replacement =
-        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.row.block.as_deref() == Some("row-119")).unwrap();
+        h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == "demo/row-119").unwrap();
     assert_ne!(replacement.control.target, target);
 }
 
@@ -137,7 +135,7 @@ fn claimed_text_selection_is_not_taken_by_its_scroll_parent() {
         let mut scroll = scroll::ScrollState::new(Id::new(), false);
         scroll.rect = Rect::new(0., 0., 300., 300.);
         scroll.max = 1000.;
-        let mut layer = crate::render::Layer::new(crate::render::Interaction::default());
+        let mut layer = crate::render::Layer::default();
         field.visit_perframe(
             &mut Frame { layer: &mut layer, bounds: Rect::new(10., 10., 250., 100.), clip: scroll.rect },
             cx,
@@ -156,24 +154,6 @@ fn claimed_text_selection_is_not_taken_by_its_scroll_parent() {
 }
 
 #[test]
-fn ancestor_detach_does_not_apply_a_stale_path_to_a_replacement_focus() {
-    let mut ui = UiState::new((100, 100), false);
-    let root = Id::new();
-    let parent = Id::new();
-    let child = Id::new();
-    let target = Target { scope: child, widget: Id::new() };
-    ui.focus = Some(target);
-    ui.focus_route = vec![root, parent, child];
-    ui.detach(parent);
-    assert!(ui.focus.is_none());
-    ui.focus_route = vec![root, parent, child];
-    let replacement = Target { scope: Id::new(), widget: Id::new() };
-    ui.focus = Some(replacement);
-    ui.detach(parent);
-    assert_eq!(ui.focus, Some(replacement));
-}
-
-#[test]
 fn operation_validation_feedback_is_painted_inside_the_opaque_form() {
     let mut h = Harness::new(false);
     h.app.open_ui(DialogSpec::Operation(Operation::Refresh)).unwrap();
@@ -182,7 +162,9 @@ fn operation_validation_feedback_is_painted_inside_the_opaque_form() {
     h.app.key("Backspace", false, false);
     h.frame();
     let before = h.ctx.read_rgba8().unwrap();
-    h.app.ui_event(Event::Submit);
+    let button = center(h.app.root.dialog.as_ref().unwrap().button("Refresh").unwrap());
+    h.app.press(1, button, false);
+    h.app.release(1, button);
     h.frame();
     assert!(h.app.root.dialog.is_some());
     assert!(h.app.controller.notice.as_ref().unwrap().contains("provider name"));
@@ -203,7 +185,7 @@ fn captured_transcript_release_crosses_a_sibling_attachment_backdrop() {
         .transcript
         .rows
         .iter()
-        .find(|r| r.row.details.is_empty() && r.control.rect.is_some())
+        .find(|r| matches!(r.item, message_row::ItemId::Message(_)) && r.control.rect.is_some())
         .unwrap();
     let point = center(crate::render::intersect(row.control.rect.unwrap(), row.control.clip));
     h.app.press(30, point, false);
@@ -236,4 +218,196 @@ fn a_download_notice_waits_for_the_form_without_an_expired_wake_loop() {
     h.frame();
     assert!(h.app.root.notice.popup.visible(), "The destination can still be followed when the form closes");
     assert_eq!(h.app.controller.notice, Some(notice));
+}
+
+#[test]
+fn opaque_dialog_covers_the_workspace_not_just_its_shapes() {
+    for mobile in [false, true] {
+        let mut h = Harness::new(mobile);
+        h.app.root.workspace.show_chats = true;
+        h.frame();
+        let rect = h.app.root.workspace.sidebar.controls.items.iter()
+            .find(|(_, _, choice)| matches!(choice, super::sidebar::Choice::Settings))
+            .unwrap().1.control.rect.unwrap();
+        let point = center(rect);
+        h.app.press(1, point, mobile); h.app.release(1, point);
+        h.frame();
+        assert!(matches!(h.app.root.dialog, Some(Dialog::Connection(_))));
+        let actual = h.ctx.read_rgba8().unwrap();
+        // An opaque dialog must look identical with or without the workspace's
+        // text, icons and shapes beneath it. No sidebar coordinates or glyph pixels.
+        let bounds = Rect::new(0., 0., h.ctx.size().0 as f32, h.ctx.size().1 as f32);
+        let mut layer = crate::render::Layer::default();
+        h.app.with_ui(|root, cx| root.dialog.as_mut().unwrap().visit_perframe(
+            &mut Frame { layer: &mut layer, bounds, clip: bounds }, cx));
+        h.app.services.renderer.draw(&h.ctx, h.ctx.view(), &[layer]);
+        assert!(actual == h.ctx.read_rgba8().unwrap(), "Opaque dialog leaked lower content (mobile={mobile})");
+    }
+}
+
+#[test]
+fn ordered_surfaces_keep_alpha_and_inherited_clips() {
+    use crate::{icons::Icon, render::{Layer, color, contains}};
+    let h = &mut Harness::new(false);
+    let renderer = &mut h.app.services.renderer;
+    let bounds = Rect::new(20., 20., 160., 80.);
+    let clip = Rect::new(bounds.x, bounds.y, bounds.width / 2., bounds.height);
+    let mut layer = Layer::default();
+    layer.rect(bounds, color(0xff0000));
+    renderer.label(&mut layer, "Lower text", bounds, 20., color(0xffffff), false);
+    renderer.icon(&h.ctx, &mut layer, Icon::Gear,
+        Rect::new(bounds.x + 10., bounds.y + 35., 32., 32.), 0xffffff);
+    renderer.draw(&h.ctx, h.ctx.view(), std::slice::from_ref(&layer));
+    let before = h.ctx.read_rgba8().unwrap();
+    layer.with_clip(clip, |layer| {
+        layer.above();
+        layer.rect(bounds, color(0x0000ff));
+        layer.above();
+        layer.rect(bounds, sanscale::Color([1., 0., 0., 0.5]));
+    });
+    renderer.draw(&h.ctx, h.ctx.view(), &[layer]);
+    let after = h.ctx.read_rgba8().unwrap();
+    let width = h.ctx.size().0 as usize;
+    let sample = &after[((clip.y as usize + 1) * width + clip.x as usize + 1) * 4..][..4];
+    assert!(sample[0] > 0 && sample[2] > 0 && sample[1] == 0, "alpha keeps both upper red and lower blue");
+    for (i, (old, new)) in before.chunks_exact(4).zip(after.chunks_exact(4)).enumerate() {
+        let inside = contains(clip, Vec2::new((i % width) as f32 + 0.5, (i / width) as f32 + 0.5));
+        assert_eq!(new, if inside { sample } else { old }, "surface order or inherited clip at pixel {i}");
+    }
+}
+
+#[test]
+fn selection_follows_scrolled_text_and_tail_returns_to_latest() {
+    let mut h = Harness::new(false);
+    let mut event = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
+    event.text = (0..120).map(|i| format!("Selectable paragraph {i}.\n\n")).collect();
+    event.attachment = None;
+    h.app.controller.preview("demo", vec![event], Default::default(), None).unwrap();
+    h.frame();
+    h.app.with_ui(|root, cx| {
+        root.workspace.chat.transcript.scroll.set(0.);
+        root.workspace.chat.transcript.remember_scroll(cx);
+    });
+    h.frame();
+    let viewport = h.app.root.workspace.chat.transcript.scroll.rect;
+    let start = Vec2::new(viewport.x + viewport.width / 2., viewport.y + 40.);
+    let end = Vec2::new(start.x, viewport.y + viewport.height - 2.);
+    h.app.press(1, start, false);
+    h.app.motion(1, end);
+    let before = h.app.services.renderer.selected_text().unwrap();
+    let scroll = h.app.root.workspace.chat.transcript.scroll.value;
+    for _ in 0..16 {
+        h.app.update_widgets(0.05);
+        h.frame();
+    }
+    assert!(h.app.root.workspace.chat.transcript.scroll.value > scroll);
+    let renderer = &h.app.services.renderer;
+    assert!(renderer.selection.as_ref().unwrap().focus == renderer.nearest_text(end).unwrap(),
+        "Stationary selection must follow the newly placed text");
+    let selected = renderer.selected_text().unwrap();
+    assert!(selected.starts_with(&before) && selected.len() > before.len());
+    h.app.release(1, end);
+    h.app.key("c", true, false);
+    assert!(h.app.actions().iter().any(|a| matches!(a, crate::app::PlatformAction::Copy(text) if text == &selected)));
+    let tail = h.app.root.workspace.chat.composer.controls.items.iter()
+        .find(|(_, _, choice)| matches!(choice, super::composer::Choice::Tail)).unwrap().1.control.rect.unwrap();
+    h.app.press(2, center(tail), false);
+    h.app.release(2, center(tail));
+    h.frame();
+    assert!(h.app.controller.chats["demo"].local.position.follow);
+    let scroll = &h.app.root.workspace.chat.transcript.scroll;
+    assert_eq!(scroll.value, scroll.max);
+}
+
+#[test]
+fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
+    let mut h = Harness::new(false);
+    let chat = h.app.controller.chats.get_mut("demo").unwrap();
+    let mut event = chat.feed.events.values().next().unwrap().clone();
+    event.text = "A scrolling transcript paragraph.\n\n".repeat(120);
+    event.attachment = None;
+    h.app.controller.preview("demo", vec![event], Default::default(), None).unwrap();
+    h.frame();
+    h.app.with_ui(|root, cx| {
+        root.workspace.chat.transcript.scroll.set(0.);
+        root.workspace.chat.transcript.remember_scroll(cx);
+    });
+    h.frame();
+    h.app.wheel(200., false, center(h.app.root.workspace.chat.transcript.scroll.rect));
+    h.app.root.workspace.chat.transcript.scroll.wheel.as_mut().unwrap().1 -= std::time::Duration::from_millis(100);
+    let point = center(h.app.root.workspace.chat.header.title.rect.unwrap());
+    h.app.press(41, point, true);
+    h.app.ui.capture.as_mut().unwrap().started -= std::time::Duration::from_millis(500);
+    let before = h.app.root.workspace.chat.transcript.scroll.value;
+    h.app.update_widgets(0.05);
+    assert!(h.app.root.menu.is_some(), "The header consumes its held-touch update");
+    assert!(h.app.root.workspace.chat.transcript.scroll.value > before, "That consumption cannot skip the body update");
+}
+
+#[test]
+fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
+    use tau_protocol::{EventKind, EventRole, EventPhase};
+    let mut h = Harness::new(false);
+    let mut source = crate::blocks::tests::Fixture::new();
+    let mut tool = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
+    tool.id = "native-tool".into(); tool.entry_id = tool.id.clone();
+    tool.role = EventRole::Assistant; tool.kind = EventKind::Tool; tool.phase = EventPhase::Saved;
+    tool.tool_call_id = Some("provider-id:Input:text".into()); tool.tool_name = Some("bash".into());
+    tool.text = "A streamed input line.\n".repeat(3000); tool.attachment = None;
+    let input = format!("{}/input", tool.id);
+    let mut metadata = tool.clone(); metadata.text.clear();
+    source.put(&tool.id, None, 0, tau_protocol::blocks::BlockKind::Tool, serde_json::json!({"event": metadata}), b"");
+    source.put(&input, Some(&tool.id), 0, tau_protocol::blocks::BlockKind::Code,
+        serde_json::json!({"inputFor": tool.id, "label": "Input", "language": "json"}), tool.text.as_bytes());
+    source.page(None, None); source.page(Some(&tool.id), None);
+    assert!(source.chunk(&input)); // Only the first verified chunk is resident.
+    let mut session = h.app.controller.account.sessions[0].clone(); session.id = "chat".into();
+    h.app.controller.account.sessions.push(session); h.app.controller.select("chat").unwrap();
+    h.app.controller.account.source_lineage = Some(source.lineage.clone());
+    let chat = h.app.controller.chats.get_mut("chat").unwrap();
+    chat.feed.native_view(source.cache.preview("chat", None).unwrap().unwrap()).unwrap();
+    chat.local.details_default = true;
+    chat.local.expansion.extend([("tool:native-tool".into(), true), ("tool:native-tool:Input".into(), true)]);
+    chat.reconcile();
+    h.frame();
+    h.app.with_ui(|root, cx| {
+        let transcript = &mut root.workspace.chat.transcript;
+        transcript.scroll.value = transcript.scroll.max / 2.;
+        transcript.remember_scroll(cx);
+    });
+    h.frame();
+    let transcript = &h.app.root.workspace.chat.transcript;
+    assert!(transcript.placed.iter().filter(|p| p.key == "chat/tool:native-tool").all(|p| p.top < transcript.scroll.value), "The tool heading is above the viewport");
+    let chat = &h.app.controller.chats["chat"];
+    let plan = source.cache.plan_visible("chat", &chat.local, &[], Some(&transcript.interests)).unwrap();
+    let (_, head) = plan.blocks.iter().find(|(id, _)| id == &input).expect("Visible input must request its native body");
+    let (_, length, _, cached) = head.unwrap(); assert!(cached < length);
+    source.body(&input);
+    assert_eq!(source.cache.snapshot("chat").unwrap().unwrap().events.iter().find(|e| e.id == tool.id).unwrap().text, tool.text);
+}
+
+#[test]
+fn native_handoff_keeps_the_actual_message_control_and_authored_text() {
+    let mut h = Harness::new(false);
+    let mut source = crate::blocks::tests::Fixture::new();
+    let mut session = h.app.controller.account.sessions[0].clone(); session.id = "chat".into();
+    h.app.controller.account.sessions.push(session); h.app.controller.select("chat").unwrap();
+    h.app.controller.account.source_lineage = Some(source.lineage.clone());
+    h.app.controller.draft("One **authored** message".into()).unwrap(); h.app.controller.send_prompt().unwrap();
+    let request = h.app.controller.chats["chat"].local.pending[0].request.id.clone();
+    let key = format!("message:chat:{request}");
+    h.frame();
+    let target = h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == key).unwrap().control.target;
+    let meta = serde_json::json!({"event":{"id":"canonical","entryId":"canonical","order":0,"phase":"saved",
+        "origin":{"requestId":request},"role":"user","kind":"text","text":"","isError":false}});
+    source.put("canonical", None, 0, tau_protocol::blocks::BlockKind::Text, meta, b"One **authored** message");
+    source.page(None, None); source.body("canonical");
+    let chat = h.app.controller.chats.get_mut("chat").unwrap();
+    let delivered = chat.feed.native_view(source.cache.snapshot("chat").unwrap().unwrap()).unwrap();
+    chat.local.reconcile_complete(&chat.feed.queue, &delivered, &chat.feed.incomplete); chat.reconcile();
+    h.frame();
+    let transcript = &h.app.root.workspace.chat.transcript;
+    assert_eq!(transcript.rows.iter().find(|r| r.key == key).unwrap().control.target, target);
+    assert_eq!(h.app.services.renderer.messages[&key].source, crate::app::literal("One **authored** message"));
+    assert!(transcript.interests.contains("canonical"));
 }

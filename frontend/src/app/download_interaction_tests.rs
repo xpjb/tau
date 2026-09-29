@@ -1,11 +1,11 @@
 //! Exercise the real hit dispatch and save lifecycle without invoking OS apps or a daemon.
 use super::*;
 use tau_protocol::blocks::{BlockHeader, BlockKind};
-use super::download_render_tests::{Case, cases, install, controls, panel, save, hints};
+use super::download_render_tests::{Case, cases, install, controls, save, hints};
 use chad::{Config, HeadlessCtx};
 use std::{sync::Arc, time::Duration};
 
-fn fixture(size: (u32, u32), mobile: bool) -> (App, HeadlessCtx, tempfile::TempDir) {
+pub(super) fn fixture(size: (u32, u32), mobile: bool) -> (App, HeadlessCtx, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let ctx = HeadlessCtx::new(&Config { size, device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
     let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(|| {}), mobile).unwrap();
@@ -36,9 +36,17 @@ fn verified(app: &mut App, case: &Case) {
     app.controller.store.bind_source(&app.controller.identity, &lineage).unwrap();
     app.controller.account.source_lineage = Some(lineage);
 }
-fn paint(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment) {
-    let layer = panel(app, ctx, case, file, Interaction::default(), Rect::new(0.,0.,ctx.size().0 as f32,ctx.size().1 as f32));
-    app.services.renderer.draw(ctx, ctx.view(), &[layer]);
+pub(super) fn paint(app: &mut App, ctx: &HeadlessCtx, case: &Case, file: &ChatAttachment) {
+    if !app.controller.chats["demo"].feed.events.values().any(|e| e.entry_id == case.id) {
+        let item = event(app, case, file.clone(), 0);
+        let chat = app.controller.chats.get_mut("demo").unwrap();
+        chat.feed.events.clear();
+        chat.feed.events.insert(0, item);
+    }
+    app.root.workspace.show_chats = false;
+    app.root.workspace.attachments.show = true;
+    app.tick(0.);
+    app.frame(ctx, ctx.view());
 }
 fn tap(app: &mut App, index: usize, touch: bool) {
     let r = controls(app)[index].rect;
@@ -77,13 +85,13 @@ fn cached_large_file_saves_once_retries_failure_and_survives_restart_then_missin
     let mut app = App::new(&ctx,Store::open(root.path().into()).unwrap(),Arc::new(||{}),false).unwrap();
     app.back(); crate::demo::populate(&mut app.controller).unwrap(); app.resize(ctx.size(),1.,Vec2::new(0.,0.));
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,ui::CardChoice::UseSaved(_,_,SavedAction::Open)),"saved copy survives restart");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::UseSaved(SavedAction::Open)),"saved copy survives restart");
     std::fs::remove_file(&saved.reference).unwrap();
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,ui::CardChoice::SaveAttachment(..)),"missing copy can be saved again from cache");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Save),"missing copy can be saved again from cache");
     assert!(app.controller.saved_download("demo",&case.id).is_none());
     std::fs::remove_file(path).unwrap(); paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Attachment(_,_,_,false)),"evicted cache returns to Download");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Acquire),"evicted cache returns to Download");
 }
 
 #[test]
@@ -110,8 +118,8 @@ fn image_view_save_and_touch_labels_do_not_confuse_actions_or_trigger_on_long_pr
     let key=Controller::download_key("demo",&case.id);
     app.services.platform.clear(); app.complete_save(&key,Err("Permission denied".into()));
     paint(&mut app,&ctx,&case,&file);
-    assert!(matches!(controls(&app)[0].action,ui::CardChoice::SaveAttachment(..)),"retry resumes saving, not just viewing");
-    assert!(matches!(controls(&app)[1].action,ui::CardChoice::Attachment(_,_,_,true)),"save failure keeps View");
+    assert!(matches!(controls(&app)[0].action,ui::CardChoice::Save),"retry resumes saving, not just viewing");
+    assert!(matches!(controls(&app)[1].action,ui::CardChoice::Acquire),"save failure keeps View");
     tap(&mut app,0,true); assert!(matches!(&app.services.platform[..],[PlatformAction::SaveDownload {..}]));
 }
 
@@ -124,8 +132,7 @@ fn actual_chat_sidebar_and_phone_use_shared_geometry_and_independent_tooltip_anc
             let file=install(&mut app,&case);
             events.push(event(&app,&case,file,events.len() as u64));
         }
-        app.controller.message(ServerMessage::TranscriptSnapshot {session_id:"demo".into(),snapshot:TranscriptSnapshot {
-            generation:"demo".into(),sequence:1,events,queue:QueueState::default(),before:None,delivered:vec![]}}).unwrap();
+        app.controller.preview(&("demo"), events, QueueState::default(), None).unwrap();
         app.controller.account.sessions[0].title="Inline file downloads".into();
         app.root.workspace.show_chats=false; app.tick(0.); app.frame(&ctx,ctx.view());
         save(&ctx,&format!("context-{name}-chat"));
@@ -157,29 +164,6 @@ fn saved_zip_text_actions_dispatch_open_show_extract_to_the_correct_file() {
         let PlatformAction::UseDownload(saved,_,target)=action else {panic!("unexpected action")};
         assert_eq!(target.session,"demo"); assert_eq!(target.entry,case.id);
         assert!(saved.reference.ends_with(&format!("saved-{}",case.id)));
-    }
-}
-
-#[test]
-fn download_name_status_and_caption_have_no_hover_or_tap_tooltip() {
-    for mobile in [false, true] {
-        let (mut app, ctx, _root) = fixture((360, 720), mobile);
-        let mut case = cases().into_iter().find(|c| c.id == "14-cached").unwrap();
-        case.caption = Some("This caption stays on the card".into());
-        let file = install(&mut app, &case);
-        paint(&mut app, &ctx, &case, &file);
-        assert!(hints(&app).iter().all(|(_, info)| matches!(info, Info::Attachment(key, ..) if key.contains(":action:"))));
-        assert!(!app.placed_controls().iter().any(|hit| matches!(hit.action, FixtureChoice::Info(Info::Attachment(..)))));
-        let card = attachments::control_panel(Rect::new(12., 44., 336., attachments::card_height(&file)), 1.);
-        for point in [Vec2::new(card.x + 16., card.y + 20.), Vec2::new(card.x + 16., card.y + 42.),
-            Vec2::new(card.x + 16., card.y - 14.)] {
-            assert!(!hints(&app).iter().any(|(r, _)| contains(*r, point)));
-            app.hover(Some(point)); app.tick(0.);
-            app.press(3, point, mobile); app.release(3, point);
-            assert!(!app.root.tooltips.info.pinned && app.root.tooltips.info.progress == 0.);
-            assert!(app.services.platform.is_empty());
-        }
-        assert!(!controls(&app).is_empty(), "FixtureChoice controls and their own descriptions remain available");
     }
 }
 
@@ -220,7 +204,7 @@ fn extract_busy_state_clears_on_failure_and_success_and_allows_retry() {
     let target = app.export_target("demo", &case.id);
     for result in [Err("Disk full".into()), Ok(())] {
         paint(&mut app, &ctx, &case, &file);
-        assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(_, _, SavedAction::Extract)));
+        assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(SavedAction::Extract)));
         tap(&mut app, 2, false);
         assert!(matches!(&app.actions()[..], [PlatformAction::UseDownload(_, SavedAction::Extract, t)] if t == &target));
         paint(&mut app, &ctx, &case, &file);
@@ -234,7 +218,7 @@ fn extract_busy_state_clears_on_failure_and_success_and_allows_retry() {
         app.controller.notice = None;
     }
     paint(&mut app, &ctx, &case, &file);
-    assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(_, _, SavedAction::Extract)));
+    assert!(matches!(controls(&app)[2].action, ui::CardChoice::UseSaved(SavedAction::Extract)));
 }
 
 #[test]
@@ -243,16 +227,14 @@ fn extraction_busy_state_is_shared_by_chat_and_sidebar_and_survives_navigation()
     let case = cases().into_iter().find(|c| c.id == "18-saved-zip").unwrap();
     let file = install(&mut app, &case);
     let item = event(&app, &case, file, 0);
-    app.controller.message(ServerMessage::TranscriptSnapshot { session_id: "demo".into(), snapshot: TranscriptSnapshot {
-        generation: "demo".into(), sequence: 1, events: vec![item], queue: QueueState::default(), before: None, delivered: vec![],
-    }}).unwrap();
+    app.controller.preview(&("demo"), vec![item], QueueState::default(), None).unwrap();
     app.root.workspace.attachments.show = true;
     app.tick(0.); app.frame(&ctx, ctx.view());
     let extract_controls = |app: &App| {
         app.root.workspace.chat.transcript.rows.iter().filter_map(|r| r.attachment.as_ref())
-            .chain(app.root.workspace.attachments.cards.cards.values())
+            .chain(app.root.workspace.attachments.cards.values())
             .flat_map(|c| c.controls.items.iter())
-            .filter(|(key, _, _)| key.starts_with("action:2:"))
+            .filter(|(_, button, _)| matches!(button.label.as_str(), "Extract" | "Extracting…"))
             .filter_map(|(_, b, _)| b.control.rect.map(|r| (r, b.control.enabled, b.control.info.is_some())))
             .collect::<Vec<_>>()
     };

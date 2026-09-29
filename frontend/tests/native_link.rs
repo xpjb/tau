@@ -110,13 +110,13 @@ async fn native_loss_delay_bandwidth_upload_cancel_resume_and_two_client_control
     {
         let chat=a.chats.get_mut(&session).unwrap();chat.local.details_default=true;
         for event in chat.feed.events.values().filter(|e|e.kind==tau_protocol::EventKind::Tool) {
-            if let Some(call)=&event.tool_call_id {chat.local.expansion.insert(format!("tool:{call}"),true);chat.local.expansion.insert(format!("tool:{call}:Output"),true);chat.local.expansion.insert(format!("tool:{call}:Input"),true);}
+            for suffix in ["", ":Output", ":Input"] {chat.local.expansion.insert(format!("tool:{}{suffix}",event.id),true);}
         }
     }
     a.save_chat(&session).unwrap();
     until(&mut a,&mut b,|a,_|a.selected().unwrap().feed.events.values().filter(|e|e.role==tau_protocol::EventRole::Tool && e.tool_name.as_deref()==Some("read") && e.text.contains("READ-FIXTURE")).count()==24).await;
     assert!(!b.selected().unwrap().feed.events.values().any(|e|e.text.contains("READ-FIXTURE")),"Collapsed client fetched hidden tool bodies");
-    until(&mut a,&mut b,|a,b|[a,b].iter().all(|c|c.selected().unwrap().feed.block_states.values().all(|s|s=="completed"))).await;
+    until(&mut a,&mut b,|a,b|[a,b].iter().all(|c|c.selected().unwrap().feed.block_states.values().all(|s|*s==blocks::ToolState::Completed))).await;
     let entries=a.selected().unwrap().feed.events.values().filter_map(|e|e.attachment.as_ref().map(|f|(f.file_name.clone(),e.entry_id.clone()))).collect::<std::collections::HashMap<_,_>>();
     assert!(entries.contains_key("visible.bin")&&entries.contains_key("unread.bin"),"Missing attachment cards: {entries:?}");
     let visible=&entries["visible.bin"];let unread=&entries["unread.bin"];

@@ -20,7 +20,7 @@ mod tooltips;
 mod viewer;
 pub(super) use attachments::AttachmentBrowser;
 #[cfg(test)]
-pub(super) use attachments::{CardChoice, CardDeck};
+pub(super) use attachments::CardChoice;
 pub(super) use menu::{Choice as MenuChoice, Menu};
 pub(super) use notice::NoticeWidget;
 pub(super) use sidebar::Sidebar;
@@ -28,7 +28,6 @@ pub(super) use tooltips::TooltipHost;
 pub(super) use viewer::{ImageSpec, ImageViewer};
 pub(super) mod header;
 pub(super) mod message_row;
-mod routes;
 mod timers;
 pub(super) mod transcript;
 mod workspace;
@@ -71,7 +70,6 @@ pub(super) struct NativeEdit {
     lineage: Option<String>,
     session: Option<String>,
     session_bound: bool,
-    pub(super) route: Vec<Id>,
 }
 impl NativeEdit {
     pub fn matches(&self, token: u64, model: &Controller) -> bool {
@@ -92,10 +90,7 @@ pub(super) enum Event<'a> {
     Text(&'a str),
     Preedit(&'a str, Option<(usize, usize)>),
     Paste { target: Target, text: &'a str },
-    Tick(f32),
-    Cancel,
     Back,
-    Submit,
     Context(Vec2),
     Middle { pressed: bool, point: Vec2 },
 }
@@ -103,6 +98,36 @@ pub(super) struct Frame<'a> {
     pub layer: &'a mut super::Layer,
     pub bounds: Rect,
     pub clip: Rect,
+}
+impl Frame<'_> {
+    /// Reserve feedback at the bottom of a form's content area, not over its fields.
+    pub fn feedback(&mut self, region: Rect, fallback: &str, cx: &mut Context<'_>) -> f32 {
+        let notice = cx.model.notice.as_ref().filter(|n| n.download.is_none());
+        let text = notice.map_or(fallback, |n| n.as_ref());
+        if text.is_empty() {
+            return 0.;
+        }
+        let s = cx.ui.scale;
+        let height = (cx.services.renderer.label_height(text, region.width, 12. * s, false) + 12. * s)
+            .min(100. * s)
+            .min(region.height.max(0.));
+        cx.services.renderer.clipped_label(
+            self.layer,
+            text,
+            Rect::new(region.x, region.y + region.height - height, region.width, (height - 8. * s).max(1.)),
+            12. * s,
+            crate::render::color(if notice.is_some() { 0xffb4ab } else { 0xb7c2ce }),
+            false,
+            self.clip,
+        );
+        height
+    }
+
+    /// Every child inherits the same clip for placement, painting and hit testing.
+    pub fn visit(&mut self, bounds: Rect, child: &mut dyn Widget, cx: &mut Context<'_>) {
+        let clip = crate::render::intersect(self.clip, bounds);
+        self.layer.with_clip(clip, |layer| child.visit_perframe(&mut Frame { layer, bounds, clip }, cx));
+    }
 }
 pub(super) struct Context<'a> {
     pub model: &'a mut Controller,
@@ -130,9 +155,39 @@ impl Context<'_> {
     }
 }
 pub(super) trait Widget {
+    /// Model/time advancement cannot be consumed by a sibling's input handler.
+    fn update(&mut self, _dt: f32, _cx: &mut Context<'_>) {}
     /// Consumption is independent of whether text/model data changed.
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool;
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>);
+    /// Query the actual mounted owner, never a cached ancestor/scope registry.
+    fn owns(&self, _target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        false
+    }
+    fn dispatch(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
+        if matches!(event, Event::Move { .. } | Event::Up { .. })
+            && let Some(capture) = cx.ui.capture
+            && !self.owns(capture.target, cx.model, cx.ui)
+        {
+            return false;
+        }
+        self.handle_event(event, cx)
+    }
+}
+/// Callers supply input children in paint order; the frontmost consumer wins.
+fn dispatch_children<'a>(
+    children: impl DoubleEndedIterator<Item = &'a mut dyn Widget>,
+    event: &Event<'_>,
+    cx: &mut Context<'_>,
+) -> bool {
+    let mut handled = false;
+    for child in children.rev() {
+        handled |= child.dispatch(event, cx);
+        if handled {
+            break;
+        }
+    }
+    handled
 }
 
 pub(super) enum Request {
@@ -154,17 +209,46 @@ pub(super) enum Request {
     Replace { owner: Id, spec: DialogSpec },
 }
 pub(super) struct RootWidget {
-    pub(super) id: Id,
     pub(super) workspace: Workspace,
-    #[cfg(test)]
-    pub(super) test_cards: CardDeck,
     pub(super) dialog: Option<Dialog>,
     pub(super) viewer: Option<ImageViewer>,
     pub(super) menu: Option<Box<Menu>>,
     pub(super) notice: NoticeWidget,
     pub(super) tooltips: TooltipHost,
 }
+#[derive(Clone, Copy)]
+enum Overlay {
+    Dialog,
+    Viewer,
+    Menu,
+}
 impl RootWidget {
+    fn overlay(&self) -> Option<Overlay> {
+        if self.dialog.is_some() {
+            Some(Overlay::Dialog)
+        } else if self.viewer.is_some() {
+            Some(Overlay::Viewer)
+        } else if self.menu.is_some() {
+            Some(Overlay::Menu)
+        } else {
+            None
+        }
+    }
+    fn overlay_widget(&self, overlay: Overlay) -> &dyn Widget {
+        match overlay {
+            Overlay::Dialog => self.dialog.as_ref().unwrap(),
+            Overlay::Viewer => self.viewer.as_ref().unwrap(),
+            Overlay::Menu => self.menu.as_deref().unwrap(),
+        }
+    }
+    fn overlay_mut(&mut self, overlay: Overlay) -> &mut dyn Widget {
+        match overlay {
+            Overlay::Dialog => self.dialog.as_mut().unwrap(),
+            Overlay::Viewer => self.viewer.as_mut().unwrap(),
+            Overlay::Menu => self.menu.as_deref_mut().unwrap(),
+        }
+    }
+
     pub fn editor(&mut self, focus: Option<Target>) -> Option<&mut TextField> {
         if let Some(dialog) = &mut self.dialog {
             return dialog.field(focus?);
@@ -185,33 +269,49 @@ impl RootWidget {
     }
 }
 impl Widget for RootWidget {
-    fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        self.workspace.sync_navigation(cx);
-        // File-interest lifetime is reconciled even when an opaque scope consumes input.
-        let dt = if let Event::Tick(dt) = event { *dt } else { 0. };
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
         self.workspace.chat.code.code_tick(dt, cx);
-        self.workspace.chat.composer.bind(cx);
-        if self.dialog.is_some() || self.viewer.is_some() || self.menu.is_some() {
-            // Hidden notices do not run an expired wake deadline. Their model
-            // destination is unchanged and receives a fresh display on return.
-            self.notice.suspend(cx);
-        }
+        self.workspace.update(dt, cx);
         if let Some(dialog) = &mut self.dialog {
-            dialog.handle_event(event, cx);
-            return true;
+            dialog.update(dt, cx);
         }
         if let Some(viewer) = &mut self.viewer {
-            return viewer.handle_event(event, cx);
+            viewer.update(dt, cx);
         }
         if let Some(menu) = &mut self.menu {
-            return menu.handle_event(event, cx);
+            menu.update(dt, cx);
         }
-        if self.notice.handle_event(event, cx) || self.tooltips.handle_event(event, cx) {
-            return true;
+        let visible = self.overlay().is_none();
+        if visible {
+            self.notice.update(dt, cx);
+        } else {
+            self.notice.suspend(cx);
         }
-        #[cfg(test)]
-        if self.test_cards.event(event, cx) {
-            self.tooltips.hint(cx);
+        let dirty = cx.ui.dirty;
+        self.tooltips.update(dt, cx);
+        if !visible {
+            cx.ui.dirty = dirty;
+        }
+        // Only the actual captured editor can need selection autoscroll.
+        if let Some(c) = cx.ui.capture
+            && let Some(field) = self.editor(Some(c.target))
+        {
+            field.update(dt, cx);
+        }
+    }
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        if let Some(overlay) = self.overlay() {
+            return self.overlay_widget(overlay).owns(target, model, ui);
+        }
+        self.notice.owns(target, model, ui) || self.workspace.owns(target, model, ui)
+    }
+
+    fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
+        if let Some(overlay) = self.overlay() {
+            self.overlay_mut(overlay).handle_event(event, cx);
+            return true; // Opaque/modal input boundary, including consumed-without-action.
+        }
+        if self.notice.dispatch(event, cx) || self.tooltips.dispatch(event, cx) {
             return true;
         }
         if let Event::Down { point, .. } = *event {
@@ -222,7 +322,7 @@ impl Widget for RootWidget {
                 self.tooltips.info.dismiss();
             }
         }
-        let handled = self.workspace.handle_event(event, cx);
+        let handled = self.workspace.dispatch(event, cx);
         if std::mem::take(&mut self.workspace.chat.composer.usage_toggle) {
             self.tooltips.info.dismiss();
             self.tooltips.usage.pinned = !self.tooltips.usage.pinned;
@@ -241,12 +341,7 @@ impl Widget for RootWidget {
         handled
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
-        let input = frame.layer.interaction;
-        if self.dialog.is_some() || self.viewer.is_some() || self.menu.is_some() {
-            frame.layer.interaction = crate::render::Interaction::default();
-        }
         self.workspace.visit_perframe(frame, cx);
-        frame.layer.interaction = input;
         self.tooltips.usage.region = self.workspace.chat.composer.usage_rect;
         self.tooltips.usage.content = self.workspace.chat.composer.usage.clone();
         if self.tooltips.usage.region.width <= 0. {
@@ -264,23 +359,12 @@ impl Widget for RootWidget {
             self.tooltips.info.region = Rect::new(0., 0., 0., 0.);
             self.tooltips.info.dismiss();
         }
-        if self.viewer.is_none() && self.dialog.is_none() && self.menu.is_none() {
-            self.tooltips.visit_perframe(frame, cx);
-        }
         self.notice.hide();
-        if let Some(viewer) = &mut self.viewer {
-            viewer.visit_perframe(frame, cx);
-        } else if self.dialog.is_none() {
-            if let Some(menu) = &mut self.menu {
-                menu.visit_perframe(frame, cx);
-            } else {
-                self.notice.visit_perframe(frame, cx);
-            }
-        }
-        if let Some(dialog) = &mut self.dialog {
-            let bounds = frame.bounds;
-            let clip = frame.clip;
-            frame.layer.with_clip(clip, |layer| dialog.visit_perframe(&mut Frame { layer, bounds, clip }, cx));
+        if let Some(overlay) = self.overlay() {
+            frame.visit(frame.bounds, self.overlay_mut(overlay), cx);
+        } else {
+            self.tooltips.visit_perframe(frame, cx);
+            self.notice.visit_perframe(frame, cx);
         }
     }
 }
@@ -294,6 +378,12 @@ pub(super) struct Services {
     pub(super) counter_bucket: Option<u128>,
     pub(super) dot_color: u32,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Cursor {
+    Default,
+    Pointer,
+    Text,
+}
 pub(crate) struct UiState {
     pub(crate) size: (u32, u32),
     pub(crate) origin: Vec2,
@@ -303,9 +393,6 @@ pub(crate) struct UiState {
     pub(super) visible: bool,
     pub(crate) dirty: bool,
     pub(super) focus: Option<Target>,
-    pub(super) focus_route: Vec<Id>,
-    pub(super) capture_route: Vec<Id>,
-    pub(super) hot_route: Vec<Id>,
     pub(super) composer: Option<Target>,
     pub(super) search: Option<Target>,
     pub(super) covered: bool,
@@ -315,7 +402,7 @@ pub(crate) struct UiState {
     pub(super) hint: Option<(Rect, super::Info)>,
     pub(super) menu_chat: Option<String>,
     pub(super) menu_section: Option<String>,
-    pub(super) hot: Option<(Target, bool)>, // bool: text cursor
+    pub(super) hot: Option<(Target, Cursor)>,
     pub(super) requests: VecDeque<Request>,
     pub(super) return_to: Option<(String, Option<String>, Option<String>)>,
     pub(super) native: Option<NativeEdit>,
@@ -323,6 +410,9 @@ pub(crate) struct UiState {
     pub(super) paste: Option<NativeEdit>,
 }
 impl UiState {
+    pub fn bounds(&self) -> Rect {
+        Rect::new(self.origin.x, self.origin.y, self.size.0 as f32, self.size.1 as f32)
+    }
     pub fn new(size: (u32, u32), mobile: bool) -> Self {
         Self {
             size,
@@ -333,9 +423,6 @@ impl UiState {
             visible: true,
             dirty: true,
             focus: None,
-            focus_route: vec![],
-            capture_route: vec![],
-            hot_route: vec![],
             composer: None,
             search: None,
             covered: false,
@@ -361,21 +448,11 @@ impl UiState {
             lineage: model.account.source_lineage.clone(),
             session: model.account.selected.clone(),
             session_bound: Some(target) == self.composer || Some(target) == self.search,
-            route: vec![],
         }
-    }
-    /// Captured movement/release visits its ancestor path before geometric hit
-    /// traversal. Another pane must not swallow the release over its backdrop.
-    pub fn routes_pointer_to(&self, event: &Event<'_>, owner: Id) -> bool {
-        !matches!(event, Event::Move { .. } | Event::Up { .. })
-            || self.capture.is_none()
-            || self.capture_route.contains(&owner)
     }
     pub fn cancel(&mut self) {
         self.capture = None;
-        self.capture_route.clear();
         self.hot = None;
-        self.hot_route.clear();
         self.hover = None;
         self.dirty = true;
         // Viewport/IME insets cancel gestures, not a valid inline editing session.
@@ -407,27 +484,19 @@ impl UiState {
         }
     }
     pub(super) fn detach(&mut self, scope: Id) {
-        // A newly focused child may not have had its path reconciled yet. Never
-        // apply an old path to a replacement target in the same dispatch.
-        let owns = |target: Target, path: &[Id]| {
-            target.scope == scope || path.last() == Some(&target.scope) && path.contains(&scope)
-        };
-        if self.focus.is_some_and(|target| owns(target, &self.focus_route)) {
+        if self.focus.is_some_and(|t| t.scope == scope) {
             self.focus = None;
-            self.focus_route.clear();
         }
-        if self.capture.is_some_and(|capture| owns(capture.target, &self.capture_route)) {
+        if self.capture.is_some_and(|c| c.target.scope == scope) {
             self.capture = None;
-            self.capture_route.clear();
         }
-        if self.hot.is_some_and(|(target, _)| owns(target, &self.hot_route)) {
+        if self.hot.is_some_and(|(t, _)| t.scope == scope) {
             self.hot = None;
-            self.hot_route.clear();
         }
-        if self.native.as_ref().is_some_and(|e| owns(e.target, &e.route)) {
+        if self.native.as_ref().is_some_and(|e| e.target.scope == scope) {
             self.native = None;
         }
-        if self.paste.as_ref().is_some_and(|e| owns(e.target, &e.route)) {
+        if self.paste.as_ref().is_some_and(|e| e.target.scope == scope) {
             self.paste = None;
         }
         self.dirty = true;

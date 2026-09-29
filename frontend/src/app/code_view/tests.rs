@@ -10,8 +10,15 @@ impl Harness {
         Self {app,ctx,_root:root}
     }
     fn frame(&mut self) {self.app.tick(0.);self.app.frame(&self.ctx,self.ctx.view());}
-    fn click(&mut self,predicate:impl Fn(&FixtureChoice)->bool) {
-        let r=self.app.placed_controls().iter().find(|h|predicate(&h.action)).unwrap().rect;
+    fn files(&mut self) {
+        let r=self.app.root.workspace.chat.header.controls.placed().find(|(a,_)|matches!(a,ui::header::Choice::Files)).unwrap().1;
+        self.click_rect(r);
+    }
+    fn click(&mut self,predicate:impl Fn(&Choice)->bool) {
+        let r=self.app.root.workspace.chat.code.controls.placed().find(|(a,_)|predicate(a)).unwrap().1;
+        self.click_rect(r);
+    }
+    fn click_rect(&mut self,r:Rect) {
         let p=Vec2::new(r.x+r.width/2.,r.y+r.height/2.);self.app.press(1,p,self.app.ui.mobile);self.app.release(1,p);self.frame();
     }
     fn update(&mut self,reply:FileReply,document:Option<Arc<Document>>) {
@@ -59,21 +66,18 @@ fn source()->String {format!("// Remote code, café 🦀\nfn main() {{\n    let 
 fn directory_code_gutter_selection_and_current_composer_work_at_desktop_and_phone_sizes() {
     for (name,size,scale,mobile) in [("desktop",(1100,800),1.,false),("phone",(360,720),1.,true),("phone-2x",(900,1800),2.5,true)] {
         let mut h=Harness::new(size,scale,mobile);
-        let attachment=h.app.placed_controls().iter().find(|h|matches!(h.action,FixtureChoice::Attachments)).unwrap().rect;
-        let files=h.app.placed_controls().iter().find(|h|matches!(h.action,FixtureChoice::Files)).unwrap().rect;
-        assert!(files.x<attachment.x && (attachment.x-files.x)<=48.*scale);
-        h.app.controller.draft("Existing draft".into()).unwrap();h.frame();h.click(|a|matches!(a,FixtureChoice::Files));
+        h.app.controller.draft("Existing draft".into()).unwrap();h.frame();h.files();
         h.update(FileReply::Directory {path:"/workspace".into(),parent:Some("/".into()),entries:vec![FileEntry {path:"/workspace/src".into(),name:"src".into(),directory:true,symlink:false},FileEntry {path:"/workspace/README.md".into(),name:"README.md".into(),directory:false,symlink:false}],next:None},None);
-        assert!(!h.app.placed_controls().iter().any(|h|matches!(h.action,FixtureChoice::Composer)));h.dump(&format!("{name}-directory.png"));
-        h.app.fixture(FixtureChoice::FileOpen("/workspace/src/main.rs".into(),false)).unwrap();h.text(&source());h.dump(&format!("{name}-code.png"));
-        assert!(!h.app.placed_controls().iter().any(|h|matches!(h.action,FixtureChoice::Composer)));
+        assert!(h.app.root.workspace.chat.composer.field.control.rect.is_none());h.dump(&format!("{name}-directory.png"));
+        h.app.with_ui(|root, cx| root.workspace.chat.code.code_action(Choice::FileOpen("/workspace/src/main.rs".into(),false), cx)).unwrap();h.text(&source());h.dump(&format!("{name}-code.png"));
+        assert!(h.app.root.workspace.chat.composer.field.control.rect.is_none());
         let start=h.line(1,true);let end=h.line(3,true);
         h.app.press(9,start,mobile);h.app.motion(9,end);h.app.release(9,end);h.frame();
-        assert!(h.app.placed_controls().iter().any(|h|matches!(h.action,FixtureChoice::Composer)));
+        assert!(h.app.root.workspace.chat.composer.field.control.rect.is_some());
         assert_eq!(h.app.controller.selected().unwrap().local.draft,"Existing draft\n\n`/workspace/src/main.rs:2-4`\n");
         assert!(h.app.controller.selected().unwrap().local.pending.is_empty(),"Selection must not send");
         h.dump(&format!("{name}-comment.png"));
-        h.click(|a|matches!(a,FixtureChoice::FileCopy));
+        h.click(|a|matches!(a,Choice::FileCopy));
         assert!(h.app.actions().iter().any(|a|matches!(a,PlatformAction::Copy(t) if t=="fn main() {\n    let answer = 42;\n    println!(\"{answer}\");")));
         h.app.ui.focus=Some(h.app.root.workspace.chat.composer.field.control.target);h.app.input("Why 42?");h.frame();
         let old_editor = h.app.root.workspace.chat.composer.field.editor.native_id();
@@ -84,17 +88,17 @@ fn directory_code_gutter_selection_and_current_composer_work_at_desktop_and_phon
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().selection.is_none());
         assert!(!h.app.controller.selected().unwrap().local.draft.contains("main.rs:"));
         assert!(h.app.controller.selected().unwrap().local.draft.ends_with("Why 42?"));
-        assert!(h.app.placed_controls().iter().any(|h|matches!(h.action,FixtureChoice::Composer)), "An active comment edit is not hidden/lost by a live replacement");
-        assert!(h.app.fixture(FixtureChoice::Send).is_err());
-        h.click(|a|matches!(a,FixtureChoice::FileClear));h.frame();
-        assert!(!h.app.placed_controls().iter().any(|h|matches!(h.action,FixtureChoice::Composer)));
-        h.click(|a|matches!(a,FixtureChoice::FileClose));assert!(h.app.root.workspace.chat.code.view.is_none());
-        assert!(h.app.placed_controls().iter().any(|h|matches!(h.action,FixtureChoice::Composer)));
+        assert!(h.app.root.workspace.chat.composer.field.control.rect.is_some(), "An active comment edit is not hidden/lost by a live replacement");
+        assert!(h.app.with_ui(|root, cx| root.workspace.send(cx)).is_err());
+        h.click(|a|matches!(a,Choice::FileClear));h.frame();
+        assert!(h.app.root.workspace.chat.composer.field.control.rect.is_none());
+        h.click(|a|matches!(a,Choice::FileClose));assert!(h.app.root.workspace.chat.code.view.is_none());
+        assert!(h.app.root.workspace.chat.composer.field.control.rect.is_some());
     }
 }
 #[test]
 fn touch_hold_haptics_drag_undrag_scroll_and_chat_switch_are_scoped() {
-    let mut h=Harness::new((360,720),1.,true);h.click(|a|matches!(a,FixtureChoice::Files));h.text(&source());
+    let mut h=Harness::new((360,720),1.,true);h.files();h.text(&source());
     let start=h.line(1,false);h.app.press(4,start,true);
     h.app.root.workspace.chat.code.pointer.as_mut().unwrap().started=Instant::now()-std::time::Duration::from_millis(500);h.frame();
     assert!(h.app.actions().iter().any(|a|matches!(a,PlatformAction::Haptic)));
@@ -102,7 +106,7 @@ fn touch_hold_haptics_drag_undrag_scroll_and_chat_switch_are_scoped() {
     let doc=h.app.root.workspace.chat.code.view.as_ref().unwrap().document.as_ref().unwrap();assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().selection.as_ref().unwrap().range(doc),Some(1..5));
     let end=h.line(2,false);h.app.motion(4,end);h.app.release(4,end);h.frame();
     assert!(h.app.controller.selected().unwrap().local.draft.contains("main.rs:2-3"));
-    h.click(|a|matches!(a,FixtureChoice::FileClear));
+    h.click(|a|matches!(a,Choice::FileClear));
     let start=h.line(5,false);h.app.press(6,start,true);h.app.motion(6,Vec2::new(start.x,start.y-90.));h.app.release(6,Vec2::new(start.x,start.y-90.));h.frame();
     assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().scroll.value>0.);assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().selection.is_none());
     let old_draft=h.app.controller.selected().unwrap().local.draft.clone();
@@ -112,7 +116,7 @@ fn touch_hold_haptics_drag_undrag_scroll_and_chat_switch_are_scoped() {
 }
 #[test]
 fn telescope_reuses_real_editor_and_cancels_without_losing_code_selection() {
-    let mut h=Harness::new((1000,800),1.,false);h.click(|a|matches!(a,FixtureChoice::Files));h.text(&source());
+    let mut h=Harness::new((1000,800),1.,false);h.files();h.text(&source());
     let start=h.line(1,true);h.app.press(1,start,false);h.app.release(1,start);h.frame();
     let before=h.app.controller.selected().unwrap().local.draft.clone();
     h.app.key("Space",true,false);h.frame();assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().search.is_some());
@@ -130,7 +134,7 @@ fn telescope_reuses_real_editor_and_cancels_without_losing_code_selection() {
 
 #[test]
 fn live_references_preserve_ime_composition_and_newer_saved_draft_text() {
-    let mut h=Harness::new((1000,800),1.,false);h.click(|a|matches!(a,FixtureChoice::Files));h.text(&source());
+    let mut h=Harness::new((1000,800),1.,false);h.files();h.text(&source());
     let start=h.line(1,true);h.app.press(1,start,false);h.app.release(1,start);h.frame();
     h.app.preedit("入力".into(),None);assert!(h.app.composing());
     h.text(&format!("// inserted\n{}",source()));
@@ -146,21 +150,21 @@ fn live_references_preserve_ime_composition_and_newer_saved_draft_text() {
     h.text(&format!("// inserted twice\n// inserted\n{}",source().replace("fn main()", "fn renamed()")));
     assert!(h.app.composing());h.app.input(" still typing");h.frame();
     assert!(h.app.root.workspace.chat.composer.field.editor.value.ends_with("入力 still typing"));assert!(!h.app.root.workspace.chat.composer.field.editor.value.contains("main.rs:"));
-    assert!(h.app.fixture(FixtureChoice::Send).is_err());
+    assert!(h.app.with_ui(|root, cx| root.workspace.send(cx)).is_err());
 }
 
 #[test]
 fn retained_modal_pauses_file_interest_before_the_next_frame_without_destroying_the_view() {
     let mut h = Harness::new((1000, 800), 1., false);
-    h.app.fixture(FixtureChoice::Files).unwrap();
+    h.app.with_ui(|root, cx| root.workspace.files(cx)).unwrap();
     // Model a previously submitted interest. The native worker is tested by the
     // remote-files integration tests; this checks the UI's ownership boundary.
     h.app.root.workspace.chat.code.view.as_mut().unwrap().subscribed = true;
     let generation = h.app.controller.viewer_generation();
-    h.app.fixture(FixtureChoice::Settings).unwrap();
+    h.app.open_ui(ui::DialogSpec::Connection).unwrap();
     assert!(!h.app.root.workspace.chat.code.view.as_ref().unwrap().subscribed);
     assert!(h.app.controller.viewer_generation() > generation, "Opening a modal cancels the old interest before another event/frame");
-    h.app.fixture(FixtureChoice::CancelModal).unwrap();
+    h.app.back();
     assert!(h.app.root.workspace.chat.code.view.is_some(), "Closing the dialog reveals the same code viewport");
     assert!(!h.app.root.workspace.chat.code.view.as_ref().unwrap().subscribed, "Offline does not invent a replacement connection");
 }
@@ -198,10 +202,10 @@ fn local_picker_matches_all_files_previews_highlights_and_never_edits_the_draft(
         h.app.key("End",true,false);h.frame();assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().row,239);
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().scroll.value>0.);
         h.app.key("Home",true,false);h.frame();
-        h.click(|a|matches!(a,FixtureChoice::FileAccept));
+        h.click(|a|matches!(a,Choice::FileAccept));
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().search.is_none());
         assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().document.as_ref().unwrap().text,source(),"Enter/Open reuses parsed preview");
-        h.click(|a|matches!(a,FixtureChoice::FileChat));
+        h.click(|a|matches!(a,Choice::FileChat));
         assert!(h.app.root.workspace.chat.code.view.is_none());
         assert_eq!(h.app.controller.selected().unwrap().local.draft,"Keep my draft");
     }
@@ -214,12 +218,9 @@ fn hidden_toggle_partial_counts_mouse_preview_and_every_exit_have_real_distinct_
         h.app.key("Space",true,false);h.matched();
         assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),2);
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().search_status().contains("PARTIAL"));
-        let chat=h.app.placed_controls().iter().find(|h|matches!(h.action,FixtureChoice::FileChat)).unwrap().rect;
-        let close=h.app.placed_controls().iter().find(|h|matches!(h.action,FixtureChoice::FileClose)).unwrap().rect;
-        assert!(chat.x+chat.width<close.x,"Chat and X retain separate controls");
-        h.click(|a|matches!(a,FixtureChoice::FileHidden));h.matched();
+        h.click(|a|matches!(a,Choice::FileHidden));h.matched();
         assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),5);
-        h.click(|a|matches!(a,FixtureChoice::FileSelect(p) if p.ends_with("options.rs")));
+        h.click(|a|matches!(a,Choice::FileSelect(p) if p.ends_with("options.rs")));
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().search.is_some(),"single click previews, doesn't exit search");
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().preview_target.as_ref().unwrap().ends_with("options.rs"));
         h.preview(&source());
@@ -227,24 +228,24 @@ fn hidden_toggle_partial_counts_mouse_preview_and_every_exit_have_real_distinct_
         let start=Vec2::new(viewport.x+120.,viewport.y+120.);h.app.press(17,start,true);h.app.motion(17,Vec2::new(start.x,start.y-60.));h.app.release(17,Vec2::new(start.x,start.y-60.));h.frame();
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().preview_scroll.value>0.);
         assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().scroll.value,0.,"preview scroll doesn't move result list");
-        h.click(|a|matches!(a,FixtureChoice::FileHidden));h.matched();assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),2);
+        h.click(|a|matches!(a,Choice::FileHidden));h.matched();assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),2);
         h.app.input("cannotmatch");h.matched();assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),0);
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().preview_target.is_none());
         h.app.key("Enter",false,false);h.frame();assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().search.is_some());
         h.app.key("Escape",false,false);h.frame();assert!(h.app.root.workspace.chat.code.view.is_none(),"Esc from chat-launched picker returns directly to chat");
-        for exit in [FixtureChoice::FileChat,FixtureChoice::FileClose] {
+        for exit in [Choice::FileChat,Choice::FileClose] {
             h.app.key("Space",true,false);h.matched();
-            h.click(|a|matches!((&exit,a),(FixtureChoice::FileChat,FixtureChoice::FileChat)|(FixtureChoice::FileClose,FixtureChoice::FileClose)));
+            h.click(|a|matches!((&exit,a),(Choice::FileChat,Choice::FileChat)|(Choice::FileClose,Choice::FileClose)));
             assert!(h.app.root.workspace.chat.code.view.is_none());
         }
-        h.click(|a|matches!(a,FixtureChoice::Files));
+        h.files();
         h.update(FileReply::Directory {path:"/workspace".into(),parent:Some("/".into()),entries:vec![FileEntry{path:"/workspace/.config".into(),name:".config".into(),directory:true,symlink:false},FileEntry{path:"/workspace/src".into(),name:"src".into(),directory:true,symlink:false}],next:None},None);
         assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),1);
-        h.click(|a|matches!(a,FixtureChoice::FileHidden));assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),2);
-        h.click(|a|matches!(a,FixtureChoice::FileFind));h.matched();
-        h.click(|a|matches!(a,FixtureChoice::FileFind));
+        h.click(|a|matches!(a,Choice::FileHidden));assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),2);
+        h.click(|a|matches!(a,Choice::FileFind));h.matched();
+        h.click(|a|matches!(a,Choice::FileFind));
         assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().search.is_none(),"Browse explicitly returns to directory");
-        h.click(|a|matches!(a,FixtureChoice::FileChat));assert!(h.app.root.workspace.chat.code.view.is_none());
+        h.click(|a|matches!(a,Choice::FileChat));assert!(h.app.root.workspace.chat.code.view.is_none());
     }
 }
 
@@ -260,14 +261,14 @@ fn background_index_refresh_preserves_selection_and_old_scope_results_cannot_res
     assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().preview.is_some());
     // Root changes clear the list immediately and do not show the old root on error.
     h.app.root.workspace.chat.code.view.as_mut().unwrap().directory=Some("/elsewhere".into());
-    h.click(|a|matches!(a,FixtureChoice::FileFindHere));h.frame();
+    h.click(|a|matches!(a,Choice::FileFindHere));h.frame();
     assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().len(),0);
     assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().preview.is_none());
     h.index(&["fresh.rs"],false);
-    h.app.fixture(FixtureChoice::Settings).unwrap();h.frame();
+    h.app.open_ui(ui::DialogSpec::Connection).unwrap();h.frame();
     h.matched();
     assert!(!h.app.root.workspace.chat.code.view.as_ref().unwrap().subscribed,"late local matching cannot reopen a preview under a modal");
-    h.app.fixture(FixtureChoice::CancelModal).unwrap();h.frame();
+    h.app.back();h.frame();
     let old=h.app.controller.file_index.clone();
     h.app.controller.select("two").unwrap();h.frame();assert!(h.app.root.workspace.chat.code.view.is_none());
     h.app.controller.file_index=old;

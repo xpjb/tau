@@ -48,6 +48,9 @@ pub struct Chat {
     pub commands_loaded: bool,
     pub model_request: Option<(String, String)>,
 }
+impl Chat {
+    pub fn reconcile(&mut self) { self.feed.reconcile(&self.local); }
+}
 #[derive(Default)]
 struct Catalog {
     id:String,revision:Option<u64>,session_after:Option<String>,project_after:Option<String>,
@@ -223,6 +226,7 @@ impl Controller {
                     model_request: None,
                 },
             );
+            self.chats.get_mut(id).unwrap().reconcile();
         }
         if self.chats[id].feed.generation.is_empty() {
             let resume = self.remote.resume_viewport(id,&self.chats[id].local)?;
@@ -230,13 +234,27 @@ impl Controller {
                 let feed = &mut self.chats.get_mut(id).unwrap().feed;
                 feed.native_view(view)?;
                 feed.synchronized = false;
+                self.chats.get_mut(id).unwrap().reconcile();
             }
         }
         Ok(())
     }
-    pub fn save_chat(&self, id: &str) -> Result<()> {
+    /// Explicit offline rendering input. Uses committed native records, never a
+    /// synthetic ServerMessage or a second history/delta algorithm.
+    #[cfg(not(target_os = "android"))]
+    pub fn preview(&mut self, scope: &str, events: Vec<Event>, queue: QueueState, before: Option<u64>) -> Result<()> {
+        ensure!(self.network.is_none(), "Preview requires a disconnected controller");
+        self.ensure_chat(scope)?;
+        let view = self.remote.seed_preview(scope, events, queue, before)?;
+        let chat = self.chats.get_mut(scope).unwrap();
+        let delivered = chat.feed.native_view(view)?;
+        chat.local.reconcile_complete(&chat.feed.queue, &delivered, &chat.feed.incomplete);
+        self.save_chat(scope)
+    }
+    pub fn save_chat(&mut self, id: &str) -> Result<()> {
         self.plan_dirty.set(true);
-        if let Some(chat) = self.chats.get(id) {
+        if let Some(chat) = self.chats.get_mut(id) {
+            chat.reconcile();
             self.store.save_chat(&self.identity, id, &chat.local)?;
         }
         Ok(())
@@ -427,7 +445,7 @@ impl Controller {
         replacement.activity = self.next_local_activity();
         if let Err(error)=self.store.save_chat(&self.identity,&id,&replacement) {let _=self.store.discard_import(&self.identity,&id,&file);return Err(error);}
         self.bumped_locally(&id, replacement.activity);
-        self.chats.get_mut(&id).unwrap().local=replacement;Ok(())
+        self.chats.get_mut(&id).unwrap().local=replacement;self.chats.get_mut(&id).unwrap().reconcile();Ok(())
     }
     pub fn remove_file(&mut self, file: &str) -> Result<()> {
         let id = self
@@ -439,7 +457,7 @@ impl Controller {
         let removed=replacement.files.iter().find(|f|f.id==file).cloned();
         replacement.files.retain(|f|f.id!=file);
         self.store.save_chat(&self.identity,&id,&replacement)?;
-        self.chats.get_mut(&id).unwrap().local=replacement;
+        self.chats.get_mut(&id).unwrap().local=replacement;self.chats.get_mut(&id).unwrap().reconcile();
         if let Some(file)=removed && !self.chats[&id].local.pending.iter().any(|p|p.files.iter().any(|f|f.id==file.id)) {self.store.discard_import(&self.identity,&id,&file)?;}
         self.plan_dirty.set(true);Ok(())
     }
@@ -487,7 +505,7 @@ impl Controller {
         // leaves both the composer and server untouched.
         self.store
             .save_chat(&self.identity, &session, &replacement)?;
-        chat.local = replacement;
+        chat.local = replacement;chat.reconcile();
         self.bumped_locally(&session, activity);
         self.send_waiting(&session, false)?;
         Ok(())
@@ -577,7 +595,7 @@ impl Controller {
     pub fn clear_replica(&mut self)->Result<()> {
         self.remote.clear()?;self.block_plan.clear();self.plan_dirty.set(true);self.copy=None;
         if let Some(network)=&self.network {network.send(Command::Blocks(crate::blocks::Command::Reset))?;}
-        for chat in self.chats.values_mut() {chat.feed=Feed::default();}
+        for chat in self.chats.values_mut() {chat.feed=Feed::default();chat.reconcile();}
         self.watch_blocks()?;Ok(())
     }
     pub fn check_control(&mut self,id:&str)->Result<()> {
@@ -639,7 +657,7 @@ impl Controller {
             detail: None,
         });
         self.store.save_chat(&self.identity, &session, &local)?;
-        chat.local = local;
+        chat.local = local;chat.reconcile();
         self.remember_local_body(&session);
         self.requests.insert(request.id.clone(),request.command.clone());
         if let Err(error) = self.network.as_ref().unwrap().send(Command::Request {
@@ -660,7 +678,7 @@ impl Controller {
         pending.status = Delivery::WaitingForConnection;
         pending.detail = None;
         self.store.save_chat(&self.identity, &session, &local)?;
-        self.chats.get_mut(&session).unwrap().local = local;
+        self.chats.get_mut(&session).unwrap().local = local;self.chats.get_mut(&session).unwrap().reconcile();
         self.send_waiting(&session, false)
     }
     pub fn restore_pending(&mut self, id: &str) -> Result<()> {
@@ -697,7 +715,7 @@ impl Controller {
         let files=replacement.pending.iter().find(|p|p.request.id==id).map(|p|p.files.clone()).unwrap_or_default();
         replacement.pending.retain(|p|p.request.id!=id);
         self.store.save_chat(&self.identity,&session,&replacement)?;
-        self.chats.get_mut(&session).unwrap().local=replacement;
+        self.chats.get_mut(&session).unwrap().local=replacement;self.chats.get_mut(&session).unwrap().reconcile();
         for file in files {let chat=&self.chats[&session].local;if !chat.files.iter().chain(chat.pending.iter().flat_map(|p|&p.files)).any(|f|f.id==file.id) {self.store.discard_import(&self.identity,&session,&file)?;}}
         Ok(())
     }
@@ -794,7 +812,7 @@ impl Controller {
             if original.hash.as_ref().is_some_and(|hash|file.hash.as_ref()!=Some(hash)) {let _=self.store.discard_import(&self.identity,&target,&file);anyhow::bail!("Original attachment changed; recovery draft was not sent");}
             let mut chat=self.chats[&target].local.clone();chat.files.push(file.clone());
             if let Err(e)=self.store.save_chat(&self.identity,&target,&chat) {let _=self.store.discard_import(&self.identity,&target,&file);return Err(e);}
-            self.chats.get_mut(&target).unwrap().local=chat;
+            self.chats.get_mut(&target).unwrap().local=chat;self.chats.get_mut(&target).unwrap().reconcile();
         }
         self.notice=Some("Copied only the draft and its files. Original intents remain in local recovery. Inspect before explicitly sending.".into());Ok(())
     }
@@ -834,10 +852,10 @@ impl Controller {
             let merged = self.store.merge_chat(&self.identity, provisional, confirmed, source, target)?;
             self.local_activity.remove(provisional);
             self.local_activity.insert(confirmed.into(), merged.activity);
-            if let Some(chat) = self.chats.get_mut(confirmed) { chat.local = merged; }
+            if let Some(chat) = self.chats.get_mut(confirmed) { chat.local = merged;chat.reconcile(); }
             else {
                 let mut chat = self.chats.remove(provisional).unwrap();
-                chat.local = merged;
+                chat.local = merged;chat.reconcile();
                 chat.feed = Feed::default();
                 self.chats.insert(confirmed.into(), chat);
             }
@@ -874,7 +892,7 @@ impl Controller {
             let mut local = chat.local.clone();
             for p in &mut local.pending {if p.status==Delivery::WaitingForModel {p.status=Delivery::WaitingForConnection;}}
             self.store.save_chat(&self.identity,session,&local)?;
-            chat.local = local;
+            chat.local = local;chat.reconcile();
         }
         if self.retry_after.is_some_and(|at| at > std::time::Instant::now()) {return Ok(());}
         let active=self.chats.values().flat_map(|c|&c.local.pending).filter(|p|matches!(p.status,Delivery::Sending|Delivery::Preparing)).take(4).count();
@@ -889,7 +907,7 @@ impl Controller {
                 saved.status = if p.files.is_empty() {Delivery::Sending} else {Delivery::Preparing};
             }
             self.store.save_chat(&self.identity, session, &local)?;
-            chat.local = local;
+            chat.local = local;chat.reconcile();
             self.remember_local_body(session);
             let command = if p.files.is_empty() { Command::Request {epoch, request:p.request.clone()} }
                 else { Command::Upload {epoch, id:p.request.id.clone(), session:session.into(), text:p.text.clone(), files:p.files.clone()} };
@@ -1044,7 +1062,7 @@ impl Controller {
                     Delivery::WaitingForConnection
                 } else { Delivery::Rejected };
                 p.detail = Some(if retrying { format!("Saved; retrying automatically: {detail}") } else { detail.into() });
-                self.store.save_chat(&self.identity, session, &chat.local)?;
+                chat.reconcile();self.store.save_chat(&self.identity, session, &chat.local)?;
             }
         }
         if let Some(command) = self.requests.remove(id) {
@@ -1136,6 +1154,7 @@ impl Controller {
             chat.feed.opening = false;
             let before = chat.local.pending.len();
             chat.local.reconcile_complete(&chat.feed.queue, &delivered,&chat.feed.incomplete);
+            chat.reconcile();
             if chat.local.pending.len() != before { self.store.save_chat(&self.identity,scope,&chat.local)?; }
         }
         Ok(())
@@ -1147,8 +1166,7 @@ impl Controller {
         // cache. Native views fetch missing bytes as an explicit copy interest.
         if !self.remote.has_snapshot(scope)? {
             let chat=self.chats.get(scope).context("Unknown chat")?;
-            let tools=crate::details::Tools::new(chat.feed.events.values());
-            self.copied=Some(tools.copy(&ids.iter().filter_map(|id|chat.feed.event(id)).collect::<Vec<_>>()));
+            self.copied=Some(crate::details::copy(&ids.iter().filter_map(|id|chat.feed.event(id)).collect::<Vec<_>>(), chat.feed.events.values(), &chat.feed.parents));
         } else {
             self.copy=Some((scope.into(),ids));self.notice=Some("Fetching details to copy…".into());
             self.watch_blocks()?;
@@ -1246,7 +1264,7 @@ impl Controller {
                     self.saved_downloads.clear();
                     self.account=self.store.get(&self.identity,"account")?;
                     self.sort_sessions();
-                    for (id,chat) in &mut self.chats {chat.local=self.store.load_chat(&self.identity,id)?;chat.feed=Feed::default();}
+                    for (id,chat) in &mut self.chats {chat.local=self.store.load_chat(&self.identity,id)?;chat.feed=Feed::default();chat.reconcile();}
                     self.notice=Some("Source lineage changed. Saved work was preserved, but old intents will not be automatically executed. Review any effects after the restored snapshot before retrying.".into());
                 } else {self.account.source_lineage=Some(lineage);}
                 self.source_guard=Some((epoch,true));
@@ -1295,7 +1313,7 @@ impl Controller {
                             p.detail = Some("Model selection unconfirmed; check the current model, then restore this draft".into());
                         }
                     }
-                    self.store.save_chat(&self.identity, session, &chat.local)?;
+                    chat.reconcile();self.store.save_chat(&self.identity, session, &chat.local)?;
                 }
             }
             transport::Event::HeartbeatSent { epoch, at } if self.epoch == Some(epoch) => {
@@ -1399,7 +1417,7 @@ impl Controller {
                 for (session,chat) in &mut self.chats {
                     if let Some(p)=chat.local.pending.iter_mut().find(|p|p.request.id==request_id) {
                         p.status=Delivery::Accepted;p.detail=Some("Accepted; awaiting outcome".into());
-                        self.store.save_chat(&self.identity,session,&chat.local)?;
+                        chat.reconcile();self.store.save_chat(&self.identity,session,&chat.local)?;
                     }
                 }
             }, // Owned by the network block service.
@@ -1425,7 +1443,7 @@ impl Controller {
                         }
                     }
                 }
-                chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);
+                chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);chat.reconcile();
                 self.store.save_chat(&self.identity,&session_id,&chat.local)?;
             }
             ServerMessage::SessionPage {catalog_id,revision,after,next,mut sessions,states}=>{
@@ -1521,67 +1539,6 @@ impl Controller {
                     if self.viewing_chat { self.account.read_at.insert(id.clone(), s.updated_at_ms); }
                 }
                 self.store.put(&self.identity, "account", &self.account)?;
-            }
-            ServerMessage::TranscriptSnapshot {
-                session_id,
-                snapshot,
-            } => {
-                self.ensure_chat(&session_id)?;
-                let mut delivered = snapshot.delivered.clone();
-                delivered.extend(
-                    snapshot
-                        .events
-                        .iter()
-                        .filter(|e| e.phase == EventPhase::Saved)
-                        .filter_map(|e| e.origin.request_id.clone()),
-                );
-                let chat = self.chats.get_mut(&session_id).unwrap();
-                chat.feed.opening = false;
-                if chat.feed.snapshot(snapshot)? {
-                    chat.local.reconcile_complete(&chat.feed.queue, &delivered,&chat.feed.incomplete);
-                    self.save_chat(&session_id)?;
-                }
-            }
-            ServerMessage::TranscriptUpdate {
-                session_id,
-                generation,
-                sequence,
-                change,
-            } => {
-                self.ensure_chat(&session_id)?;
-                let mut delivered = change.delivered.clone();
-                delivered.extend(
-                    change
-                        .events
-                        .iter()
-                        .filter(|e| e.phase == EventPhase::Saved)
-                        .filter_map(|e| e.origin.request_id.clone()),
-                );
-                let chat = self.chats.get_mut(&session_id).unwrap();
-                match chat.feed.update(&generation, sequence, change) {
-                    Ok(true) => {
-                        chat.local.reconcile_complete(&chat.feed.queue, &delivered,&chat.feed.incomplete);
-                        self.save_chat(&session_id)?;
-                    }
-                    Ok(false) => {}
-                    Err(_) => {
-                        if self.epoch.is_some() {
-                            self.open(&session_id)?;
-                        }
-                    }
-                }
-            }
-            ServerMessage::TranscriptPage {
-                session_id,
-                generation,
-                cursor,
-                page,
-                ..
-            } => {
-                if let Some(chat) = self.chats.get_mut(&session_id) {
-                    chat.feed.loading = false;
-                    chat.feed.page(&generation, cursor, page)?;
-                }
             }
             ServerMessage::SessionState {
                 session_id,revision,restore_review,
@@ -1694,7 +1651,7 @@ impl Controller {
                         {
                             chat.local.pending.retain(|p| p.request.id != request_id);
                         }
-                        chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);
+                        chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);chat.reconcile();
                         self.store.save_chat(&self.identity, id, &chat.local)?;
                     }
                 }
@@ -1741,7 +1698,7 @@ impl Controller {
                                 p.detail = Some("Model selection failed; restore the draft and choose a model".into());
                             }
                         }
-                        self.store.save_chat(&self.identity, id, &chat.local)?;
+                        chat.reconcile();self.store.save_chat(&self.identity, id, &chat.local)?;
                     }
                     if let Some(ClientCommand::GetHistory { session_id, .. }) = &command
                         && let Some(chat) = self.chats.get_mut(session_id)

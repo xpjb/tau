@@ -1,4 +1,4 @@
-use super::{AttachmentBrowser, Composer, Context, Event, Frame, Sidebar, Widget};
+use super::{AttachmentBrowser, Composer, Context, Controller, Event, Frame, Sidebar, Target, UiState, Widget};
 use super::{header::Header, transcript::Transcript};
 use crate::{
     app::{
@@ -25,14 +25,12 @@ impl Navigation {
     }
 }
 pub(in crate::app) struct ChatPane {
-    pub id: super::Id,
     pub header: Header,
     pub transcript: Transcript,
     pub composer: Composer,
     pub code: CodeBrowser,
 }
 pub(in crate::app) struct Workspace {
-    pub id: super::Id,
     pub sidebar: Sidebar,
     pub chat: ChatPane,
     pub attachments: AttachmentBrowser,
@@ -40,12 +38,34 @@ pub(in crate::app) struct Workspace {
     pub navigation: Navigation,
 }
 impl Workspace {
+    fn layout(&self, b: Rect, ui: &UiState) -> [Option<Rect>; 3] {
+        let wide = b.width / ui.scale >= 760.;
+        let sidebar = if wide { 300. * ui.scale } else { b.width };
+        let side = self.attachments.show && !ui.mobile && b.width / ui.scale >= 1000.;
+        let screen = self.attachments.show && !side;
+        let files = if side { 320. * ui.scale } else { 0. };
+        [
+            (!screen && (wide || self.show_chats)).then_some(Rect::new(b.x, b.y, sidebar, b.height)),
+            (!screen && (wide || !self.show_chats)).then_some(if wide {
+                Rect::new(b.x + sidebar, b.y, b.width - sidebar - files, b.height)
+            } else {
+                b
+            }),
+            self.attachments.show.then_some(if side {
+                Rect::new(b.x + b.width - files, b.y, files, b.height)
+            } else {
+                b
+            }),
+        ]
+    }
+    fn children(&mut self, b: Rect, ui: &UiState) -> [(Option<Rect>, &mut dyn Widget); 3] {
+        let [sidebar, chat, files] = self.layout(b, ui);
+        [(sidebar, &mut self.sidebar), (chat, &mut self.chat), (files, &mut self.attachments)]
+    }
     pub fn new(model: &crate::controller::Controller) -> Self {
         Self {
-            id: super::Id::new(),
             sidebar: Sidebar::new(),
             chat: ChatPane {
-                id: super::Id::new(),
                 header: Header::new(),
                 transcript: Transcript::new(),
                 composer: Composer::new(),
@@ -61,19 +81,10 @@ impl Workspace {
         }
     }
     pub fn sync_navigation(&mut self, cx: &mut Context<'_>) {
-        self.chat.transcript.validate_download_jump(cx);
         if self.navigation.identity != cx.model.identity
             || self.navigation.lineage != cx.model.account.source_lineage
             || self.navigation.session != cx.model.account.selected
         {
-            if self.navigation.identity == cx.model.identity
-                && self.navigation.lineage == cx.model.account.source_lineage
-                && let Some(previous) = &self.navigation.session
-                && self.chat.transcript.placed_session.as_ref() == Some(previous)
-            {
-                let result = cx.model.save_chat(previous);
-                cx.report(result);
-            }
             cx.ui.navigation_changed();
             self.chat.code.close_code(cx);
             self.cancel(cx);
@@ -90,15 +101,8 @@ impl Workspace {
         self.chat.transcript.bind(cx);
         self.chat.composer.bind(cx);
     }
-    pub fn save(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.chat.transcript.remember_scroll(cx);
-        if let Some(id) = &cx.model.account.selected {
-            cx.model.save_chat(id)?;
-        }
-        Ok(())
-    }
     pub fn navigate_chat(&mut self, id: &str, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         let same = cx.model.account.selected.as_deref() == Some(id);
         let topic = cx
             .model
@@ -127,7 +131,7 @@ impl Workspace {
         {
             return Ok(());
         }
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         cx.model.select_project(id, cx.ui.size.0 as f32 / cx.ui.scale >= 760.)?;
         self.sync_navigation(cx);
         self.sidebar.scroll.value = 0.;
@@ -136,7 +140,7 @@ impl Workspace {
         Ok(())
     }
     pub fn new_chat(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         cx.model.new_chat()?;
         self.sync_navigation(cx);
         self.show_chats = false;
@@ -159,17 +163,11 @@ impl Workspace {
         self.show_chats = false;
         self.attachments.show = false;
         self.sidebar.scroll.value = 0.;
-        let transcript = &mut self.chat.transcript;
-        transcript.horizontal.value = 0.;
-        transcript.scroll.value = 0.;
-        transcript.placed.clear();
-        transcript.placed_session = None;
-        transcript.history_attempt = None;
-        transcript.download = Some(target);
+        self.chat.transcript.jump_to_download(target.entry, cx);
         Ok(())
     }
     pub fn files(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         self.cancel(cx);
         self.chat.code.code_action(CodeChoice::Files, cx)?;
         self.show_chats = false;
@@ -177,7 +175,7 @@ impl Workspace {
         Ok(())
     }
     pub fn attachments(&mut self, show: bool, cx: &mut Context<'_>) -> anyhow::Result<()> {
-        self.save(cx)?;
+        self.chat.transcript.save(cx)?;
         self.cancel(cx);
         self.chat.code.close_code(cx);
         cx.ui.focus = None;
@@ -191,7 +189,7 @@ impl Workspace {
         Ok(())
     }
     pub fn back(&mut self, cx: &mut Context<'_>) {
-        self.chat.transcript.download = None;
+        self.chat.transcript.cancel_download_jump(cx);
         cx.ui.focus = None;
         cx.ui.native = None;
         cx.ui.paste = None;
@@ -213,8 +211,7 @@ impl Workspace {
         self.sidebar.scroll.stop();
         self.sidebar.projects.scroll.stop();
         self.attachments.scroll.stop();
-        self.chat.code.handle_event(&Event::Cancel, cx);
-        self.chat.composer.handle_event(&Event::Cancel, cx);
+        self.chat.code.cancel_pointer(cx);
         cx.ui.cancel();
     }
     pub fn send(&mut self, cx: &mut Context<'_>) -> anyhow::Result<()> {
@@ -232,44 +229,46 @@ impl Workspace {
             self.chat.composer.bind(cx);
         }
         self.chat.composer.send(cx)?;
+        self.chat.transcript.tail(cx);
         if let Some(code) = &mut self.chat.code.view {
             code.sent();
         }
         Ok(())
     }
     pub fn hints(&self) -> impl Iterator<Item = (Rect, &crate::app::Info)> {
-        self.sidebar.hints().chain(self.attachments.cards.hints()).chain(
+        self.sidebar.hints().chain(self.attachments.cards.values().flat_map(|card| card.controls.hints())).chain(
             self.chat.transcript.rows.iter().filter_map(|r| r.attachment.as_ref()).flat_map(|c| c.controls.hints()),
         )
     }
     pub fn chat_visible(&self, cx: &Context<'_>) -> bool {
         cx.ui.window_focused
             && !cx.ui.covered
-            && (cx.ui.size.0 as f32 / cx.ui.scale >= 760. || !self.show_chats)
-            && (!self.attachments.show || !cx.ui.mobile && cx.ui.size.0 as f32 / cx.ui.scale >= 1000.)
+            && self.layout(cx.ui.bounds(), cx.ui)[1].is_some()
             && self.chat.code.view.is_none()
     }
 }
 impl Widget for Workspace {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        for (bounds, child) in self.children(cx.ui.bounds(), cx.ui) {
+            if bounds.is_some() {
+                child.update(dt, cx);
+            }
+        }
+    }
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        self.layout(ui.bounds(), ui)
+            .into_iter()
+            .zip([&self.sidebar as &dyn Widget, &self.chat, &self.attachments])
+            .any(|(bounds, child)| bounds.is_some() && child.owns(target, model, ui))
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if matches!(event, Event::Cancel) {
-            self.cancel(cx);
-            return false;
-        }
-        let width = cx.ui.size.0 as f32 / cx.ui.scale;
-        let screen = self.attachments.show && (cx.ui.mobile || width < 1000.);
-        let mut handled = cx.ui.routes_pointer_to(event, self.attachments.scroll.target.scope)
-            && self.attachments.handle_event(event, cx);
-        if !handled
-            && !screen
-            && (width >= 760. || self.show_chats)
-            && cx.ui.routes_pointer_to(event, self.sidebar.controls.id)
-        {
-            handled = self.sidebar.handle_event(event, cx);
-        }
-        if !handled && !screen && (width >= 760. || !self.show_chats) && cx.ui.routes_pointer_to(event, self.chat.id) {
-            handled = self.chat.handle_event(event, cx);
-        }
+        let children = self.children(cx.ui.bounds(), cx.ui);
+        let handled = super::dispatch_children(
+            children.into_iter().filter_map(|(bounds, child)| bounds.map(|_| child)),
+            event,
+            cx,
+        );
         if self.chat.code.view.is_some() {
             self.show_chats = false;
             self.attachments.show = false;
@@ -314,32 +313,17 @@ impl Widget for Workspace {
         self.chat.composer.hide();
         self.chat.transcript.hide();
         self.attachments.hide();
-        let b = frame.bounds;
-        let s = cx.ui.scale;
-        let wide = b.width / s >= 760.;
-        let sidebar = if wide { 300. * s } else { b.width };
-        let side = self.attachments.show && !cx.ui.mobile && b.width / s >= 1000.;
-        let screen = self.attachments.show && !side;
-        let file_width = if side { 320. * s } else { 0. };
-        if !screen && (wide || self.show_chats) {
-            self.sidebar.visit_perframe(
-                &mut Frame { layer: frame.layer, bounds: Rect::new(b.x, b.y, sidebar, b.height), clip: frame.clip },
-                cx,
-            );
-        }
-        if !screen && (wide || !self.show_chats) {
-            let chat = if wide { Rect::new(b.x + sidebar, b.y, b.width - sidebar - file_width, b.height) } else { b };
-            self.chat.header.attachments_open = self.attachments.show;
-            self.chat.visit_perframe(&mut Frame { layer: frame.layer, bounds: chat, clip: frame.clip }, cx);
-        }
-        if self.attachments.show {
-            let bounds = if side { Rect::new(b.x + b.width - file_width, b.y, file_width, b.height) } else { b };
-            self.attachments.side = side;
-            self.attachments.visit_perframe(&mut Frame { layer: frame.layer, bounds, clip: frame.clip }, cx);
+        let layout = self.layout(frame.bounds, cx.ui);
+        self.chat.header.attachments_open = self.attachments.show;
+        self.attachments.side = layout[2].is_some_and(|r| r.width < frame.bounds.width);
+        for (bounds, child) in self.children(frame.bounds, cx.ui) {
+            if let Some(bounds) = bounds {
+                frame.visit(bounds, child, cx);
+            }
         }
         let mut interests = self.chat.transcript.interests.clone();
         interests.extend(self.attachments.interests.iter().cloned());
-        let request = if (wide || !self.show_chats || self.attachments.show) && self.chat.code.view.is_none() {
+        let request = if (layout[1].is_some() || layout[2].is_some()) && self.chat.code.view.is_none() {
             cx.model.account.selected.clone().map(|session| (session, interests))
         } else {
             None
@@ -351,21 +335,68 @@ impl Widget for Workspace {
         }
     }
 }
+#[derive(Clone, Copy)]
+enum ChatChild {
+    Transcript,
+    Header,
+    Code,
+    Composer,
+}
+impl ChatPane {
+    fn order(&self, ui: &UiState) -> [Option<ChatChild>; 4] {
+        let code = self.code.view.as_ref();
+        [
+            code.is_none().then_some(ChatChild::Transcript),
+            code.is_none().then_some(ChatChild::Header),
+            code.is_some().then_some(ChatChild::Code),
+            code.is_none_or(|v| {
+                v.search.is_none()
+                    && v.document.is_some()
+                    && (v.selection.is_some() || ui.focus == Some(self.composer.field.control.target))
+            })
+            .then_some(ChatChild::Composer),
+        ]
+    }
+    fn child(&self, child: ChatChild) -> &dyn Widget {
+        match child {
+            ChatChild::Transcript => &self.transcript,
+            ChatChild::Header => &self.header,
+            ChatChild::Code => &self.code,
+            ChatChild::Composer => &self.composer,
+        }
+    }
+    fn child_mut(&mut self, child: ChatChild) -> &mut dyn Widget {
+        match child {
+            ChatChild::Transcript => &mut self.transcript,
+            ChatChild::Header => &mut self.header,
+            ChatChild::Code => &mut self.code,
+            ChatChild::Composer => &mut self.composer,
+        }
+    }
+}
 impl Widget for ChatPane {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        for child in self.order(cx.ui).into_iter().flatten() {
+            self.child_mut(child).update(dt, cx);
+        }
+    }
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        model.selected().is_some()
+            && self.order(ui).into_iter().flatten().any(|child| self.child(child).owns(target, model, ui))
+    }
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        if cx.ui.routes_pointer_to(event, self.code.controls.id) && self.code.handle_event(event, cx) {
-            return true;
+        // This accelerator belongs to the chat, even when the browser is closed.
+        if !cx.ui.composing && matches!(event, Event::Key { key: "Space" | " ", ctrl: true, .. }) {
+            return self.code.handle_event(event, cx);
         }
-        if let Some(view) = &self.code.view {
-            return view.search.is_none()
-                && view.document.is_some()
-                && (view.selection.is_some() || cx.ui.focus == Some(self.composer.field.control.target))
-                && self.composer.handle_event(event, cx);
+        let mut handled = false;
+        for child in self.order(cx.ui).into_iter().flatten().rev() {
+            handled |= self.child_mut(child).dispatch(event, cx);
+            if handled {
+                break;
+            }
         }
-        cx.ui.routes_pointer_to(event, self.header.controls.id) && self.header.handle_event(event, cx)
-            || cx.ui.routes_pointer_to(event, self.composer.controls.id) && self.composer.handle_event(event, cx)
-            || cx.ui.routes_pointer_to(event, self.transcript.scroll.target.scope)
-                && self.transcript.handle_event(event, cx)
+        handled
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let Some(session) = cx.model.account.selected.clone().filter(|s| cx.model.chats.contains_key(s)) else {
@@ -384,32 +415,25 @@ impl Widget for ChatPane {
             );
             return;
         };
-        let code = self.code.view.as_ref();
-        let comments = code.is_none_or(|v| {
-            v.search.is_none() && v.document.is_some() && (v.selection.is_some() || cx.ui.focus == cx.ui.composer)
-        });
-        let layout = self.composer.layout(cx, frame.bounds, &session);
-        let bottom = layout.4;
-        if code.is_some() {
-            self.code.composer_bottom = comments.then_some(bottom);
-            self.code.visit_perframe(frame, cx);
-        } else {
-            self.header.visit_perframe(frame, cx);
-            let b = frame.bounds;
-            let s = cx.ui.scale;
-            let bounds = Rect::new(b.x, b.y + 57. * s, b.width, (bottom - b.y - 57. * s).max(1.));
-            self.transcript.visit_perframe(
-                &mut Frame { layer: frame.layer, bounds, clip: crate::render::intersect(frame.clip, bounds) },
-                cx,
-            );
-        }
-        if comments {
-            self.composer.in_code = self.code.view.is_some();
-            self.composer.code_ready =
-                self.code.view.as_ref().is_some_and(|v| v.selection.is_some() && v.error.is_none());
-            self.composer.away_from_tail =
-                self.transcript.scroll.value + 24. * cx.ui.scale < self.transcript.scroll.max;
-            self.composer.visit_perframe(frame, cx);
+        let b = frame.bounds;
+        let bottom = self.composer.layout(cx, b, &session).4;
+        let order = self.order(cx.ui);
+        self.code.composer_bottom = order[3].is_some().then_some(bottom);
+        self.composer.in_code = self.code.view.is_some();
+        self.composer.code_ready = self.code.view.as_ref().is_some_and(|v| v.selection.is_some() && v.error.is_none());
+        let header = 57. * cx.ui.scale;
+        for child in order.into_iter().flatten() {
+            let bounds = match child {
+                ChatChild::Transcript => Rect::new(b.x, b.y + header, b.width, (bottom - b.y - header).max(1.)),
+                ChatChild::Header => Rect::new(b.x, b.y, b.width, header),
+                ChatChild::Composer => {
+                    self.composer.away_from_tail =
+                        self.transcript.scroll.value + 24. * cx.ui.scale < self.transcript.scroll.max;
+                    b
+                }
+                ChatChild::Code => b,
+            };
+            frame.visit(bounds, self.child_mut(child), cx);
         }
     }
 }

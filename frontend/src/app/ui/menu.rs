@@ -3,7 +3,7 @@
 //! never dispatch through it.
 use super::controls::Control;
 use super::scroll::ScrollState;
-use super::{Context, DialogSpec, Event, Frame, Id, Operation, Request, TopicEdit, Widget};
+use super::{Context, Controller, DialogSpec, Event, Frame, Id, Operation, Request, Target, TopicEdit, UiState, Widget};
 use crate::{
     app::PlatformAction,
     render::{color, contains},
@@ -236,6 +236,7 @@ impl Menu {
         let r = frame.bounds;
         let s = cx.ui.scale;
         self.rect = r;
+        frame.layer.above();
         frame.layer.rounded_rect(r, 8. * s, color(0x36343b));
         let clip = crate::render::intersect(
             Rect::new(r.x + 4. * s, r.y + 4. * s, r.width - 8. * s, (r.height - 8. * s).max(0.)),
@@ -249,12 +250,14 @@ impl Menu {
             control.rect = Some(rect);
             control.clip = clip;
             control.enabled = !matches!(choice, Choice::Noop);
-            if cx.ui.hover.is_some_and(|p| control.contains(p))
+            control.corners = Some([4. * s; 4]);
+            if cx.ui.hot.is_some_and(|(target, _)| target == control.target)
                 || active && cx.ui.hover.is_none() && self.selected == i
                 || !active && matches!(choice, Choice::MoveMenu(_))
             {
                 frame.layer.clipped_rounded_rect(rect, 4. * s, color(0x494750), clip);
             }
+            control.highlight(frame.layer, cx.ui, false);
             cx.services.renderer.clipped_label(
                 frame.layer,
                 label,
@@ -282,6 +285,25 @@ impl Menu {
     }
 }
 impl Widget for Menu {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity
+            || self.lineage != cx.model.account.source_lineage
+            || self.session != cx.model.account.selected
+        {
+            cx.ui.requests.push_back(Request::CloseMenu(self.id));
+            return;
+        }
+        self.scroll.update(dt, cx);
+        if let Some(parent) = &mut self.parent {
+            parent.update(dt, cx);
+        }
+    }
+    fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
+        self.scroll.target == target
+            || self.controls.iter().any(|c| c.target == target && c.rect.is_some())
+            || self.parent.as_ref().is_some_and(|p| p.rect.width > 0. && p.owns(target, model, ui))
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity
             || self.lineage != cx.model.account.source_lineage
@@ -291,10 +313,7 @@ impl Widget for Menu {
             return true;
         }
         let choice = match *event {
-            Event::Cancel => {
-                self.scroll.stop();
-                return true;
-            }
+
             Event::Back | Event::Key { key: "Escape" | "ArrowLeft", .. } => {
                 self.back(cx);
                 return true;

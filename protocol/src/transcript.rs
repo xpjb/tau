@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatAttachment {
     #[serde(skip)]
@@ -13,14 +13,14 @@ pub struct ChatAttachment {
     pub size: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentKind {
     Image,
     File,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
     pub id: String,
@@ -41,7 +41,7 @@ pub struct Event {
     pub attachment: Option<ChatAttachment>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventPhase {
     Saved,
@@ -49,7 +49,7 @@ pub enum EventPhase {
     Interrupted,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventRole {
     User,
@@ -58,7 +58,7 @@ pub enum EventRole {
     System,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Origin {
     pub request_id: Option<String>,
@@ -66,7 +66,7 @@ pub struct Origin {
     pub stream_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     Text,
@@ -76,14 +76,14 @@ pub enum EventKind {
     Hidden,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueRef {
     pub request_id: String,
     pub revision: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuedRequest {
     pub request_id: String,
@@ -94,7 +94,7 @@ pub struct QueuedRequest {
     pub timestamp_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueControl {
     pub command_id: String,
@@ -106,7 +106,7 @@ pub struct QueueControl {
     pub detail: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueState {
     pub available: bool,
@@ -121,17 +121,6 @@ impl QueueState {
     pub fn native() -> Self { Self { available:true, capabilities:["queue_edit","queue_delete","queue_pause","queue_resume","queue_run_prefix","queue_cancel_control"].into_iter().map(str::to_owned).collect(), boundaries:vec!["turn".into()], ..Default::default() } }
 }
 
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptSnapshot {
-    pub generation: String,
-    pub sequence: u64,
-    pub events: Vec<Event>,
-    pub queue: QueueState,
-    pub before: Option<u64>,
-    pub delivered: Vec<String>,
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

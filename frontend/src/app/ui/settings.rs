@@ -1,7 +1,7 @@
 //! Settings widgets own staged edits and completion lifetimes. Settings schema,
 //! parsing and validation remain in daemon_settings / models, not in the UI tree.
-use super::controls::{Button, Form, TextField};
-use super::{Context, Event, Frame, Id, Request, Widget};
+use super::controls::{ButtonStyle, Controls, Form, TextField};
+use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     daemon_settings::{Draft, Kind, SECTIONS, fields},
     editor::Editor,
@@ -22,10 +22,13 @@ pub(in crate::app) struct ModelsDialog {
     pub models: TextField,
     pub search: TextField,
     form: Form<ModelChoice>,
-    suggestions: Vec<(String, Button)>,
+    suggestions: Controls<String>,
     identity: String,
 }
 impl ModelsDialog {
+    fn search_visible(ui: &UiState) -> bool {
+        ui.size.1 as f32 / ui.scale >= 320.
+    }
     pub fn new(cx: &mut Context<'_>) -> Result<Self> {
         let id = Id::new();
         let mut models = TextField::new(id, "Quick models", Editor::new(cx.model.model_preferences.text()));
@@ -49,7 +52,7 @@ impl ModelsDialog {
                 id,
                 &[(ModelChoice::Save, "Save"), (ModelChoice::Presets, "Presets"), (ModelChoice::Close, "Cancel")],
             ),
-            suggestions: vec![],
+            suggestions: Controls::new(id),
             identity: cx.model.identity.clone(),
         })
     }
@@ -58,12 +61,23 @@ impl ModelsDialog {
             .buttons
             .iter()
             .map(|(_, b)| b)
-            .chain(self.suggestions.iter().map(|(_, b)| b))
+            .chain(self.suggestions.items.iter().map(|(_, b, _)| b))
             .filter_map(|b| b.control.rect.map(|r| (b.label.as_str(), r)))
             .collect()
     }
 }
 impl Widget for ModelsDialog {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity {
+            cx.ui.requests.push_back(Request::Close(self.id));
+        }
+    }
+    fn owns(&self, target: Target, _model: &Controller, ui: &UiState) -> bool {
+        self.form.owns(target)
+            || self.models.control.target == target
+            || Self::search_visible(ui) && (self.search.control.target == target || self.suggestions.owns(target))
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity {
             cx.ui.requests.push_back(Request::Close(self.id));
@@ -72,28 +86,29 @@ impl Widget for ModelsDialog {
         let composing = self.models.editor.composing() || self.search.editor.composing();
         let choice = match event {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(ModelChoice::Close),
-            Event::Submit if !composing => Some(ModelChoice::Save),
             _ => {
-                for (slug, button) in &mut self.suggestions {
-                    if button.handle_event(event, cx) {
-                        if button.control.take_click() {
-                            let result = (|| -> Result<()> {
-                                let mut prefs = crate::models::Preferences::parse(&self.models.editor.value)?;
-                                if prefs.slugs.contains(slug) {
-                                    prefs.slugs.retain(|s| s != slug);
-                                } else {
-                                    anyhow::ensure!(prefs.slugs.len() < 12, "Choose at most 12 quick models");
-                                    prefs.slugs.push(slug.clone());
-                                }
-                                self.models.editor = Editor::new(prefs.text());
-                                Ok(())
-                            })();
-                            cx.report(result);
+                let visible = Self::search_visible(cx.ui);
+                let (handled, slug) = if visible { self.suggestions.event(event, cx) } else { (false, None) };
+                if let Some(slug) = slug {
+                    let result = (|| -> Result<()> {
+                        let mut prefs = crate::models::Preferences::parse(&self.models.editor.value)?;
+                        if prefs.slugs.contains(&slug) {
+                            prefs.slugs.retain(|s| s != &slug);
+                        } else {
+                            anyhow::ensure!(prefs.slugs.len() < 12, "Choose at most 12 quick models");
+                            prefs.slugs.push(slug);
                         }
-                        return true;
-                    }
+                        self.models.editor = Editor::new(prefs.text());
+                        Ok(())
+                    })();
+                    self.form.report(result, cx);
                 }
-                self.form.event(event, &mut [&mut self.models, &mut self.search], cx)
+                if handled {
+                    return true;
+                }
+                self.form
+                    .event(event, std::iter::once(&mut self.models).chain(visible.then_some(&mut self.search)), cx)
+                    .1
             }
         };
         match choice {
@@ -108,7 +123,7 @@ impl Widget for ModelsDialog {
                 if result.is_ok() {
                     cx.ui.requests.push_back(Request::Close(self.id));
                 }
-                cx.report(result);
+                self.form.report(result, cx);
             }
             None => {}
         }
@@ -117,22 +132,10 @@ impl Widget for ModelsDialog {
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let b = frame.bounds;
         let s = cx.ui.scale;
-        frame.layer.rect(b, color(0x0e141b));
-        self.form.begin_frame();
-        let w = (b.width - 32. * s).min(680. * s).max(1.);
-        let x = b.x + (b.width - w) / 2.;
-        let top = b.y + 12. * s;
-        let footer = b.y + b.height - 52. * s;
-        cx.services.renderer.label(
-            frame.layer,
-            "Quick model selection",
-            Rect::new(x, top, w, 30. * s),
-            20. * s,
-            color(0xe5eaf0),
-            true,
-        );
+        let area = self.form.page(680., "Quick model selection", frame, cx);
+        let (x, w, top, footer) = (area.x, area.width, b.y + 12. * s, area.y + area.height);
         let compact = b.height / s < 480.;
-        let show_suggestions = b.height / s >= 320.;
+        let show_suggestions = Self::search_visible(cx.ui);
         let help_h = if compact { 32. } else { 58. } * s;
         cx.services.renderer.label(
             frame.layer,
@@ -146,16 +149,12 @@ impl Widget for ModelsDialog {
         let h = (b.height * 0.25)
             .min(164. * s)
             .min((footer - 48. * s - y - if show_suggestions { 56. * s } else { 0. }).max(1.));
-        self.models
-            .visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x, y, w, h), clip: frame.clip }, cx);
+        frame.visit(Rect::new(x, y, w, h), &mut self.models, cx);
         let search_y = y + h + 12. * s;
         self.search.control.rect = None;
         self.search.editor.hide();
         if show_suggestions {
-            self.search.visit_perframe(
-                &mut Frame { layer: frame.layer, bounds: Rect::new(x, search_y, w, 36. * s), clip: frame.clip },
-                cx,
-            );
+            frame.visit(Rect::new(x, search_y, w, 36. * s), &mut self.search, cx);
         }
         let list_y = search_y + 44. * s;
         let query = self.search.editor.value.to_lowercase();
@@ -173,45 +172,40 @@ impl Widget for ModelsDialog {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        self.suggestions.retain(|(slug, _)| slugs.contains(slug));
+        self.suggestions.begin();
         let preferences = crate::models::Preferences::parse(&self.models.editor.value).ok();
         for (i, slug) in slugs.into_iter().enumerate() {
-            if !self.suggestions.iter().any(|(key, _)| key == &slug) {
-                self.suggestions.push((slug.clone(), Button::new(self.id, "")));
-            }
-            let button = &mut self.suggestions.iter_mut().find(|(key, _)| key == &slug).unwrap().1;
-            button.label = format!(
+            let label = format!(
                 "{} {}",
                 if preferences.as_ref().is_some_and(|p| p.slugs.contains(&slug)) { "−" } else { "+" },
                 slug
             );
-            button.visit_perframe(
-                &mut Frame {
-                    layer: frame.layer,
-                    bounds: Rect::new(x, list_y + i as f32 * 32. * s, w, 30. * s),
-                    clip: frame.clip,
-                },
+            self.suggestions.button(
                 cx,
+                frame.layer,
+                Rect::new(x, list_y + i as f32 * 32. * s, w, 30. * s),
+                &label,
+                slug,
+                ButtonStyle::Tonal,
+                frame.clip,
             );
         }
-        cx.services.renderer.label(
-            frame.layer,
-            cx.model.notice.as_deref().unwrap_or("Suggestions are optional; the provider decides availability."),
-            Rect::new(x, footer - 44. * s, w, 36. * s),
-            12. * s,
-            color(if cx.model.notice.is_some() { 0xffb4ab } else { 0x82909f }),
-            false,
+        self.suggestions.finish(cx);
+        frame.feedback(
+            Rect::new(x, footer - 44. * s, w, 44. * s),
+            "Suggestions are optional; the provider decides availability.",
+            cx,
         );
-        for (i, choice) in [ModelChoice::Save, ModelChoice::Presets, ModelChoice::Close].into_iter().enumerate() {
-            self.form.button(
-                choice,
-                Rect::new(x + i as f32 * (w + 8. * s) / 3., footer, (w - 16. * s) / 3., 40. * s),
-                choice == ModelChoice::Save,
-                false,
-                frame,
-                cx,
-            );
-        }
+        self.form.row(
+            &[
+                (ModelChoice::Save, ButtonStyle::Primary),
+                (ModelChoice::Presets, ButtonStyle::Tonal),
+                (ModelChoice::Close, ButtonStyle::Tonal),
+            ],
+            Rect::new(x, footer, w, 40. * s),
+            frame,
+            cx,
+        );
     }
 }
 
@@ -237,6 +231,9 @@ pub(in crate::app) struct DaemonDialog {
     lineage: Option<String>,
 }
 impl DaemonDialog {
+    fn field_visible(&self) -> bool {
+        self.draft.as_ref().is_some_and(|d| d.definition().kind != Kind::Bool)
+    }
     pub fn new(cx: &mut Context<'_>) -> Result<Self> {
         let id = Id::new();
         let mut buttons = vec![
@@ -260,7 +257,7 @@ impl DaemonDialog {
             lineage: cx.model.account.source_lineage.clone(),
         };
         if let Err(error) = dialog.reload(cx) {
-            cx.report(Err(error));
+            dialog.form.report(Err(error), cx);
         }
         Ok(dialog)
     }
@@ -362,47 +359,59 @@ impl DaemonDialog {
     }
 }
 impl Widget for DaemonDialog {
+    fn update(&mut self, _dt: f32, cx: &mut Context<'_>) {
+        if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
+            cx.ui.requests.push_back(Request::Close(self.id));
+            return;
+        }
+        if self.waiting
+            && let Some(document) = cx.model.daemon_settings.clone()
+        {
+            self.waiting = false;
+            let result = Draft::new(&document, self.identity.clone()).and_then(|draft| {
+                self.draft = Some(draft);
+                self.load(cx)
+            });
+            self.form.report(result, cx);
+        }
+        if let Some(request) = &self.saving {
+            if cx.model.settings_result.as_ref().is_some_and(|(id, _)| id == request) {
+                let ok = cx.model.settings_result.take().unwrap().1;
+                self.saving = None;
+                if ok && let (Some(d), Some(doc)) = (&mut self.draft, &cx.model.daemon_settings) {
+                    d.revision = doc.revision;
+                    cx.model.notice = Some("Settings saved".into());
+                }
+                cx.ui.dirty = true;
+            } else if cx.model.epoch.is_none() {
+                self.saving = None;
+                cx.model.notice = Some("Save unconfirmed. Reload before saving again; it was not resent.".into());
+                cx.ui.dirty = true;
+            }
+        }
+    }
+    fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
+        self.form.owns(target)
+            || self.field_visible() && self.value.as_ref().is_some_and(|f| f.control.target == target)
+    }
+
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if self.identity != cx.model.identity || self.lineage != cx.model.account.source_lineage {
             cx.ui.requests.push_back(Request::Close(self.id));
             return true;
         }
-        if matches!(event, Event::Tick(_)) {
-            if self.waiting
-                && let Some(document) = cx.model.daemon_settings.clone()
-            {
-                self.waiting = false;
-                let result = Draft::new(&document, self.identity.clone()).and_then(|draft| {
-                    self.draft = Some(draft);
-                    self.load(cx)
-                });
-                cx.report(result);
-            }
-            if let Some(request) = &self.saving {
-                if cx.model.settings_result.as_ref().is_some_and(|(id, _)| id == request) {
-                    let ok = cx.model.settings_result.take().unwrap().1;
-                    self.saving = None;
-                    if ok && let (Some(d), Some(doc)) = (&mut self.draft, &cx.model.daemon_settings) {
-                        d.revision = doc.revision;
-                        cx.model.notice = Some("Settings saved".into());
-                    }
-                    cx.ui.dirty = true;
-                } else if cx.model.epoch.is_none() {
-                    self.saving = None;
-                    cx.model.notice = Some("Save unconfirmed. Reload before saving again; it was not resent.".into());
-                    cx.ui.dirty = true;
-                }
-            }
-        }
+
         let composing = self.value.as_ref().is_some_and(|f| f.editor.composing());
         let choice = match event {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(SettingChoice::Close),
-            Event::Submit if !composing => Some(SettingChoice::Save),
-            _ => self.form.event(event, &mut self.value.iter_mut().collect::<Vec<_>>(), cx),
+            _ => {
+                let visible = self.field_visible();
+                self.form.event(event, self.value.iter_mut().filter(|_| visible), cx).1
+            }
         };
         if let Some(choice) = choice {
             let result = self.choose(choice, cx);
-            cx.report(result);
+            self.form.report(result, cx);
         }
         true
     }
@@ -410,25 +419,28 @@ impl Widget for DaemonDialog {
         let b = frame.bounds;
         let s = cx.ui.scale;
         let busy = self.saving.is_some();
-        frame.layer.rect(b, color(0x0e141b));
-        self.form.begin_frame();
-        let w = (b.width - 32. * s).min(900. * s).max(1.);
-        let x = b.x + (b.width - w) / 2.;
-        let footer = b.y + b.height - 52. * s;
         let compact = b.height / s < 400.;
         let title = self
             .draft
             .as_ref()
             .map(|d| format!("Daemon settings · revision {}", d.revision))
             .unwrap_or_else(|| "Daemon settings".into());
-        cx.services.renderer.label(
-            frame.layer,
-            &title,
-            Rect::new(x, b.y + 12. * s, w, 28. * s),
-            20. * s,
-            color(0xe5eaf0),
-            true,
+        let area = self.form.page(900., &title, frame, cx);
+        let (x, w, footer) = (area.x, area.width, area.y + area.height);
+        let feedback = frame.feedback(
+            area,
+            if busy {
+                "Saving…"
+            } else if compact {
+                ""
+            } else {
+                "Edits are staged until Save. Reload discards them. Credentials stay on the daemon."
+            },
+            cx,
         );
+        for (choice, button) in &mut self.form.buttons {
+            button.control.enabled = !busy || *choice == SettingChoice::Close;
+        }
         if let Some(draft) = &self.draft {
             let mut y = b.y + 48. * s;
             if !compact {
@@ -443,8 +455,7 @@ impl Widget for DaemonDialog {
                             tw,
                             30. * s,
                         ),
-                        i == draft.section,
-                        false,
+                        if i == draft.section { ButtonStyle::Primary } else { ButtonStyle::Tonal },
                         frame,
                         cx,
                     );
@@ -454,12 +465,17 @@ impl Widget for DaemonDialog {
             let definition = draft.definition();
             let count = fields(draft.section).len();
             if count > 1 {
-                self.form.button(SettingChoice::Previous, Rect::new(x, y, 36. * s, 32. * s), false, false, frame, cx);
+                self.form.button(
+                    SettingChoice::Previous,
+                    Rect::new(x, y, 36. * s, 32. * s),
+                    ButtonStyle::Tonal,
+                    frame,
+                    cx,
+                );
                 self.form.button(
                     SettingChoice::Next,
                     Rect::new(x + w - 36. * s, y, 36. * s, 32. * s),
-                    false,
-                    false,
+                    ButtonStyle::Tonal,
                     frame,
                     cx,
                 );
@@ -503,24 +519,21 @@ impl Widget for DaemonDialog {
                     };
                     self.form.buttons.iter_mut().find(|(a, _)| *a == SettingChoice::Toggle).unwrap().1.label =
                         label.into();
-                    self.form.button(SettingChoice::Toggle, Rect::new(x, y, w, 32. * s), false, false, frame, cx);
+                    self.form.button(SettingChoice::Toggle, Rect::new(x, y, w, 32. * s), ButtonStyle::Tonal, frame, cx);
                     y += 40. * s;
                 }
                 if definition.kind != Kind::Bool {
-                    let available = (footer - if compact { 4. } else { 88. } * s - y).max(1.);
+                    let reserve = if compact { feedback + 4. * s } else { (feedback + 40. * s).max(88. * s) };
+                    let available = (footer - reserve - y).max(1.);
                     let h = if field.editor.single_line { available.min(48. * s) } else { available };
-                    field.visit_perframe(
-                        &mut Frame { layer: frame.layer, bounds: Rect::new(x, y, w, h), clip: frame.clip },
-                        cx,
-                    );
+                    frame.visit(Rect::new(x, y, w, h), field, cx);
                 }
             }
             if !compact {
                 self.form.button(
                     SettingChoice::Reset,
                     Rect::new(x, footer - 80. * s, 120. * s, 28. * s),
-                    false,
-                    false,
+                    ButtonStyle::Tonal,
                     frame,
                     cx,
                 );
@@ -535,35 +548,15 @@ impl Widget for DaemonDialog {
                 false,
             );
         }
-        if !compact {
-            cx.services.renderer.label(
-                frame.layer,
-                cx.model.notice.as_deref().unwrap_or(if busy {
-                    "Saving…"
-                } else {
-                    "Edits are staged until Save. Reload discards them. Credentials stay on the daemon."
-                }),
-                Rect::new(x, footer - 42. * s, w, 36. * s),
-                12. * s,
-                color(0xb7c2ce),
-                false,
-            );
-        }
-        for (i, choice) in [SettingChoice::Save, SettingChoice::Reload, SettingChoice::Close].into_iter().enumerate() {
-            if busy && choice != SettingChoice::Close {
-                continue;
-            }
-            self.form.button(
-                choice,
-                Rect::new(x + i as f32 * (w + 8. * s) / 3., footer, (w - 16. * s) / 3., 40. * s),
-                choice == SettingChoice::Save,
-                false,
-                frame,
-                cx,
-            );
-        }
-        for (choice, button) in &mut self.form.buttons {
-            button.control.enabled = !busy || *choice == SettingChoice::Close;
-        }
+        self.form.row(
+            &[
+                (SettingChoice::Save, ButtonStyle::Primary),
+                (SettingChoice::Reload, ButtonStyle::Tonal),
+                (SettingChoice::Close, ButtonStyle::Tonal),
+            ],
+            Rect::new(x, footer, w, 40. * s),
+            frame,
+            cx,
+        );
     }
 }

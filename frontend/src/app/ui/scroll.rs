@@ -16,9 +16,31 @@ pub(in crate::app) struct ScrollState {
     pub(in crate::app) wheel: Option<(f32, Instant)>,
     candidate: Option<Capture>,
     drag: Option<f32>,
-    hovered: bool,
 }
 impl ScrollState {
+    pub fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
+        let old = self.value;
+        if let Some((target, last)) = self.wheel {
+            let target = target.clamp(0., self.max);
+            let now = Instant::now();
+            let elapsed = now.duration_since(last).as_secs_f32().min(0.1);
+            let next = self.value + (target - self.value) * (1. - (-elapsed / 0.065).exp());
+            let settled = (target - next).abs() < 0.25 * cx.ui.scale;
+            self.value = if settled { target } else { next };
+            self.wheel = (!settled).then_some((target, now));
+            cx.ui.dirty = true;
+        }
+        if self.candidate.is_none() && self.velocity.abs() > 4. {
+            self.set(self.value + self.velocity * dt.min(0.05));
+            self.velocity *= (-9. * dt).exp();
+            if (old - self.value).abs() < 0.1 {
+                self.velocity = 0.;
+            }
+            cx.ui.dirty = true;
+        }
+        cx.ui.dirty |= self.value != old;
+    }
+
     pub fn new(scope: Id, horizontal: bool) -> Self {
         Self {
             target: Target { scope, widget: Id::new() },
@@ -30,7 +52,6 @@ impl ScrollState {
             wheel: None,
             candidate: None,
             drag: None,
-            hovered: false,
         }
     }
     pub fn stop(&mut self) {
@@ -67,7 +88,8 @@ impl ScrollState {
     }
     pub fn paint(&self, layer: &mut Layer, cx: &mut Context<'_>) {
         if let Some((track, thumb)) = self.thumb(cx.ui.scale) {
-            let active = self.drag.is_some() || cx.ui.hover.is_some_and(|p| contains(track, p));
+            layer.above();
+            let active = cx.ui.capture.is_some_and(|c| c.target == self.target) || cx.ui.hot.is_some_and(|(target, _)| target == self.target);
             let w = if active { 8. } else { 6. } * cx.ui.scale;
             layer.rounded_rect(
                 Rect::new(track.x + (track.width - w) / 2., thumb.y, w, thumb.height),
@@ -81,10 +103,8 @@ impl ScrollState {
     pub fn bar_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         if let Event::Hover(point) = *event {
             let over = point.is_some_and(|p| self.thumb(cx.ui.scale).is_some_and(|(track, _)| contains(track, p)));
-            cx.ui.dirty |= self.hovered != over;
-            self.hovered = over;
             if over {
-                cx.ui.hot = None;
+                cx.ui.hot = Some((self.target, super::Cursor::Default));
                 return true;
             }
         }
@@ -118,7 +138,6 @@ impl ScrollState {
         let old = self.value;
         let mut handled = child_handled;
         match *event {
-            Event::Cancel => self.stop(),
             Event::Down { pointer, point, touch }
                 if contains(self.rect, point) && cx.ui.capture.is_none_or(|c| c.pointer == pointer) =>
             {
@@ -202,26 +221,7 @@ impl ScrollState {
                 self.wheel = Some(((target + amount).clamp(0., self.max), Instant::now()));
                 handled = true;
             }
-            Event::Tick(dt) => {
-                if let Some((target, last)) = self.wheel {
-                    let target = target.clamp(0., self.max);
-                    let now = Instant::now();
-                    let elapsed = now.duration_since(last).as_secs_f32().min(0.1);
-                    let next = self.value + (target - self.value) * (1. - (-elapsed / 0.065).exp());
-                    let settled = (target - next).abs() < 0.25 * cx.ui.scale;
-                    self.value = if settled { target } else { next };
-                    self.wheel = (!settled).then_some((target, now));
-                    cx.ui.dirty = true;
-                }
-                if self.candidate.is_none() && self.velocity.abs() > 4. {
-                    self.set(self.value + self.velocity * dt.min(0.05));
-                    self.velocity *= (-9. * dt).exp();
-                    if (old - self.value).abs() < 0.1 {
-                        self.velocity = 0.;
-                    }
-                    cx.ui.dirty = true;
-                }
-            }
+
             _ => {}
         }
         cx.ui.dirty |= self.value != old;

@@ -33,6 +33,71 @@ pub struct BlockHeader {
     pub revision: u64,
 }
 
+/// A body address is meaningful only within its source lineage and chat scope.
+/// Availability belongs to the reader, not this immutable native identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BodyRef {
+    pub source: String,
+    pub scope: String,
+    pub id: String,
+    pub version: u64,
+    pub length: u64,
+    pub sealed: bool,
+}
+impl BlockHeader {
+    pub fn body_ref(&self, source: &str, scope: &str) -> BodyRef {
+        BodyRef { source: source.into(), scope: scope.into(), id: self.id.clone(),
+            version: self.version, length: self.length, sealed: self.sealed }
+    }
+}
+
+/// Native addresses and public tool metadata; provider call IDs are not UI identity.
+pub fn tool_input_id(tool: &str) -> String { format!("{tool}/input") }
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolState { Writing, Running, Completed, Failed, Interrupted }
+impl ToolState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Writing => "writing", Self::Running => "running", Self::Completed => "completed",
+            Self::Failed => "failed", Self::Interrupted => "interrupted",
+        }
+    }
+    pub fn finished(self) -> bool { matches!(self, Self::Completed | Self::Failed | Self::Interrupted) }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolBody { Input, Output, Error }
+impl ToolBody {
+    /// Also the persisted disclosure suffix, not a decoder for block identity.
+    pub fn label(self) -> &'static str {
+        match self { Self::Input => "Input", Self::Output => "Output", Self::Error => "Error" }
+    }
+}
+impl BlockHeader {
+    pub fn tool_state(&self) -> Option<ToolState> {
+        if self.kind != BlockKind::Tool { return None; }
+        match self.meta.get("toolState") {
+            Some(state) => serde_json::from_value(state.clone()).ok(),
+            None => Some(if self.sealed { ToolState::Running } else { ToolState::Writing }),
+        }
+    }
+    /// Only textual input/results are tool bodies. Metadata and attachment payloads are not.
+    pub fn tool_body(&self) -> Option<ToolBody> {
+        if self.kind == BlockKind::Code && self.parent.is_some()
+            && self.meta.get("inputFor").and_then(|v| v.as_str()) == self.parent.as_deref() {
+            Some(ToolBody::Input)
+        } else if self.meta.pointer("/event/role").and_then(|v| v.as_str()) == Some("tool")
+            && self.meta.pointer("/event/kind").and_then(|v| v.as_str()) == Some("text")
+            && !self.meta.pointer("/event/attachment").is_some_and(|v| v.is_object()) {
+            Some(if self.meta.pointer("/event/isError").and_then(|v| v.as_bool()) == Some(true) {
+                ToolBody::Error
+            } else { ToolBody::Output })
+        } else { None }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FeedCursor { pub lineage: String, pub sequence: u64 }

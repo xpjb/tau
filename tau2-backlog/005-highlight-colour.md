@@ -1,5 +1,7 @@
 # 005 — Reduce the yellow/strong highlight
 
+**September 29 triage:** visual acceptance is part of [037](037-retained-interaction-ownership.md), alongside single-owner hover/press and ripple. Do not solve compounded parent/child highlights with palette changes alone.
+
 Priority: visual. Status: open.
 
 The user reports a highlight that is too yellow and too strong relative to its

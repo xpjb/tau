@@ -69,7 +69,7 @@ fn rich_tooltips_fit_desktop_phone_and_scaled_phone_without_clipping() {
 
         app.root.tooltips.usage = Tooltip::default(); app.root.workspace.show_chats = true;
         let session = app.controller.account.sessions.iter_mut().find(|s|s.id=="two").unwrap();
-        session.updated_at_ms = clock::now_ms().unwrap() - 52 * 60_000;
+        session.updated_at_ms = crate::clock::now_ms().unwrap() - 52 * 60_000;
         app.root.tooltips.target = Info::CacheTtl("two".into());
         app.root.tooltips.info.pinned = true; app.root.tooltips.info.progress = 1.;
         app.frame(&ctx,ctx.view());
@@ -136,7 +136,9 @@ async fn quota_refreshes_without_opening_a_tooltip_and_stops_when_hidden_or_non_
     while app.controller.epoch.is_none() {
         assert!(Instant::now()<deadline); app.tick(0.); tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    crate::demo::populate(&mut app.controller).unwrap();
+    app.controller.account.sessions = crate::demo::sessions();
+    app.controller.account.selected = Some("demo".into());
+    app.controller.ensure_chat("demo").unwrap();
     app.controller.account.sessions.iter_mut().find(|s|s.id=="demo").unwrap().model.as_mut().unwrap().provider="openai-codex".into();
     for expected in 1..=2 {
         let deadline = Instant::now() + Duration::from_secs(5);
