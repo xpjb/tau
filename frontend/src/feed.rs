@@ -13,7 +13,7 @@ pub struct Feed {
     previews:std::collections::VecDeque<(String,Vec<String>,usize)>,
     pub queue: QueueState,
     pub queue_transitions: HashMap<String,u64>, // Display-only rows awaiting the root cursor.
-    pub block_lengths: HashMap<String,u64>,
+    pub bodies: HashMap<String,crate::blocks::Body>,
     pub incomplete: HashSet<String>,
     pub block_states: HashMap<String,blocks::ToolState>,
     pub parents: HashMap<String,String>,
@@ -45,7 +45,8 @@ impl Feed {
         fn short(value:&mut Option<String>) {if let Some(s)=value {let mut n=s.len().min(64);while !s.is_char_boundary(n) {n-=1;}*s=s[..n].to_owned();}}
         for id in ids {
             if let Some(event)=self.by_id.get(id).and_then(|n|self.events.get_mut(n)) {
-                event.text=if self.block_lengths.get(id).copied().unwrap_or(0)>0 && event.kind!=EventKind::Tool {"Loading…".into()} else {String::new()};
+                event.text.clear();
+                if let Some(body) = self.bodies.get_mut(id) { body.resident = 0; body.limited = false; }
                 short(&mut event.error_message);short(&mut event.tool_name);short(&mut event.stop_reason);
                 if let Some(file)=&mut event.attachment {short(&mut file.caption);}
                 self.incomplete.insert(id.clone());
@@ -61,6 +62,7 @@ impl Feed {
                         view.snapshot.queue.requests.insert(i.min(view.snapshot.queue.requests.len()),q.clone());
                         self.queue_transitions.insert(q.request_id.clone(),*revision);
                         let id=format!("queued:{}",q.request_id);
+                        if let Some(body) = self.bodies.get(&id) { view.bodies.insert(id.clone(), body.clone()); }
                         if self.incomplete.contains(&id) { view.incomplete.insert(id); }
                     }
                 }
@@ -75,12 +77,12 @@ impl Feed {
             if let Some(i)=self.previews.iter().position(|(old,_,_)|old==root) {let (_,ids,_)=self.previews.remove(i).unwrap();self.drop_preview(&ids);}
         }
         if view.partial {
-            if view.queue_changed {self.incomplete.retain(|id|!id.starts_with("queued:"));}
+            if view.queue_changed {self.incomplete.retain(|id|!id.starts_with("queued:"));self.bodies.retain(|id,_|!id.starts_with("queued:"));}
             for event in &view.snapshot.events {self.incomplete.remove(&event.id);self.parents.remove(&event.id);self.block_states.remove(&event.id);}
             self.native_patch(view.snapshot,view.queue_changed)?;
-            self.block_lengths.extend(view.lengths);self.incomplete.extend(view.incomplete);self.block_states.extend(view.states);self.parents.extend(view.parents);
+            self.bodies.extend(view.bodies);self.incomplete.extend(view.incomplete);self.block_states.extend(view.states);self.parents.extend(view.parents);
         } else {
-            self.generation.clear();self.snapshot(view.snapshot)?;self.block_lengths=view.lengths;self.incomplete=view.incomplete;self.block_states=view.states;self.parents=view.parents;
+            self.generation.clear();self.snapshot(view.snapshot)?;self.bodies=view.bodies;self.incomplete=view.incomplete;self.block_states=view.states;self.parents=view.parents;
         }
         self.previews.extend(view.previews.into_iter().filter(|(_,_,bytes)|*bytes>0));
         let mut bytes=self.previews.iter().map(|(_,_,bytes)|bytes).sum::<usize>();

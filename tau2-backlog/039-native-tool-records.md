@@ -121,3 +121,21 @@ removal of authored-text loading placeholders, and actual retained tool children
 instead of the remaining `Line`/Row/Part reconstruction. Those must be integrated
 with 040–041, not declared done because parent membership now works. The existing
 text/Markdown caches, complete-Copy integrity/budget gates and sparse updates remain.
+
+## Explicit body state — September 29, 2026
+
+Native views now carry source/scope/ID/version, length and sealing through the
+shared `BodyRef`, separately from resident preview bytes and preview-limited
+state. Missing input headers are unknown, not completed empty bodies. This replaces
+the length-only map. Preview eviction clears bytes/availability without inventing
+source text. Queue transitions retain their body identity until the root barrier.
+Cache hydration no longer writes `Loading…` or preview notices into Event/queued
+text. The temporary existing display consumer supplies presentation only; its
+removal is still required in 041. The obsolete GPU test that expected reversal of
+an injected attachment placeholder was removed, not ported.
+
+The native regression verifies missing versus literal authored `Loading…`, exact
+copy, source/scope identity and replacement version invalidation. Frontend all-target
+check and 34 targeted native/lifetime tests pass (run
+`7bc66f1b-74d5-414a-b179-bf3905505684`). This slice costs 26 raw / 59 normalized
+lines including shared types; it does not claim simplification savings.

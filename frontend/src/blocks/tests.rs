@@ -30,6 +30,33 @@ fn event(id:&str,order:u64,kind:&str)->serde_json::Value {
 }
 
 #[test]
+fn body_identity_availability_and_authored_loading_text_are_independent() {
+    let mut f = Fixture::new();
+    f.put("text", None, 0, BlockKind::Text, event("text", 0, "text"), "Loading…".as_bytes());
+    f.put("tool", None, 1, BlockKind::Tool, event("tool", 1, "tool"), b"");
+    f.page(None, None);
+    let view = f.cache.snapshot("chat").unwrap().unwrap();
+    assert!(view.snapshot.events[0].text.is_empty());
+    assert!(view.bodies["text"].missing());
+    assert!(view.bodies["tool"].reference.is_none());
+    assert!(view.incomplete.contains("tool"), "unknown input is not completed empty input");
+    let original = view.bodies["text"].reference.clone().unwrap();
+    assert_eq!((&*original.source, &*original.scope, &*original.id), (&*f.lineage, "chat", "text"));
+    assert!(original.sealed);
+    f.body("text");
+    let view = f.cache.snapshot("chat").unwrap().unwrap();
+    assert_eq!(view.snapshot.events[0].text, "Loading…");
+    assert!(view.bodies["text"].complete());
+    assert_eq!(view.bodies["text"].reference.as_ref(), Some(&original));
+    assert_eq!(f.cache.copy_ready("chat", &["text".into()]).unwrap().unwrap(), "Loading…");
+    f.put("text", None, 0, BlockKind::Text, event("text", 0, "text"), b"replacement");
+    f.page(None, None);
+    let view = f.cache.snapshot("chat").unwrap().unwrap();
+    assert!(view.bodies["text"].missing());
+    assert_ne!(view.bodies["text"].reference.as_ref().unwrap().version, original.version);
+}
+
+#[test]
 fn queue_directory_paginates_fully_and_partial_text_is_not_editable() {
     let mut f=Fixture::new();
     f.put(QUEUE,None,i64::MAX as u64,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
@@ -65,7 +92,7 @@ fn disclosure_interests_are_per_group_and_large_input_is_explicit() {
     assert!(!plan.parents.contains(&Some("a".into())));assert!(plan.parents.contains(&Some("b".into())));
     assert!(!plan.blocks.iter().any(|(id,_)|id.ends_with("/input")));
     let view=f.cache.snapshot("chat").unwrap().unwrap();
-    let tools=crate::details::Tools::new(view.snapshot.events.iter(), &view.parents).with_lengths(&view.lengths).with_states(&view.states);
+    let tools=crate::details::Tools::new(view.snapshot.events.iter(), &view.parents).with_bodies(&view.bodies).with_states(&view.states);
     let lines=tools.lines(&[view.snapshot.events.iter().find(|e|e.id=="b").unwrap()],&local);
     assert!(lines.iter().any(|line|line.label=="Input" && line.toggle==Some(false)),"An unfetched input still has an expansion control");
     local.expansion.insert("tool:b:Input".into(),true);
@@ -142,7 +169,7 @@ fn sparse_projection_and_retained_previews_are_bounded_across_many_updates() {
     for i in 0..128 {
         let id=format!("e{i:03}");f.body(&id);let visible=BTreeSet::from([id.clone()]);
         let view=f.cache.changes("chat",Some(&visible),false).unwrap().unwrap();assert!(view.partial);assert_eq!(view.snapshot.events.len(),1);
-        assert!(view.incomplete.contains(&id));assert!(view.snapshot.events[0].text.contains("Preview limited"));
+        assert!(view.incomplete.contains(&id));assert!(view.bodies[&id].limited);assert!(!view.snapshot.events[0].text.contains("Preview limited"));
         feed.native_view(view).unwrap();
         assert!(feed.events.values().map(|e|e.text.len()).sum::<usize>()<=8*1024*1024+16000);
     }
@@ -626,7 +653,7 @@ fn warm_scrollback_survives_viewport_and_history_changes_without_stale_replaceme
     f.put("e099",None,99,BlockKind::Text,event("e099",99,"text"),b"replacement");
     f.page(None,None);
     feed.native_view(f.cache.changes_retaining("chat",Some(&BTreeSet::from(["e036".into()])),&feed.retained_roots(),false).unwrap().unwrap()).unwrap();
-    assert_eq!(feed.event("e099").unwrap().text,"Loading…");
+    assert!(feed.event("e099").unwrap().text.is_empty());assert!(feed.bodies["e099"].missing());
     // A full authoritative reset still removes ghost off-window rows.
     f.cache.clear().unwrap();f.page(None,None);
     feed.native_view(f.cache.changes_retaining("chat",None,&feed.retained_roots(),true).unwrap().unwrap()).unwrap();

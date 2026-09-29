@@ -35,7 +35,7 @@ impl Line {
 pub struct Tools<'a> {
     parents: &'a HashMap<String,String>,
     results: HashMap<&'a str, Vec<&'a Event>>,
-    lengths: Option<&'a HashMap<String,u64>>,
+    bodies: Option<&'a HashMap<String,crate::blocks::Body>>,
     states: Option<&'a HashMap<String,ToolState>>,
 }
 impl<'a> Tools<'a> {
@@ -46,11 +46,11 @@ impl<'a> Tools<'a> {
                 results.entry(parent).or_default().push(e);
             }
         }
-        Self { parents, results, lengths:None, states:None }
+        Self { parents, results, bodies:None, states:None }
     }
-    pub fn with_lengths(mut self, lengths: &'a HashMap<String,u64>) -> Self { self.lengths = Some(lengths); self }
+    pub fn with_bodies(mut self, bodies: &'a HashMap<String,crate::blocks::Body>) -> Self { self.bodies = Some(bodies); self }
     pub fn with_states(mut self, states:&'a HashMap<String,ToolState>) -> Self {self.states=Some(states);self}
-    fn length(&self, event: &Event) -> u64 { self.lengths.and_then(|lengths|lengths.get(&event.id)).copied().unwrap_or(event.text.len() as u64) }
+    fn length(&self, event: &Event) -> u64 { self.bodies.and_then(|bodies|bodies.get(&event.id)).map(|b|b.length()).unwrap_or(event.text.len() as u64) }
     pub fn paired_result(&self, e: &Event) -> bool {
         e.role == EventRole::Tool && self.parents.contains_key(&e.id)
     }

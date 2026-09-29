@@ -33,6 +33,24 @@ pub struct BlockHeader {
     pub revision: u64,
 }
 
+/// A body address is meaningful only within its source lineage and chat scope.
+/// Availability belongs to the reader, not this immutable native identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BodyRef {
+    pub source: String,
+    pub scope: String,
+    pub id: String,
+    pub version: u64,
+    pub length: u64,
+    pub sealed: bool,
+}
+impl BlockHeader {
+    pub fn body_ref(&self, source: &str, scope: &str) -> BodyRef {
+        BodyRef { source: source.into(), scope: scope.into(), id: self.id.clone(),
+            version: self.version, length: self.length, sealed: self.sealed }
+    }
+}
+
 /// Native addresses and public tool metadata; provider call IDs are not UI identity.
 pub fn tool_input_id(tool: &str) -> String { format!("{tool}/input") }
 

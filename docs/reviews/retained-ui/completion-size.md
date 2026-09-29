@@ -86,14 +86,12 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After native membership and global test-adapter retirement, frontend Rust is
-**26,774 raw / 32,175 same-format**: production **19,074 / 21,526**, tests
-**7,700 / 10,649**. Its unadjusted reduction is **951 / 843**. Replacement code
-outside frontend still adds **77 / 106** (production **41 / 69**, tests **36 / 37**),
-so the **charged reduction is 874 / 737**, with **4,126 / 4,263 remaining**.
-Charged production is **59 raw smaller / 11 same-format larger** than baseline.
-This is not production-simplification acceptance: the large architectural deletions
-remain outstanding.
+After explicit body-state migration, frontend Rust is **26,785 raw / 32,213
+same-format**: production **19,089 / 21,558**, tests **7,696 / 10,655**.
+Outside growth is **92 / 127** (production **56 / 90**, tests **36 / 37**).
+The **charged reduction is 848 / 678**, with **4,152 / 4,322 remaining**.
+Charged production is **29 raw smaller / 64 same-format larger**. Major production
+deletion remains outstanding; the body contract is a prerequisite, not savings.
 Deltas below use reduction-positive values and show raw / same-format:
 
 | Slice / commit | Deleted path | Replacement cost | Net production reduction | Net test reduction | Outside charge | Cumulative / remaining |
@@ -106,6 +104,8 @@ Deltas below use reduction-positive values and show raw / same-format:
 | 042 independent pruning / Submit retirement | Project activity/layout matrix, repeated GPU persistence setup, status glyph matrix, test-only Submit event and handlers | Controller persistence check, one isolated status render, real pointer submissions | +5 / +5 | +105 / +171 | 0 | Reduction 405 / 400; gap 4,595 / 4,600 |
 | 039 native parent membership / metadata | Provider-ID overwrite and restore; provider pairing/orphan repair; child-by-child output disclosure mismatch | Native parent index, shared metadata accessors, direct grouping and expanded native/publisher cases | +21 / +13 frontend | −35 / −42 frontend | +77 / +106 (production 41 / 69; tests 36 / 37) | Charged reduction 314 / 265; gap 4,686 / 4,735 |
 | 042 global adapter retirement | `test_ui.rs`, FixtureChoice/global selector/action conversions and App forwarders; old `scroll_tests.rs`; control/browser coordinate assumptions | Small owner-local selectors, actual pointer/cancellation paths, compact control state case and real stale-source navigation calls | +8 / +8 | +552 / +464 | 0 new; cumulative charge 77 / 106 | Charged reduction 874 / 737; gap 4,126 / 4,263 |
+
+| 039 explicit body state | Length-only map; injected/reversed authored placeholders; obsolete attachment Row test | Shared body identity, separate preview availability and native literal/version regression | −15 / −32 frontend | +4 / −6 frontend | +15 / +21 production; cumulative 92 / 127 | Charged reduction 848 / 678; gap 4,152 / 4,322 |
 
 Outside-code measurement compares every tracked Rust source in `daemon` and
 `protocol` with the same counter/formatter and reviewed test boundaries in the

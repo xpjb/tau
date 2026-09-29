@@ -14,7 +14,20 @@ use tokio::sync::{mpsc, watch};
 use crate::store::LocalChat;
 
 pub const QUEUE: &str = "@queue";
-pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub lengths:HashMap<String,u64>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,ToolState>, pub parents:HashMap<String,String> }
+pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub snapshot:TranscriptSnapshot, pub bodies:HashMap<String,Body>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,ToolState>, pub parents:HashMap<String,String> }
+/// Verified preview state, separate from both authored bytes and finality.
+/// None means the body directory/header has not arrived, not a completed empty body.
+#[derive(Clone, Debug)]
+pub struct Body {
+    pub reference: Option<BodyRef>,
+    pub resident: u64,
+    pub limited: bool,
+}
+impl Body {
+    pub fn length(&self) -> u64 { self.reference.as_ref().map_or(0, |r| r.length) }
+    pub fn complete(&self) -> bool { self.reference.as_ref().is_some_and(|r| self.resident == r.length) }
+    pub fn missing(&self) -> bool { self.resident == 0 && !self.complete() }
+}
 #[derive(Default)]
 struct Dirty {full:bool,viewing:bool,ids:BTreeSet<String>}
 #[derive(Default)]
@@ -189,7 +202,7 @@ impl Cache {
             if wanted(root) || only.is_some() { all.extend(tau_blocks::children(&db,scope,Some(&root.id))?); }
         }
         let mut delivered = Vec::new();
-        let mut events = vec![]; let mut sizes = HashMap::new(); let mut queue = QueueState::default();
+        let mut events = vec![]; let mut bodies = HashMap::new(); let mut queue = QueueState::default();
         let mut incomplete=std::collections::HashSet::new(); let mut states=HashMap::new(); let mut parents=HashMap::new();
         for h in &all {
             if let Some(value) = h.meta.get("event") {
@@ -215,7 +228,8 @@ impl Cache {
                 let bytes = if wanted(h) {read(&body,if preview {(*allowance).min(body_budget)} else {MAX_BLOCK_BYTES as usize})?} else {vec![]};
                 if preview {body_budget=body_budget.saturating_sub(bytes.len());*allowance=allowance.saturating_sub(bytes.len());}
                 event.text = text_prefix(&bytes)?;
-                let length = tau_blocks::header(&db,scope,&body)?.map_or(0,|b|b.length);
+                let reference = tau_blocks::header(&db,scope,&body)?.map(|b| b.body_ref(&page.cursor.lineage, scope));
+                let length = reference.as_ref().map_or(0, |b| b.length);
                 // Acceptance/header arrival is not display convergence. Only
                 // retire the local message after the canonical body is resident.
                 // A bounded preview can still be incomplete while its full body
@@ -226,12 +240,10 @@ impl Cache {
                     && let Some(request) = &event.origin.request_id {
                     delivered.push(request.clone());
                 }
-                sizes.insert(event.id.clone(),length);
-                if bytes.len() as u64 != length {incomplete.insert(event.id.clone());}
-                if preview && wanted(h) && (length>256*1024 || body_budget==0 || *allowance==0) && (bytes.len() as u64)<length {event.text.push_str("\n\n[Preview limited. Fetch the complete message with Copy.]");}
+                bodies.insert(event.id.clone(), Body { reference, resident: bytes.len() as u64,
+                    limited: preview && wanted(h) && (length>256*1024 || body_budget==0 || *allowance==0) && (bytes.len() as u64)<length });
+                if bodies[&event.id].reference.is_none() || bytes.len() as u64 != length {incomplete.insert(event.id.clone());}
                 if let Some(state)=h.tool_state() {states.insert(event.id.clone(),state);}
-                if event.text.is_empty() && length > 0 && (event.role != tau_protocol::EventRole::Tool || h.parent.is_none())
-                    && event.kind != EventKind::Tool { event.text = "Loading…".into(); }
                 events.push(event);
             }
         }
@@ -245,7 +257,7 @@ impl Cache {
                 let bytes=read(&h.id,MAX_BLOCK_BYTES as usize)?;
                 if bytes.len() as u64 != h.length {incomplete.insert(h.id.clone());}
                 request.text = text_prefix(&bytes)?;
-                if request.text.is_empty() && h.length > 0 { request.text = "Loading…".into(); }
+                bodies.insert(h.id.clone(), Body { reference: Some(h.body_ref(&page.cursor.lineage, scope)), resident: bytes.len() as u64, limited: false });
                 queue.requests.push(request);
             }
         }
@@ -272,7 +284,7 @@ impl Cache {
         // Feed's bounded LRU evicts retained/offscreen groups before the viewport.
         previews.sort_by_key(|(root,_,_)| (visible.contains(root), root.clone()));
         Ok(Some(View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,snapshot:TranscriptSnapshot { generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
-            events,queue,before:page.before.as_ref().map(|p|p.order),delivered },lengths:sizes,incomplete,states,parents }))
+            events,queue,before:page.before.as_ref().map(|p|p.order),delivered },bodies,incomplete,states,parents }))
     }
     pub fn copy_ready(&self, scope:&str, ids:&[String]) -> Result<Option<String>> {
         ensure!(ids.len()<=4096,"Copy fewer than 4097 sections at a time");

@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn rows(model: &Controller, session: &str) -> Vec<Row> {
     let chat = &model.chats[session];
     let tools = Tools::new(chat.feed.events.values(), &chat.feed.parents)
-        .with_lengths(&chat.feed.block_lengths)
+        .with_bodies(&chat.feed.bodies)
         .with_states(&chat.feed.block_states);
     let events = chat
         .feed
@@ -14,7 +14,7 @@ pub(super) fn rows(model: &Controller, session: &str) -> Vec<Row> {
                 && e.error_message.is_none()
                 && !e.is_error
                 && (e.kind == EventKind::Hidden
-                    || matches!(e.kind, EventKind::Thinking | EventKind::Text) && e.text.is_empty());
+                    || matches!(e.kind, EventKind::Thinking | EventKind::Text) && e.text.is_empty() && !chat.feed.incomplete.contains(&e.id));
             !empty && !(e.attachment.is_none() && tools.paired_result(e))
         })
         .collect::<Vec<_>>();
@@ -119,12 +119,15 @@ pub(super) fn rows(model: &Controller, session: &str) -> Vec<Row> {
             title,
             timestamp: clock::label(clock::event_ms(e)),
             sender: if e.role == EventRole::Tool { EventRole::Assistant } else { e.role },
-            source: if e.attachment.is_some() && chat.feed.incomplete.contains(&e.id) && e.text == "Loading…" {
+            source: if e.attachment.is_some() && e.text.is_empty() {
                 String::new()
             } else if user {
                 literal(local_text.unwrap_or(&e.text))
             } else {
-                e.text.clone()
+                let body = chat.feed.bodies.get(&e.id);
+                if body.is_some_and(|b| b.missing()) { "Loading…".into() }
+                else if body.is_some_and(|b| b.limited) { format!("{}\n\n[Preview limited. Fetch the complete message with Copy.]", e.text) }
+                else { e.text.clone() }
             },
             user,
             error: e.is_error || e.error_message.is_some(),
