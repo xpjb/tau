@@ -83,7 +83,11 @@ def production(text):
 
 
 def test_only(path):
-    return "/tests/" in path or path.endswith("/tests.rs") or path.endswith("_tests.rs") or path.endswith("/test_ui.rs")
+    # These daemon modules are reached only through lib.rs's cfg(test) entries;
+    # their singular/family filenames must not charge test fixtures as production.
+    daemon_tests = path.startswith("daemon/src/agent_test") or path in {
+        "daemon/src/protocol_audit_test.rs", "daemon/src/transcript_legacy_test.rs"}
+    return daemon_tests or "/tests/" in path or path.endswith("/tests.rs") or path.endswith("_tests.rs") or path.endswith("/test_ui.rs")
 
 
 def in_scope(path):
