@@ -109,7 +109,11 @@ def formatted(path, text):
 def main():
     paths = {rev: set(git("ls-tree", "-r", "--name-only", rev, "frontend").splitlines()) for rev in [BASE, CURRENT]}
     touched = set(git("diff", "--name-only", BASE, CURRENT, "--", "frontend").splitlines())
-    relevant = sorted(p for p in paths[BASE] | paths[CURRENT] if in_scope(p) or p in touched)
+    # Changed image/font assets are not source lines. Keep textual host changes
+    # (including Java) in the outside-scope charge, rather than filtering to Rust.
+    binary = {line.split("\t", 2)[2] for line in git("diff", "--numstat", BASE, CURRENT, "--", "frontend").splitlines()
+              if line.startswith("-\t-\t")}
+    relevant = sorted(p for p in paths[BASE] | paths[CURRENT] if p not in binary and (in_scope(p) or p in touched))
     totals = {mode: {rev: {group: [0, 0] for group in ["scope", "other", "tests", "all"]} for rev in [BASE, CURRENT]}
               for mode in ["physical", "normalized"]}
     rows = []
@@ -134,7 +138,9 @@ def main():
         rows.append(row)
     # This historical reproduction guards against accidentally counting test
     # fixtures or losing the formerly excluded two-line attachment test import.
-    if BASE == "415aeff": assert totals["physical"][BASE]["scope"] == [6620, 6582], totals["physical"][BASE]
+    # Per-item cfg(test) stripping retains five blank separators discarded by the
+    # old test-module suffix shortcut; the 6,582 nonblank lines are unchanged.
+    if BASE == "415aeff": assert totals["physical"][BASE]["scope"] == [6625, 6582], totals["physical"][BASE]
     print(json.dumps({"base": BASE, "current": CURRENT, "units": ["physical", "nonblank"], "totals": totals,
                       "normalized_per_file_churn": {"deleted": churn[0], "added": churn[1], "unchanged": churn[2]},
                       "files": rows}, indent=2))
