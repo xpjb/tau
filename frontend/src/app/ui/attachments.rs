@@ -350,11 +350,9 @@ impl Widget for AttachmentCard {
             button.style = ButtonStyle::Quiet;
             button.visit_perframe(&mut Frame { layer, bounds: r, clip: viewport }, cx);
             let control = &mut button.control;
-            control.info = description.map(|description| Info::Attachment(
-                format!("{info_key}:action:{index}"),
-                description.into(),
-                attachment.file_name.clone(),
-            ));
+            control.info = description.map(|description| {
+                Info::Attachment(format!("{info_key}:action:{index}"), description.into(), attachment.file_name.clone())
+            });
         }
 
         self.controls.finish(cx);
@@ -406,7 +404,9 @@ impl CardDeck {
         let mut handled = false;
         for card in self.cards.values_mut() {
             handled |= card.dispatch(event, cx);
-            if handled && !event.broadcast() { break; }
+            if handled && !event.broadcast() {
+                break;
+            }
         }
         handled
     }
@@ -525,7 +525,7 @@ impl Widget for AttachmentBrowser {
         if self.scroll.bar_event(event, cx) {
             return true;
         }
-        let (handled, choice) = self.form.event(event, &mut [], cx);
+        let (handled, choice) = self.form.event(event, std::iter::empty(), cx);
         if let Some(choice) = choice {
             match choice {
                 BrowserChoice::Close => cx.ui.requests.push_back(Request::Attachments(false)),
@@ -536,7 +536,9 @@ impl Widget for AttachmentBrowser {
             }
             return true;
         }
-        if handled { return true; }
+        if handled {
+            return true;
+        }
         let child = self.cards.event(event, cx);
         let handled = self.scroll.event(event, child, cx);
         // Header/backdrop space belongs to this pane, never the transcript behind it.
@@ -609,8 +611,7 @@ impl Widget for AttachmentBrowser {
                 if self.side { 40. * s } else { 64. * s },
                 40. * s,
             ),
-            false,
-            false,
+            ButtonStyle::Tonal,
             frame,
             cx,
         );
@@ -676,8 +677,7 @@ impl Widget for AttachmentBrowser {
                 self.form.button(
                     BrowserChoice::History,
                     r,
-                    false,
-                    false,
+                    ButtonStyle::Tonal,
                     &mut Frame { layer: frame.layer, bounds: b, clip: viewport },
                     cx,
                 );

@@ -1,4 +1,4 @@
-use super::controls::{Form, TextField};
+use super::controls::{ButtonStyle, Form, TextField};
 use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{editor::Editor, render::color, store::Settings};
 use anyhow::Result;
@@ -51,7 +51,11 @@ impl Dialog {
     }
     pub fn field(&mut self, target: Target) -> Option<&mut TextField> {
         match self {
-            Self::Connection(d) => (!d.tools).then_some([&mut d.url, &mut d.token]).into_iter().flatten().find(|f| f.control.target == target),
+            Self::Connection(d) => (!d.tools)
+                .then_some([&mut d.url, &mut d.token])
+                .into_iter()
+                .flatten()
+                .find(|f| f.control.target == target),
             Self::Topic(d) => d.fields().into_iter().find(|f| f.control.target == target),
             Self::Models(d) => [&mut d.models, &mut d.search].into_iter().find(|f| f.control.target == target),
             Self::Daemon(d) => d.value.iter_mut().find(|f| f.control.target == target),
@@ -60,7 +64,9 @@ impl Dialog {
     }
     pub fn field_ref(&self, target: Target) -> Option<&TextField> {
         match self {
-            Self::Connection(d) => (!d.tools).then_some([&d.url, &d.token]).into_iter().flatten().find(|f| f.control.target == target),
+            Self::Connection(d) => {
+                (!d.tools).then_some([&d.url, &d.token]).into_iter().flatten().find(|f| f.control.target == target)
+            }
             Self::Topic(d) => d.name.iter().chain(d.prompt.iter()).find(|f| f.control.target == target),
             Self::Models(d) => [&d.models, &d.search].into_iter().find(|f| f.control.target == target),
             Self::Daemon(d) => d.value.iter().find(|f| f.control.target == target),
@@ -240,7 +246,7 @@ impl Widget for ConnectionDialog {
                         cx.ui.dirty = true;
                     }
                 }
-                self.form.event(event, &mut [&mut self.url, &mut self.token], cx).1
+                self.form.event(event, [&mut self.url, &mut self.token].into_iter(), cx).1
             }
             Event::Back | Event::Key { key: "Escape", .. } if !composing => {
                 Some(if self.tools { ConnectionChoice::Main } else { ConnectionChoice::Cancel })
@@ -248,13 +254,13 @@ impl Widget for ConnectionDialog {
             Event::Submit | Event::Key { key: "Enter", shift: false, .. } if !composing && !self.tools => {
                 Some(ConnectionChoice::Connect)
             }
-            _ if self.tools => self.form.event(event, &mut [], cx).1,
-            _ => self.form.event(event, &mut [&mut self.url, &mut self.token], cx).1,
+            _ if self.tools => self.form.event(event, std::iter::empty(), cx).1,
+            _ => self.form.event(event, [&mut self.url, &mut self.token].into_iter(), cx).1,
         };
         match choice {
             Some(ConnectionChoice::Connect) => {
                 let result = self.submit(cx);
-                cx.report(result);
+                self.form.report(result, cx);
             }
             Some(ConnectionChoice::Cancel) => cx.ui.requests.push_back(Request::Close(self.form.id)),
             Some(ConnectionChoice::Tools | ConnectionChoice::Main) => {
@@ -275,7 +281,7 @@ impl Widget for ConnectionDialog {
                         Some("Replica cache cleared. Drafts, attachments and saved intents were preserved.".into());
                     cx.ui.requests.push_back(Request::Close(self.form.id));
                 }
-                cx.report(result);
+                self.form.report(result, cx);
             }
             Some(choice) => cx.ui.requests.push_back(Request::Replace {
                 owner: self.form.id,
@@ -300,35 +306,18 @@ impl Widget for ConnectionDialog {
             self.token.control.rect = None;
             self.url.editor.hide();
             self.token.editor.hide();
-            frame.layer.rect(b, color(0x0e141b));
-            let w = (b.width - 24. * s).min(520. * s).max(1.);
-            let x = b.x + (b.width - w) / 2.;
-            cx.services.renderer.label(
-                frame.layer,
-                "Connection tools",
-                Rect::new(x, b.y + 24. * s, w, 40. * s),
-                22. * s,
-                color(0xe5eaf0),
-                true,
+            let area = self.form.page(520., "Connection tools", frame, cx);
+            self.form.stack(
+                &[
+                    (ConnectionChoice::Outbox, ButtonStyle::Tonal),
+                    (ConnectionChoice::Diagnostics, ButtonStyle::Tonal),
+                    (ConnectionChoice::Clear, ButtonStyle::Tonal),
+                    (ConnectionChoice::Main, ButtonStyle::Tonal),
+                ],
+                Rect::new(area.x, area.y + 12. * s, area.width, 4. * 46. * s),
+                frame,
+                cx,
             );
-            for (i, action) in [
-                ConnectionChoice::Outbox,
-                ConnectionChoice::Diagnostics,
-                ConnectionChoice::Clear,
-                ConnectionChoice::Main,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                self.form.button(
-                    action,
-                    Rect::new(x, b.y + (84. + i as f32 * 48.) * s, w, 40. * s),
-                    false,
-                    false,
-                    frame,
-                    cx,
-                );
-            }
             return;
         }
         // The actual fields stay inside the resized activity when the IME is up.
@@ -337,43 +326,29 @@ impl Widget for ConnectionDialog {
             frame.layer.rect(b, color(0x0e141b));
             let w = (b.width - 24. * s).min(520. * s).max(1.);
             let x = b.x + (b.width - w) / 2.;
-            let h = ((b.height - 86. * s) / 2.).clamp(24. * s, 48. * s);
+            let feedback = frame.feedback(
+                Rect::new(x, b.y, w, (b.height - 46. * s).max(1.)),
+                if self.attempt.is_some() { "Connecting…" } else { "" },
+                cx,
+            );
+            let h = ((b.height - 86. * s - feedback) / 2.).clamp(24. * s, 48. * s);
             for (i, field) in [&mut self.url, &mut self.token].into_iter().enumerate() {
                 let y = b.y + 20. * s + i as f32 * (h + 18. * s);
-                cx.services.renderer.label(
-                    frame.layer,
-                    &field.label,
-                    Rect::new(x, y - 17. * s, w, 16. * s),
-                    11. * s,
-                    color(0xb7c2ce),
-                    false,
-                );
-                field.visit_perframe(
-                    &mut Frame { layer: frame.layer, bounds: Rect::new(x, y, w, h), clip: frame.clip },
-                    cx,
-                );
+                field.labeled(Rect::new(x, y - 20. * s, w, h + 20. * s), frame, cx);
             }
             let y = b.y + b.height - 38. * s;
-            self.form.button(
-                ConnectionChoice::Cancel,
-                Rect::new(x, y, (w - 8. * s) / 2., 32. * s),
-                false,
-                false,
+            self.form.buttons.iter_mut().find(|(c, _)| *c == ConnectionChoice::Connect).unwrap().1.control.enabled =
+                self.attempt.is_none();
+            self.form.row(
+                &[(ConnectionChoice::Cancel, ButtonStyle::Tonal), (ConnectionChoice::Connect, ButtonStyle::Primary)],
+                Rect::new(x, y, w, 32. * s),
                 frame,
                 cx,
             );
-            if self.attempt.is_none() {
-                self.form.button(
-                    ConnectionChoice::Connect,
-                    Rect::new(x + (w + 8. * s) / 2., y, (w - 8. * s) / 2., 32. * s),
-                    true,
-                    false,
-                    frame,
-                    cx,
-                );
-            }
             return;
         }
+        self.form.buttons.iter_mut().find(|(c, _)| *c == ConnectionChoice::Connect).unwrap().1.control.enabled =
+            self.attempt.is_none();
         let connected = cx.model.epoch.is_some()
             && self.url.editor.value.trim().trim_end_matches('/') == cx.model.settings.server_url
             && self.token.editor.value.trim() == cx.model.settings.token;
@@ -421,37 +396,14 @@ impl Widget for ConnectionDialog {
         let field_y = card.y + field_offset;
         for (i, field) in [&mut self.url, &mut self.token].into_iter().enumerate() {
             let rect = Rect::new(x, field_y + i as f32 * 80. * s, inner_w, 56. * s);
-            field.visit_perframe(&mut Frame { layer: frame.layer, bounds: rect, clip: frame.clip }, cx);
-            let label = if i == 0 { "Daemon URL" } else { "Access token" };
-            let style = sanscale::Style {
-                chain: cx.services.renderer.faces.prose[0],
-                wrap_em: None,
-                align: sanscale::Align::Left,
-                line_spacing: 1.,
-            };
-            let label_w = cx
-                .services
-                .renderer
-                .text
-                .shape_transient(label, &style)
-                .map_or(100. * s, |block| cx.services.renderer.text.measure(block).width_em() * 12. * s + 12. * s);
-            frame.layer.rect(Rect::new(x + 12. * s, rect.y - 7. * s, label_w, 16. * s), color(0x36343b));
-            cx.services.renderer.label(
-                frame.layer,
-                label,
-                Rect::new(x + 16. * s, rect.y - 8. * s, label_w, 18. * s),
-                12. * s,
-                color(0xb7c2ce),
-                false,
-            );
+            field.labeled(Rect::new(rect.x, rect.y - 20. * s, rect.width, rect.height + 20. * s), frame, cx);
         }
         let y = field_y + 158. * s;
         if self.attempt.is_none() || cx.model.connection != "Connecting…" {
             self.form.button(
                 ConnectionChoice::Connect,
                 Rect::new(x + inner_w - 104. * s, y, 104. * s, 40. * s),
-                true,
-                false,
+                ButtonStyle::Primary,
                 frame,
                 cx,
             );
@@ -468,8 +420,7 @@ impl Widget for ConnectionDialog {
         self.form.button(
             ConnectionChoice::Cancel,
             Rect::new(x + inner_w - 204. * s, y, 88. * s, 40. * s),
-            false,
-            false,
+            ButtonStyle::Tonal,
             frame,
             cx,
         );
@@ -477,16 +428,14 @@ impl Widget for ConnectionDialog {
         self.form.button(
             ConnectionChoice::Models,
             Rect::new(x, y, inner_w - 80. * s, 32. * s),
-            false,
-            false,
+            ButtonStyle::Tonal,
             frame,
             cx,
         );
         self.form.button(
             ConnectionChoice::Tools,
             Rect::new(x + inner_w - 72. * s, y, 72. * s, 32. * s),
-            false,
-            false,
+            ButtonStyle::Tonal,
             frame,
             cx,
         );
@@ -504,19 +453,9 @@ impl Widget for ConnectionDialog {
             );
             y += 28. * s;
             if connected {
-                self.form.button(
-                    ConnectionChoice::Daemon,
-                    Rect::new(x, y, (inner_w - 8. * s) / 2., 32. * s),
-                    false,
-                    false,
-                    frame,
-                    cx,
-                );
-                self.form.button(
-                    ConnectionChoice::Refresh,
-                    Rect::new(x + (inner_w + 8. * s) / 2., y, (inner_w - 8. * s) / 2., 32. * s),
-                    false,
-                    false,
+                self.form.row(
+                    &[(ConnectionChoice::Daemon, ButtonStyle::Tonal), (ConnectionChoice::Refresh, ButtonStyle::Tonal)],
+                    Rect::new(x, y, inner_w, 32. * s),
                     frame,
                     cx,
                 );
@@ -624,8 +563,8 @@ impl TopicDialog {
             request: None,
         })
     }
-    fn fields(&mut self) -> Vec<&mut TextField> {
-        self.name.iter_mut().chain(self.prompt.iter_mut()).collect()
+    fn fields(&mut self) -> impl DoubleEndedIterator<Item = &mut TextField> {
+        self.name.iter_mut().chain(self.prompt.iter_mut())
     }
     fn submit(&mut self, mode: Option<DeleteProjectMode>, cx: &mut Context<'_>) -> Result<()> {
         if self.request.is_some() {
@@ -734,13 +673,13 @@ impl Widget for TopicDialog {
                         cx.ui.dirty = true;
                     }
                 }
-                let fields = &mut self.name.iter_mut().chain(self.prompt.iter_mut()).collect::<Vec<_>>();
+                let fields = self.name.iter_mut().chain(self.prompt.iter_mut());
                 self.form.event(event, fields, cx).1
             }
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(TopicChoice::Cancel),
             Event::Submit if !composing => Some(TopicChoice::Save),
             _ => {
-                let fields = &mut self.name.iter_mut().chain(self.prompt.iter_mut()).collect::<Vec<_>>();
+                let fields = self.name.iter_mut().chain(self.prompt.iter_mut());
                 self.form.event(event, fields, cx).1
             }
         };
@@ -753,7 +692,7 @@ impl Widget for TopicDialog {
                     _ => None,
                 };
                 let result = self.submit(mode, cx);
-                cx.report(result);
+                self.form.report(result, cx);
             }
             None => {}
         }
@@ -765,14 +704,21 @@ impl Widget for TopicDialog {
         let busy = self.request.is_some();
         let prompt = self.prompt.is_some();
         let choices = match self.kind {
-            TopicKind::Delete(_) => vec![TopicChoice::Continue, TopicChoice::Cancel],
-            TopicKind::Choice(_) => vec![TopicChoice::Move, TopicChoice::Delete, TopicChoice::Cancel],
-            _ => vec![TopicChoice::Save, TopicChoice::Cancel],
+            TopicKind::Delete(_) => {
+                &[(TopicChoice::Continue, ButtonStyle::Primary), (TopicChoice::Cancel, ButtonStyle::Tonal)][..]
+            }
+            TopicKind::Choice(_) => &[
+                (TopicChoice::Move, ButtonStyle::Tonal),
+                (TopicChoice::Delete, ButtonStyle::Destructive),
+                (TopicChoice::Cancel, ButtonStyle::Tonal),
+            ][..],
+            _ => &[(TopicChoice::Save, ButtonStyle::Primary), (TopicChoice::Cancel, ButtonStyle::Tonal)][..],
         };
         self.form.begin_frame();
         frame.layer.rect(b, sanscale::Color([0., 0., 0., 0.8]));
         let width = (b.width - 24. * s).min(620. * s).max(1.);
         let height = ((if prompt { 550. } else { 340. }) * s).min((b.height - 24. * s).max(1.));
+        let compact = b.height / s < 400.;
         let r = Rect::new(b.x + (b.width - width) / 2., b.y + (b.height - height) / 2., width, height);
         frame.layer.rounded_rect(r, 16. * s, color(0x111b25));
         let x = r.x + 18. * s;
@@ -780,7 +726,7 @@ impl Widget for TopicDialog {
         cx.services.renderer.label(
             frame.layer,
             &self.title(),
-            Rect::new(x, r.y + 16. * s, w, 48. * s),
+            Rect::new(x, r.y + if compact { 8. } else { 16. } * s, w, if compact { 28. } else { 48. } * s),
             17. * s,
             color(0xe5eaf0),
             true,
@@ -794,7 +740,7 @@ impl Widget for TopicDialog {
         } else {
             "Changes appear on all connected devices."
         };
-        let help_h = if height / s < 400. && prompt { 0. } else { 52. * s };
+        let help_h = if compact { 0. } else { 52. * s };
         if help_h > 0. {
             cx.services.renderer.label(
                 frame.layer,
@@ -805,60 +751,36 @@ impl Widget for TopicDialog {
                 false,
             );
         }
-        let footer = r.y + r.height - 14. * s - choices.len() as f32 * 42. * s;
-        let notice_h = if cx.model.notice.is_some() || busy { 42. * s } else { 0. };
-        let mut y = r.y + 70. * s + help_h;
+        let rows = if compact { choices.len().div_ceil(2) } else { choices.len() };
+        let footer = r.y + r.height - 8. * s - rows as f32 * 42. * s;
+        let mut y = r.y + if compact { 40. * s } else { 70. * s + help_h };
+        let notice_h = frame.feedback(Rect::new(x, y, w, (footer - y).max(1.)), if busy { "Saving…" } else { "" }, cx);
         let fields = self.fields();
-        let field_count = fields.len();
+        let field_count = fields.size_hint().0;
         for (i, field) in fields.into_iter().enumerate() {
-            cx.services.renderer.label(
-                frame.layer,
-                &field.label,
-                Rect::new(x, y, w, 18. * s),
-                11. * s,
-                color(0xb7c2ce),
-                false,
-            );
-            y += 20. * s;
-            let available = (footer - notice_h - 8. * s - y).max(1.);
-            let h = if field.editor.single_line {
+            let available = (footer - notice_h - 28. * s - y).max(1.);
+            let h = if compact {
+                let remaining = (field_count - i) as f32;
+                let share = ((footer - notice_h - 8. * s - y) / remaining - 28. * s).max(1.);
+                if field.editor.single_line { share.min(40. * s) } else { share }
+            } else if field.editor.single_line {
                 (40. * s).min((available - (field_count - i - 1) as f32 * 48. * s).max(1.))
             } else {
                 available
             };
             field.control.enabled = !busy;
-            field.visit_perframe(
-                &mut Frame {
-                    layer: frame.layer,
-                    bounds: Rect::new(x, y, w, h),
-                    clip: crate::render::intersect(frame.clip, r),
-                },
-                cx,
-            );
-            y += h + 10. * s;
+            field.labeled(Rect::new(x, y, w, h + 20. * s), frame, cx);
+            y += h + if compact { 28. } else { 30. } * s;
         }
-        if notice_h > 0. {
-            cx.services.renderer.label(
-                frame.layer,
-                cx.model.notice.as_deref().unwrap_or("Saving…"),
-                Rect::new(x, footer - notice_h, w, notice_h - 4. * s),
-                12. * s,
-                color(0xffb4ab),
-                false,
-            );
+        for (choice, button) in &mut self.form.buttons {
+            button.control.enabled = !busy || *choice == TopicChoice::Cancel;
         }
-        for (i, choice) in choices.into_iter().enumerate() {
-            if busy && choice != TopicChoice::Cancel {
-                continue;
+        if compact {
+            for (i, choices) in choices.chunks(2).enumerate() {
+                self.form.row(choices, Rect::new(x, footer + i as f32 * 42. * s, w, 36. * s), frame, cx);
             }
-            self.form.button(
-                choice,
-                Rect::new(x, footer + i as f32 * 42. * s, w, 36. * s),
-                choice == TopicChoice::Save || choice == TopicChoice::Continue,
-                choice == TopicChoice::Delete,
-                frame,
-                cx,
-            );
+        } else {
+            self.form.stack(choices, Rect::new(x, footer, w, choices.len() as f32 * 42. * s), frame, cx);
         }
     }
 }

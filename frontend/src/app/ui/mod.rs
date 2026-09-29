@@ -108,6 +108,29 @@ pub(super) struct Frame<'a> {
     pub clip: Rect,
 }
 impl Frame<'_> {
+    /// Reserve feedback at the bottom of a form's content area, not over its fields.
+    pub fn feedback(&mut self, region: Rect, fallback: &str, cx: &mut Context<'_>) -> f32 {
+        let notice = cx.model.notice.as_ref().filter(|n| n.download.is_none());
+        let text = notice.map_or(fallback, |n| n.as_ref());
+        if text.is_empty() {
+            return 0.;
+        }
+        let s = cx.ui.scale;
+        let height = (cx.services.renderer.label_height(text, region.width, 12. * s, false) + 12. * s)
+            .min(100. * s)
+            .min(region.height.max(0.));
+        cx.services.renderer.clipped_label(
+            self.layer,
+            text,
+            Rect::new(region.x, region.y + region.height - height, region.width, (height - 8. * s).max(1.)),
+            12. * s,
+            crate::render::color(if notice.is_some() { 0xffb4ab } else { 0xb7c2ce }),
+            false,
+            self.clip,
+        );
+        height
+    }
+
     /// Every child inherits the same clip for placement, painting and hit testing.
     pub fn visit(&mut self, bounds: Rect, child: &mut dyn Widget, cx: &mut Context<'_>) {
         let clip = crate::render::intersect(self.clip, bounds);

@@ -1,4 +1,4 @@
-use super::controls::Form;
+use super::controls::{ButtonStyle, Form};
 use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     notice::DownloadTarget,
@@ -71,7 +71,7 @@ impl Widget for ImageViewer {
         }
         let (handled, choice) = match event {
             Event::Back | Event::Key { key: "Escape", .. } => (true, Some(Choice::Back)),
-            _ if self.pointer.is_none() => self.form.event(event, &mut [], cx),
+            _ if self.pointer.is_none() => self.form.event(event, std::iter::empty(), cx),
             _ => (false, None),
         };
         if let Some(choice) = choice {
@@ -93,7 +93,9 @@ impl Widget for ImageViewer {
             cx.ui.dirty = true;
             return true;
         }
-        if handled { return true; }
+        if handled {
+            return true;
+        }
         match *event {
             Event::Cancel => {
                 self.pointer = None;
@@ -196,8 +198,7 @@ impl Widget for ImageViewer {
             self.form.button(
                 choice,
                 Rect::new(b.x + (12. + i as f32 * 66.) * s, b.y + 8. * s, 60. * s, 38. * s),
-                false,
-                false,
+                ButtonStyle::Tonal,
                 frame,
                 cx,
             );

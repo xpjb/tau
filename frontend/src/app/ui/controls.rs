@@ -125,7 +125,9 @@ impl Control {
         let Some(rect) = self.rect else {
             return;
         };
-        if !self.enabled { self.ripple = None; }
+        if !self.enabled {
+            self.ripple = None;
+        }
         let capture = ui.capture.filter(|c| c.target == self.target && !c.dragged);
         let now = std::time::Instant::now();
         let ripple = self.ripple.as_ref().and_then(|r| r.paint(rect, now, capture.is_some()));
@@ -233,6 +235,20 @@ pub(in crate::app) struct TextField {
     pub decorated: bool,
 }
 impl TextField {
+    /// A labelled field owns both its label and the remaining editor bounds.
+    pub fn labeled(&mut self, rect: Rect, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
+        let s = cx.ui.scale;
+        cx.services.renderer.clipped_label(
+            frame.layer,
+            &self.label,
+            Rect::new(rect.x, rect.y, rect.width, 18. * s),
+            11. * s,
+            color(0xb7c2ce),
+            false,
+            frame.clip,
+        );
+        frame.visit(Rect::new(rect.x, rect.y + 20. * s, rect.width, (rect.height - 20. * s).max(1.)), self, cx);
+    }
     pub fn new(scope: Id, label: &str, editor: Editor) -> Self {
         Self {
             control: Control::new(scope, false),
@@ -371,6 +387,15 @@ pub(in crate::app) struct Form<A> {
     pub buttons: Vec<(A, Button)>,
 }
 impl<A: Clone + PartialEq> Form<A> {
+    /// A deliberate form action needs inline feedback even for an offline error.
+    /// Background transport errors still use Controller's quieter health path.
+    pub fn report(&self, result: anyhow::Result<()>, cx: &mut Context<'_>) {
+        if let Err(error) = result {
+            cx.model.notice = Some(error.to_string().into());
+        }
+        cx.ui.dirty = true;
+    }
+
     pub fn owns(&self, target: Target) -> bool {
         self.buttons.iter().any(|(_, b)| b.control.target == target && b.control.rect.is_some())
     }
@@ -378,16 +403,23 @@ impl<A: Clone + PartialEq> Form<A> {
     pub fn new(id: Id, buttons: &[(A, &str)]) -> Self {
         Self { id, buttons: buttons.iter().map(|(action, label)| (action.clone(), Button::new(id, label))).collect() }
     }
-    pub fn event(
+    pub fn event<'a>(
         &mut self,
         event: &Event<'_>,
-        fields: &mut [&mut TextField],
+        fields: impl DoubleEndedIterator<Item = &'a mut TextField>,
         cx: &mut Context<'_>,
     ) -> (bool, Option<A>) {
-        if let Event::Key { key: "Tab", ctrl: false, shift } = event
-            && !fields.iter().any(|f| f.editor.composing())
-        {
-            let eligible = fields.iter().filter(|f| f.control.enabled).map(|f| f.control.target).collect::<Vec<_>>();
+        if let Event::Key { key: "Tab", ctrl: false, shift } = event {
+            let mut composing = false;
+            let eligible = fields
+                .filter_map(|f| {
+                    composing |= f.editor.composing();
+                    f.control.enabled.then_some(f.control.target)
+                })
+                .collect::<Vec<_>>();
+            if composing {
+                return (true, None);
+            }
             if !eligible.is_empty() {
                 let current = eligible.iter().position(|t| Some(*t) == cx.ui.focus);
                 let i = if *shift {
@@ -411,32 +443,61 @@ impl<A: Clone + PartialEq> Form<A> {
                 return (true, None);
             }
         }
-        let handled = super::dispatch_children(fields.iter_mut().map(|f| &mut **f as &mut dyn Widget), event, cx);
+        let handled = super::dispatch_children(fields.map(|f| f as &mut dyn Widget), event, cx);
         (handled, None)
+    }
+    /// Full-page settings chrome. The returned column ends at the footer row.
+    pub fn page(&mut self, width: f32, title: &str, frame: &mut Frame<'_>, cx: &mut Context<'_>) -> Rect {
+        self.begin_frame();
+        let b = frame.bounds;
+        let s = cx.ui.scale;
+        let width = (b.width - 32. * s).min(width * s).max(1.);
+        let x = b.x + (b.width - width) / 2.;
+        frame.layer.rect(b, color(0x0e141b));
+        cx.services.renderer.label(
+            frame.layer,
+            title,
+            Rect::new(x, b.y + 12. * s, width, 30. * s),
+            20. * s,
+            color(0xe5eaf0),
+            true,
+        );
+        Rect::new(x, b.y + 48. * s, width, (b.height - 100. * s).max(1.))
+    }
+    pub fn row(&mut self, choices: &[(A, ButtonStyle)], rect: Rect, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
+        let gap = 8. * cx.ui.scale;
+        let width = (rect.width - gap * choices.len().saturating_sub(1) as f32) / choices.len().max(1) as f32;
+        for (i, (choice, style)) in choices.iter().enumerate() {
+            self.button(
+                choice.clone(),
+                Rect::new(rect.x + i as f32 * (width + gap), rect.y, width, rect.height),
+                *style,
+                frame,
+                cx,
+            );
+        }
+    }
+    pub fn stack(&mut self, choices: &[(A, ButtonStyle)], rect: Rect, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
+        let step = rect.height / choices.len().max(1) as f32;
+        for (i, (choice, style)) in choices.iter().enumerate() {
+            self.button(
+                choice.clone(),
+                Rect::new(rect.x, rect.y + i as f32 * step, rect.width, (step - 6. * cx.ui.scale).max(1.)),
+                *style,
+                frame,
+                cx,
+            );
+        }
     }
     pub fn begin_frame(&mut self) {
         for (_, button) in &mut self.buttons {
             button.control.rect = None;
         }
     }
-    pub fn button(
-        &mut self,
-        action: A,
-        rect: Rect,
-        primary: bool,
-        destructive: bool,
-        frame: &mut Frame<'_>,
-        cx: &mut Context<'_>,
-    ) {
+    pub fn button(&mut self, action: A, rect: Rect, style: ButtonStyle, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let button = &mut self.buttons.iter_mut().find(|(a, _)| *a == action).expect("declared form button").1;
-        button.style = if destructive {
-            ButtonStyle::Destructive
-        } else if primary {
-            ButtonStyle::Primary
-        } else {
-            ButtonStyle::Tonal
-        };
-        button.visit_perframe(&mut Frame { layer: frame.layer, bounds: rect, clip: frame.clip }, cx);
+        button.style = style;
+        frame.visit(rect, button, cx);
     }
 }
 

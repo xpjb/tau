@@ -1,6 +1,6 @@
 //! Short, instance-bound forms. The field and each choice live on the dialog;
 //! submission uses the captured destination, never a current-chat field index.
-use super::controls::{Form, TextField};
+use super::controls::{ButtonStyle, Form, TextField};
 use super::{Context, Controller, DialogSpec, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{editor::Editor, render::color};
 use anyhow::Result;
@@ -212,7 +212,7 @@ impl Widget for OperationDialog {
             {
                 Some(Choice::Submit)
             }
-            _ => self.form.event(event, &mut self.value.iter_mut().collect::<Vec<_>>(), cx).1,
+            _ => self.form.event(event, self.value.iter_mut(), cx).1,
         };
         let result = match choice {
             Some(Choice::Close) => {
@@ -253,7 +253,7 @@ impl Widget for OperationDialog {
             }),
             None => return true,
         };
-        cx.report(result);
+        self.form.report(result, cx);
         true
     }
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
@@ -295,47 +295,19 @@ impl Widget for OperationDialog {
         let footer = y + height - 10. * s - count as f32 * (button_h + 6. * s);
         if let Some(field) = &mut self.value {
             let top = y + title_h + 20. * s;
-            cx.services.renderer.label(
-                frame.layer,
-                &field.label,
-                Rect::new(x + 20. * s, top, w - 40. * s, 18. * s),
-                11. * s,
-                color(0xb7c2ce),
-                false,
-            );
-            field.visit_perframe(
-                &mut Frame {
-                    layer: frame.layer,
-                    bounds: Rect::new(
-                        x + 20. * s,
-                        top + 20. * s,
-                        w - 40. * s,
-                        (footer - feedback_h - top - 24. * s).max(1.),
-                    ),
-                    clip: frame.clip,
-                },
+            field.labeled(
+                Rect::new(x + 20. * s, top, w - 40. * s, (footer - feedback_h - top - 4. * s).max(1.)),
+                frame,
                 cx,
             );
         }
-        if let Some(text) = feedback {
-            cx.services.renderer.label(
-                frame.layer,
-                &text,
-                Rect::new(x + 20. * s, footer - feedback_h, w - 40. * s, (feedback_h - 8. * s).max(1.)),
-                13. * s,
-                color(0xffb4ab),
-                false,
-            );
-        }
-        let choices = self.form.buttons.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>();
-        for (i, choice) in choices.into_iter().enumerate() {
-            let primary = choice == Choice::Submit;
-            self.form.button(
-                choice,
+        frame.feedback(Rect::new(x + 20. * s, footer - feedback_h, w - 40. * s, feedback_h), "", cx);
+        // These are the fixed owned choices; don't build a list to look them up again.
+        for (i, (choice, button)) in self.form.buttons.iter_mut().enumerate() {
+            button.style = if *choice == Choice::Submit { ButtonStyle::Primary } else { ButtonStyle::Tonal };
+            frame.visit(
                 Rect::new(x + 20. * s, footer + i as f32 * (button_h + 6. * s), w - 40. * s, button_h),
-                primary,
-                false,
-                frame,
+                button,
                 cx,
             );
         }

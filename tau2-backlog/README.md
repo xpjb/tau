@@ -5,7 +5,8 @@
 Triaged **September 29, 2026**, against freshly fetched `origin/tau2` at
 `33f7d6f`. This supersedes the earlier implementation ordering, not the recorded
 bug evidence. Implementation is on `feat/tau2-simplification`; **036 is source-complete**.
-037's control, composition and lifetime changes are implemented; 038 is next.
+037's control/composition/lifetime and 038's form reuse are implemented.
+039's native-tool vertical slice is next.
 Remaining slices and the 5,000-line gate are not complete.
 
 The retained rewrite established ownership but did not finish shared input/paint
@@ -18,7 +19,7 @@ predecessors; do not add another UI or replication framework.
 | --- | --- | --- |
 | [036 Correct drawing and selection](036-drawing-and-selection-correctness.md) | Ordered compositing; selection follows scrolled text | Source-complete; device QA open |
 | [037 One control and child-traversal contract](037-retained-interaction-ownership.md) | Delete paint/register bypasses and root-maintained descendant routing | Source-complete; device QA open |
-| [038 Finish forms and chrome](038-forms-and-chrome.md) | Delete repeated field/footer/layout and migrated control plumbing | 037 |
+| [038 Finish forms and chrome](038-forms-and-chrome.md) | Delete repeated field/footer/layout and migrated control plumbing | Source-complete; device QA open |
 | [039 Native tool records, used directly](039-native-tool-records.md) | Delete native tool re-pairing and display-key parsing | Tool-widget consumer uses 037 |
 | [040 One message through local/queue/history state](040-message-state-reconciliation.md) | Move reconciliation out of paint; delete competing precedence rules | Reuse 039 body-reference contract |
 | [041 Transcript owns its children](041-direct-retained-transcript.md) | Delete `app/projection.rs`, rich `Row` descriptions and wrapper reconciliation; revisit 012 | 037, 039, 040 |

@@ -90,3 +90,13 @@ Root's separate test-card ownership/dispatch tree, along with its App paint
 adapter. Existing Save/retry/restart/source and Extract single-flight checks now
 paint and dispatch through the actual attachment browser. Net tests: **45 raw /
 77 same-format lines removed**; all 198 surviving frontend tests pass.
+
+### 038 form retirement
+
+Removed the old selector-registration assertion and a duplicate model/operation
+replacement case. Removed the daemon completion test that supplied an arbitrary
+result to a new form with no submitting token; it never exercised completion
+ownership. The actual async Topic request/source checks and editor callback cases
+remain. Extended the existing real-editor scene with compact offline feedback and
+draft preservation instead of adding another form matrix. Net tests: **14 raw /
+24 same-format removed**. The full surviving frontend suite is 196/196 green.

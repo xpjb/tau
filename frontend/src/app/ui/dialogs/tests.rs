@@ -1,4 +1,5 @@
 use super::*;
+use super::super::controls::ButtonStyle;
 use crate::app::{App, FixtureChoice, PlatformAction};
 use crate::store::Store;
 use chad::{Config, HeadlessCtx};
@@ -47,8 +48,6 @@ fn forms_bind_focus_and_replacement_before_the_next_input_without_a_frame() {
         assert_eq!(h.dialog().fields()[0].editor.value, "Second edited");
         assert_eq!(h.app.controller.selected().unwrap().local.draft, draft);
         h.frame();
-        assert!(!h.app.placed_controls().iter().any(|hit| matches!(hit.action, FixtureChoice::CodeSearch | FixtureChoice::Confirm | FixtureChoice::CancelModal)),
-            "Migrated fields/buttons never register legacy actions");
     }
 }
 
@@ -72,7 +71,7 @@ fn pointer_target_uses_current_coordinates_and_never_retargets_a_replacement() {
 }
 
 #[test]
-fn modal_scope_blocks_legacy_pointer_wheel_middle_and_context_routes() {
+fn modal_scope_blocks_background_pointer_wheel_middle_and_context() {
     let mut h = Harness::new(false); h.frame();
     let before = h.app.controller.selected().unwrap().local.draft.clone();
     h.app.fixture(FixtureChoice::ProjectPrompt("first".into())).unwrap(); h.frame();
@@ -199,7 +198,24 @@ fn retained_forms_settle_idle_and_reuse_real_editor_geometry_on_desktop_and_phon
         h.app.fixture(FixtureChoice::ProjectPrompt("first".into())).unwrap(); h.frame();
         h.dump(if mobile { "topic-prompt-phone.png" } else { "topic-prompt-desktop.png" });
         assert!(h.app.ime_rect().is_some());
-        for (_, rect) in h.dialog().buttons() { assert!(rect.y >= 0. && rect.y + rect.height <= h.app.ui.size.1 as f32); }
+        if mobile {
+            h.app.open_ui(DialogSpec::Topic(TopicEdit::New)).unwrap();
+            h.app.resize((360, 250), 1., Vec2::new(0., 0.));
+            h.app.input("Compact topic"); h.app.key("Tab", false, false); h.app.input("Kept prompt"); h.frame();
+            h.dump("topic-compact.png");
+            let point = center(h.dialog().fields()[1].control.rect.unwrap());
+            h.click(point);
+            let input = h.app.native_input().unwrap();
+            assert_eq!(input.text, "Kept prompt");
+            assert!(input.rect[1] + input.rect[3] <= 250., "The actual editor stays above the IME");
+            h.click(h.button("Save"));
+            assert!(h.app.controller.notice.is_some(), "An explicit offline submission must show its error");
+            h.frame();
+            assert_eq!(h.dialog().fields()[0].editor.value, "Compact topic", "Offline failure keeps both drafts");
+            assert_eq!(h.dialog().fields()[1].editor.value, "Kept prompt");
+            h.dump("topic-compact-feedback.png");
+            h.click(h.button("Cancel")); assert!(h.app.root.dialog.is_none());
+        }
     }
 }
 
@@ -220,9 +236,9 @@ fn shared_control_clip_governs_hover_press_and_paint_with_the_same_bounds() {
         assert!(button.handle_event(&Event::Up { pointer: 2, point: Vec2::new(150., 40.) }, cx));
         assert!(!button.control.take_click(), "Release outside the clip must not activate its hidden control");
         let mut form = super::super::controls::Form::new(Id::new(), &[(0, "Disabled foreground")]);
-        form.button(0, bounds, false, false, &mut Frame { layer: &mut layer, bounds, clip }, cx);
+        form.button(0, bounds, ButtonStyle::Tonal, &mut Frame { layer: &mut layer, bounds, clip }, cx);
         form.buttons[0].1.control.enabled = false;
-        let (consumed, action) = form.event(&Event::Down { pointer: 3, point: Vec2::new(50., 40.), touch: false }, &mut [], cx);
+        let (consumed, action) = form.event(&Event::Down { pointer: 3, point: Vec2::new(50., 40.), touch: false }, std::iter::empty(), cx);
         assert!(consumed && action.is_none() && cx.ui.capture.is_none(), "Disabled foreground must not fall through");
     });
 }
@@ -246,34 +262,3 @@ fn snapshot(input: &crate::mobile_input::Input, text: &str) -> crate::mobile_inp
         start: text.encode_utf16().count() as i32, end: text.encode_utf16().count() as i32, composing_start: -1, composing_end: -1 }
 }
 
-#[test]
-fn remaining_forms_own_fields_and_reject_detached_callbacks() {
-    let mut h = Harness::new(true);
-    h.app.open_ui(DialogSpec::Models).unwrap(); h.frame();
-    let target = h.dialog().fields()[0].control.target;
-    h.click(center(h.dialog().fields()[0].control.rect.unwrap()));
-    let native = h.app.native_input().unwrap();
-    h.app.open_ui(DialogSpec::Operation(super::super::Operation::Rename("demo".into()))).unwrap();
-    assert_ne!(h.dialog().fields()[0].control.target, target);
-    let title = h.dialog().fields()[0].editor.value.clone();
-    h.app.native_edit(snapshot(&native, "unrelated models"));
-    assert_eq!(h.dialog().fields()[0].editor.value, title);
-    h.app.key("a", true, false); h.app.input("inline title");
-    assert_eq!(h.dialog().fields()[0].editor.value, "inline title");
-    h.app.controller.identity = "other source".into(); h.app.input(" late");
-    assert!(h.app.root.dialog.is_none());
-}
-
-#[test]
-fn daemon_completion_is_owned_by_the_submitting_instance() {
-    let mut h = Harness::new(false); h.app.open_ui(DialogSpec::Daemon).unwrap();
-    let Dialog::Daemon(first) = h.app.root.dialog.as_mut().unwrap() else { panic!() };
-    let old = first.id;
-    h.app.open_ui(DialogSpec::Daemon).unwrap();
-    h.app.controller.settings_result = Some(("old-save".into(), true));
-    h.app.controller.notice = None; h.app.tick(0.);
-    assert_ne!(h.dialog().id(), old); assert!(h.app.controller.notice.is_none());
-    assert_eq!(h.app.controller.settings_result.as_ref().map(|(id, _)| id.as_str()), Some("old-save"));
-    h.app.ui.requests.push_back(Request::Close(old)); h.app.finish_ui_requests().unwrap();
-    assert!(h.app.root.dialog.is_some());
-}
