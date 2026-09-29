@@ -4,7 +4,9 @@ The user authorized a bounded final deletion pass, triage of the remaining work,
 and merging the simplification **and** the tested compaction/pause fix into
 `tau2-integration`. This is source acceptance with recorded debt, not achievement
 of the original 5,000-line target or authorization to package/deploy/restart.
-Integration normally publishes to `origin/tau2`; stable/master remains untouched.
+Integration publishes to `origin/tau2`; stable/master remains untouched. Source is
+now merged as `73a617f` and `1cb2282`; [final merged-tree acceptance](../docs/tau2-simplification-closeout.md)
+passes 328/328 tests plus compiler/platform/rustdoc checks. No deployment occurred.
 
 ## What closed locally
 
@@ -41,10 +43,16 @@ work and its additions must be shown separately, not attributed as deletion savi
 | 5,000-line reduction / further structural deletion | Deferred, explicitly unmet; no proven inventory covers the gap | Only restart a slice with a named obsolete owner/algorithm, all callers and a credible net removal. No feature removal, relocation, minification or broad operation-store/transport migration to satisfy a number. |
 | Further model/transcript test consolidation | Optional, subordinate to real duplication | Delete only redundant implementation-shape coverage after identifying the retained observable guarantee. Keep native body/cursor/source/no-replay and real daemon/two-client coverage. No blanket test-count target or test-only global action adapter. |
 | Earlier operation registry, catalogue and receiver proposals | Still deferred/shelved per [triage](triage.md) | Require an independent concrete need and scope decision. Their withdrawn LOC estimates do not finance this closeout. |
-| Source integration and release | Merge authorized; deployment is not | Include `feat/tau2-simplification` and `fix/tau2-compaction-pause` (`302e25f`, `1f75f4d`). Preserve the unrelated old `tau2/qa-remove-pause` WIP. Validate the merged tree; build/release matched clients/daemon only on separate authorization. |
+| Source integration and release | Both source merges complete; deployment is not authorized | Merged-tree acceptance is recorded in the closeout document. The unrelated old `tau2/qa-remove-pause` WIP is preserved. Build/release matched clients/daemon only on separate authorization; do not treat source integration as device acceptance. |
 
 The final local deletion check passed frontend all-target compilation and 22
 focused editor/control/IME/lifetime nextest cases (`33404561-5ba1-4e68-804d-9d4bfa1a3686`).
 The preceding simplification runtime passed 325/325 workspace tests. Neither is
 substituted for fresh merged-tree validation; integration's handoff records that
 result and the pause scenarios together. No Clippy or built-in Cargo test runner.
+
+
+Combined accounting including the independent pause fix is **1,430 raw / 323
+normalized lines smaller** after all outside charges; its additional runtime and
+regression coverage is recorded separately in the ledger. Neither this figure nor
+the green merged suite closes 013/014 or marks the original size target achieved.

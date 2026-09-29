@@ -1,5 +1,14 @@
 # Repeated pauses during a long single task
 
+**Integration update:** now merged into `tau2-integration` as `1cb2282`, alongside
+the simplification merge `73a617f`. Fresh combined validation passes **328/328**
+workspace tests, all-target checks, Windows/Android library checks and workspace
+rustdoc (`0c6b4074-76b5-4b77-92d0-cde1b3ca931c`). See
+[the source closeout](tau2-simplification-closeout.md). No deployment/restart or
+physical-device acceptance is claimed. The branch-specific evidence and
+pre-integration deployment observations below are historical.
+
+
 Source fix on `fix/tau2-compaction-pause`, based on integration `33f7d6f`.
 Daemon fix: `302e25f`.
 This is independent of the unfinished simplification work and the older

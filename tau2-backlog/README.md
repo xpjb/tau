@@ -15,7 +15,9 @@ old scroll scenario, alongside independent matrix pruning.
 Transcript reading-position ownership is now consolidated; external layout resets
 and the expansion registry are gone. The user has now authorized local/justified
 deletions, backlogging the remaining work and merging both this source and the
-independent compaction/pause fix into `tau2-integration`. The 5,000-line target is
+independent compaction/pause fix into `tau2-integration`. Those source merges are
+complete (`73a617f`, `1cb2282`); [merged acceptance](../docs/tau2-simplification-closeout.md)
+passes 328/328 workspace tests and compiler/platform/rustdoc checks. The 5,000-line target is
 **not achieved**; physical acceptance is **not complete**. These are explicit
 open/deferred items, not reasons to start another speculative rewrite before the
 authorized source merge. See [044 closeout/follow-ups](044-closeout-and-followups.md).

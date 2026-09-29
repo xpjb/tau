@@ -1,6 +1,6 @@
 # 043 — Completion means correct behavior and measured removal
 
-Status: **Practical source closeout/integration authorized; original size and physical gates remain unmet.** The user explicitly requested local/justified deletions, remaining work triaged into backlog, and integration including the pause fix. This supersedes holding the source merge for the original 5,000-line goal, not its accounting or the open device checks. See [044](044-closeout-and-followups.md). The criteria below remain the original acceptance contract, not a claim that all passed.
+Status: **Practical source integration complete; original size and physical gates remain unmet.** The user explicitly requested local/justified deletions, remaining work triaged into backlog, and integration including the pause fix. This supersedes holding the source merge for the original 5,000-line goal, not its accounting or the open device checks. See [044](044-closeout-and-followups.md). The criteria below remain the original acceptance contract, not a claim that all passed.
 
 ## Source/deletion gates
 
@@ -61,3 +61,16 @@ code/attachment navigation. Reuse existing device QA rather than adding a test f
 every coordinate. Without a device, report source completion separately and keep
 physical acceptance open. Packaging, deployment and service restarts need separate
 authorization; this task does not grant it.
+
+
+## Authorized practical closeout
+
+The bounded source work and independent pause fix are integrated as `73a617f` and
+`1cb2282`. [Final acceptance](../docs/tau2-simplification-closeout.md) records fresh
+328/328 workspace nextest, all-target checks, Windows/Android library checks and
+workspace rustdoc. Both branches are ancestors of integration. Named legacy
+paths are absent; the merge did not restore synthetic lifecycle dispatch.
+
+The original size goal is explicitly unmet and deferred; physical acceptance and
+013/014 remain open. This is the user's practical closeout decision, not a claim
+that every original criterion above passed. No release/deployment occurred.

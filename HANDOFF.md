@@ -1,29 +1,36 @@
 # Simplification and single-task compaction — integrated source, not deployed
 
-The user authorized practical closeout and source integration rather than more
-speculative rewrites to meet the unmet size target. `feat/tau2-simplification`
-through `7be1ac1` is merged into `tau2-integration` as `73a617f`. The tested
-`fix/tau2-compaction-pause` through `1f75f4d` is merged alongside it; the unrelated
-old `tau2/qa-remove-pause` WIP is preserved, not included.
+At the user's request, practical closeout is merged into `tau2-integration`,
+which publishes to `origin/tau2`:
 
-Both conflict sides' substantive work is retained: the header/sidebar keep the
-new update/control ownership and expose genuine agent failures, and the lifetime
-suite keeps both the simplification regressions and the pause-reason interaction.
-The daemon can compact repeated complete exchanges inside one long user task
-without tool replay. Genuine abort/failure/recovery pauses remain.
+- **`73a617f`** merges `feat/tau2-simplification` through `7be1ac1`.
+- **`1cb2282`** merges the tested `fix/tau2-compaction-pause` through `1f75f4d`
+  (daemon fix `302e25f` plus visible failure reasons). The unrelated old
+  `tau2/qa-remove-pause` WIP is preserved, not included.
 
-The last bounded deletion removed three unused hit-test entry points, not product
-features. Remaining size debt, queue-content lifetime, outage diagnosis, optional
-test pruning and device acceptance are in `tau2-backlog/044-closeout-and-followups.md`.
-The original reduction target is **not achieved**. The measurement report's binary
-asset handling and daemon test classification are corrected; no savings are
-claimed from reclassification.
+The named legacy UI/model paths are removed. The final bounded pass deleted
+three unused hit-test entry points and their unused import, without dropping
+features or safety tests. The pause fix supports repeated compaction inside one
+long task without replaying tools; genuine failure/abort/recovery pauses remain.
+Header/sidebar integration preserves direct update/control ownership and shows
+actual failure reasons. Both sides' lifetime regressions were kept when merging.
 
-Merged-tree compiler/nextest/platform/rustdoc validation is being recorded after
-this merge; do not substitute earlier per-branch results for that acceptance.
+Fresh merged-tree validation: workspace/all-target check; **328/328 nextest tests
+across 19 binaries**, zero skipped (`0c6b4074-76b5-4b77-92d0-cde1b3ca931c`, 101.816s);
+Windows MSVC and Android ARM64/API29 library checks; workspace rustdoc. No Clippy
+or built-in Cargo test runner. Physical device acceptance remains open.
+
+Remaining work is triaged in `tau2-backlog/044-closeout-and-followups.md`: 013
+queue-content lifetime, 014 outage diagnosis, device QA, optional justified
+pruning, and the **unmet** size target. Simplification alone saved **1,570 raw /
+564 normalized** lines after outside charges. Including the independent pause
+fix, combined savings are **1,430 / 323**. The user accepted source integration
+with this debt recorded; this is not a claim of meeting the 5,000-line goal.
+See `docs/tau2-simplification-closeout.md` and the completion-size ledger.
+
 No deployment, release package, version/protocol/schema bump, service restart,
-settings/live-data change or physical Windows/Android QA is authorized or claimed.
-
+settings/live-data change or physical Windows/Android QA occurred. Prior release
+holds remain. Feature branches/worktrees and unrelated WIP are preserved.
 
 ---
 

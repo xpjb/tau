@@ -162,3 +162,33 @@ slices is counted once. Documentation and this measurement recipe are not runtim
 savings. The baseline measurement was documentation-only; implementation checks
 are recorded with each owning backlog item. The protocol equality derive changes
 neither raw (442) nor same-format (527) code lines in `protocol/src/lib.rs`.
+
+
+## Integrated pause fix and final source closeout
+
+After `73a617f` (simplification) and `1cb2282` (independent pause fix), with the
+last unused-import cleanup, the measured combined source is:
+
+| Rust code | Raw | Same format |
+| --- | ---: | ---: |
+| Frontend total | 26,124 | 32,413 |
+| Frontend production | 18,595 | 21,876 |
+| Frontend tests | 7,529 | 10,537 |
+| Daemon + protocol total | 8,625 | 13,707 |
+| Daemon + protocol production | 5,912 | 8,980 |
+| Daemon + protocol tests | 2,713 | 4,727 |
+
+Outside growth over baseline is **171 / 282**: production **56 / 97**, tests
+**115 / 185**. Combined charged reduction is **1,430 raw / 323 normalized**,
+leaving **3,570 / 4,677** against the original goal. Charged production is **543
+raw smaller / 353 normalized larger**; test reduction is **887 / 676**.
+
+Relative to the pre-pause closeout, the independent pause fix costs **140 / 241**
+total (production **38 / 62**, tests **102 / 179**). Its actual compaction/failure
+behavior and regression coverage are useful added functionality, not UI deletion.
+No additions are hidden from the combined figure. Per-slice historical counts
+above describe their own checkpoints; this table is the final integrated snapshot.
+
+The user authorized source integration with the unmet reduction goal explicitly
+backlogged. Fresh merged-tree acceptance and release restrictions are in
+[the closeout record](../../tau2-simplification-closeout.md).

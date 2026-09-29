@@ -1,6 +1,6 @@
 //! The shared composer/settings/dialog editor. Sanscale owns visual caret
 //! geometry; this component owns text, selection, undo, composition and viewport.
-use crate::render::{Layer, Renderer, color, contains};
+use crate::render::{Layer, Renderer, color};
 use sanscale::{Align, Boundaries, Caret, Draw, FontChainHandle, Layout, Motion, Rect, ShapedHandle, Style, TextService, Vec2};
 use std::{borrow::Cow, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
