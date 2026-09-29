@@ -539,18 +539,6 @@ impl Renderer {
         self.scenes.clear();
         self.message_order.clear();
     }
-    pub fn hit_text(&self, point: Vec2) -> Option<(String, usize)> {
-        for (key, (scene, viewport)) in &self.scenes {
-            if !contains(*viewport, point) {
-                continue;
-            }
-            let m = &self.messages[key];
-            if let Some(byte) = m.view.hit_source(scene, point, &self.text, &m.doc) {
-                return Some((key.clone(), byte));
-            }
-        }
-        None
-    }
     pub fn hit_link(&self, point: Vec2) -> Option<String> {
         for (key, (scene, viewport)) in &self.scenes {
             if contains(*viewport, point)

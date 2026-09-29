@@ -564,9 +564,6 @@ impl<A: Clone + PartialEq> Controls<A> {
         }
         (false, None)
     }
-    pub fn contains(&self, point: Vec2) -> bool {
-        self.items.iter().any(|(_, b, _)| b.control.contains(point))
-    }
 }
 
 impl<A: Clone + PartialEq> Controls<A> {
