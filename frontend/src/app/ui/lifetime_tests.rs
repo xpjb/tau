@@ -330,3 +330,45 @@ fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
     assert!(h.app.root.menu.is_some(), "The header consumes its held-touch update");
     assert!(h.app.root.workspace.chat.transcript.scroll.value > before, "That consumption cannot skip the body update");
 }
+
+#[test]
+fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
+    use tau_protocol::{EventKind, EventRole, EventPhase};
+    let mut h = Harness::new(false);
+    let mut source = crate::blocks::tests::Fixture::new();
+    let mut tool = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
+    tool.id = "native-tool".into(); tool.entry_id = tool.id.clone();
+    tool.role = EventRole::Assistant; tool.kind = EventKind::Tool; tool.phase = EventPhase::Saved;
+    tool.tool_call_id = Some("provider-id:Input:text".into()); tool.tool_name = Some("bash".into());
+    tool.text = "A streamed input line.\n".repeat(3000); tool.attachment = None;
+    let input = format!("{}/input", tool.id);
+    let mut metadata = tool.clone(); metadata.text.clear();
+    source.put(&tool.id, None, 0, tau_protocol::blocks::BlockKind::Tool, serde_json::json!({"event": metadata}), b"");
+    source.put(&input, Some(&tool.id), 0, tau_protocol::blocks::BlockKind::Code,
+        serde_json::json!({"inputFor": tool.id, "label": "Input", "language": "json"}), tool.text.as_bytes());
+    source.page(None, None); source.page(Some(&tool.id), None);
+    assert!(source.chunk(&input)); // Only the first verified chunk is resident.
+    let mut session = h.app.controller.account.sessions[0].clone(); session.id = "chat".into();
+    h.app.controller.account.sessions.push(session); h.app.controller.select("chat").unwrap();
+    h.app.controller.account.source_lineage = Some(source.lineage.clone());
+    let chat = h.app.controller.chats.get_mut("chat").unwrap();
+    chat.feed.native_view(source.cache.preview("chat", None).unwrap().unwrap()).unwrap();
+    chat.local.details_default = true;
+    chat.local.expansion.extend([("tool:native-tool".into(), true), ("tool:native-tool:Input".into(), true)]);
+    h.frame();
+    h.app.with_ui(|root, cx| {
+        let transcript = &mut root.workspace.chat.transcript;
+        transcript.scroll.value = transcript.scroll.max / 2.;
+        transcript.remember_scroll(cx);
+    });
+    h.frame();
+    let transcript = &h.app.root.workspace.chat.transcript;
+    assert!(transcript.rows.iter().flat_map(|r| &r.parts).filter(|p| p.line.toggle.is_some())
+        .all(|p| p.control.rect.is_none_or(|r| r.y + r.height < transcript.scroll.rect.y)), "Headings are above the viewport");
+    let chat = &h.app.controller.chats["chat"];
+    let plan = source.cache.plan_visible("chat", &chat.local, &[], Some(&transcript.interests)).unwrap();
+    let (_, head) = plan.blocks.iter().find(|(id, _)| id == &input).expect("Visible input must request its native body");
+    let (_, length, _, cached) = head.unwrap(); assert!(cached < length);
+    source.body(&input);
+    assert_eq!(source.cache.snapshot("chat").unwrap().unwrap().snapshot.events.iter().find(|e| e.id == tool.id).unwrap().text, tool.text);
+}

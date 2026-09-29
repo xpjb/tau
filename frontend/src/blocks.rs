@@ -770,7 +770,7 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod checkpoint_tests;

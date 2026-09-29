@@ -7,6 +7,8 @@ use tau_protocol::{Event, EventKind, EventRole};
 #[derive(Clone)]
 pub struct Line {
     pub key: String,
+    /// Owning remote row for viewport demand; disclosure keys are only UI keys.
+    pub owner: Option<String>,
     pub label: String,
     pub source: String,
     pub indent: f32,
@@ -16,9 +18,10 @@ pub struct Line {
     pub tool: bool,
 }
 impl Line {
-    fn label(key: String, label: String, indent: f32, toggle: Option<bool>, error: bool) -> Self {
+    fn label(key: String, label: String, indent: f32, toggle: Option<bool>, error: bool, owner: Option<&str>) -> Self {
         Self {
             key,
+            owner: owner.map(str::to_owned),
             label,
             indent,
             toggle,
@@ -106,7 +109,7 @@ impl<'a> Tools<'a> {
     pub fn lines(&self, group: &[&Event], local: &LocalChat) -> Vec<Line> {
         // Reuse an explicitly toggled group key when a previous page prepends more details.
         let (key,open) = group_state(group,local);
-        let mut lines = vec![Line::label(key, "Details".into(), 0., Some(open), false)];
+        let mut lines = vec![Line::label(key, "Details".into(), 0., Some(open), false, None)];
         if !open {
             return lines;
         }
@@ -115,6 +118,7 @@ impl<'a> Tools<'a> {
                 if !e.text.is_empty() {
                     lines.push(Line {
                         key: format!("thinking:{}", e.id),
+                        owner: Some(e.id.clone()),
                         label: String::new(),
                         // Live prefixes are Markdown too; completed syntax can
                         // render before the event is saved or the line ends.
@@ -150,6 +154,7 @@ impl<'a> Tools<'a> {
                 8.,
                 Some(open),
                 error,
+                Some(&e.id),
             ));
             if !open {
                 continue;
@@ -184,10 +189,12 @@ impl<'a> Tools<'a> {
                     16.,
                     large.then_some(open),
                     label == "Error",
+                    Some(&e.id),
                 ));
                 if open {
                     lines.push(Line {
                         key: format!("{section}:text"),
+                        owner: Some(e.id.clone()),
                         label: String::new(),
                         source: if text.is_empty() { "Loading…".into() } else {crate::app::code(text)},
                         indent: 16.,

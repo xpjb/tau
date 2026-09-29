@@ -10,7 +10,6 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     time::Instant,
 };
-use tau_protocol::*;
 pub(in crate::app) struct Transcript {
     pub rows: Vec<MessageRow>,
     pub scroll: ScrollState,
@@ -342,16 +341,6 @@ impl Widget for Transcript {
         }
         let locating_download = self.locate_download(&rows, &placements, viewport, cx);
         self.scroll.shift_wheel(self.scroll.value - old_scroll);
-        let mut tool_roots = std::collections::HashMap::new();
-        for event in cx.model.chats[&session].feed.events.values() {
-            if let Some(call) = event.tool_call_id.as_deref() {
-                if event.kind == EventKind::Tool && event.role != EventRole::Tool {
-                    tool_roots.insert(call, &event.id);
-                } else {
-                    tool_roots.entry(call).or_insert(&event.id);
-                }
-            }
-        }
         let top = self.scroll.value - 2. * viewport.height;
         let bottom = self.scroll.value + 3. * viewport.height;
         for (row, p) in rows.iter().zip(&placements).filter(|(_, p)| p.top + p.height >= top && p.top <= bottom) {
@@ -364,24 +353,7 @@ impl Widget for Transcript {
                     if p.top + offset + height < top || p.top + offset > bottom {
                         continue;
                     }
-                    if let Some(id) = line.key.strip_prefix("thinking:") {
-                        interests.insert(id.into());
-                    }
-                    if let Some(key) = line.key.strip_prefix("tool:") {
-                        let mut key = key;
-                        if !tool_roots.contains_key(key) {
-                            key = key.strip_suffix(":body").unwrap_or(key);
-                            for suffix in [":Input", ":Output", ":Error"] {
-                                if let Some(base) = key.strip_suffix(suffix) {
-                                    key = base;
-                                    break;
-                                }
-                            }
-                        }
-                        if let Some(id) = tool_roots.get(key) {
-                            interests.insert((*id).clone());
-                        }
-                    }
+                    if let Some(id) = &line.owner { interests.insert(id.clone()); }
                 }
             }
         }

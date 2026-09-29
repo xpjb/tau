@@ -1,29 +1,29 @@
 use super::*;
 use serde_json::json;
 
-struct Fixture {source:Connection,cache:Cache,_root:tempfile::TempDir,lineage:String}
+pub(crate) struct Fixture {source:Connection,pub(crate) cache:Cache,_root:tempfile::TempDir,pub(crate) lineage:String}
 impl Fixture {
-    fn new()->Self {
+    pub(crate) fn new()->Self {
         let source=Connection::open_in_memory().unwrap();source.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&source).unwrap();
         let root=tempfile::tempdir().unwrap();let cache=Cache::open(&root.path().join("cache.db")).unwrap();
         let lineage=tau_blocks::cursor(&source).unwrap().lineage;cache.configure(&lineage).unwrap();
         Self {source,cache,_root:root,lineage}
     }
-    fn put(&mut self,id:&str,parent:Option<&str>,order:u64,kind:BlockKind,meta:serde_json::Value,bytes:&[u8]) {
+    pub(crate) fn put(&mut self,id:&str,parent:Option<&str>,order:u64,kind:BlockKind,meta:serde_json::Value,bytes:&[u8]) {
         let tx=self.source.transaction().unwrap();
         tau_blocks::put(&tx,"chat",BlockHeader {id:id.into(),parent:parent.map(str::to_owned),order,kind,meta,version:0,length:0,sealed:true,revision:0},bytes).unwrap();tx.commit().unwrap();
     }
-    fn page(&self,parent:Option<&str>,before:Option<FeedPosition>) {
+    pub(crate) fn page(&self,parent:Option<&str>,before:Option<FeedPosition>) {
         let req=self.cache.feed_request("chat",parent,before).unwrap();let page=tau_blocks::feed(&self.source,&req).unwrap();self.cache.page(&self.lineage,&req,&page).unwrap();
     }
-    fn body(&self,id:&str) {
-        loop {
-            let req=self.cache.block_request("chat",id).unwrap();let range=tau_blocks::read(&self.source,&req).unwrap();
-            self.cache.header(&self.lineage,"chat",&range.header).unwrap();
-            if range.bytes.is_empty() {break;}
-            self.cache.range(&self.lineage,"chat",&range).unwrap();
-        }
+    pub(crate) fn chunk(&self,id:&str)->bool {
+        let req=self.cache.block_request("chat",id).unwrap();let range=tau_blocks::read(&self.source,&req).unwrap();
+        self.cache.header(&self.lineage,"chat",&range.header).unwrap();
+        if range.bytes.is_empty() {return false;}
+        self.cache.range(&self.lineage,"chat",&range).unwrap();true
     }
+    pub(crate) fn body(&self,id:&str) {while self.chunk(id) {}}
+
 }
 fn event(id:&str,order:u64,kind:&str)->serde_json::Value {
     json!({"event":{"id":id,"entryId":id,"order":order,"phase":"saved","origin":{},"role":"assistant","kind":kind,"text":"","isError":false,"toolCallId":id,"toolName":"bash"},"toolState":"completed"})

@@ -1,6 +1,6 @@
 # 039 — Share native tool meaning and use it directly
 
-Status: **Selected model/UI vertical slice.** Replaces old 015 and the tool part
+Status: **In progress: viewport-key decoding removed; native record/copy migration remains.** Replaces old 015 and the tool part
 of 016/018/022. Integrate its actual tool-widget consumer with 037; no standalone
 intermediate-description module. The original state proposal remains historical.
 
@@ -54,3 +54,25 @@ Count replacements across daemon, protocol/shared crates and frontend. Moving
 meaning into shared code earns no LOC credit by itself. This slice may have little
 net saving; its purpose is to remove repeated interpretation, not pretend to fund
 the 5,000-line target. Run targeted native/copy/UI cases using managed nextest.
+
+## First deletion — September 29, 2026
+
+Removed Transcript's `tool_roots` rescan and inverse disclosure-key parser.
+The existing detail lines carry their owning remote row directly, so a text child
+can request its owner when its heading is above overscan. Keys remain persisted
+UI expansion keys, never an ID decoder. This is a narrow deletion in the existing
+path, **not** a new ToolProjection or an assertion that the old projection is done.
+
+The real retained viewport case uses a native root/input directory and one verified
+body chunk. It scrolls into the body, derives the actual native watch plan from
+Transcript's interests, and fetches/verifies the remaining native content. It failed
+before the fix (`68921602-657d-459f-999b-02bad85b9854`) and passes afterward, along
+with 41 other native/lifetime checks (`0a907926-1377-43ed-8022-2872ef8cecd3`). The
+existing cache fixture is reused, rather than copying its database/range setup.
+This case seeds native records; it does **not** claim the remaining daemon-to-widget
+shared metadata migration is complete.
+
+Still required: typed shared metadata/body references with source/version and
+availability/finality, direct native parent membership for display/copy/demand,
+and deletion of `native_event`'s provider-ID rewrite / `details::Tools` re-pairing.
+The rich Row/projection pipeline remains explicitly scheduled for 040–041.
