@@ -13,7 +13,8 @@ three unused hit-test entry points and their unused import, without dropping
 features or safety tests. The pause fix supports repeated compaction inside one
 long task without replaying tools; genuine failure/abort/recovery pauses remain.
 Header/sidebar integration preserves direct update/control ownership and shows
-actual failure reasons. Both sides' lifetime regressions were kept when merging.
+actual failure reasons. The simplification lifetime suite and the added
+pause-reason regression were kept; retired baseline cases were not resurrected.
 
 Fresh merged-tree validation: workspace/all-target check; **328/328 nextest tests
 across 19 binaries**, zero skipped (`0c6b4074-76b5-4b77-92d0-cde1b3ca931c`, 101.816s);

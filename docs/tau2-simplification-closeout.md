@@ -12,7 +12,9 @@ both finished branches into `tau2-integration`. Its existing upstream is
 | `fix/tau2-compaction-pause` through `1f75f4d` | `1cb2282` | `302e25f` single-task compaction plus read-only visible failure reasons; not the older remove-pause WIP |
 
 The simplification merge was clean. The pause merge conflicted only in HANDOFF
-and the test-file insertion point. Both full sets of lifetime tests were kept;
+and the test-file insertion point. The current simplification lifetime suite plus
+the pause branch's newly added failure-reason regression were kept exactly. The
+two baseline cases already retired/renamed by simplification were not resurrected;
 no runtime implementation was selected wholesale over the other. Reviewed the
 automerged header/sidebar: direct updates and retained controls coexist with
 failure-detail display/click, Running/Error precedence and genuine pause actions.
