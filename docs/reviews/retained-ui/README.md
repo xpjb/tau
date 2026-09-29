@@ -135,6 +135,8 @@ TAU_REVIEW_PREVIEW_DIR=/tmp/tau-review \
 
 For the baseline patch use a `415aeff` worktree and filter `test(app::review_tests::)`.
 
-Current six-probe run: `f854534d-c2de-4b07-b6f8-2edcfa3337af`. Completed-rewrite six-probe run: `2e25e46b-32b9-4d84-8515-196510fa4f64`. Pre-rewrite two-probe run: `ea738f66-9081-45c1-9dae-d69801ac47b6`. Full current frontend-library validation is recorded in the follow-up below.
+Current six-probe run: `f854534d-c2de-4b07-b6f8-2edcfa3337af`. Completed-rewrite six-probe run: `2e25e46b-32b9-4d84-8515-196510fa4f64`. Pre-rewrite two-probe run: `ea738f66-9081-45c1-9dae-d69801ac47b6`.
+
+After removing the temporary probes, the **unchanged current frontend library suite passed 165/165, zero skipped**, run `4557dbad-3f6c-4827-91d5-2a794a25be39` (41.108 seconds), using `/usr/local/bin/cargo nextest run --locked -p tau-frontend --lib --no-fail-fast`. This is not a full-workspace rerun. Existing compiler dead-code warnings were left alone. The green existing suite alongside the failing probes demonstrates specific coverage gaps; it does not negate the reproduced bugs. `git diff --check` passed, and review source changes are confined to this documentation/artifact directory.
 
 All compilation/test commands use managed `/usr/local/bin/cargo` and nextest. No Clippy, built-in Cargo test runner, physical Android/Windows QA, packaging or deployment was performed.
