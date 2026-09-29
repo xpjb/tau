@@ -572,8 +572,7 @@ impl CodeBrowser {
         let plan = if active {
             cx.model.account.selected.clone().map(|session| (session, self.view.as_ref().and_then(|c| c.index_root.clone())))
         } else { None };
-        let result = cx.model.sync_file_index(plan);
-        cx.report(result);
+        if let Err(error) = cx.model.sync_file_index(plan) { cx.report(Err(error)); }
         let Some(code) = &self.view else {
             return;
         };
