@@ -145,3 +145,22 @@ lifecycle checks cost more than its incomplete scope-only switch. Do not conceal
 that cost: cumulative saving is now **244 / 198**, and the 5,000-line gate remains
 open. 038 must remove actual repeated placement code; 039–041 still own removal
 of the legacy projection/model pipeline.
+
+## Event-boundary triage — September 29, 2026
+
+User clarification: widget events should mostly be a thin adaptation of real
+winit/platform input, not a general lifecycle/message bus. A synthetic variant
+must have a specific need; traversal convenience or historical existence is not
+sufficient. Do not introduce a new event framework to remove the old one.
+
+| Current exception | Disposition / owner |
+| --- | --- |
+| `Submit` (only test emitters) | **Removed immediately under 042**, including production handlers and fixture selector; real controls exercise the two useful callers. |
+| `Tick` | Existing broadcast is a correctness repair, not an architectural endorsement. **037 follow-up with 041 ownership work, before 043:** use an explicit non-consuming update call if it removes the synthetic dispatch path; preserve on-demand drawing, elapsed timing, independent siblings and completion/source checks. No new scheduler/registry. |
+| `Cancel` | **037 follow-up with 041 ownership work, before 043:** consolidate actual owner cleanup, replacing the mixture of synthetic delivery and direct resets where unnecessary. Platform focus loss/touch cancellation/suspend and app-owned hide/source/navigation changes must still abandon interactions without activation. Review broad resize cancellation separately from true owner loss; no fabricated pointer-up or generic lifecycle bus. |
+| `Hover` replay after layout | **Retain for now:** a stationary pointer must retarget when geometry/content moves. Reconcile against actual placed owners; this is not invented mouse movement or a new gesture vocabulary. |
+| `Back` / targeted `Paste` | **Retain:** Android back and clipboard completion are real platform actions, not literal winit variants. Keep field/source/token fencing on clipboard completion. |
+
+No offscreen-gesture signal exists: desktop cursor-leaving clears hover. The
+cancellation entry points already live at the platform/App/owner boundaries;
+there is no requirement to retransmit every reason as a new synthetic event.

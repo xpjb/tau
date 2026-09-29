@@ -81,7 +81,6 @@ impl Widget for ModelsDialog {
         let composing = self.models.editor.composing() || self.search.editor.composing();
         let choice = match event {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(ModelChoice::Close),
-            Event::Submit if !composing => Some(ModelChoice::Save),
             _ => {
                 let visible = Self::search_visible(cx.ui);
                 let (handled, slug) = if visible { self.suggestions.event(event, cx) } else { (false, None) };
@@ -395,7 +394,6 @@ impl Widget for DaemonDialog {
         let composing = self.value.as_ref().is_some_and(|f| f.editor.composing());
         let choice = match event {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(SettingChoice::Close),
-            Event::Submit if !composing => Some(SettingChoice::Save),
             _ => {
                 let visible = self.field_visible();
                 self.form.event(event, self.value.iter_mut().filter(|_| visible), cx).1

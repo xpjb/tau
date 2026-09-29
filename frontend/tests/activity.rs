@@ -281,3 +281,38 @@ fn chat_activity_ties_are_deterministic_and_old_local_records_still_load() {
     let c = controller(root.path());
     assert_eq!(order(&c), ["a", "m", "z"]);
 }
+
+#[test]
+fn topic_resume_persists_and_rejects_deleted_or_moved_chats() {
+    for resume in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut c = controller(root.path());
+        c.message(ServerMessage::Projects { projects: vec![Project::general(), project("work")] }).unwrap();
+        let mut sessions = vec![session("home", 30), in_topic("latest", "work", 20), in_topic("older", "work", 10)];
+        catalog(&mut c, &sessions);
+        c.select("home").unwrap();
+        c.account.last_chat_by_project.clear(); // Upgrade from an account with only global selection.
+        c.select_project("work", resume).unwrap();
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("latest"));
+        c.select("older").unwrap();
+        c.select_project(GENERAL_PROJECT_ID, resume).unwrap();
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("home"));
+        c.select_project("work", resume).unwrap();
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("older"));
+        drop(c);
+        let mut c = controller(root.path());
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("older"));
+        assert_eq!(c.account.last_chat_by_project.get(GENERAL_PROJECT_ID).map(String::as_str), Some("home"));
+        assert_eq!(c.account.last_chat_by_project.get("work").map(String::as_str), Some("older"));
+        sessions.retain(|s| s.id != "older");
+        catalog(&mut c, &sessions);
+        assert!(!c.account.last_chat_by_project.contains_key("work"));
+        c.select_project(GENERAL_PROJECT_ID, resume).unwrap();
+        c.select_project("work", resume).unwrap();
+        assert_eq!(c.account.selected.as_deref(), resume.then_some("latest"));
+        sessions.iter_mut().find(|s| s.id == "latest").unwrap().project_id = GENERAL_PROJECT_ID.into();
+        catalog(&mut c, &sessions);
+        c.select_project("work", resume).unwrap();
+        assert!(c.account.selected.is_none(), "An empty topic cannot resurrect its former chat");
+    }
+}

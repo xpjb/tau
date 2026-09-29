@@ -302,6 +302,12 @@ fn saved_actions_and_restore_warning_fit_mobile_and_preserve_intents() {
         }
         let ui::Dialog::Operation(modal)=app.root.dialog.as_ref().unwrap() else { panic!("operation dialog"); };let width=(size.0 as f32-24.).min(620.)-40.;assert!(app.services.renderer.label_height(&modal.title,width,17.,true)>60.,"Fixture must exercise the complete multi-line warning");
         if size.0<500 {image::save_buffer("/tmp/tau2-restore-mobile.png",&ctx.read_rgba8().unwrap(),size.0,size.1,image::ColorType::Rgba8).unwrap();}
-        assert_eq!(app.controller.account.pending_controls.len(),12);app.fixture(FixtureChoice::ForgetControl("saved-00".into())).unwrap();assert_eq!(app.controller.account.pending_controls.len(),12);app.fixture(FixtureChoice::Confirm).unwrap();assert_eq!(app.controller.account.pending_controls.len(),11);
+        app.fixture(FixtureChoice::ForgetControl("saved-00".into())).unwrap();
+        app.tick(0.); app.frame(&ctx, ctx.view());
+        assert_eq!(app.controller.account.pending_controls.len(), 12);
+        let rect = app.root.dialog.as_ref().unwrap().button("Forget locally").unwrap();
+        let point = Vec2::new(rect.x + rect.width / 2., rect.y + rect.height / 2.);
+        app.press(1, point, app.ui.mobile); app.release(1, point);
+        assert_eq!(app.controller.account.pending_controls.len(), 11);
     }
 }

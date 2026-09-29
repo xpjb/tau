@@ -86,10 +86,11 @@ Record formatter/counter versions and retain the same versions for both sides.
 
 ## Per-slice ledger
 
-After 036–038, raw frontend code is **27,412**; same-format code is **32,729**.
-Production is **19,130 / 21,557** and tests are **8,282 / 11,172** (raw / same-format).
-Net reduction is **313 / 289**; remaining gap is **4,687 / 4,711**. Production
-saving is only **44 / 27** so far: the later architectural deletions must deliver
+After 036–038, the first 039 interest fix and the independent 042 pruning below,
+raw frontend code is **27,320**; same-format code is **32,618**. Production is
+**19,103 / 21,547** and tests are **8,217 / 11,071** (raw / same-format).
+Net reduction is **405 / 400**; remaining gap is **4,595 / 4,600**. Production
+saving is only **71 / 37** so far: the later architectural deletions must deliver
 substantially more. These are intermediate results, not completion.
 Deltas below use reduction-positive values and show raw / same-format:
 
@@ -99,6 +100,8 @@ Deltas below use reduction-positive values and show raw / same-format:
 | 037 controls | Paint/register bypasses; renderer input state; per-row feedback; Debug keys; redundant hover/gallery tests | One retained Button/Control feedback path, explicit styles/cursor, typed equality, consumed/action pair, compact checks | +137 / +129 | +166 / +185 | 0 | Reduction 303 / 244; gap 4,697 / 4,756 |
 | 037 composition/lifetime | Root descendant routes, cached paths/routing IDs, separate fixture card tree and redundant path/gallery tests | Exact owner/leaf validation, local layout/order, explicit lifecycle broadcast, two before/after checks | −104 / −123 | +45 / +77 | 0 | Reduction 244 / 198; gap 4,756 / 4,802 |
 | 038 forms | Floating-label path; repeated field/footer/page placement; fixed-field/choice Vec rebuilding; bespoke suggestion controls; redundant form tests | Shared concrete placement helpers, compact IME layout and explicit form-action feedback | +55 / +67 | +14 / +24 | 0 | Reduction 313 / 289; gap 4,687 / 4,711 |
+| 039 viewport ownership (`55c11f0`) | Reverse display-key parser and tool-root rescan | Direct owner on existing detail lines; real viewport/native-body regression using shared fixture | +22 / +5 | −40 / −70 | 0 | Reduction 295 / 224; gap 4,705 / 4,776 |
+| 042 independent pruning / Submit retirement | Project activity/layout matrix, repeated GPU persistence setup, status glyph matrix, test-only Submit event and handlers | Controller persistence check, one isolated status render, real pointer submissions | +5 / +5 | +105 / +171 | 0 | Reduction 405 / 400; gap 4,595 / 4,600 |
 
 Keep raw and same-format totals alongside the ledger. A deletion shared by two
 slices is counted once. Documentation and this measurement recipe are not runtime

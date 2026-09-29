@@ -27,9 +27,7 @@ pub(super) enum FixtureChoice {
     ForgetControl(String),
     Composer,
     CodeSearch,
-    Confirm,
     CancelModal,
-    AgentSetting(String, String),
     Delete(String),
     Attach,
     Attachments,
@@ -240,17 +238,11 @@ impl App {
             C::ProjectPrompt(id) => self.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Prompt(id)))?,
             C::DeleteProject(id) => self.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Delete(id)))?,
             C::Settings => self.open_ui(ui::DialogSpec::Connection)?,
-            C::AgentSetting(id, command) => {
-                self.open_ui(ui::DialogSpec::Operation(ui::Operation::Agent(id, command)))?
-            }
             C::Delete(id) => self.open_ui(ui::DialogSpec::Operation(ui::Operation::Delete(id)))?,
             C::Outbox(page) => self.open_ui(ui::DialogSpec::Operation(ui::Operation::Outbox(page)))?,
             C::InspectControl(id) => self.open_ui(ui::DialogSpec::Operation(ui::Operation::Inspect(id)))?,
             C::ForgetControl(id) => self.open_ui(ui::DialogSpec::Operation(ui::Operation::ForgetControl(id)))?,
             C::ReviewRestore(id) => self.open_ui(ui::DialogSpec::Operation(ui::Operation::Review(id)))?,
-            C::Confirm => {
-                self.ui_event(ui::Event::Submit);
-            }
             C::CancelModal | C::Back => self.back(),
             C::Files => self.with_ui(|root, cx| root.workspace.files(cx))?,
             C::FileOpen(..)
@@ -311,9 +303,6 @@ impl App {
             self.root.workspace.attachments.show = false;
         }
         result
-    }
-    pub(super) fn composer_model_status(&mut self, layer: &mut Layer, summary: Option<&SessionSummary>, rect: Rect) {
-        self.with_ui(|root, cx| root.workspace.chat.composer.model_status(cx, layer, summary, rect));
     }
     pub(super) fn notice_frame(&mut self, _ctx: &impl RenderContext, layer: &mut Layer, b: Rect) {
         self.with_ui(|root, cx| root.notice.visit_perframe(&mut ui::Frame { layer, bounds: b, clip: b }, cx));

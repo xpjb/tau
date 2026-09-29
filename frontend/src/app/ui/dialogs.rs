@@ -251,7 +251,7 @@ impl Widget for ConnectionDialog {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => {
                 Some(if self.tools { ConnectionChoice::Main } else { ConnectionChoice::Cancel })
             }
-            Event::Submit | Event::Key { key: "Enter", shift: false, .. } if !composing && !self.tools => {
+            Event::Key { key: "Enter", shift: false, .. } if !composing && !self.tools => {
                 Some(ConnectionChoice::Connect)
             }
             _ if self.tools => self.form.event(event, std::iter::empty(), cx).1,
@@ -677,7 +677,6 @@ impl Widget for TopicDialog {
                 self.form.event(event, fields, cx).1
             }
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(TopicChoice::Cancel),
-            Event::Submit if !composing => Some(TopicChoice::Save),
             _ => {
                 let fields = self.name.iter_mut().chain(self.prompt.iter_mut());
                 self.form.event(event, fields, cx).1

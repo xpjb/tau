@@ -100,3 +100,26 @@ ownership. The actual async Topic request/source checks and editor callback case
 remain. Extended the existing real-editor scene with compact offline feedback and
 draft preservation instead of adding another form matrix. Net tests: **14 raw /
 24 same-format removed**. The full surviving frontend suite is 196/196 green.
+
+### Independent project/status pruning and synthetic Submit retirement
+
+Deleted duplicate GPU project/chat activity matrices, fixed separator/row/gap
+assertions, and the desktop copy of the long gesture/menu scenario. Kept actual
+scroll-axis, swipe-vs-hold, clipped menu navigation, unread and selected-tab reveal
+checks. Moved topic resume/restart/deleted-or-moved membership assertions to the
+existing controller-only `tests/activity.rs`; no GPU is needed for persistence.
+Collapsed composer status's eight-level/three-size glyph matrix to one narrow
+isolated render: extents fit, and changing thinking alone visibly changes the row.
+Existing thinking-level model tests retain semantic coverage.
+
+Deleted the production `Event::Submit` variant and all five handlers: only tests
+emitted it. The two useful callers now click the actual Refresh / Forget locally
+controls. Deleted `FixtureChoice::Confirm`, its dispatch, and the unused agent
+settings fixture and composer forwarding method. `test_ui.rs` still exists;
+its remaining retirement and the direct transcript rewrite remain open.
+
+Validation: all-target frontend compiler check, then **195/195 frontend tests
+across 10 binaries, zero skipped** (`c5568c42-b06e-49e2-b482-eb19fa8b5115`).
+Net reduction from `55c11f0`: production **5 / 5**, tests **105 / 171**, total
+**110 / 176** raw / same-format. Cumulative reduction is **405 / 400**, not the
+5,000-line acceptance gate. No physical device check is claimed.

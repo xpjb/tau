@@ -110,7 +110,7 @@ impl OperationDialog {
                     .account
                     .pending_controls
                     .get(key)
-                    .ok_or_else(|| anyhow::anyhow!("FixtureChoice already reconciled"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Saved intent already reconciled"))?;
                 buttons.extend([
                     (Choice::Copy(serde_json::to_string_pretty(&saved.request)?), "Copy complete saved intent".into()),
                     (Choice::Check(key.clone()), "Check daemon receipt (no execution)".into()),
@@ -206,7 +206,6 @@ impl Widget for OperationDialog {
         let composing = self.value.as_ref().is_some_and(|f| f.editor.composing());
         let choice = match event {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(Choice::Close),
-            Event::Submit if !composing => Some(Choice::Submit),
             Event::Key { key: "Enter", shift: false, .. }
                 if !composing && !cx.ui.mobile && matches!(self.operation, Operation::Rename(_)) =>
             {

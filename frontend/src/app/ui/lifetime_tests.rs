@@ -154,7 +154,9 @@ fn operation_validation_feedback_is_painted_inside_the_opaque_form() {
     h.app.key("Backspace", false, false);
     h.frame();
     let before = h.ctx.read_rgba8().unwrap();
-    h.app.ui_event(Event::Submit);
+    let button = center(h.app.root.dialog.as_ref().unwrap().button("Refresh").unwrap());
+    h.app.press(1, button, false);
+    h.app.release(1, button);
     h.frame();
     assert!(h.app.root.dialog.is_some());
     assert!(h.app.controller.notice.as_ref().unwrap().contains("provider name"));

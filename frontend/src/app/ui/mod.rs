@@ -93,7 +93,6 @@ pub(super) enum Event<'a> {
     Tick(f32),
     Cancel,
     Back,
-    Submit,
     Context(Vec2),
     Middle { pressed: bool, point: Vec2 },
 }
