@@ -1,5 +1,12 @@
 # Tau 2 retained UI: concrete replacement proposal
 
+> **September 29 completion triage:** this is a historical proposal/integration
+> record, not the current work order. [The backlog](../tau2-backlog/README.md)
+> now owns completion: correct compositing/shared interaction, direct retained
+> transcript ownership, removal of the rich row-description layer and low-value
+> tests, and a measured 5,000-line net reduction. Earlier adapter-preservation and
+> backlog-012/test-deferral instructions below are superseded.
+
 Original proposal: September 28, 2026. Historical source and counts below are
 pinned to `cafef7f7ad57e1c5bae6e3e9c89c66beebade80e` on `tau2-integration`.
 The original review branch, `review/tau2-retained-ui`, changed documentation only.

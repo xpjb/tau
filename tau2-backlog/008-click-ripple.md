@@ -1,5 +1,7 @@
 # 008 — Restore click-origin glow/ripple
 
+**September 29 triage:** ripple mechanics already exist. Finish shared control ownership, cancellation, clipping and visual acceptance under [037](037-retained-interaction-ownership.md); do not implement a second ripple path.
+
 Priority: visual. Status: open.
 
 Tau 1 had an extra circular glow expanding from the point clicked. Restore that

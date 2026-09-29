@@ -1,5 +1,12 @@
 # Retained UI implementation and acceptance ledger
 
+> **September 29 completion triage:** this is a historical proposal/integration
+> record, not the current work order. [The backlog](../tau2-backlog/README.md)
+> now owns completion: correct compositing/shared interaction, direct retained
+> transcript ownership, removal of the rich row-description layer and low-value
+> tests, and a measured 5,000-line net reduction. Earlier adapter-preservation and
+> backlog-012/test-deferral instructions below are superseded.
+
 **The four implementation stages are complete in source on
 `feat/tau2-retained-ui`. Release acceptance is not complete.** All production
 legacy routing is removed; Android uses the adapted same-window inline editor.

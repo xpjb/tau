@@ -1,6 +1,6 @@
 # 001 — Daemon settings and hierarchical system prompts
 
-Priority: first. Status: implemented in `15d2a69`; not deployed.
+Priority: first. Status: delivered in beta 0.7.1 daemon/Windows on September 24, 2026 (implementation `15d2a69`).
 
 ## Report and confirmed facts
 
@@ -44,4 +44,4 @@ invalid targets. Show the target and fallback order in the actual menu.
 
 Leave editor/Sanscale work in 003–007. Leave active production services unchanged.
 
-Validation and remaining release/device checks: see the settings handoff in `README.md`.
+Validation and remaining release/device checks: see `../INTEGRATION.md` and the historical settings handoff in Git. The original report is historical; this is not new implementation work.

@@ -1,5 +1,7 @@
 # 014 — Native data progress does not promptly recover with control
 
+**September 29 triage:** remains separate deferred reliability diagnosis. First capture a failing run's per-file wait/progress boundary (acquisition, receive/credits, commit or export), then scope a cause-specific fix. Neither the shared-state direction nor receiver extraction establishes its cause. Not a UI simplification prerequisite or LOC budget; do not silently close it.
+
 Status: **Open; deferred at the user's request on September 27, 2026.** The observed
 recovery gap is real; its exact wait/root cause and the appropriate fix remain
 unresolved. No timeout change or recovery-architecture rewrite is approved here.

@@ -1,5 +1,10 @@
 # Retained UI rewrite review — September 29, 2026
 
+> **Follow-up:** [completion triage](../../../tau2-backlog/README.md) now schedules
+> fixes, bounded model/transcript replacement and test retirement. The measurements
+> and reproduced failures below remain evidence; the older recommendation to keep
+> the existing intermediate assembly boundary is not a preservation requirement.
+
 ## Verdict
 
 **A real ownership rewrite, but not a simplification, and not a complete interaction/rendering rewrite.** Keep the retained owners, stable IDs, source/IME fences and shared composer. Do not start another wholesale rewrite. Finish the common interaction and compositing boundaries before adding more per-feature scaffolding.

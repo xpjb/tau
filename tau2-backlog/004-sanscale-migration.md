@@ -1,5 +1,7 @@
 # 004 — Migrate to Sanscale's cleaned public API
 
+**September 29 triage:** the upstream pin/limitation below is historical. Current workspace `Cargo.toml` pins `7bbe23079f175e43bbfb642663c8af547a95a7f2`; recheck the recorded limitation at the actual pin before treating it as a current SDK blocker. No dependency upgrade is authorized here. Relevant physical checks feed [043](043-simplification-acceptance.md).
+
 Priority: before completing the editor fixes. Status: merged via frontend into tau2; device acceptance pending.
 
 `git ls-remote origin refs/heads/master` confirmed published Sanscale commit

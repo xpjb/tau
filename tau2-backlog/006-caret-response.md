@@ -1,5 +1,7 @@
 # 006 — Check caret response speed
 
+**September 29 triage:** keep the measured hot-path improvement; physical latency remains unmeasured. Carry the device check into [043](043-simplification-acceptance.md), not another caret refactor.
+
 Priority: editor. Status: hot path fixed/measured; physical latency QA pending. Related: 003/004.
 
 The user suspects slow caret movement but is uncertain. Measure key-repeat input,

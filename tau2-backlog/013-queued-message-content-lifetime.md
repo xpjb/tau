@@ -1,8 +1,8 @@
 # 013 — Queue-to-history content-reference lifetime
 
-Status: **Open; deferred at the user's request on September 27, 2026.** Record the
-finding, not an approved redesign or an implementation task for this session.
-Treat the reported edge case proportionately; production frequency is not known.
+Status: **Open, independently triaged model-side follow-up on September 29, 2026.** The September 27 deferment was historical, not a resolution. No fix is implemented or approved for deployment by this planning pass. Production frequency is unknown.
+
+Next bounded work: (1) add the deterministic metadata/promotion/delayed-fetch reproduction below; (2) compare exact content-version lifetime retention with authoritative obsolete-interest reconciliation; (3) choose and implement the smaller correct path, deleting any superseded handoff code. Coordinate identities with [040](040-message-state-reconciliation.md), but do not confuse its client display continuity with this daemon/read lifetime. Do not wait for a generic replica engine or make this a prerequisite for UI completion.
 
 ## Established problem
 
