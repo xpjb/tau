@@ -1,3 +1,21 @@
+# Single-task compaction pause fix — isolated source, not deployed
+
+`fix/tau2-compaction-pause` in `/root/tau2-compaction-pause` fixes the reproduced
+pause when a long task needs compaction but has only one retained user message.
+The daemon now uses complete assistant/tool-exchange boundaries without replaying
+tools; genuine failure/abort/recovery pauses remain. The header exposes failure
+reasons instead of hiding them behind Paused, with tap/click for the full detail.
+See `docs/tau2-single-task-compaction.md` for red/green proof and limits.
+
+Managed workspace/all-target, Windows MSVC and Android ARM64 checks pass; full
+workspace nextest **331/331**, zero skipped. **Not merged or deployed; live beta
+remains 0.7.9 / protocol 21**, while this integration-based branch is protocol 22.
+No package, restart, live Resume, production write or physical QA was performed.
+Preserve the unfinished simplification worktree (including its staged event
+changes) and the separate old remove-pause WIP. Prior release holds still apply.
+
+---
+
 # Local fuzzy picker — integrated source, not deployed
 
 At the user's request, `fix/tau2-fzf-picker` (`7963270`) was merged into

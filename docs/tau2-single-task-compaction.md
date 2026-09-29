@@ -1,6 +1,7 @@
 # Repeated pauses during a long single task
 
 Source fix on `fix/tau2-compaction-pause`, based on integration `33f7d6f`.
+Daemon fix: `302e25f`.
 This is independent of the unfinished simplification work and the older
 `tau2/qa-remove-pause` WIP. Those worktrees are unchanged.
 
@@ -57,6 +58,30 @@ Managed Cargo only; no Clippy or built-in Cargo test runner.
   replay and cold-context reconstruction. Boundary checks cover parallel calls,
   ambiguous legacy IDs, retention preference and insufficient history. Existing
   interrupted-stream, abort/resume, restore, crash and paid-effect tests survive.
+
+## Visible reasons, not a generic pause label
+
+The header now prioritizes a failed run over the queue's paused flag, displays
+its daemon error in red, and opens the full reason in the existing notice popup
+when the title/status is clicked or tapped. This read-only action cannot Resume,
+submit a prompt or repeat an external effect. Running states take precedence over
+held-queue state and expose details such as `Compacting context`. The sidebar
+also keeps Error/Working distinct from an idle paused queue.
+
+The shared desktop/phone interaction regression verifies opening the full reason
+and refusing a stale failure detail after the run starts again. No new event bus,
+dialog type, protocol field or cached status copy was introduced.
+
+Final combined validation:
+
+- Workspace/all-target compiler check: passed.
+- Full workspace nextest: **331/331**, zero skipped,
+  `65d4aa38-7d24-4e2d-b910-ad50351b2113` (103.409s).
+- Focused desktop/phone header interaction: 1/1,
+  `ed6057f8-3ac1-48ef-954b-9351480bef9f`.
+- Windows x64 MSVC (`cargo xwin check`) and Android ARM64/API-29 library compiler
+  checks: passed. Existing unrelated dead-code warnings remain; no lint rewrites.
+- `git diff --check`: passed. No physical Windows/Android acceptance claimed.
 
 No merge, deployment, service restart, client package or physical-device QA is
 part of this source fix. The running beta is unchanged until a separately
