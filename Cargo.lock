@@ -5304,6 +5304,7 @@ dependencies = [
  "ignore",
  "libc",
  "nucleo-matcher",
+ "serde_json",
  "similar",
  "tau-protocol",
  "tempfile",
@@ -5314,6 +5315,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "unicode-segmentation",
+ "zstd",
 ]
 
 [[package]]

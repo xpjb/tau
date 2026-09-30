@@ -24,6 +24,12 @@ tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-json = { version = "0.24", optional = true }
 
+[[example]]
+name = "index_size"
+required-features = ["filesystem"]
+
 [dev-dependencies]
+serde_json = "1"
+zstd = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
