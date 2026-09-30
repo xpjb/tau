@@ -8,14 +8,18 @@ it. There are no filesystem write/save, rename, delete or execute actions.
 ## Interaction
 
 - Tap a directory/file, use Up to browse parents, or use arrows/j/k and Enter.
-  Dot-prefixed files and directories are hidden by default. **Show hidden** toggles
-  them in both directory browsing and the picker; it does not disable ignore rules.
+  Dot-prefixed files and directories are hidden by default in browsing. **Show
+  hidden** exposes them in browsing and exposes indexed dotfiles in the picker;
+  it does not disable ignore rules or enable recursive search of dot-directories.
 - Ctrl+Space / Find opens a local fuzzy **file** picker over the chat's initial cwd.
   Nucleo supplies subsequence scoring, path/word-boundary ranking, smart case,
   accent normalization, independent whitespace-separated terms (in either order),
   and exact/prefix/suffix/negative terms. Matching characters are coloured. Names
-  include directory components, not file contents. **Here** narrows the picker to
-  the currently browsed folder (also useful for folders outside cwd).
+  include directory components, not file contents. Dot-prefixed directory
+  descendants are pruned at every depth, even with Show hidden enabled. **Here**
+  narrows the picker to the currently browsed folder (also useful outside cwd or
+  to explicitly search inside a hidden root, whose dot-directory descendants are
+  still pruned).
 - Up/Down, Ctrl-N/P, Ctrl-J/K, Tab/Shift-Tab, Page Up/Down and Ctrl-Home/End move the
   selection without editing the query. All matches are scrollable, not just 100.
   The count shows matches / eligible indexed files, with explicit indexing,
@@ -54,12 +58,14 @@ it. There are no filesystem write/save, rename, delete or execute actions.
   are shared by canonical root, not chat, and refreshed every ten seconds. They
   respect `.gitignore`/ignore rules, including when no repository is initialized.
   Explicit directory browsing still exposes ignored files. Symlink directories
-  are not recursively followed; Git's internal `.git` directory is skipped.
+  are not recursively followed; dot-directory descendants and `.git` entries are
+  skipped before descent, independently of ignore-file exceptions.
 - Up to four roots are indexed. Each scan is limited to 200,000 **files**, 24 MiB of
   conservatively estimated JSON records (within the 32 MiB response budget), or
-  15 seconds. Visible paths are scanned before hidden paths, so hidden caches
-  cannot consume the visible-file budget first. Unsupported paths/read failures
-  and scan limits mark the index partial. Ordinary directories use 256-entry pages.
+  15 seconds. One traversal includes ordinary files and dotfiles, but never scans
+  dot-directory subtrees; a hidden cache cannot consume the file/time budget.
+  Unsupported paths/read failures and scan limits mark the index partial.
+  Ordinary directories use 256-entry pages.
 - The client warms names for the foreground chat before the picker is opened.
   Index sync is independent of preview interests and query edits. An unchanged
   revision transfers no names; a known previous revision sends additions/removals,

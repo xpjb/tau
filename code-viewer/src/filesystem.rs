@@ -121,30 +121,28 @@ fn index_worker(shared: Arc<Shared>) {
         let Some(path) = path else { continue; };
         let mut items = vec![]; let mut bytes = 0; let mut limited = false;
         let started = Instant::now();
-        // Scan visible files first: a hidden cache must never crowd ordinary
-        // project files out of the bounded index. The second pass adds hidden
-        // names for an instant, client-local Show hidden toggle.
-        'scan: for hidden in [false, true] {
-            let walk = ignore::WalkBuilder::new(&path).hidden(!hidden).git_ignore(true).git_global(true).git_exclude(true)
-                .require_git(false).follow_links(false).filter_entry(|e| e.file_name() != ".git").build();
-            for found in walk {
-                if shared.stop.load(Ordering::Acquire) { return; }
-                if started.elapsed() > Duration::from_secs(15) { limited = true; break 'scan; }
-                let Ok(found) = found else { limited = true; continue; };
-                if found.depth() == 0 { continue; }
-                let Some(kind) = found.file_type() else { limited = true; continue; };
-                if !(kind.is_file() || kind.is_symlink()) { continue; }
-                if kind.is_symlink() && !fs::metadata(found.path()).is_ok_and(|m| m.is_file()) { continue; }
-                if wire_path(found.path()).is_err() { limited = true; continue; }
-                let Ok(relative) = found.path().strip_prefix(&path) else { limited = true; continue; };
-                let Ok(relative) = wire_path(relative) else { limited = true; continue; };
-                let item = IndexedPath { path: relative, symlink: kind.is_symlink() };
-                if item.hidden() != hidden { continue; }
-                // Count escaping and framing without allocating serialized names.
-                let size = item.wire_bytes();
-                if items.len() >= INDEX_PATHS || bytes + size > INDEX_BYTES { limited = true; break 'scan; }
-                bytes += size; items.push(item);
-            }
+        // Prune dot-directories before descending, not after collecting names.
+        // Dotfiles such as .env remain eligible for the local Show hidden toggle;
+        // explicit browsing/Here roots are independent of this recursive policy.
+        let walk = ignore::WalkBuilder::new(&path).hidden(false).git_ignore(true).git_global(true).git_exclude(true)
+            .require_git(false).follow_links(false).filter_entry(|e| e.depth() == 0 || (e.file_name() != ".git"
+                && !(e.file_type().is_some_and(|kind| kind.is_dir()) && e.file_name().as_encoded_bytes().starts_with(b".")))).build();
+        for found in walk {
+            if shared.stop.load(Ordering::Acquire) { return; }
+            if started.elapsed() > Duration::from_secs(15) { limited = true; break; }
+            let Ok(found) = found else { limited = true; continue; };
+            if found.depth() == 0 { continue; }
+            let Some(kind) = found.file_type() else { limited = true; continue; };
+            if !(kind.is_file() || kind.is_symlink()) { continue; }
+            if kind.is_symlink() && !fs::metadata(found.path()).is_ok_and(|m| m.is_file()) { continue; }
+            if wire_path(found.path()).is_err() { limited = true; continue; }
+            let Ok(relative) = found.path().strip_prefix(&path) else { limited = true; continue; };
+            let Ok(relative) = wire_path(relative) else { limited = true; continue; };
+            let item = IndexedPath { path: relative, symlink: kind.is_symlink() };
+            // Count escaping and framing without allocating serialized names.
+            let size = item.wire_bytes();
+            if items.len() >= INDEX_PATHS || bytes + size > INDEX_BYTES { limited = true; break; }
+            bytes += size; items.push(item);
         }
         let snapshot = snapshot(items, limited);
         let mut roots = shared.roots.lock().unwrap();
@@ -206,21 +204,39 @@ mod tests {
         assert!(matches!(index_reply("/work".into(), &second, None, Some("unknown".into()), false), FileReply::Index {base:None,..}));
     }
     #[tokio::test]
-    async fn name_sync_includes_all_matches_and_hidden_components_but_not_ignored_or_git_internals() {
+    async fn name_sync_prunes_dot_directories_but_keeps_dotfiles_and_explicit_browsing() {
         let root = tempfile::tempdir().unwrap(); let cwd = root.path().to_owned();
         for name in ["src", ".config", "src/.nested", ".git", "ignored"] { fs::create_dir_all(cwd.join(name)).unwrap(); }
         for i in 0..350 { fs::write(cwd.join(format!("src/file{i}.rs")), "").unwrap(); }
         for name in [".config/tool", "src/.nested/file.rs", "src/.dot", ".git/config", "ignored/file.rs"] { fs::write(cwd.join(name), "").unwrap(); }
-        fs::write(cwd.join(".gitignore"), "ignored/\n").unwrap();
+        // Ignore-file exceptions must not reopen dot-directory recursion.
+        fs::write(cwd.join(".gitignore"), "ignored/\n!.config/**\n!src/.nested/**\n").unwrap();
         let service = FileSystem::new(cwd.clone());
         let end = Instant::now() + Duration::from_secs(5);
         loop {
             let reply = service.request(cwd.clone(), request(None, FileOperation::Index { revision: None })).await.unwrap();
             if matches!(&reply, FileReply::Index { indexing:false,.. }) {
                 let index = crate::finder::PathIndex::apply(None, &reply).unwrap();
-                assert_eq!(index.visible, 350); assert_eq!(index.entries.len(), 354);
-                assert!(index.entries.iter().all(|p| !p.path.starts_with(".git/") && !p.path.starts_with("ignored/")));
+                assert_eq!(index.visible, 350); assert_eq!(index.entries.len(), 352);
+                assert!(index.entries.iter().all(|p| p.path != ".git" && !p.path.starts_with("ignored/")
+                    && p.path.split('/').rev().skip(1).all(|part| !part.starts_with('.'))));
+                assert!(index.entries.iter().any(|p| p.path == "src/.dot"));
+                assert!(matches!(&reply, FileReply::Index { limited: false, .. }));
                 break;
+            }
+            assert!(Instant::now()<end); tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let FileReply::Directory { entries, .. } = service.request(cwd.clone(), request(None, FileOperation::List { after: None })).await.unwrap() else { panic!() };
+        assert!(entries.iter().any(|e| e.name == ".config" && e.directory), "Dot-directories remain browsable");
+        assert!(matches!(service.request(cwd.clone(), request(Some(&cwd.join(".config/tool")), FileOperation::Open { revision: None })).await.unwrap(), FileReply::Text {..}));
+        // Here can explicitly opt into a hidden root; its own hidden descendants
+        // are still pruned. Ordinary Show hidden never changes index interests.
+        let hidden = cwd.join(".config");
+        fs::create_dir(hidden.join(".cache")).unwrap(); fs::write(hidden.join(".cache/noise"), "").unwrap();
+        loop {
+            let reply = service.request(cwd.clone(), request(Some(&hidden), FileOperation::Index { revision: None })).await.unwrap();
+            if let FileReply::Index { entries, indexing: false, limited: false, .. } = reply {
+                assert_eq!(entries.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["tool"]); break;
             }
             assert!(Instant::now()<end); tokio::time::sleep(Duration::from_millis(10)).await;
         }
