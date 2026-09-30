@@ -216,3 +216,21 @@ feature tip (`3a911f9ffbf6043d1e501010d7543b0728b6b7e5`). Prior compiler checks 
 25/25 focused nextest result are reused; no test or package rebuild was repeated.
 Only integration notes differ after the merge. No deployment or service restart;
 protocol 22 still requires a future matched daemon/client release.
+
+
+## Filename-index discovery — September 30, 2026 (UTC)
+
+Branch `fix/tau2-file-index`, based on `003de72`; source change `36dc9c8` prunes
+recursive dot-directories while preserving dotfiles and explicit browsing/Here
+roots. A read-only development-tree audit went from 200,000 entries / partial to
+93,946 / complete eligible coverage, retaining the same visible files. Initial
+compressed filename payload is 0.73 MiB; the client names/records heap lower bound
+is 10.02 MiB. These are one host's measurements, not a universal drive-size or
+network-throughput guarantee.
+
+[Full size/sync discovery and bounded follow-ups](file-name-index.md) records the
+limits, memory-only caching, periodic rescans and validation. Focused nextest
+passed 21/21, including a real-native, wake-driven picker repaint regression.
+No filename-specific missed repaint was reproduced; the separately owned Windows
+socket/loading diagnosis remains open. This branch is pushed but not merged or
+deployed; no production services, packages or transport code were changed.
