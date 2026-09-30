@@ -129,6 +129,34 @@ fn viewport_limits_body_interests_and_copy_waits_for_sealed_content() {
 }
 
 #[test]
+fn viewport_body_admission_advances_past_cached_rows_and_closed_tools() {
+    for closed_tools in [false, true] {
+        let mut f = Fixture::new();
+        let visible = (0..60).map(|n| format!("row-{n:03}")).collect::<BTreeSet<_>>();
+        for (n, id) in visible.iter().enumerate() {
+            let tool = closed_tools && n >= 30;
+            f.put(id, None, n as u64, if tool { BlockKind::Tool } else { BlockKind::Text },
+                event(id, n as u64, if tool { "tool" } else { "text" }), if tool { b"" } else { b"body" });
+        }
+        f.page(None, None);
+        while let Some(before) = f.cache.history_cursor("chat").unwrap() { f.page(None, Some(before)); }
+        let mut fetched = BTreeSet::new();
+        for _ in 0..3 {
+            let plan = f.cache.plan_visible("chat", &LocalChat::default(), &[], Some(&visible)).unwrap();
+            let missing = plan.blocks.iter().filter(|(id, head)| id != QUEUE
+                && head.is_none_or(|(_, length, _, stored)| stored < length)).map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            assert!(missing.len() <= 30, "The active body cohort remains bounded");
+            for id in missing { fetched.insert(id.clone()); f.body(&id); }
+        }
+        let expected = if closed_tools { 30 } else { 60 };
+        assert_eq!(fetched.len(), expected, "Already cached rows and closed tools must not strand visible loading rows");
+        for id in visible.iter().take(expected) {
+            assert_eq!(f.cache.snapshot("chat").unwrap().unwrap().events.iter().find(|e| &e.id == id).unwrap().text, "body");
+        }
+    }
+}
+
+#[test]
 fn copy_interest_advances_in_bounded_cohorts_instead_of_starving_after_thirty_cards() {
     let mut f=Fixture::new();let ids=(0..100).map(|n|format!("thinking-{n}")).collect::<Vec<_>>();
     for (n,id) in ids.iter().enumerate() {f.put(id,None,n as u64,BlockKind::Thinking,event(id,n as u64,"thinking"),b"thought");}

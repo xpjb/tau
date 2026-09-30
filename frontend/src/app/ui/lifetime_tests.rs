@@ -81,6 +81,39 @@ fn retained_messages_keep_identity_on_streaming_and_prepend_but_not_source_repla
 }
 
 #[test]
+fn viewport_disk_hydration_schedules_a_redraw_without_network_or_input() {
+    for mobile in [false, true] {
+        let mut h = Harness::new(mobile);
+        let template = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
+        let events = (0..80).map(|order| {
+            let mut e = template.clone();
+            e.id = format!("cached-{order:03}"); e.entry_id = e.id.clone(); e.order = order;
+            e.text = format!("Cached message {order}"); e.attachment = None;
+            e.kind = tau_protocol::EventKind::Text;
+            e.role = tau_protocol::EventRole::Assistant;
+            e.origin = Default::default();
+            e
+        }).collect();
+        h.app.controller.preview("demo", events, Default::default(), None).unwrap();
+        // Reopen the committed replica through the production cold-view path,
+        // rather than the offline fixture's all-resident seed projection.
+        h.app.controller.chats.get_mut("demo").unwrap().feed = crate::feed::Feed::default();
+        h.app.controller.ensure_chat("demo").unwrap();
+        h.app.controller.chats.get_mut("demo").unwrap().local.position = crate::store::Position {
+            follow: false, key: Some("demo/cached-010".into()), offset: 0.,
+        };
+        h.app.root.workspace.chat.transcript = transcript::Transcript::new();
+        assert!(h.app.controller.chats["demo"].feed.bodies["cached-010"].missing());
+        h.frame(); // Paint the placeholder, then resolve its viewport from disk.
+        assert_eq!(h.app.controller.chats["demo"].feed.event("cached-010").unwrap().text, "Cached message 10", "interests={:?}, position={:?}, scroll={}/{}", h.app.root.workspace.chat.transcript.interests, h.app.controller.chats["demo"].local.position.key, h.app.root.workspace.chat.transcript.scroll.value, h.app.root.workspace.chat.transcript.scroll.max);
+        assert!(h.app.tick(0.), "A paint-time cache projection must schedule the frame that replaces Loading");
+        h.app.frame(&h.ctx, h.ctx.view());
+        assert_eq!(h.app.services.renderer.messages["demo/cached-010"].source, "Cached message 10");
+        assert!(!h.app.tick(0.), "A settled viewport must not introduce a redraw loop");
+    }
+}
+
+#[test]
 fn hidden_transcript_cannot_receive_release_or_context_before_another_frame() {
     let mut h = Harness::new(false);
     h.frame();
