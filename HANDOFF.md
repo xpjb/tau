@@ -1,3 +1,27 @@
+# Block loading QA — source fixes, not deployed
+
+Branch/worktree: `fix/tau2-block-loading-stability`,
+`/root/tau2-block-loading-stability`, based on `origin/tau2` at `003de72`.
+Implementation `203c9eb` and failing-before regressions `5dd4cc0` are pushed.
+No merge into integration/stable, release/version/schema/protocol change, packages,
+service restart or live-data change. See [the diagnosis and validation](docs/block-loading-stability.md).
+
+Two reproduced shared-client causes are corrected: cached/closed rows repeatedly
+occupying all thirty fetch-root admissions, and paint-time viewport disk hydration
+not requesting a repaint. Missing cohorts now advance; on-demand reflow keeps the
+same reading anchor and settles without an idle redraw loop. Explicit Copy,
+disclosure, preview/cache bounds and native stream-class reservations remain.
+
+72 focused nextest checks passed, plus both native-link cases after adding an
+8-second UDP-only outage. The Windows MSVC frontend-library check passed. The
+user's Windows-only observation is provisional, not physical-device acceptance.
+Native blocks resumed correctly but took up to about 8.5 seconds to start advancing
+while WebSocket control stayed healthy. No transport retry/timeout change is made;
+backlog 014 remains open, including the original per-file gap and Windows diagnosis.
+Use managed Cargo/nextest only; Clippy and Cargo's built-in runner remain banned.
+
+---
+
 # Simplification and single-task compaction — integrated source, not deployed
 
 At the user's request, practical closeout is merged into `tau2-integration`,

@@ -2,14 +2,14 @@
 //! Real TCP/QUIC on private loopback aliases. No host qdisc, routes, services,
 //! external provider or relay is touched. TCP bytes and UDP datagrams share a
 //! delayed, bandwidth-limited FIFO in each direction; UDP also loses packets.
-use std::{net::SocketAddr,sync::{Arc,atomic::{AtomicU64,Ordering}},time::{Duration,Instant}};
+use std::{net::SocketAddr,sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,Instant}};
 use tokio::{io::{AsyncReadExt,AsyncWriteExt},net::{TcpListener,TcpStream,UdpSocket},sync::Mutex};
 use tau_frontend::{controller::Controller,store::{Settings,Store}};
 use tau_protocol::*;
 
-struct Link {next:[Mutex<tokio::time::Instant>;2],udp:AtomicU64,dropped:AtomicU64,udp_bytes:AtomicU64}
+struct Link {next:[Mutex<tokio::time::Instant>;2],udp:AtomicU64,dropped:AtomicU64,udp_bytes:AtomicU64,blackhole:AtomicBool,blackholed:AtomicU64}
 impl Link {
-    fn new()->Arc<Self> {Arc::new(Self {next:[Mutex::new(tokio::time::Instant::now()),Mutex::new(tokio::time::Instant::now())],udp:AtomicU64::new(0),dropped:AtomicU64::new(0),udp_bytes:AtomicU64::new(0)})}
+    fn new()->Arc<Self> {Arc::new(Self {next:[Mutex::new(tokio::time::Instant::now()),Mutex::new(tokio::time::Instant::now())],udp:AtomicU64::new(0),dropped:AtomicU64::new(0),udp_bytes:AtomicU64::new(0),blackhole:AtomicBool::new(false),blackholed:AtomicU64::new(0)})}
     async fn wait(&self,direction:usize,bytes:usize) {
         let at={let mut next=self.next[direction].lock().await;
             *next=(*next).max(tokio::time::Instant::now()+Duration::from_millis(35))+Duration::from_secs_f64(bytes as f64/(64.*1024.));*next};
@@ -48,9 +48,12 @@ impl Proxy {
                     let (n,from)=received.unwrap();let direction=usize::from(from==udp);
                     let target=if direction==1 {let Some(client)=client else {continue;};client} else {client=Some(from);udp};
                     let serial=link.udp.fetch_add(1,Ordering::Relaxed)+1;
+                    if link.blackhole.load(Ordering::Relaxed) {link.blackholed.fetch_add(1,Ordering::Relaxed);continue;}
                     if serial%23==0 || packets.len()>=512 {link.dropped.fetch_add(1,Ordering::Relaxed);continue;}
                     let bytes=buf[..n].to_vec();let socket=socket.clone();let link=link.clone();
-                    packets.spawn(async move {link.wait(direction,n).await;if socket.send_to(&bytes,target).await.is_ok() {link.udp_bytes.fetch_add(n as u64,Ordering::Relaxed);}});
+                    packets.spawn(async move {link.wait(direction,n).await;
+                        if link.blackhole.load(Ordering::Relaxed) {link.blackholed.fetch_add(1,Ordering::Relaxed);return;}
+                        if socket.send_to(&bytes,target).await.is_ok() {link.udp_bytes.fetch_add(n as u64,Ordering::Relaxed);}});
                 }
                 _=packets.join_next(),if !packets.is_empty()=>{}
             }}
@@ -140,3 +143,6 @@ async fn native_loss_delay_bandwidth_upload_cancel_resume_and_two_client_control
     eprintln!("native-link: receipt={acceptance:?}, dropped={}, shaped UDP={} bytes\nA: {}\nB: {}",link.dropped.load(Ordering::Relaxed),link.udp_bytes.load(Ordering::Relaxed),a.diagnostics(),b.diagnostics());
     drop(a);drop(b);drop(pa);drop(pb);daemon.abort();provider.abort();let _=daemon.await;let _=provider.await;
 }
+
+#[path = "support/block_outage.rs"]
+mod block_outage;

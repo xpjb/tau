@@ -62,3 +62,25 @@ centralized rewrite or that identical control/data timeouts would fix the issue.
   needless reconnects, re-download verified prefixes or replay durable controls.
 - Add a targeted regression for the identified cause and retain seeded pressure
   coverage. Do not close this item based only on a successful same-seed rerun.
+
+
+## Block-loading QA follow-up — shared client fixes, native gap still open
+
+The user raised this item again while reporting Windows transcript blocks stuck
+on Loading and intermittent reflow. [The bounded QA fix](../docs/block-loading-stability.md)
+reproduces and fixes fetch-cohort starvation and missing repaint after disk
+hydration; neither is a proven data-socket deadlock.
+
+A new production-controller/QUIC/replica case drops UDP for eight seconds while
+read-only WebSocket control remains healthy. Foreground and background transcript
+bodies both resume their verified suffix and complete exactly. Observed first
+progress varied from about 2 seconds to about 8.5 seconds after restoration.
+The per-body guard remains fifteen seconds; no application retry/timeout setting
+was changed, and healthy connections were not forcibly replaced.
+
+This is Linux loopback evidence for transcript bodies, **not** reproduction or
+closure of the original seed-73 per-file gap or physical Windows acceptance.
+The reported Windows-only pattern may be sample/viewport-related or a separate
+native issue. Capture a failing run's wait boundary before selecting that fix.
+Aggregate Copy connection diagnostics alone cannot identify a particular stuck
+block's receive/credit or commit phase. This item stays open.
