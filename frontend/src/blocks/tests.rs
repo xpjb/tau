@@ -130,28 +130,42 @@ fn viewport_limits_body_interests_and_copy_waits_for_sealed_content() {
 
 #[test]
 fn viewport_body_admission_advances_past_cached_rows_and_closed_tools() {
-    for closed_tools in [false, true] {
+    for mode in ["text", "closed tools", "open tools"] {
         let mut f = Fixture::new();
         let visible = (0..60).map(|n| format!("row-{n:03}")).collect::<BTreeSet<_>>();
+        let mut local = LocalChat::default();
         for (n, id) in visible.iter().enumerate() {
-            let tool = closed_tools && n >= 30;
+            let tool = mode != "text" && n >= 30;
             f.put(id, None, n as u64, if tool { BlockKind::Tool } else { BlockKind::Text },
                 event(id, n as u64, if tool { "tool" } else { "text" }), if tool { b"" } else { b"body" });
+            if tool {
+                f.put(&tool_input_id(id), Some(id), 0, BlockKind::Code, json!({"inputFor":id}), b"body");
+                let result = format!("{id}/result");
+                let mut meta = event(&result, 60+n as u64, "text"); meta["event"]["role"] = json!("tool");
+                f.put(&result, Some(id), 1, BlockKind::Code, meta, b"result");
+                if mode == "open tools" { local.expansion.insert(format!("tool:{id}"), true); }
+            }
         }
         f.page(None, None);
         while let Some(before) = f.cache.history_cursor("chat").unwrap() { f.page(None, Some(before)); }
+        for id in visible.iter().skip(30) { if mode != "text" { f.page(Some(id), None); } }
         let mut fetched = BTreeSet::new();
         for _ in 0..3 {
-            let plan = f.cache.plan_visible("chat", &LocalChat::default(), &[], Some(&visible)).unwrap();
+            let plan = f.cache.plan_visible("chat", &local, &[], Some(&visible)).unwrap();
             let missing = plan.blocks.iter().filter(|(id, head)| id != QUEUE
                 && head.is_none_or(|(_, length, _, stored)| stored < length)).map(|(id, _)| id.clone()).collect::<Vec<_>>();
-            assert!(missing.len() <= 30, "The active body cohort remains bounded");
+            let groups = missing.iter().map(|id| tau_blocks::header(&f.source,"chat",id).unwrap().unwrap().parent.unwrap_or(id.clone())).collect::<BTreeSet<_>>();
+            assert!(groups.len() <= 30, "The active root cohort remains bounded");
             for id in missing { fetched.insert(id.clone()); f.body(&id); }
         }
-        let expected = if closed_tools { 30 } else { 60 };
-        assert_eq!(fetched.len(), expected, "Already cached rows and closed tools must not strand visible loading rows");
-        for id in visible.iter().take(expected) {
-            assert_eq!(f.cache.snapshot("chat").unwrap().unwrap().events.iter().find(|e| &e.id == id).unwrap().text, "body");
+        let expected = match mode { "closed tools" => 30, "open tools" => 90, _ => 60 };
+        assert_eq!(fetched.len(), expected, "Cached rows and tool disclosures must not strand visible loading rows: {mode}");
+        let view = f.cache.snapshot("chat").unwrap().unwrap();
+        for id in visible.iter().take(if mode == "closed tools" { 30 } else { 60 }) {
+            assert_eq!(view.events.iter().find(|e| &e.id == id).unwrap().text, "body");
+        }
+        if mode == "closed tools" {
+            assert!(fetched.iter().all(|id| !id.contains('/')), "Closed tools still cannot fetch child bytes");
         }
     }
 }

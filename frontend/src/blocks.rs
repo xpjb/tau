@@ -447,19 +447,29 @@ impl Cache {
         // renderer owns interests, only viewport + two-screen overscan is read.
         let window=viewport.cloned().unwrap_or_else(||roots.iter().rev().filter(|h|h.id!=QUEUE).take(32).map(|h|h.id.clone()).collect());
         let pending_copy=copy.iter().filter(|id|!copy_complete(&db,scope,std::slice::from_ref(*id)).unwrap_or(false)).cloned().collect::<BTreeSet<_>>();
-        let mut roots=roots;
-        roots.sort_by_key(|h|(!pending_copy.contains(&h.id),std::cmp::Reverse(h.order)));
-        let mut admitted=0;
+        let metadata_body = |h: &BlockHeader, selected: bool| -> Result<Option<String>> {
+            if (selected || copy.contains(&h.id)
+                || window.contains(&h.id) && h.meta.pointer("/event/attachment").is_some_and(|v|v.is_object()))
+                && let Some(reference)=h.meta.get("fullEvent")
+                && (copy.contains(&h.id) || h.parent.as_ref().is_some_and(|id|copy.contains(id)) || metadata_length(&db,scope,reference)?.unwrap_or(0)<=256*1024) {
+                return Ok(reference["id"].as_str().map(str::to_owned));
+            }
+            Ok(None)
+        };
+        let mut demands = Vec::new();
         for h in roots {
             if h.id == QUEUE { continue; }
             if !pending_copy.contains(&h.id) && (!window.contains(&h.id) || copy.contains(&h.id)) {continue;}
-            if admitted>=30 {continue;}admitted+=1;
+            let mut required = BTreeSet::new();
+            let mut parent = None;
+            let mut members = vec![h.clone()];
             if h.kind == BlockKind::Tool {
                 let call=h.parent.as_deref().unwrap_or(&h.id);
                 let key = format!("tool:{call}");
                 if copy.contains(&h.id) || visible.contains(&h.id) && local.expansion.get(&key).copied().unwrap_or(false) {
-                    parents.insert(Some(h.id.clone()));
+                    parent = Some(h.id.clone());
                     let children = tau_blocks::children(&db,scope,Some(&h.id))?;
+                    members.extend(children.iter().cloned());
                     let error = h.meta.pointer("/event/isError").and_then(|v|v.as_bool()) == Some(true)
                         || children.iter().filter(|c|c.meta.get("event").is_some()).next_back()
                             .is_some_and(|c|c.meta.pointer("/event/isError").and_then(|v|v.as_bool()) == Some(true));
@@ -471,7 +481,7 @@ impl Cache {
                         // aggregate size govern every member, including mixed success/error results.
                         let (section,length) = if body == ToolBody::Input {(body,child.length)} else {(output,output_length)};
                         if copy.contains(&h.id) || length <= 1200 || local.expansion.get(&format!("{key}:{}",section.label())).copied().unwrap_or(false) {
-                            blocks.insert(child.id);
+                            required.insert(child.id);
                         }
                     }
                 }
@@ -481,20 +491,40 @@ impl Cache {
                     let key = format!("tool:{call}");
                     let label = body.label();
                     if copy.contains(&h.id) || visible.contains(&h.id) && local.expansion.get(&key).copied().unwrap_or(false)
-                        && (h.length <= 1200 || local.expansion.get(&format!("{key}:{label}")).copied().unwrap_or(false)) {blocks.insert(h.id);}
+                        && (h.length <= 1200 || local.expansion.get(&format!("{key}:{label}")).copied().unwrap_or(false)) {required.insert(h.id.clone());}
                 } else if h.meta.pointer("/event/role").and_then(|v|v.as_str()) != Some("tool")
-                    && (copy.contains(&h.id) || h.kind != BlockKind::Thinking || visible.contains(&h.id)) {blocks.insert(h.id);}
+                    && (copy.contains(&h.id) || h.kind != BlockKind::Thinking || visible.contains(&h.id)) {required.insert(h.id.clone());}
             }
+            for member in &members {
+                if let Some(id) = metadata_body(member, required.contains(&member.id) || parent.as_ref() == Some(&member.id))? {
+                    required.insert(id);
+                }
+            }
+            // Closed tools have no demand. Cached bodies must not repeatedly
+            // win the same thirty slots while other viewport rows never start.
+            if required.is_empty() && parent.is_none() { continue; }
+            let mut pending = if let Some(parent) = &parent {
+                tau_blocks::cached_feed(&db,scope,Some(parent))?.is_none_or(|page| page.before.is_some() || page.cursor.sequence < h.revision)
+            } else { false };
+            for id in &required {
+                pending |= match tau_blocks::header(&db,scope,id)? {
+                    None => true,
+                    Some(head) => tau_blocks::cache_budget::stored_bytes(&db,scope,id)? <
+                        if copy.contains(&h.id) { head.length } else { head.length.min(256*1024) },
+                };
+            }
+            demands.push(((!pending_copy.contains(&h.id), !pending, std::cmp::Reverse(h.order)), parent, required));
+        }
+        demands.sort_by_key(|(priority,_,_)| *priority);
+        for (_,parent,required) in demands.into_iter().take(30) {
+            if let Some(parent) = parent { parents.insert(Some(parent)); }
+            blocks.extend(required);
         }
         for h in tau_blocks::children(&db,scope,Some(QUEUE))? { blocks.insert(h.id); }
         // Full captions/errors/names are explicit metadata-body interests too.
         // Closed tool cards still cause no child or body requests.
         for h in &metadata {
-            if (blocks.contains(&h.id) || parents.contains(&Some(h.id.clone())) || copy.contains(&h.id)
-                || window.contains(&h.id) && h.meta.pointer("/event/attachment").is_some_and(|v|v.is_object()))
-                && let Some(reference)=h.meta.get("fullEvent")
-                && (copy.contains(&h.id) || h.parent.as_ref().is_some_and(|id|copy.contains(id)) || metadata_length(&db,scope,reference)?.unwrap_or(0)<=256*1024)
-                && let Some(id)=reference["id"].as_str() {blocks.insert(id.into());}
+            if let Some(id) = metadata_body(h, blocks.contains(&h.id) || parents.contains(&Some(h.id.clone())))? { blocks.insert(id); }
         }
         // Bound the active body working set independently of watcher count.
         // Downloads (two <=50 MB files) and two <=64 MiB descriptors have room

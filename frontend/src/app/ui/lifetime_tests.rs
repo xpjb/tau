@@ -89,6 +89,7 @@ fn viewport_disk_hydration_schedules_a_redraw_without_network_or_input() {
             let mut e = template.clone();
             e.id = format!("cached-{order:03}"); e.entry_id = e.id.clone(); e.order = order;
             e.text = format!("Cached message {order}"); e.attachment = None;
+            if order < 50 && order != 10 { e.text.push_str(&"\n\nA taller cached paragraph.".repeat(4)); }
             e.kind = tau_protocol::EventKind::Text;
             e.role = tau_protocol::EventRole::Assistant;
             e.origin = Default::default();
@@ -105,11 +106,22 @@ fn viewport_disk_hydration_schedules_a_redraw_without_network_or_input() {
         h.app.root.workspace.chat.transcript = transcript::Transcript::new();
         assert!(h.app.controller.chats["demo"].feed.bodies["cached-010"].missing());
         h.frame(); // Paint the placeholder, then resolve its viewport from disk.
-        assert_eq!(h.app.controller.chats["demo"].feed.event("cached-010").unwrap().text, "Cached message 10", "interests={:?}, position={:?}, scroll={}/{}", h.app.root.workspace.chat.transcript.interests, h.app.controller.chats["demo"].local.position.key, h.app.root.workspace.chat.transcript.scroll.value, h.app.root.workspace.chat.transcript.scroll.max);
+        assert_eq!(h.app.controller.chats["demo"].feed.event("cached-010").unwrap().text, "Cached message 10");
         assert!(h.app.tick(0.), "A paint-time cache projection must schedule the frame that replaces Loading");
         h.app.frame(&h.ctx, h.ctx.view());
         assert_eq!(h.app.services.renderer.messages["demo/cached-010"].source, "Cached message 10");
-        assert!(!h.app.tick(0.), "A settled viewport must not introduce a redraw loop");
+        let mut frames = 1;
+        loop {
+            let transcript = &h.app.root.workspace.chat.transcript;
+            let anchor = transcript.placed.iter().find(|p| p.key == "demo/cached-010").unwrap();
+            assert!((anchor.top - transcript.scroll.value).abs() < 0.1, "Cached height changes must keep the same reading anchor");
+            assert_eq!(h.app.controller.chats["demo"].local.position.key.as_deref(), Some("demo/cached-010"));
+            assert!(!h.app.controller.chats["demo"].local.position.follow);
+            if !h.app.tick(0.) { break; }
+            frames += 1;
+            assert!(frames <= 4, "A settled viewport must not introduce a redraw loop");
+            h.app.frame(&h.ctx, h.ctx.view());
+        }
     }
 }
 
