@@ -320,6 +320,79 @@ fn selection_follows_scrolled_text_and_tail_returns_to_latest() {
 }
 
 #[test]
+fn idle_wheel_undocks_tail_and_animates_without_unrelated_wakes() {
+    use std::time::Duration;
+    for scale in [1., 2.5] {
+        let mut h = Harness::new(false);
+        h.app.resize(h.ctx.size(), scale, Vec2::new(0., 0.));
+        let mut event = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
+        event.role = tau_protocol::EventRole::Assistant;
+        event.phase = tau_protocol::EventPhase::Live;
+        event.text = (0..80).map(|i| format!("Scrolling paragraph {i}.\n\n")).collect();
+        event.attachment = None;
+        h.app.controller.preview("demo", vec![event.clone()], Default::default(), None).unwrap();
+        h.frame();
+        let point = center(h.app.root.workspace.chat.transcript.scroll.rect);
+        h.app.hover(Some(point));
+        h.frame();
+        assert!(!h.app.tick(0.), "The viewport must really be idle before wheel input");
+        assert!(!h.app.needs_redraw());
+        let bottom = h.app.root.workspace.chat.transcript.scroll.max;
+        assert!(bottom > h.app.root.workspace.chat.transcript.scroll.rect.height);
+        assert_eq!(h.app.root.workspace.chat.transcript.scroll.value, bottom);
+        assert!(h.app.controller.chats["demo"].local.position.follow);
+        let before = h.ctx.read_rgba8().unwrap();
+        let measured = h.app.services.renderer.message_measurements;
+
+        h.app.wheel(-48. * scale, false, point);
+        assert!(h.app.needs_redraw(), "OnDemand must schedule the first wheel frame, not wait for network/hover/timer activity");
+        assert!(!h.app.controller.chats["demo"].local.position.follow, "Wheel input must undock before any live reflow");
+        h.app.wheel(-48. * scale, false, point);
+        let target = bottom - 96. * scale;
+        assert_eq!(h.app.root.workspace.chat.transcript.scroll.wheel.unwrap().0, target, "Wheel bursts still accumulate");
+        h.app.root.workspace.chat.transcript.scroll.wheel.as_mut().unwrap().1 -= Duration::from_millis(16);
+        assert!(h.app.tick(1. / 60.));
+        let first = h.app.root.workspace.chat.transcript.scroll.value;
+        assert!(target < first && first < bottom, "The first scheduled frame must advance the existing easing filter");
+        h.app.frame(&h.ctx, h.ctx.view());
+        assert!((h.app.root.workspace.chat.transcript.scroll.value - first).abs() < 0.1, "Placement must not snap back to the tail");
+        assert_ne!(before, h.ctx.read_rgba8().unwrap(), "The first frame must visibly scroll");
+        assert_eq!(h.app.services.renderer.message_measurements, measured, "Scrolling must reuse measured text");
+
+        event.text.push_str("A newly streamed paragraph.\n\n");
+        h.app.controller.preview("demo", vec![event], Default::default(), None).unwrap();
+        h.app.frame(&h.ctx, h.ctx.view());
+        assert!(h.app.root.workspace.chat.transcript.scroll.max > bottom);
+        assert!((h.app.root.workspace.chat.transcript.scroll.value - first).abs() < 0.1, "Live reflow must retain the reading anchor");
+        assert!((h.app.root.workspace.chat.transcript.scroll.wheel.unwrap().0 - target).abs() < 0.1);
+        for _ in 0..12 {
+            if let Some((_, last)) = &mut h.app.root.workspace.chat.transcript.scroll.wheel {
+                *last -= Duration::from_millis(100);
+            }
+            if h.app.tick(0.1) { h.app.frame(&h.ctx, h.ctx.view()); }
+        }
+        assert!(h.app.root.workspace.chat.transcript.scroll.wheel.is_none());
+        assert!((h.app.root.workspace.chat.transcript.scroll.value - target).abs() < 0.1);
+        assert!(!h.app.controller.chats["demo"].local.position.follow);
+        assert!(!h.app.tick(0.), "Settled scrollback must return to on-demand idle");
+
+        h.app.wheel(h.app.root.workspace.chat.transcript.scroll.max, false, point);
+        assert!(h.app.needs_redraw(), "Wheel input from idle scrollback must wake too");
+        for _ in 0..16 {
+            if let Some((_, last)) = &mut h.app.root.workspace.chat.transcript.scroll.wheel {
+                *last -= Duration::from_millis(100);
+            }
+            if h.app.tick(0.1) { h.app.frame(&h.ctx, h.ctx.view()); }
+        }
+        let scroll = &h.app.root.workspace.chat.transcript.scroll;
+        assert!(scroll.wheel.is_none());
+        assert_eq!(scroll.value, scroll.max);
+        assert!(h.app.controller.chats["demo"].local.position.follow, "Settling at the bottom must restore tail-follow");
+        assert!(!h.app.tick(0.), "Tail-follow must not acquire a perpetual redraw loop");
+    }
+}
+
+#[test]
 fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
     let mut h = Harness::new(false);
     let chat = h.app.controller.chats.get_mut("demo").unwrap();

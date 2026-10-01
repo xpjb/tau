@@ -219,6 +219,9 @@ impl ScrollState {
                 self.drag = None;
                 let target = self.wheel.map_or(self.value, |(t, _)| t);
                 self.wheel = Some(((target + amount).clamp(0., self.max), Instant::now()));
+                // OnDemand needs a first frame before update() can move value
+                // and keep the easing animation's redraw chain alive.
+                cx.ui.dirty = true;
                 handled = true;
             }
 
