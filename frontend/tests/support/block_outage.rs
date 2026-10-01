@@ -68,15 +68,15 @@ fn cached(c: &Controller, scope: &str) -> Vec<u8> {
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn native_blocks_resume_after_udp_outage_while_websocket_stays_healthy() {
-    outage(Duration::from_secs(8), Duration::from_secs(5)).await;
+    outage(Duration::from_secs(8), Duration::from_secs(5), true).await;
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn native_blocks_reacquire_promptly_after_extended_udp_outage() {
-    outage(Duration::from_secs(17), Duration::from_secs(5)).await;
+    outage(Duration::from_secs(17), Duration::from_secs(5), true).await;
 }
 
-async fn outage(duration: Duration, progress_budget: Duration) {
+async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) {
     native_trace::init(); native_trace::event("fixture start");
     let db = Connection::open_in_memory().unwrap(); tau_blocks::initialize(&db).unwrap();
     let lineage = tau_blocks::cursor(&db).unwrap().lineage;
@@ -91,6 +91,22 @@ async fn outage(duration: Duration, progress_budget: Duration) {
         ] {
             tau_blocks::put(&tx,scope,BlockHeader { id:id.into(), parent:None, order, kind, meta, version:0, length:0, sealed, revision:0 },&bytes).unwrap();
         }
+    }
+    // A sealed file remains immutable through the outage. Its original
+    // download must survive reconnection, not require another user click.
+    let mut file = vec![0u8;128*1024];
+    blake3::Hasher::new().update(b"native outage file").finalize_xof().fill(&mut file);
+    if downloads {
+        use sha2::Digest;
+        let e = Event { id: "file-card".into(), entry_id: "outage-file".into(), order: 1, phase: EventPhase::Saved, origin: Origin::default(),
+            role: EventRole::Assistant, kind: EventKind::Text, text: String::new(), timestamp: None, timestamp_ms: None,
+            tool_call_id: None, tool_name: None, stop_reason: None, error_message: None, is_error: false,
+            attachment:Some(ChatAttachment { source_path:None, kind:AttachmentKind::File, file_name:"outage.bin".into(), caption:None, size:Some(file.len() as u64) }) };
+        tau_blocks::put(&tx,"foreground",BlockHeader { id:e.id.clone(), parent:None, order:1, kind:BlockKind::Text,
+            meta:serde_json::json!({"event":e}), version:0, length:0, sealed:true, revision:0 },b"").unwrap();
+        tau_blocks::put(&tx,"foreground",BlockHeader { id:"file:outage-file".into(), parent:Some("file-card".into()), order:0,
+            kind:BlockKind::File, meta:serde_json::json!({"sha256":format!("{:x}",sha2::Sha256::digest(&file))}),
+            version:0, length:0, sealed:true, revision:0 },&file).unwrap();
     }
     tx.commit().unwrap();
     let source = Arc::new(Source { db: Arc::new(std::sync::Mutex::new(db)), changed: watch::channel(0).0, reads: Default::default() });
@@ -113,6 +129,16 @@ async fn outage(duration: Duration, progress_budget: Duration) {
         c.select("foreground").unwrap();
         loop { c.poll(); if ["foreground","background"].iter().all(|s| cached(&c,s)==b"verified prefix") { break; } tokio::time::sleep(Duration::from_millis(10)).await; }
     }).await.unwrap();
+    let download_key=Controller::download_key("foreground","outage-file");
+    let download = if downloads {
+        let path=c.download("foreground","outage-file",MAX_UPLOAD_BYTES as u64).unwrap();
+        tokio::time::timeout(Duration::from_secs(10),async {
+            loop { c.poll(); if c.downloads[&download_key].status.transferred>=BLOCK_CHUNK_BYTES as u64 { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        assert!(!c.downloads[&download_key].status.done);
+        Some(path)
+    } else { None };
     let epoch = c.epoch; let ping_count = pings.load(Ordering::Relaxed);
     native_trace::event("OUTAGE BEGINS"); link.blackhole.store(true,Ordering::Relaxed);
     let suffix = (0..500).map(|n| format!("{}\n",blake3::hash(format!("outage-{n}").as_bytes()).to_hex())).collect::<String>();
@@ -130,8 +156,11 @@ async fn outage(duration: Duration, progress_budget: Duration) {
     assert!(pings.load(Ordering::Relaxed)>ping_count && c.health.latest().is_some(),"Actual WebSocket ping/pong continues during a UDP-only outage");
     assert!(link.blackholed.load(Ordering::Relaxed)>0);
     for scope in ["foreground","background"] { assert_eq!(cached(&c,scope),b"verified prefix"); }
+    if downloads { assert!(!c.downloads[&download_key].status.done,
+        "An interrupted read must wait/resume, not become a failed download: {:?}",c.downloads[&download_key].status.failure); }
+    let file_prefix=c.downloads.get(&download_key).map_or(0,|d|d.status.transferred);
     let restored = Instant::now(); native_trace::event("LINK RESTORED"); link.blackhole.store(false,Ordering::Relaxed);
-    let expected = format!("verified prefix{suffix}").into_bytes(); let mut progress = [None,None];
+    let expected = format!("verified prefix{suffix}").into_bytes(); let mut progress = [None,None]; let mut file_progress=None;
     loop {
         c.poll();
         for (index,scope) in ["foreground","background"].iter().enumerate() {
@@ -142,11 +171,19 @@ async fn outage(duration: Duration, progress_budget: Duration) {
             assert!(progress[index].is_some() || restored.elapsed()<progress_budget,
                 "{scope} made no per-body progress within {progress_budget:?} after UDP recovery; reads={:?}; {}",source.reads.lock().unwrap(),c.diagnostics());
         }
+        if downloads {
+            let d=&c.downloads[&download_key].status;
+            assert!(d.failure.is_none(),"File recovery failed: {:?}",d.failure);
+            if d.transferred>file_prefix {file_progress.get_or_insert(restored.elapsed());}
+            assert!(file_progress.is_some() || restored.elapsed()<progress_budget,"File did not resume within {progress_budget:?}");
+        }
         if ["foreground","background"].iter().all(|s| cached(&c,s)==expected)
-            && c.selected().unwrap().feed.event("reply").is_some_and(|e| e.text.as_bytes()==expected) { break; }
+            && c.selected().unwrap().feed.event("reply").is_some_and(|e| e.text.as_bytes()==expected)
+            && (!downloads || c.downloads[&download_key].status.done) { break; }
         assert!(restored.elapsed()<Duration::from_secs(25),"Native suffix did not complete: {}",c.diagnostics());
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    if let Some(path)=download { assert_eq!(std::fs::read(path).unwrap(),file); }
     assert_eq!(c.epoch,epoch,"Native recovery cannot require replacing a healthy control socket");
     assert_eq!(c.account.selected.as_deref(),Some("foreground"));
     assert!(!c.account.read_at.contains_key("background"));
@@ -154,7 +191,7 @@ async fn outage(duration: Duration, progress_budget: Duration) {
         assert!(source.reads.lock().unwrap().iter().any(|r| r.scope==scope && r.offset==b"verified prefix".len() as u64),
             "Recovery must request the verified suffix, not lose the cached prefix");
     }
-    eprintln!("native-block-outage: first per-body progress={progress:?}, completion={:?}, UDP blackholed={}; {}",restored.elapsed(),link.blackholed.load(Ordering::Relaxed),c.diagnostics());
+    eprintln!("native-block-outage: first per-body progress={progress:?}, file progress={file_progress:?}, completion={:?}, UDP blackholed={}; {}",restored.elapsed(),link.blackholed.load(Ordering::Relaxed),c.diagnostics());
     native_trace::event("recovery complete; cleanup");
     drop(c); control_task.abort(); let _ = control_task.await;
     // Keep the UDP proxy available while the endpoint closes.
