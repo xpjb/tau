@@ -1,24 +1,34 @@
-# Block loading QA — source fixes, not deployed
+# Block loading and native recovery QA — source fixes, not deployed
 
 Branch/worktree: `fix/tau2-block-loading-stability`,
 `/root/tau2-block-loading-stability`, based on `origin/tau2` at `003de72`.
-Implementation `203c9eb` and failing-before regressions `5dd4cc0` are pushed.
-No merge into integration/stable, release/version/schema/protocol change, packages,
-service restart or live-data change. See [the diagnosis and validation](docs/block-loading-stability.md).
+All implementation/regressions are pushed: UI/admission `203c9eb`, native
+peer-packet policy `55ba46f`, and interrupted-file read resumption `754096b`.
+No merge into integration/stable, version/schema/application-protocol change,
+packages, service restart or live-data change. See [diagnosis and evidence](docs/block-loading-stability.md).
 
-Two reproduced shared-client causes are corrected: cached/closed rows repeatedly
-occupying all thirty fetch-root admissions, and paint-time viewport disk hydration
-not requesting a repaint. Missing cohorts now advance; on-demand reflow keeps the
-same reading anchor and settles without an idle redraw loop. Explicit Copy,
-disclosure, preview/cache bounds and native stream-class reservations remain.
+The two shared-client loading causes are fixed: cached/closed rows hogging the
+thirty-root cohort, and viewport disk hydration not requesting a repaint. Missing
+cohorts advance; reading anchors are retained and idle repaint settles.
 
-72 focused nextest checks passed, plus both native-link cases after adding an
-8-second UDP-only outage. The Windows MSVC frontend-library check passed. The
-user's Windows-only observation is provisional, not physical-device acceptance.
-Native blocks resumed correctly but took up to about 8.5 seconds to start advancing
-while WebSocket control stayed healthy. No transport retry/timeout change is made;
-backlog 014 remains open, including the original per-file gap and Windows diagnosis.
-Use managed Cargo/nextest only; Clippy and Cargo's built-in runner remain banned.
+The user's follow-up about a fifteen-second retry exposed a separate traced
+receive wait: the forty-second native idle policy retained a silent connection
+while packet probe gaps grew. There is no fixed fifteen-second application retry.
+Native peer detection now uses max-idle 5 seconds / keep-alive 2 seconds, **not** a
+body-response timeout. Six-second slow reads and twelve-second healthy idle both
+keep their original connection. Interrupted immutable file reads resume their
+verified prefix; cancellation/source/content/storage failures do not retry, and
+no command/provider execution is replayed.
+
+91 targeted checks passed for the peer change; final 4/4 file/recovery checks pass
+including the original real-daemon impaired link and fatal missing/corrupt data.
+Eight-/seventeen-second UDP outages resume individual replies/files within about
+1–3 seconds here while the same control socket remains healthy. The final Windows
+MSVC frontend-library compiler check passes. This is not physical device/WAN QA.
+
+Backlog 014's socket-wide reproduced failure is corrected, but its original
+seed-73 per-file gap and Windows acceptance remain open; do not claim blanket
+closure. Use managed Cargo/nextest only; Clippy and the built-in runner are banned.
 
 ---
 
