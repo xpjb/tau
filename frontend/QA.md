@@ -12,136 +12,731 @@ No package or deployment was performed.
 
 ---
 
-# Tau 2 backlog
+# Wheel-scroll startup — integrated source, not released, October 1, 2026
 
-## New high-priority control/UX report — October 1, 2026
+User report: scrolling up from the bottom-docked chat on Windows beta feels delayed
+by about 500ms. Reproduced a missing first-frame request, not an explicit 500ms
+wait: `ScrollState::event` queued a wheel target without marking the UI dirty.
+The desktop OnDemand adapter therefore waited for an unrelated wake before
+`update()` could start easing. Wheel input now requests that first frame in the
+shared scroll owner. The existing 65ms filter, tail/anchor policy and touch handling
+are unchanged; no continuous render loop or new timer was added.
 
-[045 Play/Pause/Stop and run-through UX/debt](045-play-pause-control-ux-debt.md)
-records the user's confusing/undiscoverable controls, insufficient interruption,
-bricked conversation, historical Stop→drain expectation and repeated Play/pause
-fixes. The immediate [Stop/Play lockout patch](../docs/tau2-control-recovery.md)
-is source-complete; **045 remains open** for product semantics, transition
-ownership and interactive acceptance. Do not close it with another race patch.
+- Fix **`ec2d764`**, branch `fix/tau2-undock-scroll-latency`, worktree
+  `/root/tau2-undock-scroll-latency`, based on `origin/tau2` at `003de72`.
+  Merged at the user's request as **`e7e0294`** into `tau2-integration`, publishing
+  to `origin/tau2`. The merge exactly matches the validated feature tree; only
+  integration-status notes change afterward. Existing validation is reused,
+  without another build or test run.
+- The real App/GPU regression fails before the fix at the immediate redraw check
+  (nextest `860fa91a-33ac-45c3-8709-4b1086c52acc`) and passes afterward. At 1x and
+  2.5x it starts fully idle and bottom-docked, checks accumulated wheel input,
+  visible first-frame motion, cached measurement reuse, live reflow/anchor retention,
+  settling in scrollback, scrolling back to tail-follow, and returning to idle.
+  The first-frame step uses a simulated 16ms wheel timestamp, not an OS latency measurement.
+- Managed native frontend all-target and Windows MSVC library compiler checks pass.
+  Full frontend nextest: **197/197 passed**, zero skipped, 10 binaries
+  (`50b642a8-930e-4adf-865f-ac4cf0ff9081`). Existing dead-code warnings remain.
+- No Clippy, built-in Cargo test runner, package build, deployment,
+  version/protocol/schema change, production-data access or service restart.
+  Physical Windows wheel/trackpad and DPI acceptance remains open; the user's
+  exact 500ms delay was not measured on Windows here.
 
-## Current disposition: bounded source closeout
+---
 
-Triaged **September 29, 2026**, against freshly fetched `origin/tau2` at
-`33f7d6f`. This supersedes the earlier implementation ordering, not the recorded
-bug evidence. Implementation is on `feat/tau2-simplification`; **036 is source-complete**.
-037's control/composition/lifetime and explicit update/cancellation paths are in;
-synthetic lifecycle events are gone. 038's form reuse is implemented. 039–040 use
-native body/tool identity and reconcile authored messages outside painting. 041
-has deleted the rich projection/Row/Part pipeline and the legacy transcript fixture
-protocol. The redundant attachment-card registry and addressed button routes are
-also gone. 042 has retired the global test action adapter, test-only Submit and
-old scroll scenario, alongside independent matrix pruning.
-Transcript reading-position ownership is now consolidated; external layout resets
-and the expansion registry are gone. The user has now authorized local/justified
-deletions, backlogging the remaining work and merging both this source and the
-independent compaction/pause fix into `tau2-integration`. Those source merges are
-complete (`73a617f`, `1cb2282`); [merged acceptance](../docs/tau2-simplification-closeout.md)
-passes 328/328 workspace tests and compiler/platform/rustdoc checks. The 5,000-line target is
-**not achieved**; physical acceptance is **not complete**. These are explicit
-open/deferred items, not reasons to start another speculative rewrite before the
-authorized source merge. See [044 closeout/follow-ups](044-closeout-and-followups.md).
+# ZIP Extract follow-up — integrated source, not deployed
 
-### Deletion-first execution
+Removed Extract's remaining hover/context tooltip, made its operation single-flight
+across chat and Attachments (disabled **Extracting…** until the folder is opened),
+and restored Tau1's single-root ZIP handling without a redundant outer folder.
+Existing-name suffixes and archive safety checks remain; failure releases the
+button for retry. Other download actions and Android behavior are unchanged.
 
-The user's follow-up prioritizes removing **entire redundant subsystems**, not
-agonizing over individual lines. Choose each slice by naming the competing owner,
-adapter or algorithm that will disappear, its actual replacement owner and all
-remaining callers. Delete the obsolete path end-to-end in that slice; don't leave
-a facade, dormant branch or test-only reconstruction behind. Preserve product
-features and safety contracts. Helpers, formatting and test-setup consolidation
-are not standalone simplification targets merely because they can shave lines.
-Keep measuring net cost, but don't let the counter drive local code golfing.
+Managed frontend all-target, Windows x64 and Android ARM64 checks passed;
+**159/159 frontend library nextest tests**, zero skipped, passed. The 33-case GPU
+matrix and actual busy chat/sidebar previews were inspected. No package, release,
+service restart or physical Windows acceptance is claimed.
+Integrated at the user's request as `3eb2b1d` in `tau2-integration` / `origin/tau2`.
+The merge exactly matches the validated feature tree; subsequent changes are
+Markdown status notes only, so existing checks were reused without rerunning them.
+See [behavior, scope and exact evidence](../docs/zip-extraction.md).
 
-The selected ownership, input/paint and transcript boundaries are now implemented
-and their named predecessors removed. A bounded final pass deleted three unused
-hit-test entry points; no further large safe local deletion was demonstrated.
-Do not add another UI or replication framework to chase the remaining count.
+---
 
-### Ordered, bounded slices
+# Remote code viewer — integration source only, September 28, 2026
 
-| Item | Deliverable / deletion | Dependency |
-| --- | --- | --- |
-| [036 Correct drawing and selection](036-drawing-and-selection-correctness.md) | Ordered compositing; selection follows scrolled text | Source-complete; device QA open |
-| [037 One control and child-traversal contract](037-retained-interaction-ownership.md) | Delete paint/register bypasses and root-maintained descendant routing | Source-complete; device QA open |
-| [038 Finish forms and chrome](038-forms-and-chrome.md) | Delete repeated field/footer/layout and migrated control plumbing | Source-complete; device QA open |
-| [039 Native tool records, used directly](039-native-tool-records.md) | Delete native tool re-pairing and display-key parsing | Source-complete through 041; device QA open |
-| [040 One message through local/queue/history state](040-message-state-reconciliation.md) | Move reconciliation out of paint; delete competing precedence rules | Source-complete through 041; 013 remains separate |
-| [041 Transcript owns its children](041-direct-retained-transcript.md) | Projection/wrapper and competing reading-policy paths deleted; 012 source review closed | Source ownership complete; size/device gates open |
-| [042 Remove low-value tests and compatibility scaffolding](042-test-retirement.md) | Delete brittle assertions, obsolete tests and `test_ui.rs`; smaller behavioral suite | Targeted retirements complete; optional further pruning in 044 |
-| [043 Completion audit](043-simplification-acceptance.md) | Measured reduction, actual behavioral/device acceptance, no legacy path left | Source closeout authorized with unmet size/device goals recorded |
+Folder button beside attachments; read-only directory/code views, Ctrl+Space/Find,
+daemon-owned `.gitignore` index, live Sanscale paragraphs, and selected-line
+references in the shared chat composer. Mobile gutter/hold/drag selection dispatches
+Android haptics. Live updates preserve IME/native-editor text and invalidate changed
+selections rather than retargeting comments. Protocol 21; matching daemon/client.
 
-The numbered slice descriptions and intermediate check results remain historical
-evidence. Their stale “next” work is superseded by the implementation follow-ups
-and the current disposition in 044. No dormant dual implementation is accepted.
+Feature-branch managed workspace all-target check and **257/257 nextest tests** passed
+(`9017d8a4-3311-4c4a-9a4b-07b90897f386`). Windows/Android library checks, Android Java
+compilation and crate rustdoc passed. Actual GPU desktop/phone previews were
+inspected; this is **not** physical-device acceptance or a beta deployment.
 
-### Size and test policy
+**Integration merge:** retained the newer transcript-prefetch and download-navigation
+work. Merged workspace/all-target check, **278/278 nextest tests** (run
+`b7162a06-0904-4c1f-a1c6-96f752da6b56`), Windows x64 and Android ARM64 checks passed.
+New desktop/phone coverage verifies browser cancellation on immediate chat input
+and same-/cross-chat download navigation, preserving each chat's draft. Not deployed;
+a new matched protocol-21 release is required, not the prior protocol-20 packages.
 
-- The original, **unmet and now deferred**, reduction target is **at least 5,000 fewer frontend Rust code lines** than
-  `33f7d6f`, including tests: **27,725 → at most 22,725**. Also require a 5,000-line
-  reduction under identical formatting, charging growth elsewhere in the workspace.
-  [Baseline and measurement](../docs/reviews/retained-ui/completion-size.md).
-- Working allocation: **3,000 production + 2,000 test code lines removed net**.
-  These are targets, not a claim that the current inventory proves those savings.
-  Production must genuinely shrink; deleting only tests is not completion.
-  Every replacement and new regression is charged. No minification, code relocation,
-  language switching, feature removal or generated-code hiding to satisfy the count.
-- Delete tests that merely freeze incidental coordinates, spacing, glyph pixels,
-  adapter shapes or retired implementation details. Do **not** keep updating them
-  after a redesign. Do not replace each deleted test with another test.
-- Keep a small set of tests for observable guarantees: correct occlusion/input
-  ownership, selection/copy, authored-data preservation, source/lifetime fences,
-  no duplicate effects and bounded native content. A coordinate used to exercise
-  a hit/clip boundary is not automatically a brittle layout requirement.
-- Each slice reports production/test deltas, deleted paths and remaining gap. If a
-  pilot adds a wrapper rather than removing a path, stop and revise it before broad
-  migration. A green suite or a new owner struct is not architecture acceptance.
+See [scope, ownership, limits and validation](../docs/remote-code-viewer.md) and
+[reproducible previews](qa/code-viewer/README.md). No Clippy or built-in test runner.
 
-### State/sync direction
+---
 
-The remembered shared-state proposal exists on `review/tau2-client-structure` at
-`24b8323`; it was **not implemented**. Existing `tau-blocks` / `tau-transfer` already
-share revisioned records, delta/reset handling and verified content transfer.
-The implemented work concerned shared **meaning and reconciliation**, not a missing
-transport engine. 039–040 use confirmed records plus durable local intents, then
-feed retained children directly. State replay must never execute tools or paid
-requests. Do not serialize the whole daemon, add a fixed tick, or introduce a
-universal diff/replica layer.
+# Warm transcripts and ongoing-chat prefetch — September 28, 2026 (unreleased)
 
-[Complete disposition of earlier items 015–035](triage.md) includes the deferred
-operation-store/catalogue/receiver proposals. Their speculative, overlapping LOC
-estimates are retired; they do not finance the 5,000-line target.
+See [behavior, limits and focused evidence](../docs/transcript-prefetch.md).
+All running and recently used chats receive background native transcript updates,
+including live text, without changing unread state. There is no four-chat cutoff:
+limits apply to concurrent transfers, bytes and decoded views, not subscriptions.
+Navigation retains bounded previews; older pages fetch earlier; revisited disk
+content gets read-based LRU protection.
+Saved scroll anchors hydrate offline. Hidden tool output and file payloads remain
+on demand. No packages, deployment or physical-device acceptance is claimed.
 
-## Existing reports
+---
 
-| Item | Current disposition |
-| --- | --- |
-| [001 Prompts](001-daemon-settings-prompts.md), [002 Direct models](002-direct-model-selection.md), [011 Titles](011-title-generation-settings.md) | Delivered in beta 0.7.1 daemon/Windows; historical requirements, not new implementation |
-| [003 Navigation](003-text-input.md), [004 Sanscale](004-sanscale-migration.md), [006 Caret](006-caret-response.md), [007 Editor scroll](007-editor-scrolling.md) | Implemented; outstanding device/upstream checks retained, relevant device acceptance in 043 |
-| [005 Highlight](005-highlight-colour.md), [008 Ripple](008-click-ripple.md), [009 Nested hover](009-tool-hover.md) | Open visual acceptance, absorbed into 037; some mechanics exist, not blanket closure |
-| [010 Account usage](010-usage-remaining.md) | Shipped beta 0.7.6; live provider/device acceptance remains separate |
-| [012 Scroll ownership](012-chat-scroll-position-audit.md) | Source ownership complete in 041; old scroll tests deleted; physical acceptance open |
-| [013 Queue content lifetime](013-queued-message-content-lifetime.md) | Independent model-side follow-up; deterministic reproduction and proportionate fix, not solved by 040 |
-| [014 Outage recovery](014-native-data-recovery-after-outage.md) | Deferred diagnosis; preserve failing evidence, no guessed timeout/receiver rewrite |
+# Download notification navigation and UI selection — September 28, 2026 (unreleased)
 
-## Working rules
+- Clicking a completed-save popup selects its chat's current topic and scrolls to
+  that exact download widget. × still dismisses. Loading/older history, offline
+  cached targets, moved chats and stale/deleted destinations are handled.
+- Removed the duplicate filename/status/caption tooltip from both chat and the
+  Attachments pane; button descriptions remain.
+- Consolidated UI selection reconciliation in `app/navigation.rs`. Also fixed a
+  reproduced existing gap where selection changed before the composer was rebound,
+  plus old-layout retention when two accounts selected the same chat ID.
+- **106 frontend library tests and two real-native integration tests passed.**
+  Native all-target, Windows x64 and Android ARM64 compiler checks passed; Android
+  retains four existing desktop-helper dead-code warnings. Desktop/phone/2.5× GPU
+  screenshots were inspected. No physical-device acceptance or deployment claimed.
 
-Use a branch/worktree, small commits and pushes. For Rust use managed
-`/usr/local/bin/cargo`, compiler checks and nextest; **no Clippy and no built-in
-Cargo test runner**. Documentation-only triage needs no Rust build.
+See [the architecture findings, navigation behavior and exact validation](../docs/client-navigation.md).
 
-Reuse the existing Editor, Markdown/Sanscale renderer and verified content cache.
-Constructor helpers must establish an invariant or perform real setup; do not wrap
-plain struct literals or introduce types/modules merely to name an intermediate
-step. Small feature-local choices and owner-applied structural requests are fine;
-a second global action bus, widget registry or editable state copy is not.
+---
 
-Work stays on Tau2. No stable-Tau changes, live data migration, service restart,
-packaging or deployment is authorized by this backlog. Physical acceptance and
-release authorization remain explicit. Settings still have exactly **model override
-→ default prompt**, with intentional empty strings and no provider/project fallback.
-Historical delivery records are in `INTEGRATION.md` and Git history; the old settings
-handoff is not a current release gate.
+# Composer thinking-level indicator
+
+The shared Windows/Android composer status row now reports the saved per-chat
+`thinkingLevel` beside the provider/model slug, including `off`. It reserves the
+thinking label's measured width and ellipsizes the model first. Unknown old-cache
+metadata is explicit, never guessed from daemon defaults. The thinking dialog
+starts with the saved level. Creating/selecting-model notices retain their existing
+send-safety behavior until metadata is confirmed.
+
+Three focused nextest tests passed (`3cd6851d-64af-44b2-bd0c-028953d6289e`):
+real native command/metadata replication, model defaults and overrides, catalogue
+revision fencing, sleep/clone/reload; old-cache compatibility and offline local
+persistence; actual GPU desktop, 320dp phone and 2.5x phone shaping of all seven
+levels plus unknown, and the prefilled editor. Desktop/phone screenshots were
+inspected at `/tmp/tau2-thinking-previews/`. This is not physical-device acceptance.
+Fourteen related chat-activity, catalogue and offline-create regression tests also
+passed (`d429613e-e308-4e61-93d8-f3541eecd2ec`). No full suite was repeated.
+Managed Cargo only; no Clippy or built-in test runner. Release/deployment status
+is recorded at the top of `HANDOFF.md` and in `INTEGRATION.md`.
+
+---
+
+# Alerts and content/control errors — September 27, 2026 (released in beta 0.7.7)
+
+- Four-second popups, measured 16dp text, compact wrapping and a centered vector
+  close icon. Repeated identical updates do not keep an alert alive; idle expiry
+  uses the existing one-shot wake. Persistent inline errors remain available.
+- Temporary connection failures use status/diagnostics instead of popups. Real
+  unknown-block, integrity, decompression and local storage errors still surface.
+- Fixed a reproduced stale-plan fetch of already-known text after queue
+  consumption. The native-scheduler regression requires zero redundant body reads.
+- Short daemon reads no longer wait for content writes on the same connection
+  mutex. Four read-only snapshots use the already-enabled WAL; writes retain their
+  transaction ordering. Bounded admission handles bursts without blocking Pong,
+  and expiry/disconnect cannot execute not-started actions later.
+- Workspace nextest: **230/230 passed**, including real-daemon/controller,
+  impaired-link, crash-recovery and new concurrency/alert regressions. Inspected
+  headless desktop/phone/2.5× phone previews; physical-device acceptance remains
+  open. No schema or protocol change; these fixes shipped in beta 0.7.7.
+
+See [the causes, scope and validation record](../docs/alerts-and-contention.md).
+The contention timing used a synthetic local write, not a live-user measurement.
+
+---
+
+# Inline downloads — Tau1 text actions, September 27, 2026 (released in beta 0.7.7)
+
+- Restored Tau1's **Download / Save / Cancel / Retry / Open / Show / Extract** text
+  actions. Tau2's existing View action is text as well. Removed the custom action
+  glyphs and their always-on circles; other parts of the app are unchanged.
+- Kept the shared 68dp control, optional captions, extension-preserving filename
+  ellipsis, progress/speed, saved/error states and tooltips. Button widths come from
+  measured text rather than icon slots; hit targets are at least 40dp desktop / 44dp
+  touch. Saving stays visibly disabled, with duplicate-export protection.
+- Re-rendered **32 cases × four sizes/scales**, including all hover/pressed/tooltip/
+  clipped states and actual desktop/phone surfaces against Tau1's original Compose
+  renderer. Tests require a visible text label and no icon in every action region,
+  full label containment, minimum target sizes and no filename/status collisions.
+  Refreshed screenshots and reproducible fixtures: [download QA](qa/downloads/README.md).
+- All **five focused render/lifecycle nextest tests passed** (run
+  `30415ac9-5c07-48ac-a67b-db6223dc32a4`; 85 unrelated tests skipped). They cover a
+  verified 12 MiB cache save, busy/failure/retry/completion, restart, missing user
+  copy/cache, view vs save, uppercase ZIP actions, touch hold and independent live
+  tooltip anchors. Earlier 90-test validation belongs to the preceding icon version.
+- Managed native frontend all-target and Windows x64 library compiler checks passed.
+  The Android recheck was deferred after the managed wrapper's shared-build-lock
+  timeout (exit 75); no bypass or fresh Android-pass claim.
+- The previous save-limit, retry, image-placeholder and download-lifecycle fixes
+  remain. No change to network, OS actions, scoped records or ZIP extraction safety.
+- Feature-branch QA used no Clippy, production data, paid provider or OS viewer.
+  The changes shipped in beta 0.7.7; physical Windows/Android acceptance remains
+  unclaimed.
+
+![Desktop text actions in chat and sidebar](gallery/downloads-desktop.png)
+![Phone text actions](gallery/downloads-phone.png)
+
+---
+
+# Rich tooltips — September 27, 2026 (released in beta 0.7.7)
+
+- Quota, cache TTL and connection cards use native inline bold/colour, with muted
+  labels and darker, readable status accents. Text is literal, not parsed markup.
+- Quota has no refresh button. The visible selected Codex chat refreshes every five
+  minutes, even with the card closed; failures retry after 30 seconds. Reads stop
+  offline, on hidden surfaces and for other providers; no model prompt is sent.
+- Cards measure the actual wrapped rich text instead of counting newlines. Context
+  and account quota remain separate; stale quota is labelled and visually muted.
+- TTL stays one line: `TTL ~Nm remaining`, or `Working...` without a countdown.
+  Connection lifecycle/attempt timing and previous-socket RTT semantics are retained.
+- 18 focused nextest tests passed (67 unrelated tests skipped), covering automatic
+  reads with a local WebSocket, bounded retry,
+  hover/touch pinning, click-through protection and real GPU wrapping at 1000×700,
+  360×720 and 1080×2160 (2.5×). Inspected previews include long labels/errors.
+  Set `TAU_TOOLTIP_PREVIEW_DIR` when running `app::tooltip_tests` to save PNGs.
+  These changes shipped in beta 0.7.7; physical-device acceptance remains open.
+
+---
+
+# Mobile QA source update — September 26, 2026
+
+See [the focused acceptance record](../docs/mobile-qa.md). Mobile input, notice
+capture, topic navigation, arrows, font axes, durable send recovery and connection
+health are implemented. Tests/compiler checks passed; no packages or deployment
+were produced, and physical-device acceptance remains outstanding.
+
+---
+
+# Download lifecycle follow-up (unreleased)
+
+The same compact transfer card now appears in the chat and Attachments view.
+It displays human-readable bytes, percent and observed speed with a determinate
+bar, or an indeterminate moving bar if total size is unknown; failure/cancel
+and save failures stay inline with Retry. Sparse attachment metadata no longer
+shows a misleading `Loading…` body above the filename. The image preview has
+reserved space even before its content arrives.
+
+A file's Download action fetches and verifies it, then saves **without a picker**
+to the user's `Downloads/Tau` (Android uses MediaStore); a cached file can be
+saved offline. Existing names get numbered suffixes instead of being replaced.
+Export completion is distinct from cache completion: once the OS save succeeds,
+Tau remembers the user-owned file across restarts and offers Open, plus Show and
+safe, bounded ZIP extraction on desktop. Missing files can be downloaded again;
+a removed private cache never removes the user-owned copy. Image previews are
+cache-only until Save is pressed. The record is account/source/chat/file scoped,
+not attached to the evictable replica. Save failures do not claim completion.
+
+Checked with managed frontend all-target compilation, 83/83 frontend nextest,
+frontend rustdoc, Android ARM64 and Windows x64 cross-target compiler checks,
+Android Java compilation, and inspected offline desktop/phone screenshots via
+`--downloads-preview`. These are local checks, **not** a new beta deployment or
+physical Windows/Android acceptance. Stable Tau was not modified. The prior
+attachments view release/status below is historical.
+
+---
+
+# Attachments view — September 25, 2026 (unreleased)
+
+- A round folded-paper button sits beside Play/Stop and stays available while idle
+  or offline. Its selected state indicates that Attachments is open.
+- Desktop windows at least 1000dp wide show a separate 320dp right sidebar; the
+  existing chat list stays on the left. Mobile and narrower windows use a separate
+  screen. Back/Escape returns to chat; resizing into that screen clears editor focus.
+- The current chat's sent files appear newest first, with filenames, captions,
+  image previews and the same download/cancel/view/save actions as transcript cards.
+  Wheel, touch momentum and scrollbar dragging use a separate scroll position.
+- Existing root-history paging loads older file metadata near the bottom, with a
+  retry button. Closed tool bodies and non-image files stay on demand. Visible file
+  captions and transcript content share one combined viewport request, not competing
+  requests. There is no new protocol, storage schema or saved attachment list.
+
+Validation after merging the concurrent Tau 2 QA fixes:
+
+- Managed `cargo check --locked -p tau-frontend --all-targets`: passed.
+- Managed frontend library nextest run: **58 passed**, including 57 retained tests
+  and one temporary headless interaction driver. Run ID:
+  `fd1cd2d6-7e15-4170-a91e-761b552dcc33`; 15.9 seconds.
+- One retained native-cache test covers multiple history pages, newest-first file
+  enumeration, loading completion, and no hidden tool/file body requests. The
+  existing full-caption test also passes. Native history already clears its loading
+  flag; no change to that path was needed.
+- The temporary GPU driver used synthetic chats and cached, hash-verified files at
+  1280×900, 1000×800, 800×700, 1080×2160 (2.5×) and mobile 1280×800. It exercised
+  button clicks, image viewing and Back, file-save actions, wheel/touch/scrollbar
+  routing, Back/Escape, resize/focus, idle controls, new file arrival, chat switching,
+  and preservation of the draft and transcript anchor. No UI layout test was retained.
+- Inspected desktop and phone renders below. These are local headless checks, not
+  physical Windows/Android acceptance. No package, version bump or deployment.
+
+![Desktop attachments sidebar](gallery/attachments-desktop.png)
+![Mobile attachments screen](gallery/attachments-phone.png)
+
+---
+
+# Tau 2 QA stream — September 25, 2026 (unreleased)
+
+- Connection status shows **min / max / latest** acknowledged RTT from the last
+  ten ping attempts, separately from the live `received:` age or `waiting:`
+  duration. Pending/failed probes never become a `latest` sample. The status
+  card remains dynamically sized for the extra line.
+- Compact editor viewports reserve enough vertical space for font line boxes
+  and descenders, including the 40px New/Rename topic Name fields; the same
+  shared geometry also covers other short text fields.
+- The scrolling topic strip and its add button are clipped before the desktop
+  sidebar/chat divider, leaving its full-height separator visible and its
+  hit region out of the chat side.
+
+These are local changes on a single QA branch, **not** a beta deployment or
+physical Windows/Android acceptance. Headless rendering and tests are local
+checks only; device QA remains open.
+
+# Topics — 0.7.2 beta acceptance (protocol 14)
+
+Topic-label and layout follow-up: tabs are shorter and less padded; desktop/mobile
+native UI tests cover restoring each topic’s last-open chat, first-visit fallback,
+local SQLite persistence, and stale selections after delete/move. Wire fields and
+SQLite table names stay `projectId`/`projects` for compatibility. The reported
+intermittent black frame has no reproducible trigger yet and is **not claimed fixed**.
+
+- Managed workspace all-target compiler check and nextest: **69/69 tests passed**.
+  Feature validation used isolated databases/providers with no paid provider calls.
+  Release builds and beta deployment were checked separately below.
+- Actual controller/transport against the native daemon with two clients covers
+  topic creation, selection, per-topic starters, cross-client edits/conflicts,
+  restart, unread aggregation, moves without losing drafts/files, and both delete
+  choices. Cancel is exercised through actual native UI hit testing.
+- Scripted Codex and Chat Completions provider requests verify exact captured topic
+  prompt text, edits leaving old chats unchanged, new chats receiving edits, direct
+  system-prompt replacement on moves, and clone/restart persistence. A gated tool run
+  verifies moving/editing does not alter its continuation, but the next user turn
+  receives the destination snapshot. Deletion cancels running work; an injected SQL
+  failure rolls back the complete topic deletion and leaves transcripts intact.
+- A real version-1 SQLite fixture migrates to General without changing old history,
+  activity, revisions or instructions; starters are unique per topic afterward.
+- Headless native GPU rendering at 1000×800 and 360×720 exercises clipped tabs,
+  wheel/trackpad-axis routing, touch dragging and hold, selected-tab reveal, read dots,
+  target-bound nested context menus, keyboard/submenu scrolling through 25 topics,
+  exact-text prompt editing and the two-stage delete dialog. Rendered desktop/phone
+  frames were inspected. This is not physical Windows or Android device acceptance.
+
+Windows x64 and Android ARM64 release builds and package verification passed.
+The isolated beta was deployed and its live protocol-14 topic operations verified,
+with a consistent pre-migration backup and unchanged original history. Stable Tau
+was untouched. See `INTEGRATION.md` and `PACKAGING.md` for release evidence. Physical
+touch/IME and DirectX/DPI acceptance remain unclaimed. Protocol 14 requires matched
+clients; SQLite schema 2 must not be opened by the old daemon.
+
+---
+
+# Connection status follow-up
+
+The connection card omits the redundant Connected title. It shows min/max
+acknowledged Ping/Pong RTT across the last ten *attempts* and a live `received:`
+or `waiting:` millisecond counter; explicit state remains for connection failure.
+Failed attempts take a slot but never fabricate an RTT. No server URL appears;
+that belongs in Settings. The last reply age and samples survive automatic
+reconnects to the same server, but changing settings resets them. Pong receipt
+is timestamped on the network thread, not when UI events are drained.
+
+Probes run every 2s with a separate 5s timeout and no session-list requests.
+The visible counter redraws every 50ms; with the card hidden, at most three
+threshold wakes update the dot while a ping is pending. Latest RTT/pending wait
+is green through 250ms, yellow through 1000ms, orange through 3000ms and red
+above; no reply yet isn't green, and a lost/unconfigured connection is red.
+Late/unmatched pongs are ignored. The scripted socket and headless GPU tests
+cover these states. `tau --screenshot PATH --connection-preview
+[received|waiting|disconnected|unconfigured]` renders mocked cards without a
+network account. Chat rows keep their last known worker state and unread dot;
+the Tau connection dot remains solid.
+
+The older acceptance notes below describe the original 20s diagnostic design.
+# Immediate new-chat and send intent (unreleased, atop protocol 15)
+
+The client now saves and selects a provisional **Creating chat…** immediately,
+including offline. Drafts, staged files and sends persist before an acknowledgement;
+sends wait locally until creation confirms. Existing chats accept offline sends
+without a network round-trip; sends during model selection wait for its confirmation
+and never run under the previous model. On failed/uncertain selection, the authored
+send remains recoverable rather than being replayed under a different model. Client-named UUIDs and transactional
+creation receipts let the daemon return the same session on retry, including if an
+untouched starter was reused and subsequently became active. A reused starter
+receives the provisional draft/files/sends without losing existing local work.
+New work accepted into a paused queue replaces the stale Error badge with a
+paused/ready detail immediately, without awaiting a model turn. A sent prompt
+whose acknowledgement was lost remains unconfirmed and is reconciled by request
+ID from the daemon on reconnect; it is not blindly replayed.
+
+Managed all-target workspace check and nextest **70/70 passed**. Offline local
+restart, a real controller/daemon with a gated local provider, coalesced starters
+with files, duplicate create receipts, queued model selection and paused-error
+acknowledgement were exercised without a billed model call. No physical Windows/Android UI acceptance,
+merge, package or deployment is claimed. This branch builds on the separate
+context-catalog branch and needs matched client/daemon integration.
+
+---
+
+# Context-usage follow-up (unreleased, protocol 15 branch)
+
+Tau 2 previously discarded provider-reported tokens whenever the selected model
+was absent from optional metadata. The tooltip now shows the last reported turn
+total, including when capacity is unknown. For percentages and compaction the
+selected provider's authenticated model catalog is the only source: Codex
+`context_window` (or `max_context_window`) and OpenRouter `context_length` for
+an **exact** ID. The bounded, private `model-catalog.json` is loaded at startup
+after credential/endpoint identity validation. Missing/invalid cache triggers
+an asynchronous provider GET; a failure alerts connected clients. Explicit
+**Refresh models** in Connection settings replaces only on success and exposes
+new model IDs as suggestions. No Pi metadata fallback, 1-hour expiration,
+automatic guess, or rewriting the daemon settings document. A catalog missing
+the selected model leaves capacity unknown. Sleeping/unopened chats recover saved
+token counts.
+Model changes clear the old count. Protocol 15 needs matched clients and daemon;
+protocol 14 is reserved for Projects. Not yet merged, deployed, or packaged.
+
+Managed all-target workspace check passed; nextest **67/67 passed**. Scripted
+Codex and Chat Completions catalog/turn requests checked exact authenticated GET
+paths, identity/originator, missing-file alerts, explicit refresh, failure preserving
+the last good file, restart without a new GET, and unknown-model behavior through
+WebSocket state/list, sleep, restart, and model switches. Read-only
+live Codex catalog GET (September 24, 2026) using the beta's shared account access
+and Tau's inference originator reported 272,000 for GPT-6 Sol, Luna and Astra with
+catalog client version 0.156.1. No paid completion, credential copy/refresh, GUI
+or physical-device acceptance is claimed.
+
+---
+
+# 0.7.0 integrated beta acceptance
+
+The user explicitly authorized native integration, cleanup, remote `tau2`, a separate
+beta daemon port and Windows/Android builds. Earlier release holds below are history,
+not the current authorization. Stable service/data/routes remain separate.
+
+## Current evidence
+
+- Managed workspace all-target check passed; nextest **49/49 passed**, one Cargo job,
+  wrapper-limited test concurrency. No new trivial UI/API-wrapper tests.
+- Real frontend controller/transport ↔ native daemon ↔ gated local provider, tools,
+  SQLite, upload/transfer, settings CAS, history/fork and restart acceptance passed.
+- SIGKILL/WAL recovery preserves queue edits/deletes/control receipts and does not
+  automatically repeat interrupted tools or billed compaction. Native title and
+  cross-provider image/reference/export paths have deterministic provider coverage.
+- Real desktop GPU render exercised the per-corner WGSL pipeline successfully.
+- A private Xvfb/native-client/native-daemon run edited the actual settings UI:
+  built-in/null → custom intentionally empty prompt saved correctly; another native
+  client advanced the document revision; the stale UI save was rejected without
+  overwriting the newer document. Desktop and narrow settings layouts were captured.
+  That review caught and fixed a duplicate global notice overlay in this modal.
+- All fixture processes were this task's own and were stopped. No production history
+  was imported or changed; no paid provider completion was used for these checks.
+- Release packaging/deployment evidence is recorded in `INTEGRATION.md` and
+  `PACKAGING.md`, not inferred from debug binaries.
+
+## Device acceptance still required
+
+Physical Windows/DirectX/DPI and Android touch/IME/font acceptance remain device QA;
+Linux/Vulkan or previous Wine checks do not establish those. In particular exercise
+clipped hover/long-press boundaries, DST formatting, clipboard selection, scroll
+anchors on older pages, cache proxy labels, model tile scrolling/landscape, rapid
+send during model selection, and drafts/files across connection loss. Real provider
+completions were not billed just to claim a live smoke test.
+
+New native sections persist their first observation timestamps. Imported historical
+Pi sections retain the timestamps actually available; no historical sub-block times
+are fabricated. The variable-font/synthetic-style limitation recorded below remains.
+
+## Implemented
+
+- Independent top timestamps on each logical bubble, including Details, text,
+  pending/queued sends and native sections. Local time, date + seconds, using
+  source event milliseconds/RFC3339 (first contributing event for Details).
+  Local pending creation times are saved once; old local records remain readable.
+  Section times stay fixed while their content changes. Missing source
+  time says “Time unavailable”; history is never dated with its arrival/render time.
+- Same-sender neighbors touch with a faint inset divider, instead of a 12dp gap.
+  Only the outside of the visual group is rounded; logical IDs, disclosure state,
+  selection and copy boundaries stay independent. Different senders retain spacing.
+- Whole-section hover/press tint, including header/timestamp/padding/nested panels,
+  clipped to the actual rounded section and transcript viewport. Text/photos are
+  not washed out. Hit testing uses the same per-corner geometry and half-open
+  shared edges. Pointer transitions between otherwise non-interactive sections
+  request redraw without continuous polling.
+- Context menus keep their target section highlighted by stable key during
+  streaming/reflow, not whatever later occupies the original pointer coordinates.
+  Details “Copy message” includes its thinking/tool input/output even if collapsed,
+  but excludes the neighboring answer. The copy text is only assembled on demand.
+- Paragraph color matches Tau 1's muted onSurfaceVariant #B7C2CE, correctly
+  converted from sRGB to linear GPU color. Links/code retain their distinct colors.
+- Markdown block spacing reduced from 12.8 to 8dp at normal 16dp text size; no
+  trailing paragraph gap after the final block. Explicit authored line breaks and
+  line leading are unchanged. Empty/hidden no-op events no longer split Details.
+
+- Removed the duplicate bottom-left connection label and its reserved space.
+  The dot beside Tau now supports hover and click/tap-to-pin diagnostics: endpoint
+  origin (no token/path/query), TLS, real application-heartbeat RTT, last-eight
+  average/range, last reply, connected-since and reconnect count. It reuses the
+  existing 20s probe; no extra traffic, guessed quality grade, loss or speed claim.
+  Epoch changes clear samples; late-epoch results are ignored. Heartbeat timeout
+  gets a specific reconnect reason. Absolute local timestamps need no ticking UI.
+- Tooltip hover bridges cross the anchor/card gap; cards intercept clicks instead
+  of activating underlying content. Sidebar labels now clip to the list viewport.
+
+- Restored Stop's always-visible tonal circle, 40dp like Tau 1, centered in the
+  56dp header. Mobile Back uses the same size/center; title/status no longer reserve
+  an overflow slot. Removed the chat-actions button and its modal entirely.
+- Chat actions now use the contextual menu on a sidebar chat or its title/header
+  (also empty transcript background), with touch-and-hold support. Message menus
+  remain independent. Rename/delete confirmations retain the clicked session ID;
+  right-clicking another chat does not select it or retarget the operation to the
+  active chat. Target highlight follows the stable ID during list reordering.
+  Touch hold duration no longer resets on sub-threshold finger movement.
+
+- Chat-list rings are now a **one-hour provider-cache estimate**, per the user's
+  clarification, not worker-idle deadlines. Existing transcript `timestampMs` or
+  RFC3339 `timestamp` supplies the latest received assistant reply time (including
+  thinking/tool calls, excluding local tool results, errors and hidden entries).
+  Unloaded chats may use existing `updatedAt` as an activity proxy. The tooltip is
+  one line: `TTL ~Nm remaining`, or `Working...` with no ring countdown while running.
+  Fresh empty chats show `No reply yet`; missing/unusable/future timestamps show
+  `TTL unavailable`. Reconnect/history receipt and heartbeats do not renew source
+  timestamps; idle/sleeping chats continue counting down. No extra history
+  requests, probes or render timer. Minute-sized rings use bounded, distinct
+  texture variants and clip to the list. The one-hour assumption is **not** a
+  confirmed OpenAI/ChatGPT/OpenRouter cache lifetime.
+- No worker-TTL protocol was added. Native runtime idle eviction is independent;
+  it releases idle runtimes with paused work without losing the durable queue.
+- Untouched starter chats expose responsive, scrollable model tiles until the
+  first pending/queued/actual conversation turn. Draft text/files are preserved.
+  Settings → Quick model selection edits only the per-account tile list, searches
+  the daemon catalog, adds/removes choices, restores presets, or disables tiles.
+  Presets include Codex GPT-6 Luna/Sol/Astra and OpenRouter DeepSeek v4.1 Flash;
+  **none is forced as a default**. New chats retain the existing last-chosen-model
+  behavior via the daemon's persistent `/model` command. Removed the fixed default,
+  `*` syntax, automatic startup selection and pending-default send gate; a legacy
+  saved `default` field is ignored. Explicit selection still gates send until
+  resolved, never overwrites drafts/files, never optimistically marks a new model
+  selected, and is never replayed after reconnect. Selecting an already-active
+  tile still persists that choice, since another chat may have changed the default.
+  Only unambiguous real built-in catalog entries can be sent; missing choices are
+  disabled. Editing/resetting the tile list alone never changes the selected model.
+
+
+---
+
+# QA build 0.6.3 — packaging
+
+The user requested optimized, directly installable Android/Windows packages.
+0.6.3 uses system fonts on both shipped targets, compresses and strips Android's
+native library, and omits unneeded font assets/licenses from these packages.
+Windows uses GDI to select/read Segoe UI and Consolas (OS substitutions allowed).
+Android prefers installed static Roboto style files, otherwise uses the API-29
+font matcher for sans/monospace and script fallback, honoring collection indices.
+Font-file bytes are shared across chains instead of re-reading TTC collections.
+Linux development builds retain bundled fallbacks for machines without fonts.
+
+## Packaging checks completed
+
+- Windows x64 and Android ARM64 release builds succeeded, sequentially, one Cargo
+  job each. APK Java tools used one active processor. No GUI/emulator was started.
+- Android v3 signing verified, with the same certificate as 0.6.2. versionCode 4,
+  versionName 0.6.3-beta; not debuggable; extractNativeLibs=true.
+- Verified ZIP compression/CRC, stripped static symbol tables, unchanged dynamic
+  symbols, and 16KiB ELF load alignment. The original unstripped library remains
+  local for symbolication; the shared Cargo artifact is never modified in place.
+- Verified all eight previously bundled TTF payloads are absent from both native
+  binaries. Windows payload contains only the expected application executable;
+  its hash matches the fresh build. No PDBs, JVM or font assets in the installer.
+- Windows PE has no COFF symbol table to remove. Preset-6 LZMA reduces the download
+  without a large extreme-compression dictionary or an executable runtime packer.
+- See [PACKAGING.md](PACKAGING.md) for actual sizes and installed-footprint caveats.
+
+## Deferred
+
+The extra native Clippy invocation was blocked by the shared build lock (exit 75);
+it was not bypassed or retried while the host was busy. No full suite, Android
+x86_64 build, or new physical-device/font rendering check was run.
+
+The pinned Sanscale API has no variation-axis or synthetic-style controls. Static
+Roboto style files are preferred where present; devices with only variable faces
+or regular-only monospace fonts still need typography QA. Follow-up recorded as
+`df089cfc-e80f-4801-875a-b722173408e8`.
+
+Further builds/deliveries remain on request; this does not authorize a stable
+cutover, daemon deployment, or GitHub release.
+
+---
+
+# QA build 0.6.2
+
+The user explicitly requested both Windows and Android builds after `773e002`,
+lifting the hold for this QA delivery. This is not a stable-client cutover or a
+request to publish a GitHub release. Further deliveries remain on request.
+
+Keep resource use low: sequential builds, `CARGO_BUILD_JOBS=1`, limited Java
+processor count, and `TAU_LZMA_PRESET=3` for Windows packaging. No GUI/emulator
+sessions or full regression run are being started for this delivery.
+
+## Implemented
+
+- Windows-style middle-button autoscroll: quick click latches, held press ends on
+  release; dead zone and speed match Tau 1. Escape/click/wheel/focus loss cancel it.
+- Wheel input accumulates a target, followed by a frame-rate-independent one-pole
+  filter (65ms time constant). Idle rendering remains on-demand.
+- Draggable right-hand transcript scrollbar, track paging, and sidebar scrollbar.
+- Earlier history loads near the top automatically; no “Load earlier” button.
+  Pages retain the visible anchor, including while a wheel animation is active.
+- “Details”, with 12dp thinking/tool text and headers, 11dp section labels, versus
+  16dp main chat text. Tool calls/results pair by call ID. Individual tools start
+  collapsed; large Input/Output/Error sections also collapse like Tau 1.
+- Clicking the same disclosure header opens/closes it. No bottom Collapse button.
+  Expansion preferences survive parent collapse and are saved per chat. The clicked
+  header is pinned during reflow, within scroll bounds.
+- Copy/Fork/queue/local-message actions move to a right-click/long-press context
+  menu. File transfer controls remain on attachment cards, as in Tau 1.
+- Tau 1's exact send/paperclip/stop vector paths, centered at its icon sizes.
+  Empty/offline send is disabled. Icons rasterize once per size/state, not per frame.
+- Tau 1's context usage ring and formatted tooltip values. The opaque tooltip
+  expands in X and Y (160ms), rather than fading; supports hover and click pinning.
+- Selection starts/continues in transcript whitespace, spans multiple messages,
+  scrolls at the edges, and copies projected text. No floating Copy button.
+- Editing shortcuts prefer the layout's Latin shortcut, then physical keys for
+  non-Latin/named-key layouts. This also fixes Wine's Ctrl+C mapping to a named
+  volume key without produced text.
+
+## Verification already completed before the resource pause
+
+No new trivial input/API tests. Used the Windows development executable under
+Wine/Vulkan against an isolated real taud with a temporary deterministic fixture;
+no production service, stable app, or release installer was changed.
+
+- Clippy (frontend, all targets, warnings denied) and Windows cross-build passed.
+- Typed/sent a message; expanded Details and a tool, re-collapsed using the original
+  header, confirmed the nested preference remained saved.
+- Observed smaller thinking/tool labels and code, hidden tool outputs, red error
+  tool header, context menus without a message action strip, and the new icons.
+- Hovered/pinned the usage tooltip and confirmed formatted usage/capacity.
+- Latched middle-click autoscroll, moved upward, canceled with Escape.
+- Recorded a wheel burst at 60Hz: scrollbar Y decayed
+  `459 → 452 → 447 → 444 → 442 → 441 → 440 → 439 → 438`, then stayed still.
+- Selected from the blank left margin to the right margin across three messages;
+  context-menu copy/paste retained all 613 characters. Ctrl+C separately copied
+  a shorter selection after the keyboard-layout fallback correction.
+- Dragged the scrollbar upward repeatedly across a 160-message fixture. Automatic
+  50-event paging reached anchors History 116, 066, 016, then 000; no load button.
+- Stopped this task's Wine, fixture daemon and private Xvfb after the resource request.
+
+## Deferred verification / release gate
+
+- A small saved-anchor guard was added during the final static review after builds
+  stopped: an empty/unsynchronized frame must not overwrite a saved scroll position.
+  Both delivered targets now compile with it; restart restoration, especially an
+  anchor on an older page, still needs a manual check.
+- Exercise held-middle release, focus-loss cancellation, section-level large output
+  toggles, partial tooltip-animation frames, sidebar scroll and touch long-press.
+- Rerun the existing suite, both Android builds, and physical Windows/DirectX/DPI
+  acceptance when resources permit. Do not infer physical Windows acceptance from Wine.
+- Check mixed empty/hidden transcript blocks and tools straddling page boundaries
+  against Tau 1 before declaring full presentation parity.
+- The current request authorizes this beta build delivery; broader checks above
+  remain deferred, not silently marked passed. Physical Windows and Android
+  acceptance still depends on device QA.
+
+## 0.6.2 delivery checks
+
+Windows x64 installer and Android ARM64 APK built sequentially with one Cargo job.
+APK versionCode is 3; signing and 16KiB ZIP alignment checks passed. Packaged native
+payloads were hash-checked against the freshly built executable/library. No new GUI
+session, emulator, full test suite, or Android x86_64 build was started for delivery.
+
+
+## Shared editor / Sanscale migration — `tau2-sanscale-text-input`
+
+Isolated worktree `/root/tau2-text-input`, based on the completed settings handoff
+`446ac29`. SDK pinned to `8cc5afe833176a4fc71d1e5b8b97ad4952adfe40` in one workspace
+dependency. The implementation task made no merge, deployment, production account
+access or daemon restart. It was subsequently fast-forwarded through the maintained
+frontend branch into `tau2`; see MERGE.md. Integration changed documentation only
+and did not rerun the suite or convert pending device checks into passes.
+
+Completed on the implementation retained in this branch:
+- Workspace/all-targets check; **64 nextest tests passed**, including 13 new editor
+  tests with real fonts and three actual App/SQLite/headless-GPU tests.
+- Scoped frontend Clippy, all targets, `--no-deps -- -D warnings`, passed. Workspace
+  dependency linting still hits the existing Markdown lints (previously recorded
+  as `896a973b-1da6-4680-b894-c147eeb7d6fc`); no unrelated lint cleanup.
+- A SQLite trigger catches redundant same-value draft writes: navigation/copy
+  produce zero writes; cut writes once. Warm navigation produces zero shape,
+  flow or block requests. Selection visibly changes GPU pixels; repeated frames
+  are byte-identical. The actual new default-prompt settings UI exercises click
+  geometry, clipboard, composition/commit/undo and independent scrolling.
+- An observed debug run of 300 warm App Up/Down keys: p50 770ns, p95 800ns;
+  one completed headless frame plus readback 2.61ms. These are NOT physical
+  key-to-display or OS autorepeat latency measurements. Idle tick stays idle;
+  no blink/polling/smoothing timer was added. Chad forwards keyboard events and
+  the desktop adapter explicitly requests redraw after dirty input.
+
+At the user's finish request, a repeat check encountered a cold shared build and
+was stopped during dependency compilation. The late, unvalidated IME clause-highlight
+polish/test was removed, retaining the implementation from the completed 64-test
+run. Android cross-check stopped in dependency compilation (`regex-automata`),
+before checking this frontend. Do not count either attempt as a pass. The attempted
+private X11 input run supplied no completed result; no native GUI acceptance is claimed.
+
+Remaining: physical Windows/DirectX/DPI and Android/native-IME acceptance, OS
+composition/focus ordering, actual autorepeat-to-display measurements and held-drag
+input on devices. Android's existing bridge sends full text, not native caret or
+composition ranges. SDK intra-ligature caret granularity remains documented in 004.
+
+
+## Beta 0.7.1 Windows delivery
+
+At the user's request, built the release daemon and Windows x64 native app,
+launcher and self-extracting installer sequentially from `6cacd15`. Verified the
+compressed app payload matches the fresh executable; posted the approximately
+9.4 MiB installer. Beta health reports 0.7.1/protocol 13 after its authorized
+restart; stable's process/start/executable were unchanged. No backup or activity
+check, as explicitly requested. Full checksums and deployment evidence are in
+../INTEGRATION.md. No new Android package, test-suite rerun or physical GUI/input
+acceptance is claimed by this delivery.
+
+
+## Intent/topics integration validation — 2026-09-25
+
+Merged `fix/tau2-immediate-intent` (`5c5ef4d`) into the current `tau2` lineage
+(`6d30668`), retaining topic isolation, immediate queued-edit receipts and the
+2-second connection probes. Protocol 15 includes the context-catalog ancestry.
+Create receipts now bind the original keep-chat and topic payload, including
+aliases of reused starters; retries cannot silently retarget a topic or refresh
+an existing chat's captured instructions. Provisional topic selection/history
+survives restart and late acknowledgements without stealing the current topic.
+
+Validation on the combined source:
+
+- Managed `cargo check --locked --workspace --all-targets`: passed.
+- Managed `cargo nextest run --locked --workspace`: **99 passed, 0 skipped**.
+- Added cross-topic create-ID conflict/replay and provisional-chat topic/restart
+  regression coverage. Existing queue acknowledgement, connection probe and
+  real two-client topic tests also passed.
+- No deployment. `tau2-beta.service` remains stopped; stable Tau is untouched.
+
+These checks validate the merge, not bulk-network behavior or the protocol
+redesign being audited separately.
