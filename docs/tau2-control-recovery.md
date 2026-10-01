@@ -76,6 +76,21 @@ No real provider request, production mutation or physical-device acceptance.
   `/tmp/tau2-control-recovery-ui.log`). One unrelated existing dead-code warning
   in `daemon_settings::Draft::identity`; no lint-driven rewrite.
 
-Native all-target compilation and a real-controller queue end-to-end check will
-be recorded against the final source integration. Do not rerun the complete
-workspace/device/package suites merely for this bounded fix.
+## Source integration
+
+Merge **`efd1476`** combines feature `eab961b` (implementation `6422e27`) with
+`origin/tau2` at `1209d85`, retaining the already-integrated filename index. No
+code conflicts; the control/runner/UI implementation is byte-for-byte the tested
+feature version, and the filename-index implementation is unchanged.
+
+Merged native `cargo check --offline -p taud -p tau-frontend --all-targets` passes
+(`/tmp/tau2-control-recovery-merged-check.log`). Existing platform/test-only
+dead-code warnings are unchanged. The actual-controller native chat/queue/upload/
+settings/fork/restart end-to-end case also passes
+(`7963b209-8413-40c7-abac-3ccc415995b3`,
+`/tmp/tau2-control-recovery-merged-e2e.log`). Earlier disjoint daemon and retained
+layout results are reused, not rerun. No complete-workspace/device/package sweep.
+
+Source is committed and published to `origin/tau2`. The running beta and the
+reported live conversation were not changed; shipping the fix requires a
+separately authorized release/deployment. 045 remains open.

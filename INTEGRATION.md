@@ -1,3 +1,26 @@
+# Stop/Play queue-control recovery — source only, October 1, 2026
+
+User-authorized source merge **`efd1476`** integrates `fix/tau2-control-recovery`
+through `eab961b` (fix `6422e27`) into `origin/tau2` after `1209d85`; the existing
+filename-index integration is preserved. Stop retires deferred boundary actions;
+Play supersedes old/stuck actions without a separate Cancel prerequisite. Queue
+contents, receipt/revision fences and genuine error/restore pauses remain safe.
+
+Two failing-before lockout regressions now pass. All 66 daemon nextest cases pass
+across disjoint selections; the retained-control desktop/phone-layout test passes.
+Merged native daemon/frontend all-target compilation and the real-controller
+chat/queue/restart end-to-end case pass. Exact IDs and commands:
+[control recovery evidence](docs/tau2-control-recovery.md).
+
+[045 UX/control-state debt](tau2-backlog/045-play-pause-control-ux-debt.md) remains
+**open**: confusing run-through/Stop semantics, insufficient interruption,
+undiscoverable cancellation, technical-debt concerns and repeated Play/pause
+reviews are not closed by the immediate patch. No release/package/deployment,
+version/protocol/schema bump, service restart, live data edits or physical-device
+acceptance; the user's running conversation was not changed.
+
+---
+
 # Tau 2 integration / 0.7.0 beta
 
 The user authorized native integration, cleanup, remote `tau2`, Windows/Android

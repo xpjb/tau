@@ -1,8 +1,8 @@
 # 045 — Play/Stop/run-through UX and recurring control-state debt
 
 Status: **Open, high-priority product/control-state review.** Reported October 1,
-2026. The immediate lockout has a bounded source fix; that does **not** close the
-UX or architectural concerns. The user explicitly requested this backlog and
+2026. The immediate lockout fix is source-merged as `efd1476`; that does **not**
+close the UX or architectural concerns. The user explicitly requested this backlog and
 source commit/push/merge. No release or live-conversation mutation is authorized.
 
 ## User concerns — do not reduce this to one more race fix

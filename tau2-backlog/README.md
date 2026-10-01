@@ -6,8 +6,8 @@
 records the user's confusing/undiscoverable controls, insufficient interruption,
 bricked conversation, historical Stop→drain expectation and repeated Play/pause
 fixes. The immediate [Stop/Play lockout patch](../docs/tau2-control-recovery.md)
-is source-complete; **045 remains open** for product semantics, transition
-ownership and interactive acceptance. Do not close it with another race patch.
+is source-merged as `efd1476`; **045 remains open** for product semantics,
+transition ownership and interactive acceptance. Do not close it with another race patch.
 
 ## Current disposition: bounded source closeout
 

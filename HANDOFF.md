@@ -1,4 +1,4 @@
-# Stop/Play lockout — bounded source fix, October 1, 2026
+# Stop/Play lockout — integrated source, not deployed, October 1, 2026
 
 User requested fixing the stuck run-through → Stop → Play flow, then recording
 that the UX makes no sense, suggests technical debt, and Play/pause has already
@@ -13,9 +13,12 @@ The retained frontend control regression passes, including phone-sized visible
 Cancel/Play. See [exact evidence](docs/tau2-control-recovery.md).
 [045](tau2-backlog/045-play-pause-control-ux-debt.md) is **open**, not fixed by this
 patch: run-through still waits for the existing boundary; systemic UX and control
-ownership need review. Source merge is authorized; release/deployment, service
-restarts, live data changes and physical-device acceptance are not part of this
-change. Final integration/check evidence will follow the source merge.
+ownership need review. **`efd1476`** merges feature `eab961b` into `origin/tau2`
+from `1209d85`, preserving the integrated filename index. Merged native daemon/
+frontend all-target check and the actual-controller queue end-to-end case pass
+(`7963b209-8413-40c7-abac-3ccc415995b3`); previous tests are reused. No deployment,
+release packages, version/protocol/schema change, service restart, live data edit
+or physical-device acceptance. The reported running conversation is untouched.
 
 ---
 

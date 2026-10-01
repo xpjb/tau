@@ -8,7 +8,10 @@ regression covers desktop state and visible named cancellation/Play at phone siz
 [reproduction and validation](../docs/tau2-control-recovery.md).
 [045 UX/control-state debt](../tau2-backlog/045-play-pause-control-ux-debt.md)
 remains open: this is not faster mid-stream steering or real-device UX acceptance.
-No package or deployment was performed.
+Merged as `efd1476` into `origin/tau2`, retaining the separate filename-index
+integration. Merged native daemon/frontend all-target check and real-controller
+queue end-to-end case pass (`7963b209-8413-40c7-abac-3ccc415995b3`). No redundant
+full-suite rerun, package or deployment was performed.
 
 ---
 
