@@ -48,12 +48,13 @@ impl Proxy {
                     let (n,from)=received.unwrap();let direction=usize::from(from==udp);
                     let target=if direction==1 {let Some(client)=client else {continue;};client} else {client=Some(from);udp};
                     let serial=link.udp.fetch_add(1,Ordering::Relaxed)+1;
-                    if link.blackhole.load(Ordering::Relaxed) {link.blackholed.fetch_add(1,Ordering::Relaxed);continue;}
-                    if serial%23==0 || packets.len()>=512 {link.dropped.fetch_add(1,Ordering::Relaxed);continue;}
+                    native_trace::packet("received",direction,n);
+                    if link.blackhole.load(Ordering::Relaxed) {native_trace::packet("blackholed",direction,n);link.blackholed.fetch_add(1,Ordering::Relaxed);continue;}
+                    if serial%23==0 || packets.len()>=512 {native_trace::packet("lost",direction,n);link.dropped.fetch_add(1,Ordering::Relaxed);continue;}
                     let bytes=buf[..n].to_vec();let socket=socket.clone();let link=link.clone();
                     packets.spawn(async move {link.wait(direction,n).await;
-                        if link.blackhole.load(Ordering::Relaxed) {link.blackholed.fetch_add(1,Ordering::Relaxed);return;}
-                        if socket.send_to(&bytes,target).await.is_ok() {link.udp_bytes.fetch_add(n as u64,Ordering::Relaxed);}});
+                        if link.blackhole.load(Ordering::Relaxed) {native_trace::packet("blackholed",direction,n);link.blackholed.fetch_add(1,Ordering::Relaxed);return;}
+                        if socket.send_to(&bytes,target).await.is_ok() {native_trace::packet("forwarded",direction,n);link.udp_bytes.fetch_add(n as u64,Ordering::Relaxed);}});
                 }
                 _=packets.join_next(),if !packets.is_empty()=>{}
             }}
@@ -146,3 +147,6 @@ async fn native_loss_delay_bandwidth_upload_cancel_resume_and_two_client_control
 
 #[path = "support/block_outage.rs"]
 mod block_outage;
+
+#[path = "support/native_trace.rs"]
+mod native_trace;

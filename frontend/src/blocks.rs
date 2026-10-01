@@ -808,10 +808,15 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
     };
     let feeds=match &request {BlockWatch::Feed(req)=>vec![req.clone()],BlockWatch::Feeds {requests}=>requests.clone(),BlockWatch::Block(_)=>vec![]};
     let bulk=matches!(key,Key::Block(_,_,false) | Key::Feeds(_,_,true) | Key::History(_,_,_,true) | Key::BackgroundFeeds(_) | Key::BackgroundBlock(..));
+    log::trace!(target: "tau_native_watch", "acquire begin key={key:?} epoch={epoch}");
     let mut watcher = client.watch_scheduled(request.clone(),bulk).await?;
+    log::trace!(target: "tau_native_watch", "acquire complete key={key:?}");
     let mut records = vec![vec![];feeds.len()]; let mut head = None;
     loop {
+        log::trace!(target: "tau_native_watch", "receive begin key={key:?}");
         let (frame,wire_bytes) = watcher.next().await?;
+        let kind=match &frame.header {Header::Record {..}=>"record",Header::Page {..}=>"page",Header::Block {..}=>"head",Header::Data {..}=>"data",Header::End=>"end",Header::Yield=>"yield",Header::Error {..}=>"error",_=>"other"};
+        log::trace!(target: "tau_native_watch", "receive complete key={key:?} kind={kind}");
         match &frame.header {
             Header::Record { watch,record } => {
                 let records=records.get_mut(*watch).context("Unrequested feed")?;
@@ -838,7 +843,9 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
                 ensure!(h.version == *version,"Unexpected content version");
                 let range = ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes:frame.decoded()?};
                 let cache = cache.clone(); let scope2 = scope.clone(); let lineage = lineage.to_owned();
+                log::trace!(target: "tau_native_watch", "cache range begin key={key:?} offset={offset}");
                 tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope2,&range,epoch)).await??;
+                log::trace!(target: "tau_native_watch", "cache range complete key={key:?} offset={offset}");
                 notices.send(Notice {transfer:None,scope:scope.clone(),error:None}).await?; (wake)();
             }
             Header::End | Header::Yield => {
@@ -850,7 +857,9 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
         }
         // A peer may finish its credit half while the final bounded response is
         // still being consumed. Read-side errors/End determine stream completion.
+        log::trace!(target: "tau_native_watch", "credit begin key={key:?}");
         let _ = watcher.consumed(wire_bytes).await;
+        log::trace!(target: "tau_native_watch", "credit complete key={key:?}");
         if cache.epoch()!=epoch {return Ok(false);}
     }
 }

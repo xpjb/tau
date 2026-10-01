@@ -16,9 +16,14 @@ struct Source {
 }
 impl Backend for Source {
     fn feed(&self, request: FeedRequest) -> BoxFuture<'static, anyhow::Result<FeedPage>> {
-        let db = self.db.clone(); async move { tau_blocks::feed(&db.lock().unwrap(), &request) }.boxed()
+        let db = self.db.clone(); async move {
+            let page=tau_blocks::feed(&db.lock().unwrap(), &request)?;
+            if !page.records.is_empty() { native_trace::event(&format!("source metadata scope={} records={} cursor={}",request.scope,page.records.len(),page.cursor.sequence)); }
+            Ok(page)
+        }.boxed()
     }
     fn read(&self, request: BlockRequest) -> BoxFuture<'static, anyhow::Result<ContentRange>> {
+        native_trace::event(&format!("source read scope={} offset={}",request.scope,request.offset));
         self.reads.lock().unwrap().push(request.clone());
         let db = self.db.clone(); async move { tau_blocks::read(&db.lock().unwrap(), &request) }.boxed()
     }
@@ -63,6 +68,16 @@ fn cached(c: &Controller, scope: &str) -> Vec<u8> {
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn native_blocks_resume_after_udp_outage_while_websocket_stays_healthy() {
+    outage(Duration::from_secs(8), Duration::from_secs(5)).await;
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=4)]
+async fn native_blocks_reacquire_promptly_after_extended_udp_outage() {
+    outage(Duration::from_secs(17), Duration::from_secs(5)).await;
+}
+
+async fn outage(duration: Duration, progress_budget: Duration) {
+    native_trace::init(); native_trace::event("fixture start");
     let db = Connection::open_in_memory().unwrap(); tau_blocks::initialize(&db).unwrap();
     let lineage = tau_blocks::cursor(&db).unwrap().lineage;
     let tx = db.unchecked_transaction().unwrap();
@@ -80,9 +95,10 @@ async fn native_blocks_resume_after_udp_outage_while_websocket_stays_healthy() {
     tx.commit().unwrap();
     let source = Arc::new(Source { db: Arc::new(std::sync::Mutex::new(db)), changed: watch::channel(0).0, reads: Default::default() });
     let server = Arc::new(Server::bind("127.0.0.1:0".parse().unwrap(),source.clone()).await.unwrap());
+    native_trace::event("server bound");
     let probe = tau_transfer::blocks::Client::bind().await.unwrap();
     let udp_port = server.authorize(&probe.node_id(),lineage.clone()).unwrap().port;
-    probe.shutdown().await;
+    native_trace::event("probe closing"); probe.shutdown().await; native_trace::event("probe closed");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let tcp = listener.local_addr().unwrap();
     let pings = Arc::new(AtomicU64::new(0));
     let app = Router::new().route("/v1/ws",get(control)).with_state(Control { server:server.clone(), lineage, pings:pings.clone() });
@@ -98,7 +114,7 @@ async fn native_blocks_resume_after_udp_outage_while_websocket_stays_healthy() {
         loop { c.poll(); if ["foreground","background"].iter().all(|s| cached(&c,s)==b"verified prefix") { break; } tokio::time::sleep(Duration::from_millis(10)).await; }
     }).await.unwrap();
     let epoch = c.epoch; let ping_count = pings.load(Ordering::Relaxed);
-    link.blackhole.store(true,Ordering::Relaxed);
+    native_trace::event("OUTAGE BEGINS"); link.blackhole.store(true,Ordering::Relaxed);
     let suffix = (0..500).map(|n| format!("{}\n",blake3::hash(format!("outage-{n}").as_bytes()).to_hex())).collect::<String>();
     {
         let mut db = source.db.lock().unwrap(); let tx = db.transaction().unwrap();
@@ -109,20 +125,22 @@ async fn native_blocks_resume_after_udp_outage_while_websocket_stays_healthy() {
         let sequence = tau_blocks::cursor(&tx).unwrap().sequence; tx.commit().unwrap();
         source.changed.send_replace(sequence);
     }
-    let until = Instant::now()+Duration::from_secs(8);
+    let until = Instant::now()+duration;
     while Instant::now()<until { c.poll(); assert_eq!(c.epoch,epoch); tokio::time::sleep(Duration::from_millis(10)).await; }
     assert!(pings.load(Ordering::Relaxed)>ping_count && c.health.latest().is_some(),"Actual WebSocket ping/pong continues during a UDP-only outage");
     assert!(link.blackholed.load(Ordering::Relaxed)>0);
     for scope in ["foreground","background"] { assert_eq!(cached(&c,scope),b"verified prefix"); }
-    let restored = Instant::now(); link.blackhole.store(false,Ordering::Relaxed);
+    let restored = Instant::now(); native_trace::event("LINK RESTORED"); link.blackhole.store(false,Ordering::Relaxed);
     let expected = format!("verified prefix{suffix}").into_bytes(); let mut progress = [None,None];
     loop {
         c.poll();
         for (index,scope) in ["foreground","background"].iter().enumerate() {
             let bytes = cached(&c,scope);
-            if bytes.len()>b"verified prefix".len() { progress[index].get_or_insert(restored.elapsed()); }
-            assert!(progress[index].is_some() || restored.elapsed()<Duration::from_secs(15),
-                "{scope} made no per-body progress after UDP recovery; reads={:?}; {}",source.reads.lock().unwrap(),c.diagnostics());
+            if bytes.len()>b"verified prefix".len() && progress[index].is_none() {
+                native_trace::event(&format!("cache progress scope={scope} prefix={}",bytes.len())); progress[index]=Some(restored.elapsed());
+            }
+            assert!(progress[index].is_some() || restored.elapsed()<progress_budget,
+                "{scope} made no per-body progress within {progress_budget:?} after UDP recovery; reads={:?}; {}",source.reads.lock().unwrap(),c.diagnostics());
         }
         if ["foreground","background"].iter().all(|s| cached(&c,s)==expected)
             && c.selected().unwrap().feed.event("reply").is_some_and(|e| e.text.as_bytes()==expected) { break; }
@@ -137,7 +155,9 @@ async fn native_blocks_resume_after_udp_outage_while_websocket_stays_healthy() {
             "Recovery must request the verified suffix, not lose the cached prefix");
     }
     eprintln!("native-block-outage: first per-body progress={progress:?}, completion={:?}, UDP blackholed={}; {}",restored.elapsed(),link.blackholed.load(Ordering::Relaxed),c.diagnostics());
+    native_trace::event("recovery complete; cleanup");
     drop(c); control_task.abort(); let _ = control_task.await;
     // Keep the UDP proxy available while the endpoint closes.
-    server.shutdown().await; drop(proxy);
+    let _=tokio::time::timeout(Duration::from_secs(2),server.shutdown()).await;
+    drop(proxy); native_trace::event("fixture end");
 }
