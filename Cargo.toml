@@ -4,4 +4,4 @@ exclude = ["windows"]
 resolver = "2"
 
 [workspace.dependencies]
-sanscale = { git = "https://github.com/xpjb/sanscale", rev = "7bbe23079f175e43bbfb642663c8af547a95a7f2" }
+sanscale = { git = "https://github.com/xpjb/sanscale", rev = "4325844c649dde6e2f1812a489ebca8d9b2ddadd" }

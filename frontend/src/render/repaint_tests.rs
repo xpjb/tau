@@ -78,3 +78,68 @@ fn cache_pressure_during_paint_preserves_warm_markdown_and_composer_pixels() {
     }
     assert_content(&swept, &reference, "sweep frame must not lose text for one paint");
 }
+
+#[test]
+fn queued_repaints_keep_text_pixels_stable_across_surfaces_and_atlas_updates() {
+    let size = (640, 320);
+    let ctx = HeadlessCtx::new(&Config {
+        size, device_limits: crate::desktop::limits(), ..Default::default()
+    }).unwrap();
+    let mut renderer = Renderer::new(&ctx).unwrap();
+    let mut layer = Layer::default();
+    layer.rect(Rect::new(0., 0., size.0 as f32, size.1 as f32), color(0x0e141b));
+    for i in 0..64 {
+        layer.above();
+        let rect = Rect::new((i % 8) as f32 * 80. + 4., (i / 8) as f32 * 40. + 4., 72., 32.);
+        layer.rect(rect, color(0x18212b));
+        renderer.label(&mut layer, &format!("Warm text {i}"), rect, 12., color(0xe5eaf0), i % 2 == 0);
+        if i % 8 == 0 {
+            renderer.icon(&ctx, &mut layer, crate::icons::Icon::Gear,
+                Rect::new(rect.x + 56., rect.y + 16., 12., 12.), 0x67d4ff);
+        }
+    }
+    renderer.draw(&ctx, ctx.view(), std::slice::from_ref(&layer));
+    let reference = ctx.read_rgba8().unwrap();
+    assert!(reference.chunks_exact(4).any(|p| p[0] > 180), "the reference must contain bright text ink");
+    let extent = wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 };
+    let target = ctx.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("queued repaint target"), size: extent, mip_level_count: 1, sample_count: 1,
+        dimension: wgpu::TextureDimension::D2, format: ctx.format(),
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let style = Style { chain: renderer.faces.prose[0], wrap_em: None, align: Align::Left, line_spacing: 1. };
+    let mut snapshots = Vec::new();
+    sanscale::profiling::reset_work_counters();
+    for i in 0..32 {
+        // New glyphs exercise atlas uploads while every displayed draw stays
+        // unchanged. No readback/poll serializes these submitted repaint frames.
+        renderer.text.shape_transient(&char::from_u32(33 + i).unwrap().to_string(), &style).unwrap();
+        renderer.draw(&ctx, &view, std::slice::from_ref(&layer));
+        let snapshot = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("queued repaint snapshot"), size: u64::from(size.0 * size.1 * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
+        });
+        let mut encoder = ctx.device().create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(target.as_image_copy(), wgpu::TexelCopyBufferInfo {
+            buffer: &snapshot, layout: wgpu::TexelCopyBufferLayout {
+                offset: 0, bytes_per_row: Some(size.0 * 4), rows_per_image: Some(size.1),
+            },
+        }, extent);
+        ctx.queue().submit([encoder.finish()]);
+        snapshots.push(snapshot);
+    }
+    assert!(sanscale::profiling::work_counters().text_atlas_upload_bytes > 0, "new glyphs must actually update the GPU atlas");
+    let (tx, rx) = std::sync::mpsc::channel();
+    for snapshot in &snapshots {
+        let tx = tx.clone();
+        snapshot.slice(..).map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+    }
+    ctx.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    for _ in &snapshots { rx.recv().unwrap().unwrap(); }
+    for (i, snapshot) in snapshots.iter().enumerate() {
+        let pixels = snapshot.slice(..).get_mapped_range().unwrap();
+        let different = pixels.chunks_exact(4).zip(reference.chunks_exact(4)).filter(|(a, b)| a != b).count();
+        assert_eq!(different, 0, "queued repaint {i} lost/changed text in {different} pixels");
+    }
+}
