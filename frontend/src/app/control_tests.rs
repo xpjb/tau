@@ -81,6 +81,22 @@ fn queue_controls_follow_run_state() {
             .placed()
             .any(|(a, _)| matches!(a, Header::Queue(QueueOperation::Resume { .. })))
     );
+    // The cancellation escape is named for the action and remains reachable on
+    // a phone-sized layout. Play remains available without using it first.
+    app.controller.chats.get_mut("demo").unwrap().feed.queue.control.as_mut().unwrap().action = "prefix".into();
+    app.ui.mobile = true;
+    app.resize((390, 740), 1., Vec2::new(0., 0.));
+    app.root.workspace.show_chats = false;
+    frame(&mut app);
+    let cancel = app.root.workspace.chat.composer.controls.items.iter().find(|(_, _, a)|
+        matches!(a, Composer::Queue(QueueOperation::Cancel {control_id}) if control_id == "pause-control")).unwrap();
+    assert_eq!(cancel.1.label, "Cancel run limit");
+    assert!(cancel.1.control.enabled && cancel.1.control.rect.is_some_and(|r|
+        r.y >= cancel.1.control.clip.y && r.y + r.height <= cancel.1.control.clip.y + cancel.1.control.clip.height));
+    assert!(app.root.workspace.chat.header.controls.placed().any(|(a, _)| matches!(a, Header::Queue(QueueOperation::Resume { .. }))));
+    app.controller.chats.get_mut("demo").unwrap().feed.queue.control = None;
+    frame(&mut app);
+    assert!(!app.root.workspace.chat.composer.controls.placed().any(|(a, _)| matches!(a, Composer::Queue(QueueOperation::Cancel { .. }))));
 }
 
 #[test]

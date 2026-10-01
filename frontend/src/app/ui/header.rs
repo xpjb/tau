@@ -110,7 +110,14 @@ impl Widget for Header {
         let title_x = b.x + if wide { 14. * s } else { 64. * s };
         let summary = cx.model.account.sessions.iter().find(|s| s.id == session).cloned();
         let running = summary.as_ref().is_some_and(|s| s.status == SessionStatus::Running);
-        let paused = cx.model.chats[&session].feed.queue.paused;
+        let queue = &cx.model.chats[&session].feed.queue;
+        let paused = queue.paused;
+        let run_hint = match queue.control.as_ref().map(|c| (c.action.as_str(), c.status.as_str())) {
+            Some(("prefix", "waiting")) => "Run-through pending",
+            Some(("pause", "waiting")) => "Pause pending",
+            Some(("prefix", "applied")) => "Finishing run-through",
+            _ => "Working",
+        };
         let failed = summary.as_ref().is_some_and(|s| s.status == SessionStatus::Error);
         let connected = cx.model.epoch.is_some();
         let title_width = (b.x + b.width - if running || paused { 152. * s } else { 108. * s } - title_x).max(1.);
@@ -146,7 +153,7 @@ impl Widget for Header {
             } else if failed {
                 summary.as_ref().and_then(|s| s.detail.as_deref()).unwrap_or("Error · tap for details")
             } else if running {
-                summary.as_ref().and_then(|s| s.detail.as_deref()).unwrap_or("Working")
+                summary.as_ref().and_then(|s| s.detail.as_deref()).unwrap_or(run_hint)
             } else if paused {
                 "Paused · resume needed"
             } else {
