@@ -946,6 +946,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
 @fragment fn fs(in: Out) -> @location(0) vec4<f32> { return textureSample(image,image_sampler,in.uv); }
 "#;
 
+#[cfg(all(test, not(target_os = "android")))]
+mod repaint_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
