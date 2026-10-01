@@ -88,39 +88,65 @@ impl Downloads {
             let lineage=self.ready.borrow().clone().unwrap();
             ensure!(lineage==original_lineage,"Content source changed; retry the download");
             let client=self.client.borrow().clone().context("Content endpoint is unavailable")?;
-            request=self.cache.block_request(scope,id)?; request.follow=false;
-            let mut watcher=client.watch_bulk(BlockWatch::Block(request.clone())).await?;
-            let mut head=None; let mut reported=Instant::now()-Duration::from_secs(1);
-            status.transferred=request.offset;
-            loop {
-                let (frame,n)=watcher.next().await?; status.network_bytes+=n as u64;
-                match &frame.header {
-                    Header::Block {block} => {
-                        ensure!(block.id==id && matches!(block.kind,BlockKind::File|BlockKind::Image) && block.length<=limit,"Invalid file header or size");
-                        if request.version!=block.version {status.transferred=0;request.version=block.version;}
-                        status.total=block.length;
-                        let (cache,scope,lineage,h)=(self.cache.clone(),scope.to_owned(),lineage.clone(),block.clone());
-                        tokio::task::spawn_blocking(move ||cache.header_at(&lineage,&scope,&h,epoch)).await??;
-                        head=Some(block.clone());
+            let mut failures=0;
+            let mut delay=100;
+            let h=loop {
+                ensure!(self.cache.epoch()==epoch && self.ready.borrow().as_ref()==Some(&lineage),
+                    "Content source or replica changed; retry the download");
+                request=self.cache.block_request(scope,id)?; request.follow=false;
+                if let Some(h)=self.cache.file_header(scope,id)? && h.sealed && h.length==request.offset {break h;}
+                let before=request.offset;
+                let result=async {
+                    let mut watcher=client.watch_bulk(BlockWatch::Block(request.clone())).await?;
+                    let mut head=None; let mut reported=Instant::now()-Duration::from_secs(1);
+                    status.transferred=request.offset;
+                    loop {
+                        let (frame,n)=watcher.next().await?; status.network_bytes+=n as u64;
+                        match &frame.header {
+                            Header::Block {block} => {
+                                ensure!(block.id==id && matches!(block.kind,BlockKind::File|BlockKind::Image) && block.length<=limit,"Invalid file header or size");
+                                if request.version!=block.version {status.transferred=0;request.version=block.version;}
+                                status.total=block.length;
+                                let (cache,scope,lineage,h)=(self.cache.clone(),scope.to_owned(),lineage.clone(),block.clone());
+                                tokio::task::spawn_blocking(move ||cache.header_at(&lineage,&scope,&h,epoch)).await??;
+                                head=Some(block.clone());
+                            }
+                            Header::Data {version,offset,hash,..} => {
+                                let h: &BlockHeader=head.as_ref().context("File data preceded its header")?;
+                                ensure!(*version==h.version && *offset==status.transferred,"Unexpected file offset/version");
+                                let bytes=frame.decoded()?; let length=bytes.len();
+                                let range=ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes};
+                                let (cache,scope,lineage)=(self.cache.clone(),scope.to_owned(),lineage.clone());
+                                tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope,&range,epoch)).await??;
+                                status.transferred+=length as u64;
+                            }
+                            Header::End => break,
+                            Header::Error {message} => anyhow::bail!("{message}"),
+                            _ => anyhow::bail!("Unexpected file response"),
+                        }
+                        let _=watcher.consumed(n).await;
+                        if reported.elapsed()>=Duration::from_millis(100) {self.report(key,path,status).await;reported=Instant::now();}
                     }
-                    Header::Data {version,offset,hash,..} => {
-                        let h: &BlockHeader=head.as_ref().context("File data preceded its header")?;
-                        ensure!(*version==h.version && *offset==status.transferred,"Unexpected file offset/version");
-                        let bytes=frame.decoded()?; let length=bytes.len();
-                        let range=ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes};
-                        let (cache,scope,lineage)=(self.cache.clone(),scope.to_owned(),lineage.clone());
-                        tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope,&range,epoch)).await??;
-                        status.transferred+=length as u64;
+                    let h=head.context("File response had no header")?;
+                    ensure!(h.sealed && status.transferred==h.length,"File transfer is incomplete");
+                    Ok::<_,anyhow::Error>(h)
+                }.await;
+                match result {
+                    Ok(h)=>break h,
+                    Err(error)=>{
+                        if !tau_transfer::blocks::is_connection_error(&error) {return Err(error);}
+                        if status.transferred>before {failures=0;delay=100;}
+                        failures+=1;
+                        if failures>=8 {return Err(error);}
+                        // Only a disposable read resumes. Never retry corrupt
+                        // content, local IO, changed sources or user actions.
+                        log::trace!(target:"tau_native_watch", "file reconnect scope={scope} id={id} verified={} failures={failures}",status.transferred);
+                        self.report(key,path,status).await;
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        delay=(delay*2).min(1000);
                     }
-                    Header::End => break,
-                    Header::Error {message} => anyhow::bail!("{message}"),
-                    _ => anyhow::bail!("Unexpected file response"),
                 }
-                let _=watcher.consumed(n).await;
-                if reported.elapsed()>=Duration::from_millis(100) {self.report(key,path,status).await;reported=Instant::now();}
-            }
-            let h=head.context("File response had no header")?;
-            ensure!(h.sealed && status.transferred==h.length,"File transfer is incomplete");
+            };
             (h,lineage)
         };
         ensure!(header.length<=limit && matches!(header.kind,BlockKind::File|BlockKind::Image),"Invalid file or download limit");
