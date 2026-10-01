@@ -1,4 +1,4 @@
-# Wheel-scroll startup — feature source only, October 1, 2026
+# Wheel-scroll startup — integrated source, not released, October 1, 2026
 
 User report: scrolling up from the bottom-docked chat on Windows beta feels delayed
 by about 500ms. Reproduced a missing first-frame request, not an explicit 500ms
@@ -10,6 +10,10 @@ are unchanged; no continuous render loop or new timer was added.
 
 - Fix **`ec2d764`**, branch `fix/tau2-undock-scroll-latency`, worktree
   `/root/tau2-undock-scroll-latency`, based on `origin/tau2` at `003de72`.
+  Merged at the user's request as **`e7e0294`** into `tau2-integration`, publishing
+  to `origin/tau2`. The merge exactly matches the validated feature tree; only
+  integration-status notes change afterward. Existing validation is reused,
+  without another build or test run.
 - The real App/GPU regression fails before the fix at the immediate redraw check
   (nextest `860fa91a-33ac-45c3-8709-4b1086c52acc`) and passes afterward. At 1x and
   2.5x it starts fully idle and bottom-docked, checks accumulated wheel input,
@@ -19,7 +23,7 @@ are unchanged; no continuous render loop or new timer was added.
 - Managed native frontend all-target and Windows MSVC library compiler checks pass.
   Full frontend nextest: **197/197 passed**, zero skipped, 10 binaries
   (`50b642a8-930e-4adf-865f-ac4cf0ff9081`). Existing dead-code warnings remain.
-- No Clippy, built-in Cargo test runner, package build, integration merge, deployment,
+- No Clippy, built-in Cargo test runner, package build, deployment,
   version/protocol/schema change, production-data access or service restart.
   Physical Windows wheel/trackpad and DPI acceptance remains open; the user's
   exact 500ms delay was not measured on Windows here.

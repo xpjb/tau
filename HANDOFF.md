@@ -1,3 +1,16 @@
+# Wheel-scroll startup fix — integrated source, not released, October 1, 2026
+
+At the user's request, `fix/tau2-undock-scroll-latency` (`ff92cf8`, fix `ec2d764`)
+is merged as **`e7e0294`** into `tau2-integration`, publishing to `origin/tau2`.
+Wheel input now wakes on-demand rendering before the easing animation starts.
+The merge exactly matches the validated feature tree; reuse the **197/197 frontend
+nextest** result and native/Windows compiler checks. Only status notes follow;
+no redundant build or test run. See [frontend QA](frontend/QA.md) for the failing-before
+regression and scope. No package, version bump, deployment, service restart or
+stable/master change. Physical Windows latency/DPI acceptance remains open.
+
+---
+
 # Simplification and single-task compaction — integrated source, not deployed
 
 At the user's request, practical closeout is merged into `tau2-integration`,
