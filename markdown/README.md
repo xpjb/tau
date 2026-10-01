@@ -15,8 +15,11 @@ so Tau's build is pinned/self-contained and the backend agent need not coordinat
 a second repository change. It can be moved upstream into a companion crate later.
 
 Local additions: passive authored-link destination metadata, projected selection
-rectangles and plain-text copy, with a source-map/link-edit regression. Activation
-and allowed URL schemes belong to the app. The upstream CPU/differential tests
+rectangles and plain-text copy, with a source-map/link-edit regression. Link
+underlines sit 0.1 em below each shaped line's measured baseline rather than at a
+fixed distance from the line top; font metrics, wrapping and heading sizes must
+not move them across the glyphs. Activation and allowed URL schemes belong to the
+app. The upstream CPU/differential tests
 were retained; adapter tests use Tau's bundled, licensed deterministic fonts
 instead of system font discovery. No demo editor/fontdb/window dependency remains.
 

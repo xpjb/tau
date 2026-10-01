@@ -892,12 +892,13 @@ impl Preview {
                 paint: c.paint,
                 clip: Some(viewport),
             });
+            let layout = text.measure(c.handle);
             for r in &c.rich.runs {
                 let flags = r.flags | c.flags;
                 if flags & (inline::CODE | inline::STRIKE | inline::LINK) == 0 {
                     continue;
                 }
-                for span in text.measure(c.handle).selection(r.range.clone()) {
+                for span in layout.selection(r.range.clone()) {
                     let x = at.x + span.x_em * c.size;
                     let y = at.y + span.y_em * c.size;
                     let w = span.width_em * c.size;
@@ -914,8 +915,11 @@ impl Preview {
                         });
                     }
                     if flags & inline::LINK != 0 {
+                        // Font metrics and leading move the baseline; a fixed
+                        // offset from the line top can cut through the glyphs.
+                        let baseline = layout.line(span.line).unwrap().baseline_em;
                         scene.over.push(Decoration {
-                            rect: Rect::new(x, y + c.size * 1.05, w, 1.),
+                            rect: Rect::new(x, at.y + (baseline + 0.1) * c.size, w, 1.),
                             color: theme.accent(),
                         });
                     }
@@ -1120,6 +1124,69 @@ impl Preview {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_underlines_stay_below_each_measured_baseline() {
+        let (mut text, faces) = setup();
+        for source in [
+            "See [https://example.org with **bold**, _italic_ and `code` labels that wrap](https://example.org) here.",
+            "# [A heading link that wraps](https://example.org)",
+            "[first line\nsecond line](https://example.org)",
+            "> [A quoted link that wraps](https://example.org)",
+            "| Link |\n| --- |\n| [A table link that wraps](https://example.org) |",
+        ] {
+            let doc = Document::new(source);
+            for size in [12., 16., 28.] {
+                let theme = Theme::default();
+                let mut view = Preview::new(902);
+                view.sync(&doc, &mut text, faces, theme, 130., size);
+                let scene = view.scene(
+                    &mut text,
+                    &doc,
+                    Rect::new(30., 60., 130., 1600.),
+                    Vec2::new(7., 11.),
+                );
+                assert!(
+                    scene.over.len() > 1,
+                    "fixture must exercise multiple lines/runs"
+                );
+                let mut underlines = scene.over.iter();
+                for &(id, at) in &scene.placed {
+                    let c = &view.texts[&id];
+                    let layout = text.measure(c.handle);
+                    for run in &c.rich.runs {
+                        if run.flags & inline::LINK == 0 {
+                            continue;
+                        }
+                        for span in layout.selection(run.range.clone()) {
+                            let line = layout.line(span.line).unwrap();
+                            let baseline = at.y + line.baseline_em * c.size;
+                            let underline = underlines.next().unwrap();
+                            let gap_em = (underline.rect.y - baseline) / c.size;
+                            assert!(
+                                (0.04..0.2).contains(&gap_em),
+                                "underline must sit just below baseline, not across glyphs: gap={gap_em}em, size={size}, source={source:?}"
+                            );
+                            assert!(
+                                underline.rect.y + underline.rect.height
+                                    <= at.y + (line.top_em + line.height_em) * c.size
+                            );
+                            assert!((underline.rect.x - (at.x + span.x_em * c.size)).abs() < 0.001);
+                            assert!((underline.rect.width - span.width_em * c.size).abs() < 0.001);
+                            assert_eq!(underline.rect.height, 1.);
+                            assert_eq!(underline.color, theme.accent());
+                        }
+                    }
+                }
+                assert!(
+                    underlines.next().is_none(),
+                    "only link spans are underlined"
+                );
+                view.release(&mut text);
+            }
+        }
+    }
+
     #[test]
     fn links_and_copy_follow_projected_text_even_when_only_destination_changes() {
         let (mut text, faces) = setup();
