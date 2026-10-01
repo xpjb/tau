@@ -36,10 +36,13 @@ async fn sync_prefetches_names_then_uses_conditional_deltas_across_chat_switches
     client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
     let (endpoint,clients)=watch::channel(Some(client.clone())); let (lineage,ready)=watch::channel(Some("source".into()));
     let (send,mut updates)=watch::channel(None);
-    let service=Service::start(clients,ready,send,Arc::new(||{}));
+    let (wake,mut wakes)=tokio::sync::mpsc::unbounded_channel();
+    let service=Service::start(clients,ready,send,Arc::new(move || {let _=wake.send(());}));
     let plan=|generation,session:&str|Some(Interest {generation,session:session.into(),path:None});
     service.set(plan(1,"chat"));
     let first=update(&mut updates,1).await;assert_eq!(first.index.as_ref().unwrap().entries.len(),2);
+    tokio::time::timeout(Duration::from_secs(1),wakes.recv()).await.unwrap().unwrap();
+    assert!(wakes.try_recv().is_err(),"One names publication emits one wake, not a repaint loop");
     assert!(matches!(backend.calls.lock().unwrap()[0].operation,FileOperation::Index {revision:None}));
     // No viewer/file-open interest is needed to warm the index.
     service.set(None);tokio::time::sleep(Duration::from_millis(20)).await;
@@ -84,14 +87,15 @@ fn matching_is_latest_only_and_keeps_all_results_on_a_large_index() {
     let paths=(0..50_000).map(|i|IndexedPath {path:format!("frontend/src/app/module_{i:05}.rs"),symlink:false}).collect::<Vec<_>>();
     let reply=FileReply::Index {path:"/work".into(),revision:"a".repeat(64),base:None,entries:paths,removed:vec![],indexing:false,limited:false};
     let index=Arc::new(PathIndex::apply(None,&reply).unwrap());
-    let matcher=Matcher::new(Arc::new(||{}));
+    let (wake,wakes)=std::sync::mpsc::channel();
+    let matcher=Matcher::new(Arc::new(move || {let _=wake.send(());}));
     let start=std::time::Instant::now();
     let mut generation=0;
     for query in ["zzzz", "module", "module4", "mdrs fnt"] {generation=matcher.query(index.clone(),query.into(),false);}
     loop {
+        wakes.recv_timeout(Duration::from_secs(10).saturating_sub(start.elapsed())).expect("Local matcher must wake an idle UI");
         if let Some(done)=matcher.take() && done.generation==generation {
             assert_eq!(done.rows.len(),50_000);assert!(Arc::ptr_eq(&index,&done.index));break;
         }
-        assert!(start.elapsed()<Duration::from_secs(10),"local worker stalled");std::thread::sleep(Duration::from_millis(2));
     }
 }

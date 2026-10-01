@@ -275,3 +275,66 @@ fn background_index_refresh_preserves_selection_and_old_scope_results_cannot_res
     h.app.key("Space",true,false);h.frame();
     assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().index_seen.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_picker_results_wake_and_repaint_without_input_or_polling_frames() {
+    use std::time::Duration;
+    async fn until(app: &mut App, ctx: &HeadlessCtx, wakes: &mut tokio::sync::mpsc::UnboundedReceiver<()>, done: impl Fn(&App) -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !done(app) {
+            tokio::time::timeout_at(deadline, wakes.recv()).await.expect("Picker did not wake the UI").expect("Wake channel closed");
+            let indexed = app.root.workspace.chat.code.view.as_ref().is_some_and(|v| v.index_seen.as_ref().is_some_and(|u| u.index.is_some()));
+            let matched = app.root.workspace.chat.code.view.as_ref().is_some_and(|v| v.len() > 0);
+            let repaint = app.tick(0.);
+            let code = app.root.workspace.chat.code.view.as_ref();
+            if (!indexed && code.is_some_and(|v| v.index_seen.as_ref().is_some_and(|u| u.index.is_some())))
+                || (!matched && code.is_some_and(|v| v.len() > 0)) {
+                assert!(repaint, "Background names/matches must invalidate an idle picker");
+            }
+            // Model desktop OnDemand: no frames unless an update requests one.
+            if repaint { app.frame(ctx, ctx.view()); }
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("work"); std::fs::create_dir_all(cwd.join("src")).unwrap();
+    std::fs::write(cwd.join("src/needle.rs"), "fn needle() {}\n").unwrap();
+    std::fs::create_dir(cwd.join(".cache")).unwrap();
+    std::fs::write(cwd.join(".cache/needle.rs"), "not a fuzzy result").unwrap();
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let settings_path = root.path().join("settings.json");
+    let mut settings = tau_protocol::settings::Settings::default();
+    settings.agent.load_agents_files = false; settings.daemon.generate_titles = false; settings.daemon.idle_timeout_seconds = 0;
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+    let daemon = tokio::spawn(taud::run(taud::Config {
+        bind: tcp, transfer_bind: match udp { std::net::SocketAddr::V4(a) => a, _ => unreachable!() }, transfer_bind_v6: None,
+        token: Arc::from("picker-wake-fixture"), settings_path, import_pi_dir: None, codex_auth_source: None, cwd,
+        database_path: root.path().join("daemon.sqlite3"), telemetry_path: root.path().join("crashes.jsonl"),
+        attachment_root: root.path().join("outbox"), upload_root: root.path().join("uploads"),
+    }));
+    let store = Store::open(root.path().join("client")).unwrap();
+    store.put("", "settings", &crate::store::Settings { server_url: format!("http://{tcp}"), token: "picker-wake-fixture".into() }).unwrap();
+    let ctx = HeadlessCtx::new(&Config { size: (1000, 800), device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
+    let (wake, mut wakes) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(&ctx, store, Arc::new(move || { let _ = wake.send(()); }), false).unwrap();
+    app.resize(ctx.size(), 1., Vec2::new(0., 0.));
+    // Suppress name warming until the picker opens, without timing races against
+    // a fast loopback response. Control/session creation still runs normally.
+    app.ui.window_focused = false;
+    until(&mut app, &ctx, &mut wakes, |a| a.controller.epoch.is_some() && a.controller.account.source_lineage.is_some()).await;
+    app.controller.new_chat().unwrap();
+    until(&mut app, &ctx, &mut wakes, |a| a.controller.account.selected.as_ref().is_some_and(|id| a.controller.account.sessions.iter().any(|s| &s.id == id))).await;
+    assert!(app.controller.file_index.is_none());
+    app.ui.window_focused = true;
+    app.key("Space", true, false); app.input("needle.rs");
+    assert!(app.tick(0.)); app.frame(&ctx, ctx.view());
+    assert_eq!(app.root.workspace.chat.code.view.as_ref().unwrap().search_status(), "Syncing file names…");
+    // No input, sleeps, or forced poll/frame loop from here: both names and
+    // matcher completion must make it through wake -> tick -> repaint.
+    until(&mut app, &ctx, &mut wakes, |a| a.root.workspace.chat.code.view.as_ref().is_some_and(|v| v.len() == 1 && v.preview.is_some())).await;
+    let code = app.root.workspace.chat.code.view.as_ref().unwrap();
+    assert!(code.search_status().starts_with("1 / 1 files"));
+    assert_eq!(code.preview.as_ref().unwrap().text, "fn needle() {}\n");
+    assert!(code.paints.values().any(|(spans, _)| !spans.is_empty()), "Results actually painted after the background wake");
+    drop(app); daemon.abort(); let _ = daemon.await;
+}
