@@ -153,6 +153,13 @@ impl AgentManager {
             let mut queue = content.transcript.as_ref().unwrap().queue.clone();
             queue.run_id = None;
             if (cancelled || result.is_err()) && !resume { queue.paused = true; }
+            if !resume && let Some(control) = &mut queue.control && control.status == "waiting" {
+                // A boundary action cannot remain pending after its owner ends.
+                // Preserve the outcome without automatically retrying failed work.
+                control.status = "failed".into();
+                control.detail = Some(if cancelled { "Interrupted before the queue boundary".into() }
+                    else { result.as_ref().err().map_or_else(|| "Run ended before the queue boundary".into(), |e| bounded(&e.to_string(), 480)) });
+            }
             // A run gets one completion bump, including an error/abort that
             // needs attention. Streaming, tools and queued continuations do not.
             if let Err(error) = content.commit_with_activity(&id, Vec::new(), Some(queue), None, true).await {

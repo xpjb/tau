@@ -1,5 +1,14 @@
 # Tau 2 backlog
 
+## New high-priority control/UX report — October 1, 2026
+
+[045 Play/Pause/Stop and run-through UX/debt](045-play-pause-control-ux-debt.md)
+records the user's confusing/undiscoverable controls, insufficient interruption,
+bricked conversation, historical Stop→drain expectation and repeated Play/pause
+fixes. The immediate [Stop/Play lockout patch](../docs/tau2-control-recovery.md)
+is source-complete; **045 remains open** for product semantics, transition
+ownership and interactive acceptance. Do not close it with another race patch.
+
 ## Current disposition: bounded source closeout
 
 Triaged **September 29, 2026**, against freshly fetched `origin/tau2` at

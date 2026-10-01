@@ -266,14 +266,19 @@ impl AgentManager {
             if receipt.command.as_deref() != Some("queue_control") || receipt.text != payload { bail!("Request ID was already used for another control"); }
             return Ok("accepted".into());
         }
-        if matches!(operation,QueueOperation::Resume {..}) {self.inner.state.require_execution(id).await?;}
+        if matches!(operation,QueueOperation::Resume {..} | QueueOperation::Prefix {..}) {self.inner.state.require_execution(id).await?;}
         let transcript = content.transcript.as_ref().unwrap();
         if transcript.generation != generation { bail!("Queue changed; reopen this chat"); }
         let mut queue = transcript.queue.clone();
-        if matches!(operation, QueueOperation::Pause { .. } | QueueOperation::Prefix { .. } | QueueOperation::Resume { .. })
-            && queue.control.as_ref().is_some_and(|control| control.status == "waiting") { bail!("Cancel the pending queue control first"); }
-        let resume_after_stop = matches!(&operation, QueueOperation::Resume { .. })
-            && content.agent.as_ref().is_some_and(|agent| agent.running && agent.cancel.is_cancelled());
+        // Explicit transport controls supersede the previous boundary intent.
+        // Never make Play depend on a separate Cancel action, including old
+        // paused chats whose waiting control outlived its run.
+        let stopping = content.agent.as_ref().is_some_and(|agent| agent.running && agent.cancel.is_cancelled());
+        let continuation = match &operation {
+            QueueOperation::Resume { .. } | QueueOperation::Prefix { .. } => Some(stopping),
+            QueueOperation::Pause { .. } => Some(false),
+            _ => None,
+        };
         match operation {
             QueueOperation::Edit { request_id, revision, text } => {
                 if text.trim().is_empty() || text.chars().count() > MAX_PROMPT_CHARS { bail!("Invalid queue text"); }
@@ -289,7 +294,7 @@ impl AgentManager {
             }
             QueueOperation::Pause { run_id, boundary } => {
                 queue.control = Some(QueueControl { command_id:command_id.into(), run_id, action:"pause".into(), boundary:Some(boundary), requests:vec![], status:"waiting".into(), detail:None });
-                if !content.agent.as_ref().unwrap().running { queue.paused = true; queue.control.as_mut().unwrap().status = "applied".into(); }
+                if !content.agent.as_ref().unwrap().running || stopping { queue.paused = true; queue.control.as_mut().unwrap().status = "applied".into(); }
             }
             QueueOperation::Prefix { run_id, boundary, requests } => {
                 if requests.is_empty() || requests.len() > queue.requests.len() || requests.iter().zip(&queue.requests).any(|(a,b)| a.request_id != b.request_id || a.revision != b.revision) { bail!("Queue prefix changed"); }
@@ -297,7 +302,9 @@ impl AgentManager {
                 queue.paused = false;
             }
             QueueOperation::Resume { run_id } => {
-                if run_id != queue.run_id { bail!("Run changed"); }
+                // Stop may settle between the client painting Play and sending
+                // it. An ended run cannot conflict; a different live run can.
+                if queue.run_id.is_some() && run_id != queue.run_id { bail!("Run changed"); }
                 queue.paused = false; queue.control = None;
             }
             QueueOperation::Cancel { control_id } => {
@@ -310,7 +317,7 @@ impl AgentManager {
             bail!("Cancel the pending prefix before editing its messages");
         }
         content.save_queue(id, queue, Some(Receipt { id:command_id.into(),command:Some("queue_control".into()),text:payload,disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
-        if resume_after_stop { content.agent.as_mut().unwrap().resume_after_stop = true; }
+        if let Some(continuation) = continuation { content.agent.as_mut().unwrap().resume_after_stop = continuation; }
         self.start_run(id, &runtime, &mut content);
         Ok("accepted".into())
     }
@@ -323,8 +330,11 @@ impl AgentManager {
             return Ok(());
         }
         let mut queue=content.transcript.as_ref().unwrap().queue.clone();
+        // Stop cancels the active work AND its deferred run limit/pause. Keep
+        // every queued message held for Play; no hidden control can block it.
+        queue.control = None;
         if let Some(agent)=&content.agent {
-            if agent.running || !queue.requests.is_empty() { queue.paused=true; }
+            if agent.running || agent.needs_turn || !queue.requests.is_empty() { queue.paused=true; }
         }
         content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:Some("abort".into()),text:String::new(),disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
         if let Some(agent)=&mut content.agent {agent.stop();}

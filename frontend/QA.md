@@ -1,3 +1,17 @@
+# Stop/Play queue-control recovery — October 1, 2026
+
+The immediate lockout fix `6422e27` makes Stop retire deferred controls and Play
+supersede stale ones; genuine error/restore pauses remain. Menu/header/cancel
+copy now names pending run-through and its pause/limit. The retained-control
+regression covers desktop state and visible named cancellation/Play at phone size
+(`55f8fb11-4fbb-4bdb-a970-021f6b75a95e`). See
+[reproduction and validation](../docs/tau2-control-recovery.md).
+[045 UX/control-state debt](../tau2-backlog/045-play-pause-control-ux-debt.md)
+remains open: this is not faster mid-stream steering or real-device UX acceptance.
+No package or deployment was performed.
+
+---
+
 # Wheel-scroll startup — integrated source, not released, October 1, 2026
 
 User report: scrolling up from the bottom-docked chat on Windows beta feels delayed

@@ -388,8 +388,8 @@ impl Widget for Composer {
             self.controls.button(
                 cx,
                 chrome,
-                Rect::new(x, controls_y, 100. * s, 30. * s),
-                "Cancel control",
+                Rect::new(x, controls_y, 140. * s, 30. * s),
+                if control.action == "prefix" { "Cancel run limit" } else { "Cancel pause" },
                 Choice::Queue(QueueOperation::Cancel { control_id: control.command_id.clone() }),
                 ButtonStyle::Tonal,
                 frame.clip,

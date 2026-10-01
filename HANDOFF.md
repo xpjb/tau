@@ -1,3 +1,24 @@
+# Stop/Play lockout — bounded source fix, October 1, 2026
+
+User requested fixing the stuck run-through → Stop → Play flow, then recording
+that the UX makes no sense, suggests technical debt, and Play/pause has already
+been reviewed repeatedly, followed by commit/push/merge. Implementation
+**`6422e27`** on `fix/tau2-control-recovery` retires controls on Stop, makes Play
+supersede stale intent, preserves queue data and applies last-intent precedence
+through cancelled-task cleanup. Genuine failure/restore pauses remain.
+
+Both lockout reproductions fail before the patch; **66/66 daemon nextest cases**
+pass after it across disjoint selections, including WAL/disk-full/recovery.
+The retained frontend control regression passes, including phone-sized visible
+Cancel/Play. See [exact evidence](docs/tau2-control-recovery.md).
+[045](tau2-backlog/045-play-pause-control-ux-debt.md) is **open**, not fixed by this
+patch: run-through still waits for the existing boundary; systemic UX and control
+ownership need review. Source merge is authorized; release/deployment, service
+restarts, live data changes and physical-device acceptance are not part of this
+change. Final integration/check evidence will follow the source merge.
+
+---
+
 # Wheel-scroll startup fix — integrated source, not released, October 1, 2026
 
 At the user's request, `fix/tau2-undock-scroll-latency` (`ff92cf8`, fix `ec2d764`)

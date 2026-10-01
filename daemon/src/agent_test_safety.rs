@@ -87,6 +87,9 @@ async fn catalogue_pages_reset_on_membership_change_and_delete_many_cold_chats()
 async fn restored_execution_requires_review_and_review_does_not_run_or_replay() {
     let model=ModelServer::start(vec![]).await;let (root,manager,_,server)=fixture(&model,Api::ChatCompletions).await;
     let id=manager.create_session(None,"general").await.unwrap();
+    let generation=manager.runtime(&id).await.unwrap().content.lock().await.transcript.as_ref().unwrap().generation.clone();
+    manager.queue_control(&id,&generation,"hold",tau_protocol::QueueOperation::Pause {run_id:None,boundary:"turn".into()}).await.unwrap();
+    manager.prompt(&id,"Held work","held").await.unwrap();
     let config=manager.inner.config.clone();manager.shutdown().await;server.abort();drop(manager);
     crate::maintenance::rotate_lineage(&root.path().join("tau.sqlite3")).await.unwrap();
     let manager=AgentManager::new(config,StateStore::load(root.path().join("tau.sqlite3")).await.unwrap()).await.unwrap();
@@ -94,8 +97,12 @@ async fn restored_execution_requires_review_and_review_does_not_run_or_replay() 
     let child=manager.clone_session(&id).await.unwrap();assert!(manager.inner.state.restore_review(&child).await.unwrap());
     let generation=format!("{}:{id}",manager.inner.state.block_cursor().await.unwrap().lineage);
     assert!(manager.queue_control(&id,&generation,"resume-restored",tau_protocol::QueueOperation::Resume {run_id:None}).await.is_err());
+    let error=manager.queue_control(&id,&generation,"prefix-restored",tau_protocol::QueueOperation::Prefix {run_id:None,boundary:"turn".into(),
+        requests:vec![tau_protocol::QueueRef {request_id:"held".into(),revision:0}]}).await.unwrap_err();
+    assert!(error.to_string().contains("Restored"),"Run-through must obey the same restore-review guard as Play");
+    assert!(manager.inner.state.receipt(&id,"prefix-restored").await.unwrap().is_none());
     manager.inner.state.review_restore(&id).await.unwrap();assert!(!manager.inner.state.restore_review(&id).await.unwrap());
-    assert!(manager.inner.state.receipt(&id,"guarded").await.unwrap().is_none());assert!(manager.inner.state.queue(&id).await.unwrap().requests.is_empty());
+    assert!(manager.inner.state.receipt(&id,"guarded").await.unwrap().is_none());assert_eq!(manager.inner.state.queue(&id).await.unwrap().requests.len(),1);
     assert_eq!(manager.runtime(&id).await.unwrap().snapshot().status,tau_protocol::SessionStatus::Idle);
     manager.shutdown().await;server.abort();
 }
