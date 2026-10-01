@@ -486,3 +486,31 @@ feature branch and worktree intact.
   **22** requires a future matched client/daemon release; version stays 0.7.9 in
   this source-only integration, with no schema change. Physical-device QA remains
   open. See `docs/remote-code-viewer.md` for feature limits and validation details.
+
+
+## Filename-index filtering — source integration, October 1, 2026
+
+At the user's request, merged `fix/tau2-file-index` tip `a395f27` into
+`tau2-integration` / `origin/tau2` as **`67e0dd8`**, on top of freshly fetched
+`40ac1b0`. The worktree was clean and the merge conflict-free. The independent
+wheel-scroll wake fix already in the integration branch is preserved, as are the
+filename feature branch/worktree and their three implementation/audit commits.
+
+- Recursive fuzzy indexing prunes dot-directory descendants before descent.
+  Dotfiles remain toggleable; hidden directories and ignored files stay browsable,
+  and explicit Here roots remain supported. Query edits are still entirely local.
+- Actual development-tree audit: 93,946 eligible names, same 93,484 visible files,
+  no scan limit, 0.73 MiB compressed initial filename payload, and 10.02 MiB client
+  name/record heap lower bound. These are one host's aggregate measurements, not a
+  total-RAM, network-throughput or universal drive-coverage guarantee.
+- Every filename feature source/test/dependency file exactly matches `a395f27`.
+  Reused its managed all-target compiler check and **21/21 focused nextest** run
+  `cc38e41f-c970-4556-ac24-0a9d932bcf28`; no tests, builds or audits repeated and no
+  new merged-tree test result claimed. `git diff --check` and local doc links pass.
+- A wake-driven native/headless picker regression passes; no filename-specific
+  missed repaint was reproduced. The separately owned Windows socket/loading
+  diagnosis and physical-device acceptance remain open.
+- **No deployment, service restart, release packages, production storage writes,
+  provider calls, stable/master changes or version/protocol/schema bump.** Source
+  remains 0.7.10 / protocol 22. See `docs/file-name-index.md` for evidence and the
+  bounded scaling follow-ups.

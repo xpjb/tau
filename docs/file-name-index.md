@@ -3,7 +3,8 @@
 September 30, 2026 (UTC). Branch `fix/tau2-file-index`, worktree
 `/root/tau2-file-index`, based on `origin/tau2` at `003de72`.
 Audit tool: `cdb9b96`; dot-directory pruning and repaint regressions: `36dc9c8`.
-**Source-only, pushed; not merged or deployed.** No version/protocol/schema change.
+**Merged and pushed to `origin/tau2` as `67e0dd8` on October 1, 2026; not deployed.**
+No version/protocol/schema change.
 
 ## Scope and conclusion
 
@@ -219,3 +220,21 @@ other worktree's wait-boundary/recovery diagnosis independent of this result.
 - No Clippy, Cargo built-in test runner, full workspace suite, platform/package
   rebuild, service restart, merge/deployment, production DB write, or paid provider
   request. Windows hang/recovery and physical-device acceptance remain open.
+
+### Approved integration — October 1, 2026
+
+At the user's request, merged feature tip `a395f27` into `tau2-integration` /
+`origin/tau2` as **`67e0dd8`**, on top of freshly fetched `40ac1b0` (which already
+contains the independent wheel-scroll wake fix). Integration was clean and
+conflict-free. The feature branch/worktree remain intact.
+
+All filename-index source, tests, audit dependencies and feature documentation
+in the merge exactly match the checked/tested feature tip. Reused the compiler
+check and 21/21 focused result above; no Rust tests/builds or host audit were
+repeated, and no fresh merged-tree test result is claimed. The only changes from
+the feature tree are the previously integrated wheel-scroll changes and their
+handoff/QA notes. `git diff --check` and local documentation links pass.
+
+Source publication only: no deployment, service restart, package build, production
+storage write, provider request, stable/master change or Windows hang-resolution
+claim. Source remains 0.7.10 / protocol 22.

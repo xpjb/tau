@@ -232,5 +232,8 @@ network-throughput guarantee.
 limits, memory-only caching, periodic rescans and validation. Focused nextest
 passed 21/21, including a real-native, wake-driven picker repaint regression.
 No filename-specific missed repaint was reproduced; the separately owned Windows
-socket/loading diagnosis remains open. This branch is pushed but not merged or
-deployed; no production services, packages or transport code were changed.
+socket/loading diagnosis remains open. At the user's request, feature tip
+`a395f27` was merged and pushed to `origin/tau2` as **`67e0dd8`** on October 1,
+2026. The merge was conflict-free; feature files exactly match the tested tip,
+so its check and 21/21 result were reused without another build/test run. No
+deployment, production services, packages or transport code were changed.
