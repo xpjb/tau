@@ -537,3 +537,25 @@ filename feature branch/worktree and their three implementation/audit commits.
   provider calls, stable/master changes or version/protocol/schema bump.** Source
   remains 0.7.10 / protocol 22. See `docs/file-name-index.md` for evidence and the
   bounded scaling follow-ups.
+
+
+## Markdown URL underlines — source integration, October 1, 2026
+
+At the user's request, merged `fix/tau2-link-underline` (`6395a36`) into
+`origin/tau2` as **`4ca14ca`**, based on freshly fetched `4afd665`. The merge was
+conflict-free and prepared in `/root/tau2-link-underline-merge` on its own branch;
+the feature branch/worktree remain preserved.
+
+- Link underlines now sit 0.1 em below each shaped line's measured baseline,
+  instead of at a fixed line-top offset that could cross the glyphs. Link color,
+  one-pixel thickness, span widths, activation and strikethrough are unchanged.
+- The real-font regression failed before the fix: the underline was 0.0237 em
+  above the baseline at 12 px. It now covers wrapped/styled links, explicit line
+  breaks, headings, quotes, table cells, font sizes and translated/scrolled scenes.
+- Merged-tree managed Markdown/frontend all-target compiler check passed, with
+  existing dead-code warnings. Focused nextest **30/30 passed**, with 162 unrelated
+  frontend tests filtered out (`300eb6e1-ccca-4b9d-b629-8124075b1068`). This includes
+  all 27 Markdown tests and real frontend GPU pixel checks at 12, 16 and 32 px.
+- **Source only:** no deployment, service restart, packages, production data writes,
+  stable/master changes or version/protocol/schema bump. Headless rendering is
+  not physical Windows/Android acceptance; existing rollout holds remain intact.
