@@ -559,3 +559,36 @@ the feature branch/worktree remain preserved.
 - **Source only:** no deployment, service restart, packages, production data writes,
   stable/master changes or version/protocol/schema bump. Headless rendering is
   not physical Windows/Android acceptance; existing rollout holds remain intact.
+
+
+## Text-cache residency — source integration, October 1, 2026
+
+Approved as a residency/bookkeeping improvement for the next iteration cycle,
+**not as a confirmed fix for the user's periodic blank/text-missing frame**.
+Merged `fix/tau2-text-frame-flash` (`7f961d7`) on top of freshly fetched
+`b76386c` as **`1350fd2`**, in `/root/tau2-text-residency-merge` on its own merge
+branch. Existing filename, scroll, controls and URL-underline integrations are
+preserved. Original feature history/worktrees remain available.
+
+- Sanscale now counts valid cached preparation as block-cache use, without
+  re-shaping or adding GPU uploads. The real-capacity pixel reproduction is
+  protected; cold eviction, pool bounds and stale-input rejection remain intact.
+- The dependency fix is also integrated into Sanscale master via `48b5234`,
+  published at **`8a290e9`**. Its merged library/example/integration nextest passed
+  **98/98**, including ignored GPU cases, and strict private-item rustdoc passed.
+  Tau retains the compatible **`4325844`** pin rather than importing unrelated
+  upstream public-API naming changes.
+- Merged native frontend/Markdown all-target check passed with existing warnings.
+  Their library nextest passed **195/195, zero skipped**
+  (`45f0d8b2-0263-4ec4-abb8-de0399f8fab6`). This includes a new ordinary heartbeat
+  repaint/pixel check which also passes with the old dependency: it is additional
+  coverage, **not** proof of a repaired periodic timer bug.
+- Preparation gains a small age-store cost. One release smoke with 16,384 layouts
+  measured 0.812 ms before / 0.824 ms after for CPU preparation; this is a bounded
+  host observation, not a general performance guarantee.
+- **The periodic-blink QA remains OPEN.** The user expects actual testing in the
+  next iteration; neither a real-session cache sweep nor a platform cause has
+  been established. See `docs/text-repaint-stability.md` for the reproduction,
+  explicit limits, merged-tree evidence and remaining diagnosis.
+- **Source only:** no deployment, service restart, release packages, production
+  data writes, stable/master change in Tau, or version/protocol/schema bump.

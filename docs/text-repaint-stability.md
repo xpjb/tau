@@ -2,7 +2,10 @@
 
 October 1, 2026 (UTC). Source-only on `fix/tau2-text-frame-flash`, worktree
 `/root/tau2-text-frame-flash`, based on `origin/tau2` at `003de72`.
-**Pushed, not merged or deployed.** No version, protocol or schema change.
+**Source integrated into Tau2 and Sanscale; not deployed.** No version,
+protocol or schema change. The reported periodic blink remains **OPEN**: this
+is an approved cache-residency improvement, not a confirmed fix for that symptom.
+See the integration record below.
 
 ## Reproduced condition
 
@@ -93,3 +96,49 @@ confirmation of the reported flicker remains open.
 No Clippy, Cargo built-in test runner, production data/service changes, paid
 provider calls, package build, release or deployment. Stable/master, Compendium,
 Sanscale master and the integration worktree were left unchanged.
+
+## Approved source integration — October 1, 2026
+
+The user accepted the bookkeeping improvement for the next iteration cycle but
+explicitly doubts it explains the observed periodic blink. **Do not close that
+QA issue or describe these tests as device acceptance.** The relevant before/after
+failure is forced block-capacity pressure; reaching that capacity during the
+reported blink has not been observed. No numerical confidence claim is supported.
+
+- Sanscale master includes the patch through merge `48b5234`, published at
+  `8a290e9`. The decision-history conflict preserved both the existing naming
+  cleanup and the new residency entry. Merged-tree nextest passed **98/98**
+  library/example/integration cases, including ignored GPU tests; run
+  `cd8aad09-288b-4b39-a5cf-d5f8b8bc22ed`. Strict private-item rustdoc passed.
+- Tau merge `1350fd2` was prepared on freshly fetched `b76386c`, preserving the
+  already integrated filename filtering, wheel-scroll wake, queue controls and
+  Markdown link underlines. Tau continues to pin the tested compatible `4325844`
+  revision, which is now in Sanscale master history; no unrelated API migration.
+- Merged-tree native frontend/Markdown all-target check passed. Frontend/Markdown
+  library nextest passed **195/195, zero skipped**, run
+  `45f0d8b2-0263-4ec4-abb8-de0399f8fab6`. Logs:
+  `/tmp/tau2-residency-merge-{check,suite}.log`.
+- Added an independent ordinary-repaint check: 32 waiting/reply state repaints
+  through the real App tick/frame/render path preserve the complete transcript
+  and draft pixel regions while the layout cache stays below 1,024 entries.
+  The same case also passes with the **old `7bbe230` pin**, run
+  `2e9b497c-176c-408f-ab96-a8d99ee3bff8`, so it is not misrepresented as a newly
+  fixed timer bug. The pin was restored before the final check and suite.
+- The bookkeeping has a small CPU cost, not extra layout work or GPU uploads.
+  A single matched release warm-prepare smoke over 16,384 layouts measured median
+  preparation **811.519 us before / 823.869 us after**, 31 samples after 5 warmups;
+  this is one host/dataset, not a general performance guarantee or a statistically
+  established regression. Sanscale's decision entry records the reports and
+  distinguishes the earlier debug smoke from usable timing evidence.
+
+The ordinary health path is now additionally covered, but the investigation has
+not found a second reproducible code cause for the reported periodic blank.
+The current queued-frame pixel test is headless/Vulkan, not Windows/DirectX or
+Android compositor verification. In a real recurrence, establish whether the
+missing frame has empty/stale draw inputs, a coincident cache sweep, or valid
+inputs but missing GPU/presented pixels before attributing it to another cache,
+font reset or timer. The next iteration can test the actual symptom with the
+residency improvement included. No continuous-redraw workaround was introduced.
+
+No deployment, service restart, packages, production storage writes or paid
+provider calls. The original feature branches and worktrees remain preserved.

@@ -312,3 +312,53 @@ fn saved_actions_and_restore_warning_fit_mobile_and_preserve_intents() {
         assert_eq!(app.controller.account.pending_controls.len(), 11);
     }
 }
+
+#[test]
+fn ordinary_connection_repaints_keep_transcript_and_draft_pixels_stable() {
+    fn crop(pixels: &[u8], width: u32, rect: Rect) -> Vec<u8> {
+        let x = rect.x.ceil() as usize;
+        let right = (rect.x + rect.width).floor() as usize;
+        (rect.y.ceil() as usize..(rect.y + rect.height).floor() as usize)
+            .flat_map(|y| pixels[(y * width as usize + x) * 4..(y * width as usize + right) * 4].iter().copied())
+            .collect()
+    }
+    let root = tempfile::tempdir().unwrap();
+    let ctx = HeadlessCtx::new(&Config {
+        size: (1000, 700), device_limits: crate::desktop::limits(), ..Default::default()
+    }).unwrap();
+    let mut app = App::new(&ctx, Store::open(root.path().into()).unwrap(), Arc::new(|| {}), false).unwrap();
+    app.back();
+    crate::demo::populate(&mut app.controller).unwrap();
+    app.resize(ctx.size(), 1., Vec2::new(0., 0.));
+    app.tick(0.);
+    app.ui.focus = Some(app.root.workspace.chat.composer.field.control.target);
+    app.input("The unchanged draft must stay visible during health repaints.");
+    app.controller.health.connected_at(Instant::now());
+    app.tick(0.);
+    app.frame(&ctx, ctx.view());
+    let reference = ctx.read_rgba8().unwrap();
+    let transcript = app.root.workspace.chat.transcript.scroll.rect;
+    let transcript = Rect::new(transcript.x + 8., transcript.y + 8., transcript.width - 32., transcript.height - 16.);
+    let draft = app.root.workspace.chat.composer.field.control.rect.unwrap();
+    let expected = [transcript, draft].map(|r| crop(&reference, ctx.size().0, r));
+    for pixels in &expected {
+        assert!(pixels.chunks_exact(4).any(|p| p[0] > 180), "both reference regions must contain text ink");
+    }
+    for i in 0..16 {
+        for reply in [false, true] {
+            if reply { app.controller.health.reply(Duration::from_millis(23 + i), Instant::now()); }
+            else { app.controller.health.sent(Instant::now() - Duration::from_millis(1350)); }
+            // Network delivery invalidates the UI even when the dot's color is
+            // unchanged. Exercise the actual tick -> frame path, not a redraw loop.
+            app.ui.dirty = true;
+            assert!(app.tick(0.));
+            app.frame(&ctx, ctx.view());
+            let pixels = ctx.read_rgba8().unwrap();
+            for (rect, expected) in [transcript, draft].into_iter().zip(&expected) {
+                assert!(crop(&pixels, ctx.size().0, rect) == *expected, "health repaint {i}, reply={reply}, lost/changed unchanged text");
+            }
+            assert!(app.services.renderer.text.diagnostics().cache_occupancy().1 < 1024,
+                "this is the ordinary small-cache path, not the forced-capacity reproduction");
+        }
+    }
+}
