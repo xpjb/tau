@@ -1112,3 +1112,43 @@ mod thinking;
 
 #[path="agent_test_compaction.rs"]
 mod compaction;
+
+#[tokio::test]
+async fn catalog_refresh_updates_live_and_sleeping_usage_with_new_revisions() {
+    for api in [Api::Codex, Api::ChatCompletions] {
+        let response = |window| if api == Api::Codex {
+            json!({"models":[{"slug":"gpt-6-astra","context_window":window}]})
+        } else { json!({"data":[{"id":"gpt-6-astra","context_length":window}]}) };
+        let mut model = ModelServer::with_catalog(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }], Some(response(200_000))).await;
+        let (_root, manager, url, server) = fixture(&model, api).await;
+        manager.refresh_model_catalog("openai-codex").await.unwrap();
+        model.catalog_request().await;
+        let mut client = Client::connect(&url).await;
+        let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        client.request(json!({"id":"turn","type":"prompt","sessionId":id,"text":"Report context tokens"})).await;
+        model.request().await;
+        client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
+        let runtime = manager.runtime(&id).await.unwrap();
+        let tokens = if api == Api::Codex { 120 } else { 1024 };
+        for (sleeping, window) in [(false, 400_000), (true, 500_000)] {
+            if sleeping { manager.close_session(&id).await.unwrap(); }
+            let before = runtime.snapshot();
+            model.set_catalog(Some(response(window))).await;
+            manager.refresh_model_catalog("openai-codex").await.unwrap();
+            model.catalog_request().await;
+            let after = runtime.snapshot();
+            assert_eq!(after.context_usage, Some(crate::protocol::ContextUsage { tokens:Some(tokens), context_window:Some(window) }), "A refreshed catalog must update retained runtime usage");
+            assert!(after.revision > before.revision, "Delayed pre-refresh pages and states must be fenced");
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.detail, before.detail);
+            assert_eq!(after.idle_since, before.idle_since, "Refreshing metadata must not reset the idle timer");
+            let crate::protocol::ServerMessage::SessionPage {sessions, states, ..} = manager.list_page("usage".into(), false, None, 0).await.unwrap() else { panic!() };
+            let summary = sessions.iter().find(|s| s.id == id).unwrap();
+            assert_eq!(summary.context_usage, after.context_usage);
+            assert_eq!(states[&id], after.revision);
+            let crate::protocol::ServerMessage::SessionState {context_usage, ..} = manager.session_state_message(&id).await.unwrap() else { panic!() };
+            assert_eq!(context_usage, after.context_usage);
+        }
+        manager.shutdown().await; server.abort();
+    }
+}

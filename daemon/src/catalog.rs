@@ -185,3 +185,35 @@ pub(crate) async fn fetch(http: &reqwest::Client, config: &ProviderSettings, key
     if windows.is_empty() { bail!("Model catalog provides no context limits"); }
     Ok(windows)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn old_catalog_revalidates_without_discarding_the_last_good_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = Settings::default();
+        let config = &settings.providers["openai-codex"];
+        let catalog = ModelCatalog::load(root.path().join("model-catalog.json")).await;
+        let model = settings.agent.model.clone();
+        assert!(catalog.begin(&model.provider, config, false));
+        catalog.save(&model.provider, config, "fixture-identity".into(), HashMap::from([(model.model_id.clone(), 272_000)])).await.unwrap();
+        let saved = tokio::fs::read(&catalog.path).await.unwrap();
+        {
+            let mut state = catalog.state.lock().unwrap();
+            let record = state.records.get_mut(&model.provider).unwrap();
+            record.saved.as_mut().unwrap().fetched_at_ms = crate::agent::now_ms() - 3_600_000;
+            record.retry_after = None;
+        }
+        assert_eq!(catalog.capacity(&settings, &model), Some(272_000));
+        assert!(catalog.begin(&model.provider, config, false), "An old valid catalog must be revalidated automatically");
+        assert!(!catalog.begin(&model.provider, config, true), "Concurrent requests coalesce, including manual refresh");
+        assert!(!catalog.restore(&model.provider, config, "fixture-identity"), "A stale restore must not skip the GET");
+        catalog.failed(&model.provider);
+        assert_eq!(catalog.capacity(&settings, &model), Some(272_000), "Age and transient failures do not expire valid limits");
+        assert_eq!(tokio::fs::read(&catalog.path).await.unwrap(), saved);
+        assert!(!catalog.begin(&model.provider, config, false), "Failures are rate limited");
+        assert!(catalog.begin(&model.provider, config, true), "Manual refresh can bypass the cooldown");
+    }
+}
