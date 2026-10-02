@@ -1,7 +1,7 @@
 //! A one-hour provider-cache *estimate*, not a daemon worker deadline.
 //! Use existing source timestamps; receiving history/heartbeats never renews it.
 use crate::{clock, feed::Feed, tooltip::{Content, ACCENT, INK, WARNING}};
-use tau_protocol::{EventKind, EventRole, SessionStatus, SessionSummary};
+use tau_net::{EventKind, EventRole, SessionStatus, SessionSummary};
 
 const ESTIMATED_TTL_MS: u64 = 60 * 60 * 1000;
 #[derive(Clone, Copy)]

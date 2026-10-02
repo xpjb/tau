@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::Result;
 use sanscale::Rect;
-use tau_protocol::*;
+use tau_net::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModelChoice {

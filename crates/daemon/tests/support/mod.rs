@@ -2,8 +2,8 @@
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value,json};
-use tau_blocks::*;
-use tau_transfer::blocks::{Client as DataClient, Header};
+use tau_net::blocks::*;
+use tau_net::native::{Client as DataClient, Header};
 use tokio_tungstenite::{connect_async,tungstenite::{Message,client::IntoClientRequest}};
 
 pub struct Client {
@@ -21,7 +21,7 @@ impl Client {
         let (socket,_)=connect_async(request).await.unwrap();
         let mut client=Self {socket,seen:vec![],data:DataClient::bind().await.unwrap(),lineage:String::new()};
         let hello=client.until(|m|m["type"]=="hello").await;
-        assert_eq!(hello["protocolVersion"],tau_protocol::PROTOCOL_VERSION);
+        assert_eq!(hello["protocolVersion"],tau_net::PROTOCOL_VERSION);
         client.request(json!({"id":"data","type":"connect_blocks","nodeId":client.data.node_id()})).await;
         client.request(json!({"id":"initial-head","type":"list_sessions"})).await;
         client
@@ -31,7 +31,7 @@ impl Client {
             loop {
                 match self.socket.next().await.unwrap().unwrap() {
                     Message::Text(text)=>{
-                        assert!(text.len()<=tau_protocol::MAX_CONTROL_BYTES);
+                        assert!(text.len()<=tau_net::MAX_CONTROL_BYTES);
                         let mut value:Value=serde_json::from_str(&text).unwrap();
                         assert!(!matches!(value["type"].as_str(),Some("transcript_update"|"transcript_snapshot"|"transcript_page")));
                         if value["type"]=="block_connection" {
@@ -60,7 +60,7 @@ impl Client {
     }
     pub async fn request(&mut self, value:Value)->Value {
         let id=value["id"].clone();let bytes=serde_json::to_vec(&value).unwrap();
-        let value=if bytes.len()>tau_protocol::MAX_CONTROL_BYTES {
+        let value=if bytes.len()>tau_net::MAX_CONTROL_BYTES {
             let hash=blake3::hash(&bytes).to_hex().to_string();
             let spec=UploadSpec {id:hash.clone(),length:bytes.len() as u64,hash:hash.clone(),purpose:UploadPurpose::Command};
             let mut upload=self.data.uploader(spec).await.unwrap();
@@ -94,12 +94,12 @@ impl Client {
     }
     pub async fn page(&self,id:&str,before:Option<FeedPosition>)->Value {
         let page=self.directory(id,None,before).await;
-        let mut events=vec![];let mut queue=tau_protocol::QueueState::native();
+        let mut events=vec![];let mut queue=tau_net::QueueState::native();
         for record in page.records {
             let BlockRecord::Put {block:h}=record else {continue;};
             if h.id=="@queue" {queue=serde_json::from_slice(&self.body(id,"@queue").await).unwrap();}
             if let Some(value)=h.meta.get("event") {
-                let mut event:tau_protocol::Event=serde_json::from_value(value.clone()).unwrap();
+                let mut event:tau_net::Event=serde_json::from_value(value.clone()).unwrap();
                 event.text=if h.kind==BlockKind::Tool {String::new()} else {String::from_utf8(self.body(id,&h.id).await).unwrap()};
                 events.push(event);
             }
@@ -111,10 +111,10 @@ impl Client {
                         let BlockRecord::Put {block:c}=child else {continue;};
                         if c.meta.get("inputFor").is_some() {events.last_mut().unwrap().text=String::from_utf8(self.body(id,&c.id).await).unwrap();}
                         else if let Some(value)=c.meta.get("event") {
-                            let mut event:tau_protocol::Event=serde_json::from_value(value.clone()).unwrap();
+                            let mut event:tau_net::Event=serde_json::from_value(value.clone()).unwrap();
                             event.text=String::from_utf8(self.body(id,&c.id).await).unwrap();events.push(event);
                         } else if let Some(value)=c.meta.get("request") {
-                            let mut request:tau_protocol::QueuedRequest=serde_json::from_value(value.clone()).unwrap();
+                            let mut request:tau_net::QueuedRequest=serde_json::from_value(value.clone()).unwrap();
                             request.text=String::from_utf8(self.body(id,&c.id).await).unwrap();queue.requests.push(request);
                         }
                     }

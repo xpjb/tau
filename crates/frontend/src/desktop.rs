@@ -17,7 +17,7 @@ use std::{
     sync::{Arc, mpsc},
     time::Instant,
 };
-use tau_protocol::SessionStatus;
+use tau_net::SessionStatus;
 mod scroll;
 use scroll::WheelDecoder;
 

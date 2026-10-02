@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
 };
-use tau_protocol::*;
+use tau_net::*;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Settings {

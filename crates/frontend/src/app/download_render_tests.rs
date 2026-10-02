@@ -35,7 +35,7 @@ pub(super) fn install(app: &mut App, case: &Case) -> ChatAttachment {
     }
     let key = Controller::download_key("demo", entry);
     if matches!(case.state.as_str(), "active" | "failed" | "unavailable") {
-        let mut download = crate::controller::Download::new(tau_transfer::TransferStatus {
+        let mut download = crate::controller::Download::new(tau_net::TransferStatus {
             transferred: case.transferred, total: case.size.unwrap_or(0), network_bytes: case.transferred,
             done: case.state != "active", failure: case.error.clone(),
         }, path.clone());

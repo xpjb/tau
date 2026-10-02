@@ -13,19 +13,19 @@ use crate::transcript::{EventProjection, Event, QueueState};
 mod reads;
 #[path = "state_timing.rs"]
 mod timing;
-pub(crate) use tau_protocol::settings::DEFAULT_TITLE_PROMPT;
+pub(crate) use tau_net::settings::DEFAULT_TITLE_PROMPT;
 pub(crate) const MAX_FLAG_CHARS: usize = 4096;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Flag { pub id: String, pub timestamp_ms: u64, pub session_id: String, pub session_title: String, pub text: String }
 
-pub use tau_protocol::SessionModel;
+pub use tau_net::SessionModel;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredSession {
     pub title: String,
-    #[serde(default = "tau_protocol::general_project_id")]
+    #[serde(default = "tau_net::general_project_id")]
     pub project_id: String,
     #[serde(default)]
     pub project_prompt: String,
@@ -87,7 +87,7 @@ impl StateStore {
             }
             if version < 3 {
                 let tx = db.transaction()?;
-                tau_blocks::initialize(&tx)?;
+                tau_block_store::initialize(&tx)?;
                 crate::blocks::project_existing(&tx)?;
                 tx.execute_batch("PRAGMA user_version=3")?;
                 tx.commit()?;
@@ -98,7 +98,7 @@ impl StateStore {
                 tx.commit()?;
             }
             if version<5 {
-                let tx=db.transaction()?;tau_blocks::initialize(&tx)?;
+                let tx=db.transaction()?;tau_block_store::initialize(&tx)?;
                 tx.execute_batch("CREATE TABLE file_publications(id TEXT PRIMARY KEY,session TEXT NOT NULL,path TEXT NOT NULL,size INTEGER NOT NULL,created INTEGER NOT NULL,sealed INTEGER NOT NULL DEFAULT 0);
                     CREATE TABLE file_owners(id TEXT NOT NULL REFERENCES file_publications(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(id,session));
                     INSERT INTO file_publications SELECT id,json_extract(header,'$.meta.upload.purpose.sessionId'),json_extract(header,'$.meta.file.path'),json_extract(header,'$.length'),position,1 FROM blocks WHERE scope='@uploads' AND json_extract(header,'$.sealed')=1 AND json_extract(header,'$.meta.file.path') IS NOT NULL;
@@ -122,9 +122,9 @@ impl StateStore {
                     }
                     let mut rows=tx.prepare("SELECT scope,header FROM blocks WHERE json_type(header,'$.meta.fullEvent')='object' AND json_extract(header,'$.meta.fullEvent.length') IS NULL")?;
                     for row in rows.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
-                        let (scope,raw)=row?;let mut h:tau_blocks::BlockHeader=serde_json::from_str(&raw)?;
-                        if let Some(id)=h.meta["fullEvent"]["id"].as_str() && let Some(meta)=tau_blocks::header(&tx,&scope,id)? {
-                            h.meta["fullEvent"]["length"]=json!(meta.length);tau_blocks::set_header(&tx,&scope,h)?;
+                        let (scope,raw)=row?;let mut h:tau_net::blocks::BlockHeader=serde_json::from_str(&raw)?;
+                        if let Some(id)=h.meta["fullEvent"]["id"].as_str() && let Some(meta)=tau_block_store::header(&tx,&scope,id)? {
+                            h.meta["fullEvent"]["length"]=json!(meta.length);tau_block_store::set_header(&tx,&scope,h)?;
                         }
                     }
                 }
@@ -150,9 +150,9 @@ impl StateStore {
         tokio::task::spawn_blocking(move || {
             timing.working();
             let result=(|| {
-                let before = tau_blocks::cursor(&connection)?.sequence;
+                let before = tau_block_store::cursor(&connection)?.sequence;
                 let result = action(&mut connection);
-                let after = tau_blocks::cursor(&connection)?.sequence;
+                let after = tau_block_store::cursor(&connection)?.sequence;
                 if after != before { changes.send_replace(after); }
                 result
             })();
@@ -441,7 +441,7 @@ impl StateStore {
         let id = id.to_owned();
         self.access(move |db| {
             let tx = db.transaction()?;
-            tau_blocks::remove_scope(&tx,&id)?;
+            tau_block_store::remove_scope(&tx,&id)?;
             tx.execute("DELETE FROM blocks WHERE scope='@uploads' AND json_extract(header,'$.meta.upload.purpose.sessionId')=?1",[&id])?;
             if tx.execute("DELETE FROM sessions WHERE id=?1",[&id])? != 1 { bail!("Unknown session"); }
             tx.execute("UPDATE sessions SET data=json_set(data,'$.parent_id',NULL) WHERE json_extract(data,'$.parent_id')=?1",[&id])?;
@@ -462,7 +462,7 @@ impl StateStore {
                 uuid::Uuid::parse_str(id).context("Legacy session ID is invalid")?;
                 let model = old.get("model").filter(|model| !model.is_null()).map(|model| serde_json::from_value(model.clone())).transpose()?.unwrap_or_else(|| settings.agent.model.clone());
                 let thinking = settings.agent.model_thinking_levels.get(&format!("{}/{}",model.provider,model.model_id)).unwrap_or(&settings.agent.thinking_level).clone();
-                let mut session = StoredSession { title:old["title"].as_str().unwrap_or("Unnamed chat").into(),project_id:tau_protocol::general_project_id(),project_prompt:String::new(),starter:false,
+                let mut session = StoredSession { title:old["title"].as_str().unwrap_or("Unnamed chat").into(),project_id:tau_net::general_project_id(),project_prompt:String::new(),starter:false,
                     parent_id:old["parent_id"].as_str().filter(|parent| sessions.contains_key(*parent)).map(str::to_owned),model,thinking,
                     created_at_ms:old["created_at_ms"].as_u64().unwrap_or(0),updated_at_ms:old["updated_at_ms"].as_u64().unwrap_or(0),tokens:None,needs_turn:false,head:None,next_order:0,revision:0 };
                 let mut records = HashMap::new(); let mut head = None;

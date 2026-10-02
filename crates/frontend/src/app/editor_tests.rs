@@ -79,7 +79,7 @@ fn composer_navigation_repaints_without_sqlite_draft_writes_or_reshaping() {
 fn actual_prompt_settings_reuse_input_geometry_clipboard_ime_and_scrolling() {
     let mut h = Harness::new();
     let content = format!("abcdefghij\nab\nabcdefghij\n{}", "a long settings prompt with emoji 😀\n".repeat(35));
-    let mut settings = tau_protocol::settings::Settings::default();
+    let mut settings = tau_net::settings::Settings::default();
     settings.agent.system_prompt = content.clone();
     h.app.open_ui(ui::DialogSpec::Daemon).unwrap();
     h.app.with_ui(|root, cx| {

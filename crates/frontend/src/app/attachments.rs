@@ -1,6 +1,6 @@
 use super::*;
 #[cfg(test)]
-use tau_transfer::TransferStatus;
+use tau_net::TransferStatus;
 
 // Match Tau 1's byte labels without overflowing on large advertised sizes.
 pub(in crate::app) fn format_bytes(bytes: u64) -> String {

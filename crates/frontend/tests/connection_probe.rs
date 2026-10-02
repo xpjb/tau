@@ -15,7 +15,7 @@ use tau_frontend::{
     store::Settings,
     transport::{Event, Network},
 };
-use tau_protocol::{PROTOCOL_VERSION, ServerMessage};
+use tau_net::{PROTOCOL_VERSION, ServerMessage};
 
 async fn fixture(reply: bool) -> (Settings, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -201,7 +201,7 @@ async fn paused_ui_coalesces_state_without_blocking_heartbeats_or_losing_receipt
     let app=Router::new().route("/v1/ws",get(move |ws:WebSocketUpgrade| {let seen=seen.clone();async move {ws.on_upgrade(move |mut socket|async move {
         socket.send(Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into())}).unwrap().into())).await.unwrap();
         for n in 0..1500 {
-            let state=ServerMessage::SessionState {revision:0,restore_review:None,session_id:"chat".into(),status:tau_protocol::SessionStatus::Running,context_usage:None,detail:Some(n.to_string())};
+            let state=ServerMessage::SessionState {revision:0,restore_review:None,session_id:"chat".into(),status:tau_net::SessionStatus::Running,context_usage:None,detail:Some(n.to_string())};
             socket.send(Message::Text(serde_json::to_string(&state).unwrap().into())).await.unwrap();
             if n<200 {socket.send(Message::Text(serde_json::to_string(&ServerMessage::success(format!("receipt-{n}"),None,None)).unwrap().into())).await.unwrap();}
         }

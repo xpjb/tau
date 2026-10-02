@@ -152,7 +152,7 @@ async fn admission_timeout_does_not_execute_or_reserve_the_expired_request() {
     let response=tokio::time::timeout(Duration::from_secs(4),client.until(|v|v["type"]=="response" && v["requestId"]=="deadline-8")).await.unwrap();
     assert!(started.elapsed()>=Duration::from_secs(2));assert_eq!(response["ok"],false);assert_eq!(response["uncertain"],false);
     assert_eq!(response["error"],"The server could not start this request in time. Please try again.");
-    assert!(matches!(manager.inner.state.operation_outcome("deadline-8").await.unwrap(),tau_protocol::ServerMessage::Operation {registered:false,..}));
+    assert!(matches!(manager.inner.state.operation_outcome("deadline-8").await.unwrap(),tau_net::ServerMessage::Operation {registered:false,..}));
     release.send(()).unwrap();storage.await.unwrap();
     // The expired request must not start when the database becomes free.
     for n in 0..8 {
@@ -161,7 +161,7 @@ async fn admission_timeout_does_not_execute_or_reserve_the_expired_request() {
             client.until(|v|v["type"]=="response" && v["requestId"]==id).await;
         }
     }
-    assert!(matches!(manager.inner.state.operation_outcome("deadline-8").await.unwrap(),tau_protocol::ServerMessage::Operation {registered:false,..}));
+    assert!(matches!(manager.inner.state.operation_outcome("deadline-8").await.unwrap(),tau_net::ServerMessage::Operation {registered:false,..}));
     drop(client);manager.shutdown().await;server.abort();
 }
 
@@ -258,7 +258,7 @@ async fn stop_retires_waiting_controls_and_play_drains_the_queue() {
 
 #[tokio::test]
 async fn play_recovers_legacy_orphaned_controls_even_with_a_stopped_run_id() {
-    use tau_protocol::{QueueControl, QueueOperation, QueueRef};
+    use tau_net::{QueueControl, QueueOperation, QueueRef};
     for action in ["prefix", "pause"] {
         let mut model = ModelServer::start(vec![completion("Recovered held work", vec![])]).await;
         let (_root, manager, _, server) = fixture(&model, Api::ChatCompletions).await;
@@ -293,7 +293,7 @@ async fn play_recovers_legacy_orphaned_controls_even_with_a_stopped_run_id() {
 
 #[tokio::test]
 async fn newer_boundary_intents_replace_pending_ones_but_stale_inputs_do_not() {
-    use tau_protocol::{QueueOperation, QueueRef};
+    use tau_net::{QueueOperation, QueueRef};
     let response = Arc::new(Notify::new());
     let mut blocked = completion("Current response", vec![]); blocked.gate = Some(response.clone());
     let mut model = ModelServer::start(vec![blocked, completion("All queued work", vec![])]).await;
@@ -339,7 +339,7 @@ async fn newer_boundary_intents_replace_pending_ones_but_stale_inputs_do_not() {
 
 #[tokio::test]
 async fn run_through_limits_the_queue_and_a_later_pause_wins_during_stop_cleanup() {
-    use tau_protocol::{QueueOperation, QueueRef};
+    use tau_net::{QueueOperation, QueueRef};
     for pause_again in [false, true] {
         let mut blocked = completion("Stopped response", vec![]); blocked.gate = Some(Arc::new(Notify::new()));
         let mut model = ModelServer::start(vec![blocked, completion("Selected work", vec![]), completion("Remaining work", vec![])]).await;
@@ -387,7 +387,7 @@ async fn run_through_limits_the_queue_and_a_later_pause_wins_during_stop_cleanup
 
 #[tokio::test]
 async fn provider_failure_retires_a_waiting_limit_without_automatically_retrying() {
-    use tau_protocol::{QueueOperation, QueueRef, SessionStatus};
+    use tau_net::{QueueOperation, QueueRef, SessionStatus};
     let response = Arc::new(Notify::new());
     let failed = Reply {status:400, bytes:br#"{"error":{"message":"fixture provider failure"}}"#.to_vec(), gate:Some(response.clone()), body_gate:None};
     let mut model = ModelServer::start(vec![failed, completion("Explicitly recovered", vec![])]).await;

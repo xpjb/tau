@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::Result;
 use sanscale::{Rect, Vec2};
-use tau_protocol::*;
+use tau_net::*;
 
 #[derive(Clone)]
 pub(in crate::app) enum Choice {

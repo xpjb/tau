@@ -6,7 +6,7 @@ use axum::{Json,Router,extract::State,response::IntoResponse,routing::post};
 use futures_util::{SinkExt,StreamExt};
 use serde_json::{Value,json};
 use tau_frontend::{controller::Controller,store::{Settings,Store}};
-use tau_protocol::*;
+use tau_net::*;
 use tokio::net::{TcpListener,TcpStream};
 use tokio_tungstenite::{connect_async,tungstenite::{Message,client::IntoClientRequest}};
 #[path="support/pressure_link.rs"] #[allow(dead_code)] mod pressure_link;
@@ -54,12 +54,12 @@ impl Fixture {
             answer:(0..180).map(|n|format!("{} café 😀\n",blake3::hash(format!("{seed}-{n}").as_bytes()).to_hex())).collect()});
         let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
         let app=Router::new().route("/{*path}",post(reply).get(||async {
-            Json(json!({"data":[{"id":tau_protocol::settings::Settings::default().agent.model.model_id,"context_length":200_000}]}))
+            Json(json!({"data":[{"id":tau_net::settings::Settings::default().agent.model.model_id,"context_length":200_000}]}))
         })).with_state(model.clone());
         let provider=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
-        let mut settings=tau_protocol::settings::Settings::default();settings.agent.load_agents_files=false;
+        let mut settings=tau_net::settings::Settings::default();settings.agent.load_agents_files=false;
         settings.agent.retry.enabled=false;settings.daemon.generate_titles=false;settings.daemon.idle_timeout_seconds=0;
-        let p=settings.providers.get_mut("openai-codex").unwrap();p.api=tau_protocol::settings::Api::ChatCompletions;
+        let p=settings.providers.get_mut("openai-codex").unwrap();p.api=tau_net::settings::Api::ChatCompletions;
         p.base_url=format!("http://{address}");p.web_search=false;
         std::fs::write(source.path().join("settings.json"),serde_json::to_vec(&settings).unwrap()).unwrap();
         let auth=source.path().join("auth.json");std::fs::write(&auth,r#"{"openai-codex":{"type":"api_key","key":"local-pressure-fixture"}}"#).unwrap();

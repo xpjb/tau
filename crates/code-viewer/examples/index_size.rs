@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use std::{mem::size_of, path::PathBuf, time::{Duration, Instant}};
 use tau_code_viewer::{filesystem::FileSystem, finder::PathIndex};
-use tau_protocol::files::*;
+use tau_net::files::*;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {

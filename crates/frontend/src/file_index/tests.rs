@@ -2,8 +2,8 @@ use super::*;
 use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
 use anyhow::Result;
 use futures_util::{future::BoxFuture, FutureExt};
-use tau_blocks::{FeedRequest, FeedPage, BlockRequest, ContentRange};
-use tau_transfer::blocks::{Backend, Client, Server};
+use tau_net::blocks::{FeedRequest, FeedPage, BlockRequest, ContentRange};
+use tau_net::native::{Backend, Client, Server};
 
 struct Memory { reply: Mutex<FileReply>, calls: Mutex<Vec<FileRequest>>, fail: AtomicBool, hints: watch::Sender<u64> }
 impl Backend for Memory {

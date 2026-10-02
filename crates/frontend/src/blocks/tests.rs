@@ -4,20 +4,20 @@ use serde_json::json;
 pub(crate) struct Fixture {source:Connection,pub(crate) cache:Cache,_root:tempfile::TempDir,pub(crate) lineage:String}
 impl Fixture {
     pub(crate) fn new()->Self {
-        let source=Connection::open_in_memory().unwrap();source.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&source).unwrap();
+        let source=Connection::open_in_memory().unwrap();source.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_block_store::initialize(&source).unwrap();
         let root=tempfile::tempdir().unwrap();let cache=Cache::open(&root.path().join("cache.db")).unwrap();
-        let lineage=tau_blocks::cursor(&source).unwrap().lineage;cache.configure(&lineage).unwrap();
+        let lineage=tau_block_store::cursor(&source).unwrap().lineage;cache.configure(&lineage).unwrap();
         Self {source,cache,_root:root,lineage}
     }
     pub(crate) fn put(&mut self,id:&str,parent:Option<&str>,order:u64,kind:BlockKind,meta:serde_json::Value,bytes:&[u8]) {
         let tx=self.source.transaction().unwrap();
-        tau_blocks::put(&tx,"chat",BlockHeader {id:id.into(),parent:parent.map(str::to_owned),order,kind,meta,version:0,length:0,sealed:true,revision:0},bytes).unwrap();tx.commit().unwrap();
+        tau_block_store::put(&tx,"chat",BlockHeader {id:id.into(),parent:parent.map(str::to_owned),order,kind,meta,version:0,length:0,sealed:true,revision:0},bytes).unwrap();tx.commit().unwrap();
     }
     pub(crate) fn page(&self,parent:Option<&str>,before:Option<FeedPosition>) {
-        let req=self.cache.feed_request("chat",parent,before).unwrap();let page=tau_blocks::feed(&self.source,&req).unwrap();self.cache.page(&self.lineage,&req,&page).unwrap();
+        let req=self.cache.feed_request("chat",parent,before).unwrap();let page=tau_block_store::feed(&self.source,&req).unwrap();self.cache.page(&self.lineage,&req,&page).unwrap();
     }
     pub(crate) fn chunk(&self,id:&str)->bool {
-        let req=self.cache.block_request("chat",id).unwrap();let range=tau_blocks::read(&self.source,&req).unwrap();
+        let req=self.cache.block_request("chat",id).unwrap();let range=tau_block_store::read(&self.source,&req).unwrap();
         self.cache.header(&self.lineage,"chat",&range.header).unwrap();
         if range.bytes.is_empty() {return false;}
         self.cache.range(&self.lineage,"chat",&range).unwrap();true
@@ -61,7 +61,7 @@ fn queue_directory_paginates_fully_and_partial_text_is_not_editable() {
     let mut f=Fixture::new();
     f.put(QUEUE,None,i64::MAX as u64,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
     for n in 0..99 {
-        let id=format!("request-{n}");let meta=json!({"request":tau_protocol::QueuedRequest {request_id:id.clone(),revision:0,kind:"steer".into(),text:String::new(),images:0,timestamp_ms:None}});
+        let id=format!("request-{n}");let meta=json!({"request":tau_net::QueuedRequest {request_id:id.clone(),revision:0,kind:"steer".into(),text:String::new(),images:0,timestamp_ms:None}});
         f.put(&format!("queued:{id}"),Some(QUEUE),n,BlockKind::Text,meta,b"whole message");
     }
     f.page(None,None);f.body(QUEUE);f.page(Some(QUEUE),None);
@@ -102,7 +102,7 @@ fn disclosure_interests_are_per_group_and_large_input_is_explicit() {
 fn text_prefix_handles_split_utf8_and_old_connections_cannot_pollute_new_cache() {
     let mut f=Fixture::new();let text=format!("{}😀","x".repeat(BLOCK_CHUNK_BYTES-1));
     f.put("text",None,0,BlockKind::Text,event("text",0,"text"),text.as_bytes());f.page(None,None);
-    let range=tau_blocks::read(&f.source,&f.cache.block_request("chat","text").unwrap()).unwrap();
+    let range=tau_block_store::read(&f.source,&f.cache.block_request("chat","text").unwrap()).unwrap();
     f.cache.range(&f.lineage,"chat",&range).unwrap();let view=f.cache.snapshot("chat").unwrap().unwrap();
     assert_eq!(view.events[0].text.len(),BLOCK_CHUNK_BYTES-1);assert!(view.incomplete.contains("text"));
     f.body("text");let view=f.cache.snapshot("chat").unwrap().unwrap();assert_eq!(view.events[0].text,text);assert!(view.incomplete.is_empty());
@@ -122,9 +122,9 @@ fn viewport_limits_body_interests_and_copy_waits_for_sealed_content() {
     let plan=f.cache.plan_visible("chat",&LocalChat::default(),&[],Some(&visible)).unwrap();
     assert_eq!(plan.blocks.iter().map(|(id,_)|id.clone()).collect::<BTreeSet<_>>(),BTreeSet::from([QUEUE.into(),"text-3".into(),"text-4".into()]));
     let tx=f.source.transaction().unwrap();
-    tau_blocks::put(&tx,"chat",BlockHeader {id:"live".into(),parent:None,order:200,kind:BlockKind::Thinking,meta:event("live",200,"thinking"),version:0,length:0,sealed:false,revision:0},b"observed prefix").unwrap();tx.commit().unwrap();
+    tau_block_store::put(&tx,"chat",BlockHeader {id:"live".into(),parent:None,order:200,kind:BlockKind::Thinking,meta:event("live",200,"thinking"),version:0,length:0,sealed:false,revision:0},b"observed prefix").unwrap();tx.commit().unwrap();
     f.page(None,None);f.body("live");assert!(f.cache.copy_ready("chat",&["live".into()]).unwrap().is_none());
-    let tx=f.source.transaction().unwrap();let mut h=tau_blocks::header(&tx,"chat","live").unwrap().unwrap();h.sealed=true;tau_blocks::set_header(&tx,"chat",h).unwrap();tx.commit().unwrap();
+    let tx=f.source.transaction().unwrap();let mut h=tau_block_store::header(&tx,"chat","live").unwrap().unwrap();h.sealed=true;tau_block_store::set_header(&tx,"chat",h).unwrap();tx.commit().unwrap();
     f.page(None,None);assert!(f.cache.copy_ready("chat",&["live".into()]).unwrap().unwrap().contains("observed prefix"));
 }
 
@@ -154,7 +154,7 @@ fn viewport_body_admission_advances_past_cached_rows_and_closed_tools() {
             let plan = f.cache.plan_visible("chat", &local, &[], Some(&visible)).unwrap();
             let missing = plan.blocks.iter().filter(|(id, head)| id != QUEUE
                 && head.is_none_or(|(_, length, _, stored)| stored < length)).map(|(id, _)| id.clone()).collect::<Vec<_>>();
-            let groups = missing.iter().map(|id| tau_blocks::header(&f.source,"chat",id).unwrap().unwrap().parent.unwrap_or(id.clone())).collect::<BTreeSet<_>>();
+            let groups = missing.iter().map(|id| tau_block_store::header(&f.source,"chat",id).unwrap().unwrap().parent.unwrap_or(id.clone())).collect::<BTreeSet<_>>();
             assert!(groups.len() <= 30, "The active root cohort remains bounded");
             for id in missing { fetched.insert(id.clone()); f.body(&id); }
         }
@@ -188,13 +188,13 @@ fn copy_interest_advances_in_bounded_cohorts_instead_of_starving_after_thirty_ca
 #[test]
 fn sqlite_full_and_cross_handle_reset_never_advance_a_verified_prefix() {
     let mut f=Fixture::new();f.put("body",None,0,BlockKind::Text,event("body",0,"text"),&vec![7;BLOCK_CHUNK_BYTES*2]);f.page(None,None);
-    let req=f.cache.block_request("chat","body").unwrap();let range=tau_blocks::read(&f.source,&req).unwrap();
+    let req=f.cache.block_request("chat","body").unwrap();let range=tau_block_store::read(&f.source,&req).unwrap();
     {let db=f.cache.db.lock().unwrap();let pages:u64=db.query_row("PRAGMA page_count",[],|r|r.get(0)).unwrap();db.pragma_update(None,"max_page_count",pages).unwrap();}
     let error=f.cache.range(&f.lineage,"chat",&range).unwrap_err();assert!(error.to_string().contains("full"),"{error:#}");
     assert_eq!(f.cache.block_request("chat","body").unwrap().offset,0);
     let old=f.cache.epoch();let second=Cache::open(&f._root.path().join("cache.db")).unwrap();second.clear().unwrap();
     assert!(f.cache.header_at(&f.lineage,"chat",&range.header,old).is_err());assert!(f.cache.range_at(&f.lineage,"chat",&range,old).is_err());
-    assert!(tau_blocks::header(&f.cache.db.lock().unwrap(),"chat","body").unwrap().is_none());
+    assert!(tau_block_store::header(&f.cache.db.lock().unwrap(),"chat","body").unwrap().is_none());
 }
 
 #[test]
@@ -236,7 +236,7 @@ fn giant_previews_stop_prefetching_and_copy_can_target_a_closed_child() {
     f.page(None,None);f.page(Some("tool"),None);
     let plan=f.cache.plan_visible("chat",&LocalChat::default(),&["result".into()],Some(&BTreeSet::new())).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="result"));
     let mut local=LocalChat {details_default:true,..Default::default()};local.expansion.insert("tool:tool".into(),true);local.expansion.insert("tool:tool:Output".into(),true);
-    for _ in 0..16 {let req=f.cache.block_request("chat","result").unwrap();let range=tau_blocks::read(&f.source,&req).unwrap();f.cache.range(&f.lineage,"chat",&range).unwrap();}
+    for _ in 0..16 {let req=f.cache.block_request("chat","result").unwrap();let range=tau_block_store::read(&f.source,&req).unwrap();f.cache.range(&f.lineage,"chat",&range).unwrap();}
     let plan=f.cache.plan("chat",&local,&[]).unwrap();assert!(!plan.blocks.iter().any(|(id,_)|id=="result"));
     let plan=f.cache.plan("chat",&local,&["result".into()]).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="result"));f.body("result");let text=f.cache.copy_ready("chat",&["result".into()]).unwrap().unwrap();assert_eq!(text.bytes().filter(|b|*b==b'x').count(),bytes.len());assert!(!text.contains("Preview limited"));
 }
@@ -254,13 +254,13 @@ fn cache_migrates_without_losing_verified_bytes_and_rejects_future_versions() {
     {
         let db = cache.db.lock().unwrap();
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_schema WHERE name='local_echoes'", [], |r|r.get::<_,u32>(0)).unwrap(), 0);
-        assert_eq!(tau_blocks::cached_content(&db,"chat","kept").unwrap(), b"verified");
+        assert_eq!(tau_block_store::cached_content(&db,"chat","kept").unwrap(), b"verified");
         db.execute_batch("DROP TRIGGER fail_migration").unwrap();
     }
     let current = Cache::open(&f._root.path().join("cache.db")).unwrap();
     assert_eq!(current.copy_ready("chat",&["kept".into()]).unwrap().unwrap(), "verified");
     assert_eq!(current.db.lock().unwrap().query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('local_echoes','block_body_hash')", [], |r|r.get::<_,u32>(0)).unwrap(), 2);
-    cache.db.lock().unwrap().execute_batch("PRAGMA user_version=999").unwrap();assert!(Cache::open(&f._root.path().join("cache.db")).is_err());assert_eq!(tau_blocks::cached_content(&cache.db.lock().unwrap(),"chat","kept").unwrap(),b"verified");
+    cache.db.lock().unwrap().execute_batch("PRAGMA user_version=999").unwrap();assert!(Cache::open(&f._root.path().join("cache.db")).is_err());assert_eq!(tau_block_store::cached_content(&cache.db.lock().unwrap(),"chat","kept").unwrap(),b"verified");
 }
 
 #[test]
@@ -353,8 +353,8 @@ fn attachment_history_paging_clears_loading_without_fetching_closed_tools_or_fil
     assert_eq!(plan.blocks.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec![QUEUE]);
     let db = f.cache.db.lock().unwrap();
     for id in &visible {
-        assert!(tau_blocks::cached_content(&db, "chat", id).unwrap().is_empty());
-        assert!(tau_blocks::header(&db, "chat", &format!("file:{id}")).unwrap().is_none());
+        assert!(tau_block_store::cached_content(&db, "chat", id).unwrap().is_empty());
+        assert!(tau_block_store::header(&db, "chat", &format!("file:{id}")).unwrap().is_none());
     }
 }
 
@@ -400,8 +400,8 @@ fn authored_message_has_one_model_identity_across_receipt_queue_and_history() {
 
 fn local_prompt(id: &str, text: &str) -> LocalChat {
     use crate::store::{Delivery, Pending};
-    LocalChat { pending: vec![Pending { request: tau_protocol::ClientRequest { id: id.into(),
-        command: tau_protocol::ClientCommand::Prompt { session_id: "chat".into(), text: text.into(), model: None, create: None } },
+    LocalChat { pending: vec![Pending { request: tau_net::ClientRequest { id: id.into(),
+        command: tau_net::ClientCommand::Prompt { session_id: "chat".into(), text: text.into(), model: None, create: None } },
         text: text.into(), files: vec![], status: Delivery::Accepted, started_at_ms: None, detail: None }], ..Default::default() }
 }
 fn user_body(id: &str, request: &str, text: &str) -> serde_json::Value {
@@ -432,7 +432,7 @@ fn local_body_reuse_survives_queue_to_history_and_restart_without_downloading_in
     // The queue can disappear before the history directory arrives. This must
     // not lose the only reusable bytes or require downloading our own input.
     let tx = f.source.transaction().unwrap();
-    tau_blocks::remove(&tx,"chat","queued:request").unwrap(); tx.commit().unwrap();
+    tau_block_store::remove(&tx,"chat","queued:request").unwrap(); tx.commit().unwrap();
     f.page(Some(QUEUE),None);
     f.cache = Cache::open(&f._root.path().join("cache.db")).unwrap();
     f.cache.configure(&f.lineage).unwrap();
@@ -516,7 +516,7 @@ fn accepted_queue_header_does_not_retire_local_input_before_its_body_arrives() {
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn native_watch_fetches_unknown_body_but_never_downloads_locally_known_input() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tau_transfer::blocks::Backend;
+    use tau_net::native::Backend;
     struct Source {
         db: Arc<Mutex<Connection>>,
         known_reads: Arc<AtomicUsize>,
@@ -525,14 +525,14 @@ async fn native_watch_fetches_unknown_body_but_never_downloads_locally_known_inp
     }
     impl Backend for Source {
         fn feed(&self, req: FeedRequest) -> futures_util::future::BoxFuture<'static, Result<FeedPage>> {
-            let db=self.db.clone(); Box::pin(async move { tau_blocks::feed(&db.lock().unwrap(),&req) })
+            let db=self.db.clone(); Box::pin(async move { tau_block_store::feed(&db.lock().unwrap(),&req) })
         }
         fn read(&self, req: BlockRequest) -> futures_util::future::BoxFuture<'static, Result<ContentRange>> {
             let db=self.db.clone();let known=self.known_reads.clone();let unknown=self.unknown_reads.clone();
             Box::pin(async move {
                 if req.id=="saved" {known.fetch_add(1,Ordering::SeqCst);}
                 if req.id=="unknown" {unknown.fetch_add(1,Ordering::SeqCst);}
-                tau_blocks::read(&db.lock().unwrap(),&req)
+                tau_block_store::read(&db.lock().unwrap(),&req)
             })
         }
         fn changes(&self) -> watch::Receiver<u64> {self.changes.clone()}
@@ -546,7 +546,7 @@ async fn native_watch_fetches_unknown_body_but_never_downloads_locally_known_inp
     f.put("unknown",None,2,BlockKind::Text,user_body("unknown","another-client","remote text"),b"remote text");
     let known=Arc::new(AtomicUsize::new(0));let unknown=Arc::new(AtomicUsize::new(0));
     let (_changes,changed)=watch::channel(0);
-    let server=tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
+    let server=tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
         db:Arc::new(Mutex::new(f.source)),known_reads:known.clone(),unknown_reads:unknown.clone(),changes:changed,
     })).await.unwrap();
     let (notices,mut received)=mpsc::channel(32);
@@ -563,8 +563,8 @@ async fn native_watch_fetches_unknown_body_but_never_downloads_locally_known_inp
             let notice=received.recv().await.unwrap();assert!(notice.error.is_none(),"{:?}",notice.error);
             service.send(Command::Plan(vec![f.cache.plan("chat",&local,&[]).unwrap()]));
             let db=f.cache.db.lock().unwrap();
-            if tau_blocks::cached_content(&db,"chat","unknown").unwrap()==b"remote text" {
-                assert_eq!(tau_blocks::cached_content(&db,"chat","saved").unwrap(),text.as_bytes());
+            if tau_block_store::cached_content(&db,"chat","unknown").unwrap()==b"remote text" {
+                assert_eq!(tau_block_store::cached_content(&db,"chat","saved").unwrap(),text.as_bytes());
                 break;
             }
         }
@@ -590,7 +590,7 @@ fn queue_removal_before_history_header_keeps_a_display_copy_until_root_catches_u
         local.reconcile_complete(&feed.queue,&delivered,&feed.incomplete);
         assert_eq!(local.pending.is_empty(),complete);
         // Source commits a move/deletion, but deliver the queue directory first.
-        let tx=f.source.transaction().unwrap();tau_blocks::remove(&tx,"chat","queued:request").unwrap();tx.commit().unwrap();
+        let tx=f.source.transaction().unwrap();tau_block_store::remove(&tx,"chat","queued:request").unwrap();tx.commit().unwrap();
         if consumed {f.put("saved",None,1,BlockKind::Text,user_body("saved","request",text),text.as_bytes());}
         else {f.put(QUEUE,None,100,BlockKind::Queue,json!({"membershipHash":"changed"}),&serde_json::to_vec(&QueueState::native()).unwrap());}
         f.page(Some(QUEUE),None);
@@ -648,15 +648,15 @@ fn body_reuse_is_bounded_disposable_and_does_not_accept_corrupt_cached_candidate
 
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn a_delayed_plan_does_not_refetch_known_text_after_queue_consumption() {
-    use tau_transfer::blocks::Backend;
+    use tau_net::native::Backend;
     struct Source { db:Arc<Mutex<Connection>>, reads:Arc<Mutex<Vec<String>>>, changes:watch::Receiver<u64> }
     impl Backend for Source {
         fn feed(&self, req:FeedRequest)->futures_util::future::BoxFuture<'static,Result<FeedPage>> {
-            let db=self.db.clone();Box::pin(async move {tau_blocks::feed(&db.lock().unwrap(),&req)})
+            let db=self.db.clone();Box::pin(async move {tau_block_store::feed(&db.lock().unwrap(),&req)})
         }
         fn read(&self, req:BlockRequest)->futures_util::future::BoxFuture<'static,Result<ContentRange>> {
             let db=self.db.clone();let reads=self.reads.clone();Box::pin(async move {
-                reads.lock().unwrap().push(req.id.clone());tau_blocks::read(&db.lock().unwrap(),&req)
+                reads.lock().unwrap().push(req.id.clone());tau_block_store::read(&db.lock().unwrap(),&req)
             })
         }
         fn changes(&self)->watch::Receiver<u64> {self.changes.clone()}
@@ -672,13 +672,13 @@ async fn a_delayed_plan_does_not_refetch_known_text_after_queue_consumption() {
     assert!(pending_plan.blocks.iter().any(|(id,head)|id=="queued:request" && head.is_some_and(|(_,len,sealed,stored)|sealed && len==stored)));
     // The UI has built its plan, but hasn't handed it to the service yet.
     // Meanwhile the existing body-reuse fix correctly completes the merge.
-    let tx=f.source.transaction().unwrap();tau_blocks::remove(&tx,"chat","queued:request").unwrap();tx.commit().unwrap();
+    let tx=f.source.transaction().unwrap();tau_block_store::remove(&tx,"chat","queued:request").unwrap();tx.commit().unwrap();
     f.put("saved",None,1,BlockKind::Text,user_body("saved","request",text),text.as_bytes());
     f.page(Some(QUEUE),None);f.page(None,None);
     assert_eq!(f.cache.copy_ready("chat",&["saved".into()]).unwrap().unwrap(),text);
     let merged_plan=f.cache.plan("chat",&local,&[]).unwrap();
     let reads=Arc::new(Mutex::new(vec![]));let (_changes,changed)=watch::channel(0);
-    let server=tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
+    let server=tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
         db:Arc::new(Mutex::new(f.source)),reads:reads.clone(),changes:changed,
     })).await.unwrap();
     let (notices,mut received)=mpsc::channel(32);let service=Service::start(f.cache.clone(),Arc::new(||{}),notices);
@@ -767,10 +767,10 @@ fn disk_reads_refresh_eviction_recency_and_saved_anchors_hydrate_offline() {
     f.cache.preview("chat",Some(&BTreeSet::from(["e001".into()]))).unwrap();
     f.body("e003");
     let mut db = f.cache.db.lock().unwrap();let tx=db.transaction().unwrap();
-    tau_blocks::cache_budget::enforce(&tx,"chat","e003",14).unwrap();tx.commit().unwrap();
-    assert_eq!(tau_blocks::cached_content(&db,"chat","e001").unwrap(),b"body 01","read recency, not last download, protects revisited text");
-    assert!(tau_blocks::cached_content(&db,"chat","e002").unwrap().is_empty());
-    assert_eq!(tau_blocks::cached_content(&db,"chat","e003").unwrap(),b"body 03");
+    tau_block_store::cache_budget::enforce(&tx,"chat","e003",14).unwrap();tx.commit().unwrap();
+    assert_eq!(tau_block_store::cached_content(&db,"chat","e001").unwrap(),b"body 01","read recency, not last download, protects revisited text");
+    assert!(tau_block_store::cached_content(&db,"chat","e002").unwrap().is_empty());
+    assert_eq!(tau_block_store::cached_content(&db,"chat","e003").unwrap(),b"body 03");
 }
 
 #[test]
@@ -818,7 +818,7 @@ fn background_plans_only_fetch_a_bounded_text_tail_and_queue_not_hidden_details_
 #[test]
 fn controller_keeps_recent_views_warm_and_reopens_evicted_scrollback_from_disk() {
     use crate::{controller::Controller,store::Store};
-    use tau_protocol::{ServerMessage,SessionSummary};
+    use tau_net::{ServerMessage,SessionSummary};
     let mut f=Fixture::new();
     let mut c=Controller::new(Store::open(f._root.path().join("client")).unwrap(),Arc::new(||{})).unwrap();
     f.cache=c.store.block_cache(&c.identity).unwrap();f.cache.configure(&f.lineage).unwrap();
@@ -859,7 +859,7 @@ fn busy_recency_never_gates_verified_reads_or_weakens_content_writes() {
     let view = f.cache.preview("chat", None).unwrap().unwrap();
     assert_eq!(view.events[0].text, "verified body");
     let local = LocalChat { pending: vec![crate::store::Pending {
-        request: tau_protocol::ClientRequest { id: "uncertain".into(), command: tau_protocol::ClientCommand::Prompt { session_id: "chat".into(), text: "keep locally".into(), model: None, create: None } },
+        request: tau_net::ClientRequest { id: "uncertain".into(), command: tau_net::ClientCommand::Prompt { session_id: "chat".into(), text: "keep locally".into(), model: None, create: None } },
         started_at_ms: None, text: "keep locally".into(), files: vec![],
         status: crate::store::Delivery::Unconfirmed, detail: None,
     }], ..Default::default() };
@@ -875,7 +875,7 @@ fn busy_recency_never_gates_verified_reads_or_weakens_content_writes() {
     writer.execute_batch("CREATE TRIGGER fail_touch BEFORE UPDATE ON block_usage BEGIN SELECT RAISE(ABORT,'recency fault'); END").unwrap();
     let error = f.cache.preview("chat", None).err().expect("non-contention failures must not be hidden");
     assert!(format!("{error:#}").contains("recency fault"));
-    assert_eq!(tau_blocks::cached_content(&writer, "chat", "text").unwrap(), b"verified body");
+    assert_eq!(tau_block_store::cached_content(&writer, "chat", "text").unwrap(), b"verified body");
 }
 
 #[test]
@@ -927,7 +927,7 @@ fn prefetched_bodies_do_not_thrash_after_eviction_but_replacements_and_viewing_s
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn file_reconnect_does_not_retry_missing_or_corrupt_content() {
     use std::sync::atomic::{AtomicUsize,Ordering};
-    use tau_transfer::blocks::Backend;
+    use tau_net::native::Backend;
     struct Broken {
         db:Arc<Mutex<Connection>>, reads:Arc<AtomicUsize>, changed:watch::Receiver<u64>, corrupt:bool,
     }
@@ -940,7 +940,7 @@ async fn file_reconnect_does_not_retry_missing_or_corrupt_content() {
             let db=self.db.clone();let corrupt=self.corrupt;
             Box::pin(async move {
                 ensure!(corrupt,"Source content is missing");
-                let mut range=tau_blocks::read(&db.lock().unwrap(),&request)?;
+                let mut range=tau_block_store::read(&db.lock().unwrap(),&request)?;
                 range.hash="0".repeat(64);Ok(range)
             })
         }
@@ -949,7 +949,7 @@ async fn file_reconnect_does_not_retry_missing_or_corrupt_content() {
     for corrupt in [false,true] {
         let mut f=Fixture::new();f.put("file",None,0,BlockKind::File,json!({}),b"file bytes");
         let reads=Arc::new(AtomicUsize::new(0));let (_changes,changed)=watch::channel(0);
-        let server=tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Broken {
+        let server=tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Broken {
             db:Arc::new(Mutex::new(f.source)),reads:reads.clone(),changed,corrupt,
         })).await.unwrap();
         let client=Arc::new(Client::bind().await.unwrap());

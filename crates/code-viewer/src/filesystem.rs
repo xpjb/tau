@@ -2,7 +2,7 @@
 //! filesystem path or file body is persisted in chat/attachment storage.
 use anyhow::{Context, Result, ensure};
 use std::{collections::{BTreeMap, HashMap}, fs, io::Read, path::{Path, PathBuf}, sync::{Arc, Condvar, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
-use tau_protocol::files::*;
+use tau_net::files::*;
 
 const INDEX_PATHS: usize = MAX_INDEX_PATHS;
 const INDEX_BYTES: usize = MAX_INDEX_BYTES;

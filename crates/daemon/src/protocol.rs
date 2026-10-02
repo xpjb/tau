@@ -1,4 +1,4 @@
-pub use tau_protocol::*;
+pub use tau_net::*;
 
 pub trait ResponseError {
     fn command_failure(request_id: String, error: anyhow::Error) -> Self;

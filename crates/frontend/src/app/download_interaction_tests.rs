@@ -1,6 +1,6 @@
 //! Exercise the real hit dispatch and save lifecycle without invoking OS apps or a daemon.
 use super::*;
-use tau_protocol::blocks::{BlockHeader, BlockKind};
+use tau_net::blocks::{BlockHeader, BlockKind};
 use super::download_render_tests::{Case, cases, install, controls, save, hints};
 use chad::{Config, HeadlessCtx};
 use std::{sync::Arc, time::Duration};
@@ -26,9 +26,9 @@ fn verified(app: &mut App, case: &Case) {
     let bytes = std::fs::read(&path).unwrap();
     let cache = app.controller.store.root.join("blocks").join(format!("{:x}.sqlite3", Sha256::digest(app.controller.identity.as_bytes())));
     let mut db = rusqlite::Connection::open(cache).unwrap();
-    let lineage = tau_blocks::cursor(&db).unwrap().lineage;
+    let lineage = tau_block_store::cursor(&db).unwrap().lineage;
     let tx = db.transaction().unwrap();
-    tau_blocks::cache_header(&tx, "demo", &BlockHeader { id: format!("file:{}", case.id), parent: None, order: 0,
+    tau_block_store::cache_header(&tx, "demo", &BlockHeader { id: format!("file:{}", case.id), parent: None, order: 0,
         kind: if case.image { BlockKind::Image } else { BlockKind::File },
         meta: serde_json::json!({"sha256": format!("{:x}", Sha256::digest(&bytes))}), version: 1, revision: 1,
         length: bytes.len() as u64, sealed: true }).unwrap();

@@ -26,7 +26,7 @@ impl Editor {
             secret: view.secret, single_line: self.single_line,
             rect: [view.rect.x, view.rect.y, view.rect.width, view.rect.height], size: view.size,
             selection_rect: [view.rect.x, view.rect.y, view.rect.width, view.rect.height],
-            max_bytes: tau_protocol::MAX_REQUEST_BYTES,
+            max_bytes: tau_net::MAX_REQUEST_BYTES,
         })
     }
     pub fn accepts_native_edit(&self, edit: &Edit) -> bool {
@@ -35,7 +35,7 @@ impl Editor {
     /// IME snapshots include composing text, so backgrounding also saves an
     /// unfinished word. Selection/composition-only updates never write a draft.
     pub fn native_edit(&mut self, edit: Edit) -> bool {
-        if !self.accepts_native_edit(&edit) || edit.text.len() > tau_protocol::MAX_REQUEST_BYTES { return false; }
+        if !self.accepts_native_edit(&edit) || edit.text.len() > tau_net::MAX_REQUEST_BYTES { return false; }
         let byte = |offset| normalize(&edit.text[..utf16_byte(&edit.text, offset)], self.single_line).len();
         let anchor = byte(edit.start);
         let caret = byte(edit.end);

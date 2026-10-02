@@ -22,7 +22,7 @@ fn cached_phone_first_frame_does_not_wait_for_a_replica_writer() {
     controller.save_chat("chat").unwrap();
     let replica = root.path().join("blocks").join(format!("{}.sqlite3", crate::store::hash(&controller.identity)));
     let db = rusqlite::Connection::open(&replica).unwrap();
-    let lineage = tau_blocks::cursor(&db).unwrap().lineage;
+    let lineage = tau_block_store::cursor(&db).unwrap().lineage;
     controller.store.bind_source(&controller.identity, &lineage).unwrap();
     drop(controller);
 

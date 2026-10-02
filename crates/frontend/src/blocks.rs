@@ -7,9 +7,9 @@ pub(crate) use uploads::InvalidAttachment;
 use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
 use std::{collections::{BTreeSet, HashMap}, path::Path, sync::{Arc, Mutex}, time::Duration};
-use tau_blocks::*;
-use tau_protocol::{Event, EventKind, QueueState};
-use tau_transfer::blocks::{Client, Header};
+use tau_net::blocks::*;
+use tau_net::{Event, EventKind, QueueState};
+use tau_net::native::{Client, Header};
 use tokio::sync::{mpsc, watch};
 use crate::store::LocalChat;
 
@@ -48,13 +48,13 @@ impl Cache {
             let mut parents = BTreeSet::from([None, Some(QUEUE.to_owned())]);
             let mut put = |id: String, parent: Option<String>, order, kind, meta, sealed, bytes: &[u8]| -> Result<()> {
                 wanted.insert(id.clone());
-                tau_blocks::put(&tx, scope, BlockHeader { id, parent, order, kind, meta, sealed, version: 0, length: 0, revision: 0 }, bytes)?;
+                tau_block_store::put(&tx, scope, BlockHeader { id, parent, order, kind, meta, sealed, version: 0, length: 0, revision: 0 }, bytes)?;
                 Ok(())
             };
             for mut event in events {
                 let text = std::mem::take(&mut event.text);
                 let kind = match event.kind { EventKind::Tool => BlockKind::Tool, EventKind::Thinking => BlockKind::Thinking, _ => BlockKind::Text };
-                let sealed = event.phase != tau_protocol::EventPhase::Live;
+                let sealed = event.phase != tau_net::EventPhase::Live;
                 let mut meta = serde_json::json!({"event": event});
                 if kind == BlockKind::Tool {
                     meta["toolState"] = serde_json::to_value(if sealed { ToolState::Completed } else { ToolState::Writing })?;
@@ -72,13 +72,13 @@ impl Cache {
                 put(format!("queued:{}", q.request_id), Some(QUEUE.into()), order as u64, BlockKind::Text, serde_json::json!({"request": q}), true, text.as_bytes())?;
             }
             let old = tx.prepare("SELECT id FROM blocks WHERE scope=?1")?.query_map([scope], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            for id in old { if !wanted.contains(&id) { tau_blocks::remove(&tx, scope, &id)?; } }
+            for id in old { if !wanted.contains(&id) { tau_block_store::remove(&tx, scope, &id)?; } }
             tx.execute("DELETE FROM block_cache_feeds WHERE scope=?1", [scope])?;
             for parent in parents {
                 let request = FeedRequest { scope: scope.into(), parent: parent.clone(), cursor: None, floor: 0, before: None };
                 // All scripted records above are already committed bodies. This
                 // declares their directory coverage, not a fake transport delta.
-                tau_blocks::cache_page(&tx, &request, &FeedPage { reset: false, records: vec![], cursor: tau_blocks::cursor(&tx)?, floor: 0,
+                tau_block_store::cache_page(&tx, &request, &FeedPage { reset: false, records: vec![], cursor: tau_block_store::cursor(&tx)?, floor: 0,
                     before: if parent.is_none() { before.map(|order| FeedPosition { order, id: String::new() }) } else { None }, more: false })?;
             }
             tx.commit()?;
@@ -108,7 +108,7 @@ impl Cache {
         let echoes_ready: bool = db.query_row("SELECT count(*)=2 FROM sqlite_schema WHERE (type='table' AND name='local_echoes') OR (type='index' AND name='block_body_hash')", [], |r| r.get(0))?;
         if version < 2 || !echoes_ready {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            tau_blocks::initialize(&tx)?;
+            tau_block_store::initialize(&tx)?;
             echoes::initialize(&tx)?;
             tx.execute_batch("UPDATE block_limits SET headers=100000,bytes=134217728; CREATE TABLE IF NOT EXISTS replica_epoch(singleton INTEGER PRIMARY KEY,epoch INTEGER NOT NULL); INSERT OR IGNORE INTO replica_epoch VALUES(1,0); PRAGMA user_version=2")?;
             tx.commit()?;
@@ -138,7 +138,7 @@ impl Cache {
         if dirty.ids.is_empty() {return Ok(None);}
         let (ids,queue)={let db=self.db.lock().unwrap();let mut ids=BTreeSet::new();let mut queue=false;
             for id in dirty.ids {
-                if let Some(h)=tau_blocks::header(&db,scope,&id)? {
+                if let Some(h)=tau_block_store::header(&db,scope,&id)? {
                     queue|=h.id==QUEUE || h.parent.as_deref()==Some(QUEUE);
                     ids.insert(h.parent.filter(|p|p!=QUEUE).unwrap_or(h.id));
                 }
@@ -152,29 +152,29 @@ impl Cache {
     }
     pub(crate) fn previous_source(&self)->Result<Option<String>> {
         let db=self.db.lock().unwrap();let known:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM blocks) OR EXISTS(SELECT 1 FROM block_cache_feeds)",[],|r|r.get(0))?;
-        Ok(if known {Some(tau_blocks::cursor(&db)?.lineage)} else {None})
+        Ok(if known {Some(tau_block_store::cursor(&db)?.lineage)} else {None})
     }
     pub fn authorized(&self) -> bool { self.bound.load(std::sync::atomic::Ordering::Acquire) }
     pub fn has_file(&self, scope:&str, id:&str) -> bool {
-        tau_blocks::header(&self.db.lock().unwrap(),scope,id).ok().flatten().is_some_and(|h|matches!(h.kind,BlockKind::File|BlockKind::Image))
+        tau_block_store::header(&self.db.lock().unwrap(),scope,id).ok().flatten().is_some_and(|h|matches!(h.kind,BlockKind::File|BlockKind::Image))
     }
     fn feed_request(&self, scope: &str, parent: Option<&str>, before: Option<FeedPosition>) -> Result<FeedRequest> {
         let db = self.db.lock().unwrap();
-        let saved = tau_blocks::cached_feed(&db,scope,parent)?;
+        let saved = tau_block_store::cached_feed(&db,scope,parent)?;
         Ok(FeedRequest { scope:scope.into(),parent:parent.map(str::to_owned),
             cursor:if before.is_some() {None} else {saved.as_ref().map(|p|p.cursor.clone())},
             floor:saved.map_or(0,|p|p.floor),before })
     }
     fn block_request(&self, scope: &str, id: &str) -> Result<BlockRequest> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
-        let h = tau_blocks::header(&tx,scope,id)?;
-        let offset = tau_blocks::cached_prefix(&tx,scope,id)?; tx.commit()?;
+        let h = tau_block_store::header(&tx,scope,id)?;
+        let offset = tau_block_store::cached_prefix(&tx,scope,id)?; tx.commit()?;
         Ok(BlockRequest { scope:scope.into(),id:id.into(),version:h.map_or(0,|h|h.version),offset,follow:true })
     }
     fn configure(&self, lineage: &str) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
-        if tau_blocks::cursor(&tx)?.lineage != lineage { tx.execute("DELETE FROM local_echoes", [])?; }
-        tau_blocks::cache_lineage(&tx,lineage)?; tx.commit()?;
+        if tau_block_store::cursor(&tx)?.lineage != lineage { tx.execute("DELETE FROM local_echoes", [])?; }
+        tau_block_store::cache_lineage(&tx,lineage)?; tx.commit()?;
         self.bound.store(true,std::sync::atomic::Ordering::Release); Ok(())
     }
     #[cfg(test)]
@@ -182,13 +182,13 @@ impl Cache {
     fn page_at(&self,lineage:&str,request:&FeedRequest,page:&FeedPage,epoch:u64) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
-        ensure!(page.cursor.lineage == lineage && tau_blocks::cursor(&tx)?.lineage == lineage,"Stale data connection");
+        ensure!(page.cursor.lineage == lineage && tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
         let reset=page.reset && request.cursor.is_some() && request.before.is_none()
-            && tau_blocks::cached_feed(&tx,&request.scope,request.parent.as_deref())?.is_none_or(|old|old.cursor.sequence<=page.cursor.sequence);
-        tau_blocks::cache_page(&tx,request,page)?;
+            && tau_block_store::cached_feed(&tx,&request.scope,request.parent.as_deref())?.is_none_or(|old|old.cursor.sequence<=page.cursor.sequence);
+        tau_block_store::cache_page(&tx,request,page)?;
         for record in &page.records {
             if let BlockRecord::Put { block } = record
-                && let Some(current) = tau_blocks::header(&tx, &request.scope, &block.id)? {
+                && let Some(current) = tau_block_store::header(&tx, &request.scope, &block.id)? {
                 echoes::adopt(&tx, &request.scope, &current)?;
             }
         }
@@ -204,9 +204,9 @@ impl Cache {
     fn range_at(&self,lineage:&str,scope:&str,range:&ContentRange,epoch:u64) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
-        ensure!(tau_blocks::cursor(&tx)?.lineage == lineage,"Stale data connection");
-        tau_blocks::cache_range(&tx,scope,range)?;
-        tau_blocks::cache_budget::enforce(&tx,scope,&range.header.id,tau_blocks::cache_budget::DEFAULT_CACHE_BYTES)?;
+        ensure!(tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
+        tau_block_store::cache_range(&tx,scope,range)?;
+        tau_block_store::cache_budget::enforce(&tx,scope,&range.header.id,tau_block_store::cache_budget::DEFAULT_CACHE_BYTES)?;
         tx.commit()?;self.changed(scope,&range.header.id,false); Ok(())
     }
     #[cfg(test)]
@@ -214,9 +214,9 @@ impl Cache {
     fn header_at(&self,lineage:&str,scope:&str,header:&BlockHeader,epoch:u64) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
-        ensure!(tau_blocks::cursor(&tx)?.lineage == lineage,"Stale data connection");
-        tau_blocks::cache_header(&tx,scope,header)?;
-        if let Some(current) = tau_blocks::header(&tx,scope,&header.id)? { echoes::adopt(&tx,scope,&current)?; }
+        ensure!(tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
+        tau_block_store::cache_header(&tx,scope,header)?;
+        if let Some(current) = tau_block_store::header(&tx,scope,&header.id)? { echoes::adopt(&tx,scope,&current)?; }
         tx.commit()?;self.changed(scope,&header.id,false); Ok(())
     }
     #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,&BTreeSet::new(),false,None,true,true)}
@@ -224,7 +224,7 @@ impl Cache {
         if local.position.follow { return Ok(None); }
         let Some(key) = &local.position.key else { return Ok(None); };
         let db = self.db.lock().unwrap();
-        let roots = tau_blocks::children(&db, scope, None)?;
+        let roots = tau_block_store::children(&db, scope, None)?;
         let anchor = roots.iter().position(|h| {
             key == &format!("{scope}/{}",h.id) || key == &format!("{scope}/details:{}",h.id)
                 || key == &format!("{scope}/tool:{}",h.id) || key == &format!("{scope}/thinking:{}",h.id)
@@ -235,12 +235,12 @@ impl Cache {
             .filter(|h|h.id!=QUEUE).map(|h|h.id.clone()).collect()))
     }
     pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,&BTreeSet::new(),true,None,true,true)}
-    pub fn has_snapshot(&self,scope:&str)->Result<bool> {Ok(tau_blocks::cached_feed(&self.db.lock().unwrap(),scope,None)?.is_some())}
+    pub fn has_snapshot(&self,scope:&str)->Result<bool> {Ok(tau_block_store::cached_feed(&self.db.lock().unwrap(),scope,None)?.is_some())}
     fn snapshot_inner(&self, scope: &str, visible:Option<&BTreeSet<String>>,retained:&BTreeSet<String>,preview:bool,only:Option<&[String]>,include_queue:bool,touch:bool) -> Result<Option<View>> {
         let db = self.db.lock().unwrap();
-        let Some(page) = tau_blocks::cached_feed(&db,scope,None)? else { return Ok(None); };
+        let Some(page) = tau_block_store::cached_feed(&db,scope,None)? else { return Ok(None); };
         let mut body_budget=8*1024*1024usize;let mut group_budgets=HashMap::new();let mut preview_ids=HashMap::<String,Vec<String>>::new();
-        let mut roots = if let Some(ids)=only {ids.iter().filter_map(|id|tau_blocks::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?} else {tau_blocks::children(&db,scope,None)?};
+        let mut roots = if let Some(ids)=only {ids.iter().filter_map(|id|tau_block_store::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?} else {tau_block_store::children(&db,scope,None)?};
         let recent=roots.iter().rev().filter(|h|h.id!=QUEUE).take(30).map(|h|h.id.clone()).collect::<BTreeSet<_>>();
         let visible=visible.unwrap_or(&recent);
         let resident = |id: &String| visible.contains(id) || retained.contains(id);
@@ -251,14 +251,14 @@ impl Cache {
         roots.sort_by_key(|h| (!visible.contains(&h.id), !retained.contains(&h.id), std::cmp::Reverse(h.order)));
         let mut accessed = BTreeSet::new();
         let mut read = |id: &str, limit: usize| -> Result<Vec<u8>> {
-            let bytes = tau_blocks::cached_preview(&db, scope, id, limit)?;
+            let bytes = tau_block_store::cached_preview(&db, scope, id, limit)?;
             if !bytes.is_empty() { accessed.insert(id.to_owned()); }
             Ok(bytes)
         };
         let mut all = Vec::new();
         for root in &roots {
             all.push(root.clone());
-            if wanted(root) || only.is_some() { all.extend(tau_blocks::children(&db,scope,Some(&root.id))?); }
+            if wanted(root) || only.is_some() { all.extend(tau_block_store::children(&db,scope,Some(&root.id))?); }
         }
         let mut delivered = Vec::new();
         let mut events = vec![]; let mut bodies = HashMap::new(); let mut queue = QueueState::default();
@@ -278,7 +278,7 @@ impl Cache {
                     if !bytes.is_empty() && blake3::hash(&bytes).to_hex().as_str()==reference["hash"].as_str().unwrap_or("") {
                         let mut full:Event=serde_json::from_slice(&bytes)?;
                         full.phase=event.phase;full.is_error=event.is_error;full.order=event.order;
-                        if event.phase==tau_protocol::EventPhase::Interrupted {full.error_message=event.error_message.clone().or(full.error_message);}
+                        if event.phase==tau_net::EventPhase::Interrupted {full.error_message=event.error_message.clone().or(full.error_message);}
                         event=full;
                         if preview {body_budget-=bytes.len();*allowance-=bytes.len();}
                     } else {incomplete.insert(h.id.clone());}
@@ -288,15 +288,15 @@ impl Cache {
                 let bytes = if wanted(h) {read(&body,if preview {(*allowance).min(body_budget)} else {MAX_BLOCK_BYTES as usize})?} else {vec![]};
                 if preview {body_budget=body_budget.saturating_sub(bytes.len());*allowance=allowance.saturating_sub(bytes.len());}
                 event.text = text_prefix(&bytes)?;
-                let reference = tau_blocks::header(&db,scope,&body)?.map(|b| b.body_ref(&page.cursor.lineage, scope));
+                let reference = tau_block_store::header(&db,scope,&body)?.map(|b| b.body_ref(&page.cursor.lineage, scope));
                 let length = reference.as_ref().map_or(0, |b| b.length);
                 // Acceptance/header arrival is not display convergence. Only
                 // retire the local message after the canonical body is resident.
                 // A bounded preview can still be incomplete while its full body
                 // is safely cached, so do not confuse truncation with absence.
-                if event.role == tau_protocol::EventRole::User && event.phase == tau_protocol::EventPhase::Saved
+                if event.role == tau_net::EventRole::User && event.phase == tau_net::EventPhase::Saved
                     && event.kind == EventKind::Text && wanted(h) && (length == 0 || !bytes.is_empty()) && !incomplete.contains(&event.id)
-                    && tau_blocks::cache_budget::stored_bytes(&db,scope,&body)? == length
+                    && tau_block_store::cache_budget::stored_bytes(&db,scope,&body)? == length
                     && let Some(request) = &event.origin.request_id {
                     delivered.push(request.clone());
                 }
@@ -307,13 +307,13 @@ impl Cache {
                 events.push(event);
             }
         }
-        if include_queue && let Some(h)=tau_blocks::header(&db,scope,QUEUE)? {
+        if include_queue && let Some(h)=tau_block_store::header(&db,scope,QUEUE)? {
             let bytes=read(QUEUE,MAX_BLOCK_BYTES as usize)?;
             if bytes.len() as u64==h.length && !bytes.is_empty() {queue=serde_json::from_slice(&bytes)?;}
         }
-        for h in if include_queue {tau_blocks::children(&db,scope,Some(QUEUE))?} else {vec![]} {
+        for h in if include_queue {tau_block_store::children(&db,scope,Some(QUEUE))?} else {vec![]} {
             if let Some(value) = h.meta.get("request") {
-                let mut request: tau_protocol::QueuedRequest = serde_json::from_value(value.clone())?;
+                let mut request: tau_net::QueuedRequest = serde_json::from_value(value.clone())?;
                 let bytes=read(&h.id,MAX_BLOCK_BYTES as usize)?;
                 if bytes.len() as u64 != h.length {incomplete.insert(h.id.clone());}
                 request.text = text_prefix(&bytes)?;
@@ -321,7 +321,7 @@ impl Cache {
                 queue.requests.push(request);
             }
         }
-        queue.available &= tau_blocks::cached_feed(&db,scope,Some(QUEUE))?.is_some_and(|page|page.before.is_none());
+        queue.available &= tau_block_store::cached_feed(&db,scope,Some(QUEUE))?.is_some_and(|page|page.before.is_none());
         // A tombstone can beat the root page containing its replacement user
         // entry. Keep the old display row until that root cursor catches up.
         let queue_removals = if include_queue {
@@ -335,7 +335,7 @@ impl Cache {
         // snapshot) just to refresh it, including the first viewport's visit.
         // Actual content writes retain the normal busy timeout and durability.
         if touch && !accessed.is_empty() && let Some(tx) = try_replica_maintenance(&db)? {
-            tau_blocks::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
+            tau_block_store::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
             tx.commit()?;
         }
         let mut previews = preview_ids.into_iter().map(|(root,ids)| {
@@ -355,7 +355,7 @@ impl Cache {
         let text=crate::details::copy(&group, view.events.iter(), &view.parents);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
     }
     pub fn history_cursor(&self, scope: &str) -> Result<Option<FeedPosition>> {
-        Ok(tau_blocks::cached_feed(&self.db.lock().unwrap(),scope,None)?.and_then(|p|p.before))
+        Ok(tau_block_store::cached_feed(&self.db.lock().unwrap(),scope,None)?.and_then(|p|p.before))
     }
     #[cfg(test)]
     pub fn plan(&self,scope:&str,local:&LocalChat,copy:&[String])->Result<Plan> {self.plan_visible(scope,local,copy,None)}
@@ -397,18 +397,18 @@ impl Cache {
         candidates.extend(plan.blocks.iter().map(|(id,_)|id.clone()));
         let db=self.db.lock().unwrap();
         for id in &viewport {
-            if let Some(h)=tau_blocks::header(&db,scope,id)?
+            if let Some(h)=tau_block_store::header(&db,scope,id)?
                 && let Some(id)=h.meta.pointer("/fullEvent/id").and_then(|v|v.as_str()) {candidates.insert(id.into());}
         }
-        let binding=(tau_blocks::cursor(&db)?.lineage,replica_epoch(&db)?);
+        let binding=(tau_block_store::cursor(&db)?.lineage,replica_epoch(&db)?);
         let mut fetched=self.prefetched.lock().unwrap();
         if fetched.binding.as_ref()!=Some(&binding) {fetched.bodies.clear();fetched.binding=Some(binding);}
         fetched.bodies.retain(|(old,id),_|old!=scope || candidates.contains(id));
         let required=|id:&str,length:u64| if id==QUEUE || id.starts_with("queued:") {length} else {length.min(256*1024)};
         for id in candidates {
-            if let Some(h)=tau_blocks::header(&db,scope,&id)? {
+            if let Some(h)=tau_block_store::header(&db,scope,&id)? {
                 let length=required(&id,h.length);
-                if length>0 && tau_blocks::cache_budget::stored_bytes(&db,scope,&id)? >= length {
+                if length>0 && tau_block_store::cache_budget::stored_bytes(&db,scope,&id)? >= length {
                     fetched.bodies.insert((scope.into(),id),(h.version,length));
                 }
             }
@@ -434,14 +434,14 @@ impl Cache {
         let db = self.db.lock().unwrap();
         let roots = if let Some(viewport)=viewport {
             let ids=viewport.iter().chain(copy.iter()).collect::<BTreeSet<_>>();
-            ids.into_iter().filter_map(|id|tau_blocks::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?.into_iter().filter(|h|h.parent.is_none()).collect()
-        } else {tau_blocks::children(&db,scope,None)?};
+            ids.into_iter().filter_map(|id|tau_block_store::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?.into_iter().filter(|h|h.parent.is_none()).collect()
+        } else {tau_block_store::children(&db,scope,None)?};
         let mut parents = BTreeSet::from([None,Some(QUEUE.into())]);
         let mut blocks = BTreeSet::from([QUEUE.into()]);
         let mut metadata = roots.clone();
-        for root in &roots {metadata.extend(tau_blocks::children(&db,scope,Some(&root.id))?);}
+        for root in &roots {metadata.extend(tau_block_store::children(&db,scope,Some(&root.id))?);}
         for id in copy {
-            if let Some(h)=tau_blocks::header(&db,scope,id)? && h.parent.is_some() {
+            if let Some(h)=tau_block_store::header(&db,scope,id)? && h.parent.is_some() {
                 ensure!(h.meta.get("event").is_some(),"Use Download for non-text payloads");
                 blocks.insert(id.clone());metadata.push(h);
             }
@@ -480,7 +480,7 @@ impl Cache {
                 let key = format!("tool:{call}");
                 if copy.contains(&h.id) || visible.contains(&h.id) && local.expansion.get(&key).copied().unwrap_or(false) {
                     parent = Some(h.id.clone());
-                    let children = tau_blocks::children(&db,scope,Some(&h.id))?;
+                    let children = tau_block_store::children(&db,scope,Some(&h.id))?;
                     members.extend(children.iter().cloned());
                     let error = h.meta.pointer("/event/isError").and_then(|v|v.as_bool()) == Some(true)
                         || children.iter().filter(|c|c.meta.get("event").is_some()).next_back()
@@ -516,12 +516,12 @@ impl Cache {
             // win the same thirty slots while other viewport rows never start.
             if required.is_empty() && parent.is_none() { continue; }
             let mut pending = if let Some(parent) = &parent {
-                tau_blocks::cached_feed(&db,scope,Some(parent))?.is_none_or(|page| page.before.is_some() || page.cursor.sequence < h.revision)
+                tau_block_store::cached_feed(&db,scope,Some(parent))?.is_none_or(|page| page.before.is_some() || page.cursor.sequence < h.revision)
             } else { false };
             for id in &required {
-                pending |= match tau_blocks::header(&db,scope,id)? {
+                pending |= match tau_block_store::header(&db,scope,id)? {
                     None => true,
-                    Some(head) => tau_blocks::cache_budget::stored_bytes(&db,scope,id)? <
+                    Some(head) => tau_block_store::cache_budget::stored_bytes(&db,scope,id)? <
                         if copy.contains(&h.id) { head.length } else { head.length.min(256*1024) },
                 };
             }
@@ -532,7 +532,7 @@ impl Cache {
             if let Some(parent) = parent { parents.insert(Some(parent)); }
             blocks.extend(required);
         }
-        for h in tau_blocks::children(&db,scope,Some(QUEUE))? { blocks.insert(h.id); }
+        for h in tau_block_store::children(&db,scope,Some(QUEUE))? { blocks.insert(h.id); }
         // Full captions/errors/names are explicit metadata-body interests too.
         // Closed tool cards still cause no child or body requests.
         for h in &metadata {
@@ -545,12 +545,12 @@ impl Cache {
         candidates.sort_by_key(|id|(!(*id==QUEUE || recent.contains(id)),id.clone()));
         let mut budget=128*1024*1024u64;let mut admitted=BTreeSet::new();
         for id in candidates {
-            let h=tau_blocks::header(&db,scope,&id)?;
+            let h=tau_block_store::header(&db,scope,&id)?;
             let complete=copy.contains(&id) || h.as_ref().and_then(|h|h.parent.as_ref()).is_some_and(|parent|copy.contains(parent))
                 || id==QUEUE || h.as_ref().and_then(|h|h.parent.as_deref())==Some(QUEUE);
             let mut length=h.map_or(0,|h|h.length);
             if !complete && length>256*1024 {
-                if tau_blocks::cache_budget::stored_bytes(&db,scope,&id)?>=256*1024 {continue;}
+                if tau_block_store::cache_budget::stored_bytes(&db,scope,&id)?>=256*1024 {continue;}
                 length=256*1024;
             }
             if length<=budget {budget-=length;admitted.insert(id);}
@@ -558,13 +558,13 @@ impl Cache {
         blocks=admitted;
         // Include content heads in the plan so a sealed block's replacement can
         // restart its watch even if the set of IDs did not change.
-        let heads = blocks.iter().map(|id| Ok((id.clone(),tau_blocks::header(&db,scope,id)?.map(|h|(h.version,h.length,h.sealed,tau_blocks::cache_budget::stored_bytes(&db,scope,id).unwrap_or(0))))))
+        let heads = blocks.iter().map(|id| Ok((id.clone(),tau_block_store::header(&db,scope,id)?.map(|h|(h.version,h.length,h.sealed,tau_block_store::cache_budget::stored_bytes(&db,scope,id).unwrap_or(0))))))
             .collect::<Result<Vec<_>>>()?;
         let mut older=vec![];
         for parent in parents.iter().flatten() {
-            if let Some(before)=tau_blocks::cached_feed(&db,scope,Some(parent))?.and_then(|p|p.before) {older.push((parent.clone(),before));}
+            if let Some(before)=tau_block_store::cached_feed(&db,scope,Some(parent))?.and_then(|p|p.before) {older.push((parent.clone(),before));}
         }
-        let foreground=blocks.iter().filter(|id|*id==QUEUE || recent.contains(*id) || tau_blocks::header(&db,scope,id).ok().flatten().is_some_and(|h|!h.sealed && h.kind!=BlockKind::Code))
+        let foreground=blocks.iter().filter(|id|*id==QUEUE || recent.contains(*id) || tau_block_store::header(&db,scope,id).ok().flatten().is_some_and(|h|!h.sealed && h.kind!=BlockKind::Code))
             .cloned().collect();
         Ok(Plan { scope:scope.into(),parents,blocks:heads,older,foreground,background:false })
     }
@@ -586,7 +586,7 @@ fn try_replica_maintenance(db: &Connection) -> Result<Option<rusqlite::Transacti
 fn replica_epoch(db:&Connection)->Result<u64> {Ok(db.query_row("SELECT epoch FROM replica_epoch WHERE singleton=1",[],|r|r.get(0))?)}
 fn metadata_length(db:&Connection,scope:&str,reference:&serde_json::Value)->Result<Option<u64>> {
     let id=reference["id"].as_str().context("Invalid metadata reference")?;
-    Ok(match (reference["length"].as_u64(),tau_blocks::header(db,scope,id)?.map(|h|h.length)) {
+    Ok(match (reference["length"].as_u64(),tau_block_store::header(db,scope,id)?.map(|h|h.length)) {
         (Some(a),Some(b))=>Some(a.max(b)),(a,b)=>a.or(b),
     })
 }
@@ -596,12 +596,12 @@ fn copy_complete(db:&Connection,scope:&str,ids:&[String])->Result<bool> {
         if let Some(reference)=h.meta.get("fullEvent") {metadata.insert(reference["id"].as_str().context("Invalid metadata reference")?.to_owned(),reference.clone());}Ok(())
     };
     for id in ids {
-        let h=tau_blocks::header(db,scope,id)?.context("Details block no longer exists")?;
+        let h=tau_block_store::header(db,scope,id)?.context("Details block no longer exists")?;
         ready&=h.sealed && (h.kind!=BlockKind::Tool || h.tool_state().is_some_and(ToolState::finished));
         inspect(&h)?;
         if h.kind==BlockKind::Tool {
-            ready&=tau_blocks::cached_feed(db,scope,Some(id))?.is_some_and(|p|p.before.is_none() && p.cursor.sequence>=h.revision);
-            for child in tau_blocks::children(db,scope,Some(id))? {
+            ready&=tau_block_store::cached_feed(db,scope,Some(id))?.is_some_and(|p|p.before.is_none() && p.cursor.sequence>=h.revision);
+            for child in tau_block_store::children(db,scope,Some(id))? {
                 if child.tool_body().is_some() {
                     inspect(&child)?;bodies.insert(child.id.clone(),child);
                 }
@@ -616,10 +616,10 @@ fn copy_complete(db:&Connection,scope:&str,ids:&[String])->Result<bool> {
         if let Some(length)=metadata_length(db,scope,reference)? {total=total.saturating_add(length);} else {ready=false;}
     }
     ensure!(total<=MAX_BLOCK_BYTES,"Details including metadata exceed the 64 MiB clipboard limit");
-    for h in bodies.values() {ready&=h.sealed && tau_blocks::cache_budget::stored_bytes(db,scope,&h.id)?==h.length;}
+    for h in bodies.values() {ready&=h.sealed && tau_block_store::cache_budget::stored_bytes(db,scope,&h.id)?==h.length;}
     if !ready {return Ok(false);}
     for (id,reference) in metadata {
-        let bytes=tau_blocks::cached_content(db,scope,&id)?;
+        let bytes=tau_block_store::cached_content(db,scope,&id)?;
         if blake3::hash(&bytes).to_hex().as_str()!=reference["hash"].as_str().unwrap_or("") {return Ok(false);}
     }
     Ok(true)
@@ -636,7 +636,7 @@ fn text_prefix(bytes: &[u8]) -> Result<String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan { pub background: bool, pub scope: String, pub parents: BTreeSet<Option<String>>, pub blocks: Vec<(String,Option<(u64,u64,bool,u64)>)>, pub older:Vec<(String,FeedPosition)>, pub foreground:BTreeSet<String> }
 pub enum Command { FileIndex(Option<crate::file_index::Interest>), Files(Option<crate::file_client::Interest>), Reset, Configure(BulkOffer,String), Plan(Vec<Plan>), History { scope:String,before:FeedPosition } }
-pub struct Notice { pub scope: String, pub error: Option<anyhow::Error>, pub transfer:Option<(String,std::path::PathBuf,tau_transfer::TransferStatus)> }
+pub struct Notice { pub scope: String, pub error: Option<anyhow::Error>, pub transfer:Option<(String,std::path::PathBuf,tau_net::TransferStatus)> }
 pub struct Service { file_index:crate::file_index::Service, viewer:crate::file_client::Service, tx: mpsc::Sender<Command>, plans:watch::Sender<Vec<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
 impl Service {
     pub fn start(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>) -> Self {
@@ -655,7 +655,7 @@ impl Service {
         let task = tokio::spawn(run(cache,wake,rx,plan_rx,config_rx,notices,node,endpoint,ready));
         Self { file_index,viewer,tx,plans,configuration,node:identity,downloads,task }
     }
-    pub fn stats(&self)->Option<tau_transfer::blocks::Stats> {self.downloads.client.borrow().as_ref().map(|client|client.stats())}
+    pub fn stats(&self)->Option<tau_net::native::Stats> {self.downloads.client.borrow().as_ref().map(|client|client.stats())}
     pub(crate) fn downloads(&self) -> files::Downloads { self.downloads.clone() }
     pub fn send(&self, command: Command) {
         match command {
@@ -772,13 +772,13 @@ async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Rece
             let needed=match &key {
                 Key::Block(scope,id,_)=>{
                     let db=cache.db.lock().unwrap();
-                    tau_blocks::header(&db,scope,id).ok().flatten().is_none_or(|h|!h.sealed ||
-                        tau_blocks::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length))
+                    tau_block_store::header(&db,scope,id).ok().flatten().is_none_or(|h|!h.sealed ||
+                        tau_block_store::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length))
                 }
                 Key::BackgroundBlock(scope,id)=>{
                     let db=cache.db.lock().unwrap();
-                    tau_blocks::header(&db,scope,id).ok().flatten().is_none_or(|h|
-                        tau_blocks::cache_budget::stored_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length))
+                    tau_block_store::header(&db,scope,id).ok().flatten().is_none_or(|h|
+                        tau_block_store::cache_budget::stored_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length))
                 }
                 _=>true,
             };
@@ -810,8 +810,8 @@ fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Re
                     // the popup and never log message bodies or credentials.
                     if log::log_enabled!(target:"tau::content",log::Level::Debug) {
                         let state=if let Key::Block(scope,id,_)=&key {cache.db.lock().ok().map(|db| {
-                            let head=tau_blocks::header(&db,scope,id).ok().flatten().map(|h|(h.version,h.length,h.sealed));
-                            let prefix=tau_blocks::cached_prefix(&db,scope,id).ok();
+                            let head=tau_block_store::header(&db,scope,id).ok().flatten().map(|h|(h.version,h.length,h.sealed));
+                            let prefix=tau_block_store::cached_prefix(&db,scope,id).ok();
                             (head,prefix)
                         })} else {None};
                         log::debug!(target:"tau::content","Content sync job {key:?}, current (header, cached prefix) {state:?}: {error:#}");

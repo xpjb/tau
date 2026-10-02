@@ -1,6 +1,6 @@
 //! Acceptance tests for the protocol cutover, not legacy cost characterizations.
 use serde_json::json;
-use tau_protocol::{ClientRequest, ServerMessage, MAX_CONTROL_BYTES};
+use tau_net::{ClientRequest, ServerMessage, MAX_CONTROL_BYTES};
 
 #[test]
 fn retired_transcript_commands_and_messages_are_not_wire_apis() {
@@ -24,6 +24,6 @@ async fn large_descriptors_leave_only_bounded_references_and_receipts_on_control
     assert_eq!(reports.len(),1);assert!(reports[0].accepted && reports[0].complete);
     let original=serde_json::to_vec(&response).unwrap();
     assert_eq!(content.length,original.len() as u64);
-    let bytes=state.access(move |db|tau_blocks::cached_content(db,&content.scope,&content.id)).await.unwrap();
+    let bytes=state.access(move |db|tau_block_store::cached_content(db,&content.scope,&content.id)).await.unwrap();
     assert_eq!(bytes,original,"No long field may be silently truncated");
 }

@@ -1,7 +1,7 @@
 //! Saved per-chat metadata must survive offline use without guessing defaults.
 use std::sync::Arc;
 use tau_frontend::{controller::Controller, store::Store};
-use tau_protocol::*;
+use tau_net::*;
 
 #[test]
 fn composer_thinking_metadata_updates_per_chat_and_survives_offline_restart() {

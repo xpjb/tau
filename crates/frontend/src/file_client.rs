@@ -1,7 +1,7 @@
 //! One coalesced viewer interest per UI. No filesystem bodies enter the replica
 //! or control queues. Dropping/changing interest cancels its native stream.
 use std::{sync::Arc, time::Duration};
-use tau_protocol::files::*;
+use tau_net::files::*;
 use tokio::sync::watch;
 
 #[derive(Clone)]
@@ -12,7 +12,7 @@ pub struct Update {
 }
 pub(crate) struct Service { plans: watch::Sender<Option<Interest>>, task: tokio::task::JoinHandle<()> }
 impl Service {
-    pub fn start(mut client: watch::Receiver<Option<Arc<tau_transfer::blocks::Client>>>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<Update>>>, wake: crate::transport::Wake) -> Self {
+    pub fn start(mut client: watch::Receiver<Option<Arc<tau_net::native::Client>>>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<Update>>>, wake: crate::transport::Wake) -> Self {
         let (plans, mut interest) = watch::channel::<Option<Interest>>(None);
         let task = tokio::spawn(async move {
             loop {
@@ -37,7 +37,7 @@ impl Service {
     pub fn set(&self, interest: Option<Interest>) { self.plans.send_replace(interest); }
 }
 impl Drop for Service { fn drop(&mut self) { self.task.abort(); } }
-async fn refresh(client: Arc<tau_transfer::blocks::Client>, plan: Interest, lineage: String, updates: &watch::Sender<Option<Arc<Update>>>, wake: &crate::transport::Wake) {
+async fn refresh(client: Arc<tau_net::native::Client>, plan: Interest, lineage: String, updates: &watch::Sender<Option<Arc<Update>>>, wake: &crate::transport::Wake) {
     let mut request = plan.request.clone();
     if plan.preview { tokio::time::sleep(Duration::from_millis(75)).await; }
     let mut document = plan.document.clone();
@@ -79,8 +79,8 @@ mod tests {
     use anyhow::Result;
     use futures_util::{future::BoxFuture, FutureExt};
     use std::sync::Mutex;
-    use tau_blocks::{BlockRequest, ContentRange, FeedPage, FeedRequest};
-    use tau_transfer::blocks::{Backend, Client, Server};
+    use tau_net::blocks::{BlockRequest, ContentRange, FeedPage, FeedRequest};
+    use tau_net::native::{Backend, Client, Server};
     struct Memory { calls: Mutex<Vec<String>>, hints: watch::Sender<u64> }
     impl Backend for Memory {
         fn feed(&self, _: FeedRequest) -> BoxFuture<'static, Result<FeedPage>> { async { anyhow::bail!("unused") }.boxed() }

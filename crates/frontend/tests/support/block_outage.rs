@@ -5,8 +5,8 @@ use super::*;
 use axum::{Router, extract::{State, WebSocketUpgrade}, response::IntoResponse, routing::get};
 use futures_util::{future::BoxFuture, FutureExt};
 use rusqlite::Connection;
-use tau_blocks::*;
-use tau_transfer::blocks::{Backend, Server};
+use tau_net::blocks::*;
+use tau_net::native::{Backend, Server};
 use tokio::sync::watch;
 
 struct Source {
@@ -17,7 +17,7 @@ struct Source {
 impl Backend for Source {
     fn feed(&self, request: FeedRequest) -> BoxFuture<'static, anyhow::Result<FeedPage>> {
         let db = self.db.clone(); async move {
-            let page=tau_blocks::feed(&db.lock().unwrap(), &request)?;
+            let page=tau_block_store::feed(&db.lock().unwrap(), &request)?;
             if !page.records.is_empty() { native_trace::event(&format!("source metadata scope={} records={} cursor={}",request.scope,page.records.len(),page.cursor.sequence)); }
             Ok(page)
         }.boxed()
@@ -25,7 +25,7 @@ impl Backend for Source {
     fn read(&self, request: BlockRequest) -> BoxFuture<'static, anyhow::Result<ContentRange>> {
         native_trace::event(&format!("source read scope={} offset={}",request.scope,request.offset));
         self.reads.lock().unwrap().push(request.clone());
-        let db = self.db.clone(); async move { tau_blocks::read(&db.lock().unwrap(), &request) }.boxed()
+        let db = self.db.clone(); async move { tau_block_store::read(&db.lock().unwrap(), &request) }.boxed()
     }
     fn changes(&self) -> watch::Receiver<u64> { self.changed.subscribe() }
 }
@@ -63,7 +63,7 @@ async fn control(State(peer): State<Control>, ws: WebSocketUpgrade) -> impl Into
 fn cached(c: &Controller, scope: &str) -> Vec<u8> {
     let path = c.store.root.join("blocks").join(format!("{}.sqlite3",tau_frontend::store::hash(&c.identity)));
     let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    tau_blocks::cached_content(&db,scope,"reply").unwrap()
+    tau_block_store::cached_content(&db,scope,"reply").unwrap()
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
@@ -78,8 +78,8 @@ async fn native_blocks_reacquire_promptly_after_extended_udp_outage() {
 
 async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) {
     native_trace::init(); native_trace::event("fixture start");
-    let db = Connection::open_in_memory().unwrap(); tau_blocks::initialize(&db).unwrap();
-    let lineage = tau_blocks::cursor(&db).unwrap().lineage;
+    let db = Connection::open_in_memory().unwrap(); tau_block_store::initialize(&db).unwrap();
+    let lineage = tau_block_store::cursor(&db).unwrap().lineage;
     let tx = db.unchecked_transaction().unwrap();
     for scope in ["foreground", "background"] {
         let e = Event { id: "reply".into(), entry_id: "reply".into(), order: 0, phase: EventPhase::Live, origin: Origin::default(),
@@ -89,7 +89,7 @@ async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) 
             ("reply", 0, BlockKind::Text, serde_json::json!({"event":e}), false, b"verified prefix".to_vec()),
             ("@queue", i64::MAX as u64, BlockKind::Queue, serde_json::json!({}), true, serde_json::to_vec(&QueueState::native()).unwrap()),
         ] {
-            tau_blocks::put(&tx,scope,BlockHeader { id:id.into(), parent:None, order, kind, meta, version:0, length:0, sealed, revision:0 },&bytes).unwrap();
+            tau_block_store::put(&tx,scope,BlockHeader { id:id.into(), parent:None, order, kind, meta, version:0, length:0, sealed, revision:0 },&bytes).unwrap();
         }
     }
     // A sealed file remains immutable through the outage. Its original
@@ -102,9 +102,9 @@ async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) 
             role: EventRole::Assistant, kind: EventKind::Text, text: String::new(), timestamp: None, timestamp_ms: None,
             tool_call_id: None, tool_name: None, stop_reason: None, error_message: None, is_error: false,
             attachment:Some(ChatAttachment { source_path:None, kind:AttachmentKind::File, file_name:"outage.bin".into(), caption:None, size:Some(file.len() as u64) }) };
-        tau_blocks::put(&tx,"foreground",BlockHeader { id:e.id.clone(), parent:None, order:1, kind:BlockKind::Text,
+        tau_block_store::put(&tx,"foreground",BlockHeader { id:e.id.clone(), parent:None, order:1, kind:BlockKind::Text,
             meta:serde_json::json!({"event":e}), version:0, length:0, sealed:true, revision:0 },b"").unwrap();
-        tau_blocks::put(&tx,"foreground",BlockHeader { id:"file:outage-file".into(), parent:Some("file-card".into()), order:0,
+        tau_block_store::put(&tx,"foreground",BlockHeader { id:"file:outage-file".into(), parent:Some("file-card".into()), order:0,
             kind:BlockKind::File, meta:serde_json::json!({"sha256":format!("{:x}",sha2::Sha256::digest(&file))}),
             version:0, length:0, sealed:true, revision:0 },&file).unwrap();
     }
@@ -112,7 +112,7 @@ async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) 
     let source = Arc::new(Source { db: Arc::new(std::sync::Mutex::new(db)), changed: watch::channel(0).0, reads: Default::default() });
     let server = Arc::new(Server::bind("127.0.0.1:0".parse().unwrap(),source.clone()).await.unwrap());
     native_trace::event("server bound");
-    let probe = tau_transfer::blocks::Client::bind().await.unwrap();
+    let probe = tau_net::native::Client::bind().await.unwrap();
     let udp_port = server.authorize(&probe.node_id(),lineage.clone()).unwrap().port;
     native_trace::event("probe closing"); probe.shutdown().await; native_trace::event("probe closed");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); let tcp = listener.local_addr().unwrap();
@@ -145,10 +145,10 @@ async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) 
     {
         let mut db = source.db.lock().unwrap(); let tx = db.transaction().unwrap();
         for scope in ["foreground","background"] {
-            let h = tau_blocks::header(&tx,scope,"reply").unwrap().unwrap();
-            tau_blocks::append(&tx,scope,"reply",h.version,h.length,suffix.as_bytes(),true).unwrap();
+            let h = tau_block_store::header(&tx,scope,"reply").unwrap().unwrap();
+            tau_block_store::append(&tx,scope,"reply",h.version,h.length,suffix.as_bytes(),true).unwrap();
         }
-        let sequence = tau_blocks::cursor(&tx).unwrap().sequence; tx.commit().unwrap();
+        let sequence = tau_block_store::cursor(&tx).unwrap().sequence; tx.commit().unwrap();
         source.changed.send_replace(sequence);
     }
     let until = Instant::now()+duration;

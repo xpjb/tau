@@ -303,7 +303,7 @@ async fn remote_picker_results_wake_and_repaint_without_input_or_polling_frames(
     let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let settings_path = root.path().join("settings.json");
-    let mut settings = tau_protocol::settings::Settings::default();
+    let mut settings = tau_net::settings::Settings::default();
     settings.agent.load_agents_files = false; settings.daemon.generate_titles = false; settings.daemon.idle_timeout_seconds = 0;
     std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
     let daemon = tokio::spawn(taud::run(taud::Config {

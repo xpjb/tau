@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 tau-code-viewer = { path = "../code-viewer", features = ["filesystem"] }
-tau-blocks = { path = "../blocks" }
-tau-protocol = { path = "../protocol" }
+tau-block-store = { path = "../block-store" }
+tau-net = { path = "../net", features = ["native"] }
 anyhow = "1"
 blake3 = "1.8"
 base64 = "0.22"
@@ -15,7 +15,6 @@ libc = "0.2"
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tempfile = "3"
-tau-transfer = { path = "../transfer" }
 axum = { version = "0.8", features = ["json", "ws"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }

@@ -2,7 +2,7 @@
 //! live text. There is no per-download endpoint, HTTP grant or worker runtime.
 use super::*;
 use std::{io::{Read, Write}, path::{Path, PathBuf}, time::Instant};
-use tau_transfer::TransferStatus;
+use tau_net::TransferStatus;
 
 #[derive(Clone)]
 pub(crate) struct Downloads {
@@ -13,8 +13,8 @@ pub(crate) struct Downloads {
     pub wake:crate::transport::Wake,
 }
 impl Cache {
-    pub fn lineage(&self) -> Result<String> { Ok(tau_blocks::cursor(&self.db.lock().unwrap())?.lineage) }
-    fn file_header(&self, scope:&str, id:&str) -> Result<Option<BlockHeader>> { tau_blocks::header(&self.db.lock().unwrap(),scope,id) }
+    pub fn lineage(&self) -> Result<String> { Ok(tau_block_store::cursor(&self.db.lock().unwrap())?.lineage) }
+    fn file_header(&self, scope:&str, id:&str) -> Result<Option<BlockHeader>> { tau_block_store::header(&self.db.lock().unwrap(),scope,id) }
     pub fn file_ready(&self, scope:&str, id:&str, path:&Path, limit:u64) -> Result<bool> {
         let Some(h)=self.file_header(scope,id)? else {return Ok(false);};
         let Some(expected)=h.meta.get("sha256").and_then(|v|v.as_str()) else {return Ok(false);};
@@ -37,8 +37,8 @@ impl Cache {
             ensure!(!*cancel.borrow(),"Download cancelled");
             let range={
                 let db=self.db.lock().unwrap();
-                ensure!(super::replica_epoch(&db)?==epoch && tau_blocks::cursor(&db)?.lineage==lineage,"Data source changed");
-                tau_blocks::read(&db,&BlockRequest {scope:scope.into(),id:header.id.clone(),version:header.version,offset,follow:false})?
+                ensure!(super::replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==lineage,"Data source changed");
+                tau_block_store::read(&db,&BlockRequest {scope:scope.into(),id:header.id.clone(),version:header.version,offset,follow:false})?
             };
             ensure!(range.header.version==header.version && range.offset==offset && !range.bytes.is_empty(),"Cached file changed or is incomplete");
             temp.write_all(&range.bytes)?; hash.update(&range.bytes); offset+=range.bytes.len() as u64;
@@ -53,7 +53,7 @@ impl Cache {
         // Hold the cache fence through the final rename: clear/reset cannot be
         // followed by late publication from a previously verified generation.
         let db=self.db.lock().unwrap();
-        ensure!(!*cancel.borrow() && super::replica_epoch(&db)?==epoch && tau_blocks::cursor(&db)?.lineage==lineage,"Download cancelled or data source changed");
+        ensure!(!*cancel.borrow() && super::replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==lineage,"Download cancelled or data source changed");
         temp.persist(target)?;
         #[cfg(unix)] std::fs::File::open(parent)?.sync_all()?;
         Ok(())
@@ -134,7 +134,7 @@ impl Downloads {
                 match result {
                     Ok(h)=>break h,
                     Err(error)=>{
-                        if !tau_transfer::blocks::is_connection_error(&error) {return Err(error);}
+                        if !tau_net::native::is_connection_error(&error) {return Err(error);}
                         if status.transferred>before {failures=0;delay=100;}
                         failures+=1;
                         if failures>=8 {return Err(error);}

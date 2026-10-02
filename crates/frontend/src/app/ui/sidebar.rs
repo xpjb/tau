@@ -6,7 +6,7 @@ use super::{
 use crate::{app::Info, icons::Icon, render::color};
 use sanscale::Rect;
 use std::time::Instant;
-use tau_protocol::*;
+use tau_net::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum Choice {
     Select(String),

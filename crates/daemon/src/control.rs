@@ -1,14 +1,14 @@
 //! Hard-bounded control frames. Large application descriptors are immutable
 //! native blocks. Small durable receipt summaries never wait on their download.
 use anyhow::{Result, ensure};
-use tau_blocks::*;
-use tau_protocol::{ClientCommand, ClientRequest, OperationReceipt, ServerMessage, MAX_CONTROL_BYTES};
+use tau_net::blocks::*;
+use tau_net::{ClientCommand, ClientRequest, OperationReceipt, ServerMessage, MAX_CONTROL_BYTES};
 use crate::state::StateStore;
 
 impl StateStore {
     pub(crate) async fn resolve_input(&self, request: ClientRequest) -> Result<ClientRequest> {
         let ClientCommand::Input {content} = request.command else {return Ok(request);};
-        let bytes = self.read(move |db|tau_blocks::uploads::input(db,&content)).await?;
+        let bytes = self.read(move |db|tau_block_store::uploads::input(db,&content)).await?;
         let decoded: ClientRequest = serde_json::from_slice(&bytes)?;
         ensure!(decoded.id == request.id,"Input request ID does not match its control descriptor");
         ensure!(!matches!(decoded.command,ClientCommand::Input {..} | ClientCommand::ConnectBlocks {..}),"Invalid nested input");
@@ -29,15 +29,15 @@ impl StateStore {
             let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
             tx.execute("DELETE FROM blocks WHERE scope=?1 AND position<?2",rusqlite::params![CONTROL_SCOPE,now.saturating_sub(24*3600)])?;
             tx.execute("DELETE FROM block_changes WHERE scope=?1 AND id NOT IN (SELECT id FROM blocks WHERE scope=?1)",[CONTROL_SCOPE])?;
-            if tau_blocks::header(&tx,CONTROL_SCOPE,&id)?.is_none() {
+            if tau_block_store::header(&tx,CONTROL_SCOPE,&id)?.is_none() {
                 let (count,size):(u64,u64)=tx.query_row("SELECT count(*),coalesce(sum(json_extract(header,'$.length')),0) FROM blocks WHERE scope=?1",[CONTROL_SCOPE],|r|Ok((r.get(0)?,r.get(1)?)))?;
                 ensure!(count<4096 && size.saturating_add(length)<=256*1024*1024,"Descriptor storage quota is full");
                 let h = BlockHeader {id:id.clone(),parent:None,order:now,kind:BlockKind::State,meta:serde_json::json!({"descriptor":true}),version:0,length:0,sealed:true,revision:0};
-                tau_blocks::put(&tx,CONTROL_SCOPE,h,&bytes)?;
+                tau_block_store::put(&tx,CONTROL_SCOPE,h,&bytes)?;
             }
             // Renew the immutable descriptor's lease without changing bytes.
             tx.execute("UPDATE blocks SET position=?3 WHERE scope=?1 AND id=?2",rusqlite::params![CONTROL_SCOPE,id,now])?;
-            let lineage = tau_blocks::cursor(&tx)?.lineage;
+            let lineage = tau_block_store::cursor(&tx)?.lineage;
             tx.commit()?; Ok(lineage)
         }).await?;
         let short = |s: &Option<String>| s.as_ref().map(|s| {

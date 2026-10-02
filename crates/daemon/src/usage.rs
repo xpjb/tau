@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
-use tau_protocol::{CodexUsage, CodexUsageWindow};
+use tau_net::{CodexUsage, CodexUsageWindow};
 
 use crate::agent::auth::AuthStore;
 

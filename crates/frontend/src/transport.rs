@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tau_protocol::*;
+use tau_net::*;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async_with_config,
@@ -61,7 +61,7 @@ pub enum Event {
     HeartbeatReply { epoch: u64, at: Instant, rtt: Duration },
     Message(u64, Box<ServerMessage>),
     SizedMessage(u64,Box<ServerMessage>,usize),
-    Metrics(tau_transfer::blocks::Stats),
+    Metrics(tau_net::native::Stats),
     Disconnected(String),
     Fatal(String),
     NotSent(String, String),
@@ -73,7 +73,7 @@ pub enum Event {
     },
     Download {
         key: String,
-        status: tau_transfer::TransferStatus,
+        status: tau_net::TransferStatus,
         path: PathBuf,
     },
 }
@@ -339,7 +339,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                     ensure!(jobs.len() < 64,"Too many unresolved descriptors");
                                     let data=service.downloads();let tx=resolved_tx.clone();let serial=generation;let budget=descriptor_budget.clone();
                                     jobs.spawn(async move {
-                                        let Ok(permit)=budget.acquire_many_owned(content.length.min(tau_protocol::blocks::MAX_BLOCK_BYTES).max(1) as u32).await else {return;};
+                                        let Ok(permit)=budget.acquire_many_owned(content.length.min(tau_net::blocks::MAX_BLOCK_BYTES).max(1) as u32).await else {return;};
                                         let length=content.length as usize;
                                         let result=data.descriptor(content).await.and_then(|mut message| {
                                             if let Some(route)=route {match &mut message {ServerMessage::SessionPage {catalog_id,..}|ServerMessage::ProjectPage {catalog_id,..}=>*catalog_id=route,_=>bail!("Unexpected descriptor route")}}
@@ -446,7 +446,7 @@ async fn start_download(jobs:&mut tokio::task::JoinSet<()>, downloads:&mut HashM
     downloads.retain(|_,cancel|cancel.receiver_count()>0);
     if downloads.contains_key(&key) {return;}
     let Some(service)=service.filter(|_|downloads.len()<2) else {
-        events.send(Event::Download {key,path:target,status:tau_transfer::TransferStatus {transferred:0,total:0,network_bytes:0,done:true,
+        events.send(Event::Download {key,path:target,status:tau_net::TransferStatus {transferred:0,total:0,network_bytes:0,done:true,
             failure:Some("Content service unavailable or two downloads are already active".into())}}).await;
         return;
     };
@@ -477,7 +477,7 @@ async fn reject_offline(command: Command, events: &Events) {
                 .send(Event::Download {
                     key,
                     path: target,
-                    status: tau_transfer::TransferStatus {
+                    status: tau_net::TransferStatus {
                         transferred: 0,
                         total: 0,
                         network_bytes: 0,

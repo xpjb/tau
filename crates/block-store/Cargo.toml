@@ -1,10 +1,10 @@
 [package]
-name = "tau-blocks"
+name = "tau-block-store"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tau-protocol = { path = "../protocol" }
+tau-net = { path = "../net" }
 anyhow = "1"
 blake3 = "1.8"
 rusqlite = { version = "0.37", features = ["bundled"] }

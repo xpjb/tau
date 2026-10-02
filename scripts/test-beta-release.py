@@ -67,7 +67,7 @@ class ReleaseTests(unittest.TestCase):
         for directory, name in [('daemon', 'taud'), ('frontend', 'tau-frontend')]:
             self.write('crates/' + directory + '/Cargo.toml', f'[package]\nname="{name}"\nversion = "0.7.4"\n')
         self.write('Cargo.lock', '[[package]]\nname = "taud"\nversion = "0.7.4"\n[[package]]\nname = "tau-frontend"\nversion = "0.7.4"\n')
-        self.write('crates/protocol/src/lib.rs', 'pub const PROTOCOL_VERSION: u32 = 18;')
+        self.write('crates/net/src/lib.rs', 'pub const PROTOCOL_VERSION: u32 = 18;')
         self.write('crates/frontend/android/AndroidManifest.xml', '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.tau.rust" android:versionCode="9" android:versionName="0.7.4-beta"/>')
         release.bump('0.7.5')
         self.assertEqual(('0.7.5', 18, 10), release.metadata())
@@ -108,7 +108,7 @@ class ReleaseTests(unittest.TestCase):
         # keychain and Cargo commands are replaced by explicit no-work doubles.
         self.write('crates/frontend/Cargo.toml', '[package]\nversion="0.7.5"\n')
         self.write('crates/daemon/Cargo.toml', '[package]\nversion="0.7.5"\n')
-        self.write('crates/protocol/src/lib.rs', 'pub const PROTOCOL_VERSION:u32=18;')
+        self.write('crates/net/src/lib.rs', 'pub const PROTOCOL_VERSION:u32=18;')
         self.write('crates/frontend/android/AndroidManifest.xml', '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.tau.rust" android:versionCode="10" android:versionName="0.7.5-beta"/>')
         self.write('.gitignore', '/dist/\n/target/\n/cache/\n')
         source = (self.old / 'scripts/release-beta.sh').read_text()

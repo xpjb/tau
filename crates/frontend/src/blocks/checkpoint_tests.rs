@@ -1,7 +1,7 @@
 //! Exercise the production watch consumer and QUIC server, not a timer model.
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tau_transfer::blocks::{Backend, Server};
+use tau_net::native::{Backend, Server};
 
 struct SlowSource {
     db: Arc<Mutex<Connection>>,
@@ -18,7 +18,7 @@ impl Backend for SlowSource {
             // Longer than the production five-second scheduling quantum, but
             // comfortably inside the existing transport IO deadlines.
             if slow { tokio::time::sleep(Duration::from_secs(6)).await; }
-            tau_blocks::feed(&db.lock().unwrap(), &request)
+            tau_block_store::feed(&db.lock().unwrap(), &request)
         })
     }
     fn read(&self, request: BlockRequest) -> futures_util::future::BoxFuture<'static, Result<ContentRange>> {
@@ -27,7 +27,7 @@ impl Backend for SlowSource {
         self.reads.lock().unwrap().push(request.clone());
         Box::pin(async move {
             if slow { tokio::time::sleep(Duration::from_secs(6)).await; }
-            tau_blocks::read(&db.lock().unwrap(), &request)
+            tau_block_store::read(&db.lock().unwrap(), &request)
         })
     }
     fn changes(&self) -> watch::Receiver<u64> { self.changed.clone() }
@@ -44,8 +44,8 @@ impl Fixture {
     fn new() -> Self {
         let source = Connection::open_in_memory().unwrap();
         source.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        tau_blocks::initialize(&source).unwrap();
-        let lineage = tau_blocks::cursor(&source).unwrap().lineage;
+        tau_block_store::initialize(&source).unwrap();
+        let lineage = tau_block_store::cursor(&source).unwrap().lineage;
         let root = tempfile::tempdir().unwrap();
         let cache = Cache::open(&root.path().join("cache.db")).unwrap();
         cache.configure(&lineage).unwrap();
@@ -54,7 +54,7 @@ impl Fixture {
     fn put(&self, id: &str, parent: Option<&str>, bytes: &[u8]) {
         let mut db = self.source.lock().unwrap();
         let tx = db.transaction().unwrap();
-        tau_blocks::put(&tx, "chat", BlockHeader {
+        tau_block_store::put(&tx, "chat", BlockHeader {
             id: id.into(), parent: parent.map(str::to_owned), order: 1,
             kind: BlockKind::Text, meta: serde_json::json!({}),
             version: 0, length: 0, sealed: true, revision: 0,
@@ -86,7 +86,7 @@ async fn checkpoint_scheduling_commits_a_slow_metadata_round_instead_of_restarti
     )).await.expect("A slow but completing read must not monopolize its stream").unwrap();
     assert!(!result, "A live feed yields; it does not become permanently complete");
     for parent in [None, Some("parent")] {
-        assert!(tau_blocks::cached_feed(&f.cache.db.lock().unwrap(), "chat", parent).unwrap().is_some(),
+        assert!(tau_block_store::cached_feed(&f.cache.db.lock().unwrap(), "chat", parent).unwrap().is_some(),
             "The entire bounded metadata round must commit before yielding, including later feeds");
     }
     assert!(f.reads.lock().unwrap().is_empty(), "Metadata scheduling must not fetch content");
@@ -113,7 +113,7 @@ async fn checkpoint_scheduling_resumes_after_a_slow_chunk_without_replaying_its_
     assert!(tokio::time::timeout(Duration::from_secs(3), watch_once(
         &key, &client, &f.cache, &f.lineage, &notices, &wake,
     )).await.unwrap().unwrap());
-    assert_eq!(tau_blocks::cached_content(&f.cache.db.lock().unwrap(), "chat", "body").unwrap(), bytes);
+    assert_eq!(tau_block_store::cached_content(&f.cache.db.lock().unwrap(), "chat", "body").unwrap(), bytes);
     assert_eq!(f.reads.lock().unwrap().iter().map(|r| r.offset).collect::<Vec<_>>(),
         [0, BLOCK_CHUNK_BYTES as u64, (BLOCK_CHUNK_BYTES * 2) as u64]);
     assert_eq!(client.stats().connections, 1, "Yielding must reuse the native connection");
@@ -128,8 +128,8 @@ async fn background_live_body_releases_its_slot_after_catching_up_and_resumes_ne
     {
         let mut db=f.source.lock().unwrap();let tx=db.transaction().unwrap();
         // Publish a genuinely unsealed body through the normal source path.
-        let mut h=tau_blocks::header(&tx,"chat","live").unwrap().unwrap();h.sealed=false;
-        tau_blocks::put(&tx,"chat",h,b"prefix").unwrap();tx.commit().unwrap();
+        let mut h=tau_block_store::header(&tx,"chat","live").unwrap().unwrap();h.sealed=false;
+        tau_block_store::put(&tx,"chat",h,b"prefix").unwrap();tx.commit().unwrap();
     }
     let (server,client,_changes)=f.connect(true).await; // Only the unused feed path is slow.
     let (notices,_received)=mpsc::channel(32);let wake:crate::transport::Wake=Arc::new(||{});
@@ -139,11 +139,11 @@ async fn background_live_body_releases_its_slot_after_catching_up_and_resumes_ne
     assert_eq!(client.stats().bulk_slots,0);
     {
         let mut db=f.source.lock().unwrap();let tx=db.transaction().unwrap();
-        let h=tau_blocks::header(&tx,"chat","live").unwrap().unwrap();
-        tau_blocks::append(&tx,"chat","live",h.version,h.length,b" suffix",false).unwrap();tx.commit().unwrap();
+        let h=tau_block_store::header(&tx,"chat","live").unwrap().unwrap();
+        tau_block_store::append(&tx,"chat","live",h.version,h.length,b" suffix",false).unwrap();tx.commit().unwrap();
     }
     assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake)).await.unwrap().unwrap());
-    assert_eq!(tau_blocks::cached_content(&f.cache.db.lock().unwrap(),"chat","live").unwrap(),b"prefix suffix");
+    assert_eq!(tau_block_store::cached_content(&f.cache.db.lock().unwrap(),"chat","live").unwrap(),b"prefix suffix");
     let reads=f.reads.lock().unwrap().clone();assert_eq!(reads.len(),2);assert_eq!(reads[1].offset,6);
     assert_eq!(client.stats().bulk_slots,0);client.shutdown().await;server.shutdown().await;
 }

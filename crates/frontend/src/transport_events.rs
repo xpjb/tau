@@ -2,7 +2,7 @@
 //! state are coalesced; the WebSocket reader never awaits an idle UI consumer.
 use super::{Event,Wake};
 use std::{collections::VecDeque,sync::{Arc,Mutex}};
-use tau_protocol::ServerMessage;
+use tau_net::ServerMessage;
 use tokio::sync::Notify;
 
 struct Queue {events:VecDeque<(Event,usize)>,bytes:usize,closed:bool}

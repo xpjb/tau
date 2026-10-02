@@ -38,13 +38,13 @@ struct AppState {
     config: Config,
     manager: AgentManager,
     telemetry_gate: Arc<Mutex<()>>,
-    transfers: Arc<tau_transfer::blocks::Server>,
+    transfers: Arc<tau_net::native::Server>,
     requests: Arc<tokio::sync::Semaphore>,
     admissions: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::TcpListener) -> Result<()> {
-    let transfers = Arc::new(tau_transfer::blocks::Server::bind_with_ipv6(config.transfer_bind, config.transfer_bind_v6, Arc::new(manager.clone())).await?);
+    let transfers = Arc::new(tau_net::native::Server::bind_with_ipv6(config.transfer_bind, config.transfer_bind_v6, Arc::new(manager.clone())).await?);
     let state = AppState {
         config: config.clone(),
         manager: manager.clone(),
@@ -646,7 +646,7 @@ mod tests {
             cwd:root.path().into(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),
             attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
         let manager=AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
-        let transfers=Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap());
+        let transfers=Arc::new(tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap());
         let state=AppState {config,manager,telemetry_gate:Arc::new(Mutex::new(())),transfers,requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128))};
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url=format!("ws://{}/v1/ws",listener.local_addr().unwrap());
@@ -698,7 +698,7 @@ mod tests {
         let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
         let app = Router::new().route("/v1/telemetry/crash", post(crash_report).layer(DefaultBodyLimit::max(MAX_CRASH_BYTES)))
             .with_state(AppState { config, manager:manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
-            transfers: Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128)) });
+            transfers: Arc::new(tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128)) });
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let frame = json!({"className":"example.Frame", "methodName":"draw", "fileName":"File.kt", "lineNumber":5});
         let legacy = json!({"schema":1, "reportId":"legacy", "platform":"windows", "appVersion":"0.5.12",
@@ -778,7 +778,7 @@ mod tests {
         let id = manager.create_session(None, "general").await.unwrap();
         let other = manager.create_session(Some(&id), "general").await.unwrap();
         let state = AppState { config, manager: manager.clone(), telemetry_gate: Arc::new(Mutex::new(())),
-            transfers: Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128)) };
+            transfers: Arc::new(tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap()), requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128)) };
         let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
         let app = Router::new().route("/", get(move |upgrade: WebSocketUpgrade| {
             let state = state.clone();

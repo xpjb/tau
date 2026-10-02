@@ -2,7 +2,7 @@
 //! One bounded memory-only snapshot, fenced by chat, root and source lineage.
 use std::{sync::Arc, time::Duration};
 use tau_code_viewer::finder::PathIndex;
-use tau_protocol::files::*;
+use tau_net::files::*;
 use tokio::sync::watch;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub struct Update {
 pub(crate) struct Service { plans: watch::Sender<Option<Interest>>, task: tokio::task::JoinHandle<()> }
 struct Cached { session: String, root: Option<String>, lineage: String, index: Arc<PathIndex>, indexing: bool, limited: bool }
 impl Service {
-    pub fn start(mut client: watch::Receiver<Option<Arc<tau_transfer::blocks::Client>>>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<Update>>>, wake: crate::transport::Wake) -> Self {
+    pub fn start(mut client: watch::Receiver<Option<Arc<tau_net::native::Client>>>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<Update>>>, wake: crate::transport::Wake) -> Self {
         let (plans, mut interest) = watch::channel::<Option<Interest>>(None);
         let task = tokio::spawn(async move {
             let mut cached = None;
@@ -41,7 +41,7 @@ impl Service {
     pub fn set(&self, interest: Option<Interest>) { self.plans.send_replace(interest); }
 }
 impl Drop for Service { fn drop(&mut self) { self.task.abort(); } }
-async fn refresh(client: Arc<tau_transfer::blocks::Client>, plan: Interest, lineage: String, cached: &mut Option<Cached>, updates: &watch::Sender<Option<Arc<Update>>>, wake: &crate::transport::Wake) {
+async fn refresh(client: Arc<tau_net::native::Client>, plan: Interest, lineage: String, cached: &mut Option<Cached>, updates: &watch::Sender<Option<Arc<Update>>>, wake: &crate::transport::Wake) {
     if cached.as_ref().is_some_and(|c| c.lineage != lineage) { *cached = None; }
     let mut previous = None;
     let mut reset = false;

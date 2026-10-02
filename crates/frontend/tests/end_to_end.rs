@@ -9,7 +9,7 @@ use tau_frontend::{
     controller::Controller,
     store::{Settings, Store},
 };
-use tau_protocol::*;
+use tau_net::*;
 
 #[path = "../src/daemon_settings.rs"]
 mod daemon_settings;
@@ -91,11 +91,11 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
         .await
         .unwrap()
     });
-    let mut daemon_settings = tau_protocol::settings::Settings::default();
+    let mut daemon_settings = tau_net::settings::Settings::default();
     daemon_settings.daemon.idle_timeout_seconds = 0;
     daemon_settings.agent.load_agents_files = false;
     let endpoint = daemon_settings.providers.get_mut("openai-codex").unwrap();
-    endpoint.api = tau_protocol::settings::Api::ChatCompletions;
+    endpoint.api = tau_net::settings::Api::ChatCompletions;
     endpoint.base_url = format!("http://{model_address}");
     endpoint.web_search = false;
     std::fs::write(
@@ -422,31 +422,31 @@ async fn files_share_native_blocks_authorization_and_verified_offline_cache() {
     use axum::{Router,extract::{State,WebSocketUpgrade},http::{HeaderMap,StatusCode},routing::get};
     use futures_util::FutureExt;
     use std::sync::{Mutex,atomic::{AtomicUsize,Ordering}};
-    use tau_transfer::blocks::{Backend,Server};
-    use tau_blocks::*;
+    use tau_net::native::{Backend,Server};
+    use tau_net::blocks::*;
     struct Data {db:Arc<Mutex<rusqlite::Connection>>,changes:tokio::sync::watch::Sender<u64>,reads:AtomicUsize}
     impl Backend for Data {
         fn feed(&self, req:FeedRequest) -> futures_util::future::BoxFuture<'static,anyhow::Result<FeedPage>> {
-            let db=self.db.clone(); async move {tau_blocks::feed(&db.lock().unwrap(),&req)}.boxed()
+            let db=self.db.clone(); async move {tau_block_store::feed(&db.lock().unwrap(),&req)}.boxed()
         }
         fn read(&self, req:BlockRequest) -> futures_util::future::BoxFuture<'static,anyhow::Result<ContentRange>> {
             self.reads.fetch_add(1,Ordering::SeqCst);
-            let db=self.db.clone(); async move {tau_blocks::read(&db.lock().unwrap(),&req)}.boxed()
+            let db=self.db.clone(); async move {tau_block_store::read(&db.lock().unwrap(),&req)}.boxed()
         }
         fn changes(&self) -> tokio::sync::watch::Receiver<u64> {self.changes.subscribe()}
     }
     let root=tempfile::tempdir().unwrap();
     let bytes=(0..150_000).map(|n|(n%251)as u8).collect::<Vec<_>>();
     let mut db=rusqlite::Connection::open_in_memory().unwrap();
-    db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&db).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_block_store::initialize(&db).unwrap();
     use sha2::Digest;
     let tx=db.transaction().unwrap();
     for entry in ["entry?escaped","second"] {
-        tau_blocks::put(&tx,"chat/escaped",BlockHeader {id:format!("file:{entry}"),parent:None,order:0,kind:BlockKind::File,
+        tau_block_store::put(&tx,"chat/escaped",BlockHeader {id:format!("file:{entry}"),parent:None,order:0,kind:BlockKind::File,
             meta:serde_json::json!({"sha256":format!("{:x}",sha2::Sha256::digest(&bytes))}),version:0,length:0,sealed:true,revision:0},&bytes).unwrap();
     }
     tx.commit().unwrap();
-    let lineage=tau_blocks::cursor(&db).unwrap().lineage;
+    let lineage=tau_block_store::cursor(&db).unwrap().lineage;
     let data=Arc::new(Data {db:Arc::new(Mutex::new(db)),changes:tokio::sync::watch::channel(0).0,reads:AtomicUsize::new(0)});
     let bulk=Arc::new(Server::bind("127.0.0.1:0".parse().unwrap(),data.clone()).await.unwrap());
     #[derive(Clone)] struct Peer {bulk:Arc<Server>,lineage:String,grants:Arc<AtomicUsize>,http:Arc<AtomicUsize>}

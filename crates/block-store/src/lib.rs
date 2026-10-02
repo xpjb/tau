@@ -5,7 +5,7 @@
 //! before advancing a feed cursor. No function publishes network events.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
-pub use tau_protocol::blocks::*;
+use tau_net::blocks::*;
 pub mod uploads;
 pub mod cache_budget;
 
@@ -231,8 +231,6 @@ pub fn feed(db: &Connection, request: &FeedRequest) -> Result<FeedPage> {
         records:blocks.into_iter().map(|block|BlockRecord::Put { block }).collect(), more:false })
 }
 
-#[derive(Clone, Debug)]
-pub struct ContentRange { pub header: BlockHeader, pub offset: u64, pub hash: String, pub bytes: Vec<u8> }
 
 /// A range never crosses a chunk boundary and is always hard byte-bounded.
 pub fn read(db: &Connection, request: &BlockRequest) -> Result<ContentRange> {

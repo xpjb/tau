@@ -1,6 +1,7 @@
 //! Request-driven display blocks. A parent is an address, never an embedded tree.
 //! Content bytes are separate from bounded headers and use the same range protocol
 //! for text, code, tool input/output and files.
+use anyhow::ensure;
 use serde::{Deserialize, Serialize};
 
 pub const BLOCK_CHUNK_BYTES: usize = 16 * 1024;
@@ -190,4 +191,25 @@ pub struct ContentRef {
     pub id: String,
     pub length: u64,
     pub hash: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContentRange { pub header: BlockHeader, pub offset: u64, pub hash: String, pub bytes: Vec<u8> }
+
+impl UploadSpec {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let spec = self;
+    ensure!(!spec.id.is_empty() && spec.id.len() <= 128 && spec.id.bytes().all(|b|b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "Invalid upload ID");
+    ensure!(spec.hash.len() == 64 && spec.hash.bytes().all(|b|b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "Invalid upload hash");
+    let limit = match &spec.purpose {
+        UploadPurpose::Command => MAX_COMMAND_BYTES,
+        UploadPurpose::File { session_id, file_name } => {
+            ensure!(!session_id.is_empty() && session_id.len() <= 128 && session_id.bytes().all(|b|b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "Invalid upload session");
+            ensure!(!file_name.trim().is_empty() && file_name.len() <= 1024, "Invalid upload file name");
+            crate::MAX_UPLOAD_BYTES as u64
+        }
+    };
+    ensure!(spec.length > 0 && spec.length <= limit, "Upload exceeds its byte limit");
+    Ok(())
+}
 }

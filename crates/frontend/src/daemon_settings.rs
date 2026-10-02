@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use tau_protocol::{SessionModel, settings::Settings};
+use tau_net::{SessionModel, settings::Settings};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {

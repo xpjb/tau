@@ -12,7 +12,7 @@ pub const PAGE_BYTES: usize = 256 * 1024;
 pub const IMAGE_LIMIT: u64 = 10_000_000;
 pub const FILE_LIMIT: u64 = 50_000_000;
 
-pub use tau_protocol::{ChatAttachment, AttachmentKind, Event, EventPhase, EventRole, Origin, EventKind, QueuedRequest, QueueControl, QueueState,  HistoryPage, TextDelta};
+pub use tau_net::{ChatAttachment, AttachmentKind, Event, EventPhase, EventRole, Origin, EventKind, QueuedRequest, QueueControl, QueueState,  HistoryPage, TextDelta};
 
 pub struct AttachmentRequest {
     pub kind: AttachmentKind,
@@ -60,11 +60,11 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
 
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptChange {
-    pub wire: tau_protocol::TranscriptChange,
+    pub wire: tau_net::TranscriptChange,
     pub(crate) head: Option<String>,
 }
 impl std::ops::Deref for TranscriptChange {
-    type Target = tau_protocol::TranscriptChange;
+    type Target = tau_net::TranscriptChange;
     fn deref(&self) -> &Self::Target { &self.wire }
 }
 impl std::ops::DerefMut for TranscriptChange {

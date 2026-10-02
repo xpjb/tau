@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/daemon", "crates/transfer", "crates/protocol", "crates/blocks", "crates/markdown", "crates/frontend", "crates/code-viewer"]
+members = ["crates/daemon", "crates/net", "crates/block-store", "crates/markdown", "crates/frontend", "crates/code-viewer"]
 exclude = ["crates/windows"]
 resolver = "2"
 

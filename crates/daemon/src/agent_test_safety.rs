@@ -1,5 +1,5 @@
 use super::*;
-use tau_blocks::{UploadSpec,UploadPurpose,BLOCK_CHUNK_BYTES};
+use tau_net::blocks::{UploadSpec,UploadPurpose,BLOCK_CHUNK_BYTES};
 
 fn file_spec(id:&str,session:&str,bytes:&[u8])->UploadSpec {UploadSpec {id:id.into(),length:bytes.len() as u64,hash:blake3::hash(bytes).to_hex().to_string(),purpose:UploadPurpose::File {session_id:session.into(),file_name:"kept.bin".into()}}}
 async fn upload(manager:&AgentManager,spec:&UploadSpec,bytes:&[u8]) {
@@ -69,17 +69,17 @@ async fn catalogue_pages_reset_on_membership_change_and_delete_many_cold_chats()
     let first=manager.create_session(None,&topic).await.unwrap();manager.close_session(&first).await.unwrap();
     manager.inner.state.access({let first=first.clone();move |db| {
         let raw:String=db.query_row("SELECT data FROM sessions WHERE id=?1",[first],|r|r.get(0))?;let tx=db.transaction()?;
-        for n in 0..140 {let id=format!("cold-{n:03}");tx.execute("INSERT INTO sessions(id,data,queue,activity,starter) VALUES(?1,?2,?3,0,0)",rusqlite::params![id,raw,serde_json::to_string(&tau_protocol::QueueState::native())?])?;}tx.commit()?;Ok(())
+        for n in 0..140 {let id=format!("cold-{n:03}");tx.execute("INSERT INTO sessions(id,data,queue,activity,starter) VALUES(?1,?2,?3,0,0)",rusqlite::params![id,raw,serde_json::to_string(&tau_net::QueueState::native())?])?;}tx.commit()?;Ok(())
     }}).await.unwrap();
     let count=manager.inner.runtimes.lock().await.len();
-    let tau_protocol::ServerMessage::SessionPage {revision,next,sessions,..}=manager.list_page("catalog".into(),false,None,0).await.unwrap() else {panic!()};assert_eq!(sessions.len(),64);assert!(next.is_some());
-    let tau_protocol::ServerMessage::SessionPage {sessions:second,after,..}=manager.list_page("catalog".into(),false,next.clone(),revision).await.unwrap() else {panic!()};assert_eq!(after,next);assert_eq!(second.len(),64);assert!(sessions.iter().all(|a|second.iter().all(|b|a.id!=b.id)));
+    let tau_net::ServerMessage::SessionPage {revision,next,sessions,..}=manager.list_page("catalog".into(),false,None,0).await.unwrap() else {panic!()};assert_eq!(sessions.len(),64);assert!(next.is_some());
+    let tau_net::ServerMessage::SessionPage {sessions:second,after,..}=manager.list_page("catalog".into(),false,next.clone(),revision).await.unwrap() else {panic!()};assert_eq!(after,next);assert_eq!(second.len(),64);assert!(sessions.iter().all(|a|second.iter().all(|b|a.id!=b.id)));
     assert_eq!(manager.inner.runtimes.lock().await.len(),count);
     manager.inner.state.rename(&first,"Changed".into(),false).await.unwrap();
-    let tau_protocol::ServerMessage::SessionPage {revision:new,after,..}=manager.list_page("catalog".into(),false,next,revision).await.unwrap() else {panic!()};assert_ne!(new,revision);assert!(after.is_none());
+    let tau_net::ServerMessage::SessionPage {revision:new,after,..}=manager.list_page("catalog".into(),false,next,revision).await.unwrap() else {panic!()};assert_ne!(new,revision);assert!(after.is_none());
     for n in 0..10 {manager.create_project(uuid::Uuid::new_v4().to_string(),format!("Other {n}"),String::new()).await.unwrap();}
-    let tau_protocol::ServerMessage::ProjectPage {projects,next,..}=manager.list_page("catalog".into(),true,None,0).await.unwrap() else {panic!()};assert_eq!(projects.len(),8);assert!(next.is_some());
-    manager.delete_project(topic,0,tau_protocol::DeleteProjectMode::DeleteChats).await.unwrap();assert!(manager.inner.state.list().await.unwrap().is_empty());
+    let tau_net::ServerMessage::ProjectPage {projects,next,..}=manager.list_page("catalog".into(),true,None,0).await.unwrap() else {panic!()};assert_eq!(projects.len(),8);assert!(next.is_some());
+    manager.delete_project(topic,0,tau_net::DeleteProjectMode::DeleteChats).await.unwrap();assert!(manager.inner.state.list().await.unwrap().is_empty());
     manager.shutdown().await;server.abort();
 }
 
@@ -88,7 +88,7 @@ async fn restored_execution_requires_review_and_review_does_not_run_or_replay() 
     let model=ModelServer::start(vec![]).await;let (root,manager,_,server)=fixture(&model,Api::ChatCompletions).await;
     let id=manager.create_session(None,"general").await.unwrap();
     let generation=manager.runtime(&id).await.unwrap().content.lock().await.transcript.as_ref().unwrap().generation.clone();
-    manager.queue_control(&id,&generation,"hold",tau_protocol::QueueOperation::Pause {run_id:None,boundary:"turn".into()}).await.unwrap();
+    manager.queue_control(&id,&generation,"hold",tau_net::QueueOperation::Pause {run_id:None,boundary:"turn".into()}).await.unwrap();
     manager.prompt(&id,"Held work","held").await.unwrap();
     let config=manager.inner.config.clone();manager.shutdown().await;server.abort();drop(manager);
     crate::maintenance::rotate_lineage(&root.path().join("tau.sqlite3")).await.unwrap();
@@ -96,14 +96,14 @@ async fn restored_execution_requires_review_and_review_does_not_run_or_replay() 
     assert!(manager.prompt(&id,"not yet","guarded").await.err().unwrap().to_string().contains("Restored"));
     let child=manager.clone_session(&id).await.unwrap();assert!(manager.inner.state.restore_review(&child).await.unwrap());
     let generation=format!("{}:{id}",manager.inner.state.block_cursor().await.unwrap().lineage);
-    assert!(manager.queue_control(&id,&generation,"resume-restored",tau_protocol::QueueOperation::Resume {run_id:None}).await.is_err());
-    let error=manager.queue_control(&id,&generation,"prefix-restored",tau_protocol::QueueOperation::Prefix {run_id:None,boundary:"turn".into(),
-        requests:vec![tau_protocol::QueueRef {request_id:"held".into(),revision:0}]}).await.unwrap_err();
+    assert!(manager.queue_control(&id,&generation,"resume-restored",tau_net::QueueOperation::Resume {run_id:None}).await.is_err());
+    let error=manager.queue_control(&id,&generation,"prefix-restored",tau_net::QueueOperation::Prefix {run_id:None,boundary:"turn".into(),
+        requests:vec![tau_net::QueueRef {request_id:"held".into(),revision:0}]}).await.unwrap_err();
     assert!(error.to_string().contains("Restored"),"Run-through must obey the same restore-review guard as Play");
     assert!(manager.inner.state.receipt(&id,"prefix-restored").await.unwrap().is_none());
     manager.inner.state.review_restore(&id).await.unwrap();assert!(!manager.inner.state.restore_review(&id).await.unwrap());
     assert!(manager.inner.state.receipt(&id,"guarded").await.unwrap().is_none());assert_eq!(manager.inner.state.queue(&id).await.unwrap().requests.len(),1);
-    assert_eq!(manager.runtime(&id).await.unwrap().snapshot().status,tau_protocol::SessionStatus::Idle);
+    assert_eq!(manager.runtime(&id).await.unwrap().snapshot().status,tau_net::SessionStatus::Idle);
     manager.shutdown().await;server.abort();
 }
 
@@ -113,8 +113,8 @@ async fn schema_four_migration_adopts_transitive_fork_owners_and_streaming_expor
     let parent=state.create(Settings::default().agent.model,"medium".into(),None,"general".into()).await.unwrap();let (child,_)=state.branch(&parent,None).await.unwrap();let (grandchild,_)=state.branch(&child,None).await.unwrap();
     let spec=file_spec("legacy-file",&parent,b"old");
     state.access(move |db| {
-        let tx=db.transaction()?;tau_blocks::uploads::begin(&tx,&spec)?;tau_blocks::uploads::write(&tx,&spec,0,b"old")?;
-        tau_blocks::uploads::seal(&tx,&spec,&spec.hash,Some(tau_protocol::UploadedFile {name:"old".into(),path:"/private/legacy/old".into(),size:3}))?;tx.commit()?;
+        let tx=db.transaction()?;tau_block_store::uploads::begin(&tx,&spec)?;tau_block_store::uploads::write(&tx,&spec,0,b"old")?;
+        tau_block_store::uploads::seal(&tx,&spec,&spec.hash,Some(tau_net::UploadedFile {name:"old".into(),path:"/private/legacy/old".into(),size:3}))?;tx.commit()?;
         db.execute_batch("DROP TABLE file_owners; DROP TABLE file_publications; DROP TABLE restore_guards;
           DROP TRIGGER catalogue_insert; DROP TRIGGER catalogue_delete; DROP TRIGGER catalogue_session;
           DROP TRIGGER catalogue_project_insert; DROP TRIGGER catalogue_project_update; DROP TRIGGER catalogue_project_delete;

@@ -175,9 +175,9 @@ impl AgentManager {
     /// Both standalone and pipelined creates own the same immutable journal
     /// entry under the topic gate. A delayed create cannot reset a used chat,
     /// and retrying after deletion/restart cannot recreate it or repeat a turn.
-    pub async fn create_session_operation(&self, request_id: &str, creation: &tau_protocol::ChatCreation) -> Result<String> {
+    pub async fn create_session_operation(&self, request_id: &str, creation: &tau_net::ChatCreation) -> Result<String> {
         let _gate = self.inner.projects.lock().await;
-        let request = tau_protocol::ClientRequest { id: request_id.into(), command: tau_protocol::ClientCommand::CreateSession {
+        let request = tau_net::ClientRequest { id: request_id.into(), command: tau_net::ClientCommand::CreateSession {
             project_id: creation.project_id.clone(), keep_session_id: creation.keep_session_id.clone(),
         }};
         if let Some(response) = self.inner.state.reserve_operation(&request).await? {

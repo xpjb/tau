@@ -12,7 +12,7 @@ use crate::{
 };
 use sanscale::Rect;
 use std::collections::{BTreeSet, HashMap};
-use tau_protocol::*;
+use tau_net::*;
 
 // Destinations belong to the mounted card, not to a second per-button route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

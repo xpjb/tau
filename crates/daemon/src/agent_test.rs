@@ -216,13 +216,13 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     // The native file primitive materializes only after an explicit body read.
     let native_file=crate::blocks::file_id(attachment["entryId"].as_str().unwrap());
     let scope=id.clone();let file_id=native_file.clone();
-    let before=manager.inner.state.access(move |db|Ok(tau_blocks::header(db,&scope,&file_id)?.unwrap())).await.unwrap();
+    let before=manager.inner.state.access(move |db|Ok(tau_block_store::header(db,&scope,&file_id)?.unwrap())).await.unwrap();
     assert!(!before.sealed);assert_eq!(before.length,0);
-    use tau_transfer::blocks::Backend;
-    let range=manager.read(tau_blocks::BlockRequest {scope:id.clone(),id:native_file.clone(),version:0,offset:0,follow:false}).await.unwrap();
+    use tau_net::native::Backend;
+    let range=manager.read(tau_net::blocks::BlockRequest {scope:id.clone(),id:native_file.clone(),version:0,offset:0,follow:false}).await.unwrap();
     assert_eq!(range.bytes,b"beta\n");assert!(range.header.sealed);assert_eq!(range.header.version,before.version);
     assert!(range.header.meta["sha256"].is_string());
-    let end=manager.read(tau_blocks::BlockRequest {scope:id.clone(),id:native_file,version:range.header.version,offset:5,follow:false}).await.unwrap();
+    let end=manager.read(tau_net::blocks::BlockRequest {scope:id.clone(),id:native_file,version:range.header.version,offset:5,follow:false}).await.unwrap();
     assert!(end.bytes.is_empty());
     let staged = events.iter().find(|event| event["attachment"]["fileName"] == "outside.txt").unwrap();
     assert_eq!(staged["attachment"]["caption"], "Report");
@@ -615,15 +615,15 @@ async fn sqlite_transactions_roll_back_consumption_and_forks_while_history_pages
     runtime.content.lock().await.commit(&id,entries,None,None).await.unwrap();
     manager.close_session(&id).await.unwrap();
     let snapshot = client.open(&id).await;
-    assert!(snapshot["events"].as_array().unwrap().len() <= tau_blocks::MAX_FEED_PAGE);
+    assert!(snapshot["events"].as_array().unwrap().len() <= tau_net::blocks::MAX_FEED_PAGE);
     assert!(runtime.content.lock().await.transcript.is_none(),"Native reads must not reload the runtime");
     let mut all = snapshot["events"].as_array().unwrap().clone();
     let mut before = snapshot["before"].clone();
     while !before.is_null() {
-        let position:tau_blocks::FeedPosition=serde_json::from_value(before).unwrap();
+        let position:tau_net::blocks::FeedPosition=serde_json::from_value(before).unwrap();
         let page=client.page(&id,Some(position.clone())).await;
         let older=page["events"].as_array().unwrap();
-        assert!(older.len()<=tau_blocks::MAX_FEED_PAGE);
+        assert!(older.len()<=tau_net::blocks::MAX_FEED_PAGE);
         assert!(older.iter().all(|e|e["order"].as_u64().unwrap()*2<=position.order));
         all.extend(older.iter().cloned());before=page["before"].clone();
     }
@@ -1039,7 +1039,7 @@ async fn project_prompt_snapshots_reach_both_providers_and_moves_replace_them() 
         let config = manager.inner.config.clone();
         manager.shutdown().await; server.abort(); drop(client);
         let reopened = StateStore::load(config.database_path).await.unwrap();
-        assert_eq!(reopened.projects().await.unwrap(),vec![tau_protocol::Project { id:"general".into(),name:"General".into(),prompt:"General context".into(),revision:1 }]);
+        assert_eq!(reopened.projects().await.unwrap(),vec![tau_net::Project { id:"general".into(),name:"General".into(),prompt:"General context".into(),revision:1 }]);
         assert_eq!(reopened.get(&id).await.unwrap().unwrap().project_prompt,"General context");
         assert!(model.requests.try_recv().is_err(),"Metadata edits must never invoke a provider");
     }
@@ -1074,7 +1074,7 @@ async fn moving_during_tool_run_keeps_that_turn_stable_and_project_delete_cancel
     assert_eq!(manager.inner.state.get(&session).await.unwrap().unwrap().project_prompt,"DESTINATION");
     let upload = root.path().join("uploads").join(&session);
     let bytes=b"private upload";let hash=blake3::hash(bytes).to_hex().to_string();
-    let spec=tau_blocks::UploadSpec {id:"project-delete-file".into(),length:bytes.len() as u64,hash:hash.clone(),purpose:tau_blocks::UploadPurpose::File {session_id:session.clone(),file_name:"file".into()}};
+    let spec=tau_net::blocks::UploadSpec {id:"project-delete-file".into(),length:bytes.len() as u64,hash:hash.clone(),purpose:tau_net::blocks::UploadPurpose::File {session_id:session.clone(),file_name:"file".into()}};
     manager.begin_upload(spec.clone()).await.unwrap();manager.write_upload(spec.clone(),0,bytes.to_vec()).await.unwrap();manager.finish_upload(spec).await.unwrap();
     // A forced transaction failure leaves the project and every chat intact.
     manager.inner.state.access(|db| { db.execute_batch("CREATE TRIGGER fail_project_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END;")?; Ok(()) }).await.unwrap();

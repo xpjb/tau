@@ -90,8 +90,8 @@ fn viewport_disk_hydration_schedules_a_redraw_without_network_or_input() {
             e.id = format!("cached-{order:03}"); e.entry_id = e.id.clone(); e.order = order;
             e.text = format!("Cached message {order}"); e.attachment = None;
             if order < 50 && order != 10 { e.text.push_str(&"\n\nA taller cached paragraph.".repeat(4)); }
-            e.kind = tau_protocol::EventKind::Text;
-            e.role = tau_protocol::EventRole::Assistant;
+            e.kind = tau_net::EventKind::Text;
+            e.role = tau_net::EventRole::Assistant;
             e.origin = Default::default();
             e
         }).collect();
@@ -371,8 +371,8 @@ fn idle_wheel_undocks_tail_and_animates_without_unrelated_wakes() {
         let mut h = Harness::new(false);
         h.app.resize(h.ctx.size(), scale, Vec2::new(0., 0.));
         let mut event = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
-        event.role = tau_protocol::EventRole::Assistant;
-        event.phase = tau_protocol::EventPhase::Live;
+        event.role = tau_net::EventRole::Assistant;
+        event.phase = tau_net::EventPhase::Live;
         event.text = (0..80).map(|i| format!("Scrolling paragraph {i}.\n\n")).collect();
         event.attachment = None;
         h.app.controller.preview("demo", vec![event.clone()], Default::default(), None).unwrap();
@@ -464,7 +464,7 @@ fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
 
 #[test]
 fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
-    use tau_protocol::{EventKind, EventRole, EventPhase};
+    use tau_net::{EventKind, EventRole, EventPhase};
     let mut h = Harness::new(false);
     let mut source = crate::blocks::tests::Fixture::new();
     let mut tool = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
@@ -474,8 +474,8 @@ fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
     tool.text = "A streamed input line.\n".repeat(3000); tool.attachment = None;
     let input = format!("{}/input", tool.id);
     let mut metadata = tool.clone(); metadata.text.clear();
-    source.put(&tool.id, None, 0, tau_protocol::blocks::BlockKind::Tool, serde_json::json!({"event": metadata}), b"");
-    source.put(&input, Some(&tool.id), 0, tau_protocol::blocks::BlockKind::Code,
+    source.put(&tool.id, None, 0, tau_net::blocks::BlockKind::Tool, serde_json::json!({"event": metadata}), b"");
+    source.put(&input, Some(&tool.id), 0, tau_net::blocks::BlockKind::Code,
         serde_json::json!({"inputFor": tool.id, "label": "Input", "language": "json"}), tool.text.as_bytes());
     source.page(None, None); source.page(Some(&tool.id), None);
     assert!(source.chunk(&input)); // Only the first verified chunk is resident.
@@ -518,7 +518,7 @@ fn native_handoff_keeps_the_actual_message_control_and_authored_text() {
     let target = h.app.root.workspace.chat.transcript.rows.iter().find(|r| r.key == key).unwrap().control.target;
     let meta = serde_json::json!({"event":{"id":"canonical","entryId":"canonical","order":0,"phase":"saved",
         "origin":{"requestId":request},"role":"user","kind":"text","text":"","isError":false}});
-    source.put("canonical", None, 0, tau_protocol::blocks::BlockKind::Text, meta, b"One **authored** message");
+    source.put("canonical", None, 0, tau_net::blocks::BlockKind::Text, meta, b"One **authored** message");
     source.page(None, None); source.body("canonical");
     let chat = h.app.controller.chats.get_mut("chat").unwrap();
     let delivered = chat.feed.native_view(source.cache.snapshot("chat").unwrap().unwrap()).unwrap();
@@ -537,7 +537,7 @@ fn failed_run_header_opens_the_full_reason_without_resuming_or_submitting() {
         let reason = "Context compaction failed; history is unchanged. The provider connection was interrupted.";
         h.app.controller.epoch = Some(1);
         let session = h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap();
-        session.status = tau_protocol::SessionStatus::Error;
+        session.status = tau_net::SessionStatus::Error;
         session.detail = Some(reason.into());
         h.app.controller.chats.get_mut("demo").unwrap().feed.queue.paused = true;
         h.frame();
@@ -548,7 +548,7 @@ fn failed_run_header_opens_the_full_reason_without_resuming_or_submitting() {
         assert!(h.app.controller.chats["demo"].feed.queue.paused);
         assert_eq!(h.app.controller.chats["demo"].local.pending.len(),pending,"Reading an error is not a Resume or prompt");
         h.app.controller.notice = None;
-        h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().status = tau_protocol::SessionStatus::Running;
+        h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().status = tau_net::SessionStatus::Running;
         h.frame(); h.app.press(2,p,mobile); h.app.release(2,p);
         assert!(h.app.controller.notice.is_none(),"A stale error detail cannot be opened after the run restarts");
     }
@@ -561,8 +561,8 @@ fn real_touch_fling_keeps_the_reading_anchor_and_stops_on_a_new_touch() {
         let mut h = Harness::new(true);
         h.app.resize(h.ctx.size(), scale, Vec2::new(0., 0.));
         let mut event = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
-        event.role = tau_protocol::EventRole::Assistant;
-        event.phase = tau_protocol::EventPhase::Live;
+        event.role = tau_net::EventRole::Assistant;
+        event.phase = tau_net::EventPhase::Live;
         event.attachment = None;
         event.text = "A paragraph for a moving reading anchor.\n\n".repeat(150);
         h.app.controller.preview("demo", vec![event.clone()], Default::default(), None).unwrap();

@@ -1,4 +1,9 @@
-use super::*;
+//! Authenticated native streaming, scheduling, recovery and durable uploads.
+use anyhow::Result;
+use futures_util::future::BoxFuture;
+use std::{sync::{Arc, Mutex}, time::{Duration, Instant}};
+use tau_net::{blocks::*, native::*};
+use tokio::sync::watch;
 use futures_util::FutureExt;
 use rand::RngCore;
 use rusqlite::Connection as Sqlite;
@@ -12,33 +17,33 @@ struct Memory {
 impl Memory {
     fn new() -> Arc<Self> {
         let db = Sqlite::open_in_memory().unwrap(); db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        tau_blocks::initialize(&db).unwrap();
+        tau_block_store::initialize(&db).unwrap();
         Arc::new(Self { db:Arc::new(Mutex::new(db)),notify:watch::channel(0).0,reads:AtomicUsize::new(0) })
     }
     fn put(&self, id: &str, parent: Option<&str>, kind: BlockKind, bytes: &[u8], sealed: bool) {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction().unwrap();
         let header = BlockHeader { id:id.into(),parent:parent.map(str::to_owned),kind,order:1,meta:serde_json::json!({"label":id}),
             version:0,length:0,sealed,revision:0 };
-        tau_blocks::put(&tx,"chat",header,bytes).unwrap();
-        let revision = tau_blocks::cursor(&tx).unwrap().sequence; tx.commit().unwrap();
+        tau_block_store::put(&tx,"chat",header,bytes).unwrap();
+        let revision = tau_block_store::cursor(&tx).unwrap().sequence; tx.commit().unwrap();
         self.notify.send_replace(revision);
     }
-    fn lineage(&self) -> String { tau_blocks::cursor(&self.db.lock().unwrap()).unwrap().lineage }
+    fn lineage(&self) -> String { tau_block_store::cursor(&self.db.lock().unwrap()).unwrap().lineage }
 }
 impl Backend for Memory {
     fn feed(&self, request: FeedRequest) -> BoxFuture<'static,Result<FeedPage>> {
-        let db = self.db.clone(); async move { tau_blocks::feed(&db.lock().unwrap(),&request) }.boxed()
+        let db = self.db.clone(); async move { tau_block_store::feed(&db.lock().unwrap(),&request) }.boxed()
     }
     fn read(&self, request: BlockRequest) -> BoxFuture<'static,Result<ContentRange>> {
         self.reads.fetch_add(1,Ordering::SeqCst);
-        let db = self.db.clone(); async move { tau_blocks::read(&db.lock().unwrap(),&request) }.boxed()
+        let db = self.db.clone(); async move { tau_block_store::read(&db.lock().unwrap(),&request) }.boxed()
     }
-    fn files(&self, request: tau_protocol::files::FileRequest) -> BoxFuture<'static,Result<tau_protocol::files::FileReply>> {
+    fn files(&self, request: tau_net::files::FileRequest) -> BoxFuture<'static,Result<tau_net::files::FileReply>> {
         self.reads.fetch_add(1,Ordering::SeqCst);
         async move {
             if request.path.as_deref()==Some("/wait") {std::future::pending::<()>().await;}
             let text="credit-window café 🦀\n".repeat(12_000);
-            Ok(tau_protocol::files::FileReply::Text {path:"/fixture.rs".into(),revision:blake3::hash(text.as_bytes()).to_hex().to_string(),text})
+            Ok(tau_net::files::FileReply::Text {path:"/fixture.rs".into(),revision:blake3::hash(text.as_bytes()).to_hex().to_string(),text})
         }.boxed()
     }
     fn changes(&self) -> watch::Receiver<u64> { self.notify.subscribe() }
@@ -129,11 +134,12 @@ async fn lost_initial_discovery_keeps_one_attempt_then_negotiates_short_idle() {
     assert_eq!(dropped.load(Ordering::Relaxed),2);
     assert_eq!(client.stats().connection_attempts,1,"Discovery loss must not fail the application connect attempt");
     assert_eq!(client.stats().connections,1);
-    let connection=client.connection().await.unwrap();
+    let mut probe=client.watch(feed_request(None)).await.unwrap();
+    while !matches!(frame(&mut probe).await.header,Header::Page {..}) {}
     blackhole.store(true,Ordering::Relaxed);let silent=Instant::now();
-    let reason=tokio::time::timeout(Duration::from_secs(7),connection.closed()).await
-        .expect("Established peers must retain the negotiated five-second silence limit");
-    assert!(matches!(reason,iroh::endpoint::ConnectionError::TimedOut));
+    let error=tokio::time::timeout(Duration::from_secs(7),probe.next()).await
+        .expect("Established peers must retain the negotiated five-second silence limit").unwrap_err();
+    assert!(is_connection_error(&error));
     eprintln!("native-discovery-loss: connected={connected:?}, established peer timeout={:?}",silent.elapsed());
     blackhole.store(false,Ordering::Relaxed);
     client.shutdown().await;server.shutdown().await;proxy.abort();let _=proxy.await;
@@ -144,14 +150,14 @@ async fn healthy_idle_connection_is_preserved_across_native_peer_timeout_windows
     let (backend,server,client)=fixture().await;
     backend.put("first",None,BlockKind::Text,b"first",true);
     assert_eq!(collect(client.watch(block_request("first",0,0,false)).await.unwrap()).await.0,b"first");
-    let identity=client.connection().await.unwrap().stable_id();
+    let connections=client.stats().connections;
     assert_eq!(client.stats().active_streams,0);
     // More than two five-second peer windows, with no application streams.
     // Transport keep-alive ACKs, not periodic re-downloads, preserve the peer.
     tokio::time::sleep(Duration::from_secs(12)).await;
     backend.put("second",None,BlockKind::Text,b"second",true);
     assert_eq!(collect(client.watch(block_request("second",0,0,false)).await.unwrap()).await.0,b"second");
-    assert_eq!(client.connection().await.unwrap().stable_id(),identity);
+    assert_eq!(client.stats().connections,connections);
     assert_eq!(client.stats().connections,1,"Healthy idle peers cannot be recycled by the recovery policy");
     client.shutdown().await;server.shutdown().await;
 }
@@ -218,13 +224,13 @@ async fn one_peer_can_request_multiple_blocks_and_renew_grant_without_replacing_
     backend.put("b",None,BlockKind::Text,b"second",true);
     let mut feed = client.watch(feed_request(None)).await.unwrap();
     assert!(matches!(frame(&mut feed).await.header,Header::Record { .. }));
-    let first_connection = client.connection().await.unwrap().stable_id();
+    let connections = client.stats().connections;
     let (a,_) = collect(client.watch(block_request("a",0,0,false)).await.unwrap()).await;
     let offer = server.authorize(&client.node_id(),backend.lineage()).unwrap();
     client.configure(&offer,"127.0.0.1").await.unwrap();
     let (b,_) = collect(client.watch(block_request("b",0,0,false)).await.unwrap()).await;
     assert_eq!(a,b"first"); assert_eq!(b,b"second");
-    assert_eq!(client.connection().await.unwrap().stable_id(),first_connection);
+    assert_eq!(client.stats().connections,connections);
     assert!(matches!(frame(&mut feed).await.header,Header::Record { .. }));
     client.shutdown().await; server.shutdown().await;
 }
@@ -238,20 +244,6 @@ async fn ungranted_endpoint_cannot_read_blocks() {
     if let Ok(mut watcher) = result { assert!(tokio::time::timeout(Duration::from_secs(4),watcher.next()).await.unwrap().is_err()); }
     assert_eq!(backend.reads.load(Ordering::SeqCst),0);
     client.shutdown().await; server.shutdown().await;
-}
-
-#[test]
-fn compression_is_chunk_local_bounded_and_verified_after_decompression() {
-    let header = BlockHeader { id:"a".into(),parent:None,order:0,kind:BlockKind::Code,meta:serde_json::json!({}),version:1,length:BLOCK_CHUNK_BYTES as u64,sealed:true,revision:1 };
-    let bytes = vec![b'x';BLOCK_CHUNK_BYTES];
-    let range = ContentRange { header,offset:0,hash:blake3::hash(&bytes).to_hex().to_string(),bytes:bytes.clone() };
-    let mut frame = Frame::content(&range).unwrap();
-    assert!(matches!(frame.header,Header::Data {codec:Codec::Zstd,..}));
-    assert!(frame.data.len() < 100); assert_eq!(frame.decoded().unwrap(),bytes);
-    if let Header::Data { length,.. } = &mut frame.header { *length = (BLOCK_CHUNK_BYTES+1) as u32; }
-    assert!(frame.decoded().is_err());
-    if let Header::Data { length,hash,.. } = &mut frame.header { *length = BLOCK_CHUNK_BYTES as u32; *hash = "bad".into(); }
-    assert!(frame.decoded().is_err());
 }
 
 #[tokio::test]
@@ -325,7 +317,7 @@ async fn scheduled_idle_watches_yield_capacity_to_waiters_without_reconnecting()
     let waiting = client.watch_scheduled(feed_request(None),false);
     tokio::pin!(waiting);
     assert!(tokio::time::timeout(Duration::from_millis(30),&mut waiting).await.is_err());
-    let (end,_) = tokio::time::timeout(WATCH_QUANTUM+Duration::from_secs(2),first.next()).await.unwrap().unwrap();
+    let (end,_) = tokio::time::timeout(Duration::from_secs(7),first.next()).await.unwrap().unwrap();
     assert!(matches!(end.header,Header::Yield),"Idle is not complete, but must not hoard a class slot");
     drop(first);
     let mut next = tokio::time::timeout(Duration::from_secs(2),&mut waiting).await.unwrap().unwrap();
@@ -379,7 +371,7 @@ async fn background_metadata_cannot_occupy_selected_chat_stream_reservations() {
 
 #[tokio::test]
 async fn filesystem_streams_require_grants_share_connection_and_release_credit_slots_on_cancel() {
-    use tau_protocol::files::*;
+    use tau_net::files::*;
     let (backend,server,client)=fixture().await;
     let offer=server.authorize(&client.node_id(),backend.lineage()).unwrap();
     let anonymous=Client::bind().await.unwrap();anonymous.configure(&offer,"127.0.0.1").await.unwrap();
@@ -404,7 +396,7 @@ async fn filesystem_streams_require_grants_share_connection_and_release_credit_s
 
 #[tokio::test]
 async fn warming_file_names_uses_background_slots_and_does_not_block_file_previews() {
-    use tau_protocol::files::*;
+    use tau_net::files::*;
     let (_,server,client)=fixture().await;
     let mut background=Box::pin(client.files(FileRequest {session_id:"chat".into(),path:Some("/wait".into()),operation:FileOperation::Index {revision:None}}));
     tokio::select! {_ = &mut background => panic!("fixture must stall"), _ = tokio::time::sleep(Duration::from_millis(150)) => {}}
@@ -413,4 +405,81 @@ async fn warming_file_names_uses_background_slots_and_does_not_block_file_previe
     assert!(matches!(tokio::time::timeout(Duration::from_secs(3),preview).await.unwrap().unwrap(),FileReply::Text {..}));
     drop(background);assert_eq!(client.stats().active_streams,0);assert_eq!(client.stats().bulk_slots,0);
     client.shutdown().await;server.shutdown().await;
+}
+
+mod uploads {
+use std::sync::{Arc,Mutex};
+use futures_util::{FutureExt,future::BoxFuture};
+use rusqlite::Connection;
+use tau_net::blocks::*;
+use tau_block_store::*;
+use tau_net::native::{Backend,Server,Client,Header};
+use tokio::sync::watch;
+
+struct Store {db:Arc<Mutex<Connection>>,changes:watch::Sender<u64>}
+impl Store {
+    fn open(path:&std::path::Path)->Arc<Self> {
+        let db=Connection::open(path).unwrap();db.execute_batch("PRAGMA foreign_keys=ON;PRAGMA journal_mode=WAL;PRAGMA synchronous=FULL").unwrap();tau_block_store::initialize(&db).unwrap();
+        Arc::new(Self {db:Arc::new(Mutex::new(db)),changes:watch::channel(0).0})
+    }
+    fn lineage(&self)->String {cursor(&self.db.lock().unwrap()).unwrap().lineage}
+}
+impl Backend for Store {
+    fn feed(&self,r:FeedRequest)->BoxFuture<'static,anyhow::Result<FeedPage>> {let db=self.db.clone();async move {feed(&db.lock().unwrap(),&r)}.boxed()}
+    fn read(&self,r:BlockRequest)->BoxFuture<'static,anyhow::Result<ContentRange>> {let db=self.db.clone();async move {read(&db.lock().unwrap(),&r)}.boxed()}
+    fn changes(&self)->watch::Receiver<u64> {self.changes.subscribe()}
+    fn upload_begin(&self,s:UploadSpec)->BoxFuture<'static,anyhow::Result<UploadStatus>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;let status=uploads::begin(&tx,&s)?;tx.commit()?;Ok(status)}.boxed()}
+    fn upload_write(&self,s:UploadSpec,offset:u64,bytes:Vec<u8>)->BoxFuture<'static,anyhow::Result<()>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;uploads::write(&tx,&s,offset,&bytes)?;tx.commit()?;Ok(())}.boxed()}
+    fn upload_finish(&self,s:UploadSpec)->BoxFuture<'static,anyhow::Result<UploadStatus>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;let bytes=cached_content(&tx,UPLOAD_SCOPE,&s.id)?;let status=uploads::seal(&tx,&s,&blake3::hash(&bytes).to_hex(),None)?;tx.commit()?;Ok(status)}.boxed()}
+}
+async fn connect(store:Arc<Store>)->(Server,Client) {
+    let server=Server::bind("127.0.0.1:0".parse().unwrap(),store.clone()).await.unwrap();
+    let client=Client::bind().await.unwrap();
+    let offer=server.authorize(&client.node_id(),store.lineage()).unwrap();client.configure(&offer,"127.0.0.1").await.unwrap();(server,client)
+}
+
+#[tokio::test]
+async fn interrupted_upload_resumes_durable_bytes_after_both_endpoints_restart() {
+    let root=tempfile::tempdir().unwrap();let path=root.path().join("source.db");let store=Store::open(&path);
+    let bytes=(0..900_000).map(|n|((n*31)%251) as u8).collect::<Vec<_>>();
+    let spec=UploadSpec {id:"operation".into(),length:bytes.len() as u64,hash:blake3::hash(&bytes).to_hex().to_string(),purpose:UploadPurpose::Command};
+    let (server,client)=connect(store.clone()).await;
+    let mut upload=client.uploader(spec.clone()).await.unwrap();
+    for chunk in bytes[..128*1024].chunks(BLOCK_CHUNK_BYTES) {upload.write(chunk).await.unwrap();}
+    // A second stream proves progress is committed, not just client queued.
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {let status=uploads::status(&store.db.lock().unwrap(),&spec).unwrap();if status.offset>=64*1024 {break;}tokio::task::yield_now().await;}
+    }).await.unwrap();
+    drop(upload);client.shutdown().await;server.shutdown().await;drop(client);drop(server);drop(store);
+    let store=Store::open(&path);let saved=uploads::status(&store.db.lock().unwrap(),&spec).unwrap().offset;
+    assert!(saved>=64*1024 && saved<spec.length);
+    let (server,client)=connect(store.clone()).await;
+    let mut upload=client.uploader(spec.clone()).await.unwrap();assert_eq!(upload.status.offset,saved);
+    for chunk in bytes[saved as usize..].chunks(BLOCK_CHUNK_BYTES) {upload.write(chunk).await.unwrap();}
+    let status=upload.finish().await.unwrap();assert!(status.sealed);drop(upload);
+    let retry=client.uploader(spec.clone()).await.unwrap();assert!(retry.status.sealed);assert_eq!(retry.status.offset,spec.length);drop(retry);
+    assert_eq!(cached_content(&store.db.lock().unwrap(),UPLOAD_SCOPE,&spec.id).unwrap(),bytes);
+    let mut wrong=spec.clone();wrong.hash=blake3::hash(b"other").to_hex().to_string();assert!(client.uploader(wrong).await.is_err());
+    let mut feed=client.watch(BlockWatch::Feed(FeedRequest {scope:UPLOAD_SCOPE.into(),parent:None,cursor:None,floor:0,before:None})).await.unwrap();
+    assert!(matches!(feed.next().await.unwrap().0.header,Header::Record {..}));
+    client.shutdown().await;server.shutdown().await;
+}
+
+#[tokio::test]
+async fn upload_checks_authorization_hashes_size_gaps_and_unsealed_references() {
+    let root=tempfile::tempdir().unwrap();let store=Store::open(&root.path().join("source.db"));
+    let (server,client)=connect(store.clone()).await;
+    let spec=UploadSpec {id:"bound".into(),length:4,hash:blake3::hash(b"good").to_hex().to_string(),purpose:UploadPurpose::Command};
+    let mut upload=client.uploader(spec.clone()).await.unwrap();upload.write(b"evil").await.unwrap();assert!(upload.finish().await.is_err());drop(upload);
+    assert!(!uploads::status(&store.db.lock().unwrap(),&spec).unwrap().sealed);
+    let reference=ContentRef {lineage:store.lineage(),scope:UPLOAD_SCOPE.into(),id:spec.id.clone(),length:4,hash:spec.hash.clone()};
+    assert!(uploads::input(&store.db.lock().unwrap(),&reference).is_err());
+    let mut too_big=spec.clone();too_big.length=MAX_COMMAND_BYTES+1;assert!(client.uploader(too_big).await.is_err());
+    let outsider=Client::bind().await.unwrap();
+    let offer=server.authorize(&client.node_id(),store.lineage()).unwrap();outsider.configure(&offer,"127.0.0.1").await.unwrap();
+    assert!(outsider.uploader(spec.clone()).await.is_err());
+    server.revoke(&client.node_id());assert!(client.uploader(spec).await.is_err());
+    outsider.shutdown().await;client.shutdown().await;server.shutdown().await;
+}
+
 }

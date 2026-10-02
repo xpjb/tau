@@ -1,6 +1,6 @@
 //! Account quota UI state. This never changes the session's context-token gauge.
 use std::time::{Duration, Instant};
-use tau_protocol::CodexUsage;
+use tau_net::CodexUsage;
 use crate::tooltip::{Content, INK, MUTED, GOOD, WARNING, DANGER};
 
 const FRESH: Duration = Duration::from_secs(300);
@@ -83,7 +83,7 @@ fn reset_in(fetched:u64, received:Instant, reset:u64)->Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tau_protocol::CodexUsageWindow;
+    use tau_net::CodexUsageWindow;
     #[test]
     fn automatic_refresh_is_bounded_and_timeouts_retry_without_a_button() {
         let mut view = UsageView::default();

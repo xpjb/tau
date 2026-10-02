@@ -2,8 +2,8 @@
 //! gate orders membership changes against runtime retirement; SQLite commits first.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
-#[cfg(test)] use tau_protocol::Project;
-use tau_protocol::{DeleteProjectMode, GENERAL_PROJECT_ID, MAX_PROJECT_NAME_CHARS, MAX_PROJECT_PROMPT_CHARS};
+#[cfg(test)] use tau_net::Project;
+use tau_net::{DeleteProjectMode, GENERAL_PROJECT_ID, MAX_PROJECT_NAME_CHARS, MAX_PROJECT_PROMPT_CHARS};
 use crate::{manager::AgentManager, state::StateStore};
 
 fn validate(name: &str, prompt: &str) -> Result<()> {
@@ -85,7 +85,7 @@ impl StateStore {
                 DeleteProjectMode::DeleteChats => {
                     let ids = tx.prepare("SELECT id FROM sessions WHERE json_extract(data,'$.project_id')=?1")?
                         .query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                    for scope in ids { tau_blocks::remove_scope(&tx,&scope)?; }
+                    for scope in ids { tau_block_store::remove_scope(&tx,&scope)?; }
                     tx.execute("DELETE FROM sessions WHERE json_extract(data,'$.project_id')=?1", [&id])?;
                     tx.execute("UPDATE sessions SET data=json_set(data,'$.parent_id',NULL) WHERE json_extract(data,'$.parent_id') IS NOT NULL AND NOT EXISTS
                         (SELECT 1 FROM sessions parent WHERE parent.id=json_extract(sessions.data,'$.parent_id'))", [])?;
@@ -97,7 +97,7 @@ impl StateStore {
 }
 impl AgentManager {
     async fn broadcast_projects(&self) -> Result<()> {
-        let _ = self.inner.events.send(tau_protocol::ServerMessage::ResyncRequired {session_id:None});
+        let _ = self.inner.events.send(tau_net::ServerMessage::ResyncRequired {session_id:None});
         Ok(())
     }
     pub async fn create_project(&self, id: String, name: String, prompt: String) -> Result<()> {
@@ -161,7 +161,7 @@ mod tests {
         db.execute_batch(include_str!("schema.sql")).unwrap();
         let data = serde_json::json!({"title":"Existing","starter":true,"parent_id":null,"model":{"provider":"openai-codex","modelId":"gpt-6-astra"},
             "thinking":"high","created_at_ms":12,"updated_at_ms":20,"tokens":null,"needs_turn":false,"head":"entry","next_order":0,"revision":3}).to_string();
-        db.execute("INSERT INTO sessions(id,starter,activity,data,queue) VALUES('old',1,20,?1,?2)",params![data,serde_json::to_string(&tau_protocol::QueueState::native()).unwrap()]).unwrap();
+        db.execute("INSERT INTO sessions(id,starter,activity,data,queue) VALUES('old',1,20,?1,?2)",params![data,serde_json::to_string(&tau_net::QueueState::native()).unwrap()]).unwrap();
         db.execute("INSERT INTO entries(session_id,id,kind,data) VALUES('old','entry','model_change',?1)",
             [r#"{"id":"entry","type":"model_change","provider":"openai-codex","modelId":"gpt-6-astra","thinkingLevel":"high"}"#]).unwrap();
         drop(db);

@@ -4,12 +4,12 @@ use anyhow::{Context, Result, ensure};
 use futures_util::FutureExt;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use tau_blocks::{BlockHeader, BlockKind, ToolBody, ToolState};
-use tau_protocol::{Event, EventKind, EventPhase, EventRole, QueueState};
+use tau_net::blocks::{BlockHeader, BlockKind, ToolBody, ToolState};
+use tau_net::{Event, EventKind, EventPhase, EventRole, QueueState};
 use crate::{manager::AgentManager, state::StateStore};
 
 pub const QUEUE: &str = "@queue";
-pub use tau_protocol::blocks::tool_input_id as input_id;
+pub use tau_net::blocks::tool_input_id as input_id;
 pub fn file_id(entry: &str) -> String { format!("file:{entry}") }
 
 fn header(id: String, parent: Option<String>, order: u64, kind: BlockKind, meta: Value, sealed: bool) -> BlockHeader {
@@ -52,12 +52,12 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
     };
     let sealed = value.phase != EventPhase::Live;
     let write=|mut h:BlockHeader,bytes:&[u8]|->Result<()> {
-        if let Some(offset)=append_from && let Some(old)=tau_blocks::header(db,session,&h.id)?
+        if let Some(offset)=append_from && let Some(old)=tau_block_store::header(db,session,&h.id)?
             && !old.sealed && old.length==offset as u64 && bytes.len()>=offset {
-            let appended=tau_blocks::append(db,session,&h.id,old.version,old.length,&bytes[offset..],h.sealed)?;
+            let appended=tau_block_store::append(db,session,&h.id,old.version,old.length,&bytes[offset..],h.sealed)?;
             h.version=appended.version;h.length=appended.length;h.revision=appended.revision;
-            tau_blocks::set_header(db,session,h)?;
-        } else {tau_blocks::put(db,session,h,bytes)?;}
+            tau_block_store::set_header(db,session,h)?;
+        } else {tau_block_store::put(db,session,h,bytes)?;}
         Ok(())
     };
     let mut attributes=json!({"event":meta});
@@ -70,7 +70,7 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
     let h = header(value.id.clone(),parent.clone(),value.order*2,kind,attributes,sealed);
     if value.kind == EventKind::Tool {
         // The card itself carries no argument bytes, even while they stream.
-        tau_blocks::put(db,session,h,b"")?;
+        tau_block_store::put(db,session,h,b"")?;
         let input = header(input_id(&value.id),Some(value.id.clone()),0,BlockKind::Code,
             json!({"inputFor":value.id,"language":"json","label":ToolBody::Input.label()}),sealed);
         write(input,value.text.as_bytes())?;
@@ -79,24 +79,24 @@ fn event_inner(db:&Connection,session:&str,value:&Event,append_from:Option<usize
     }
     if overflow {
         let metadata=header(format!("{}/meta",value.id),Some(value.id.clone()),2,BlockKind::State,json!({"eventMetadata":true}),true);
-        tau_blocks::put(db,session,metadata,&full_meta)?;
+        tau_block_store::put(db,session,metadata,&full_meta)?;
     }
     if let Some(parent) = call_parent {
         // A collapsed tool can show completion/error without downloading output.
-        if let Some(mut call) = tau_blocks::header(db,session,&parent)? {
+        if let Some(mut call) = tau_block_store::header(db,session,&parent)? {
             call.meta["event"]["isError"] = json!(value.is_error);
             call.meta["toolState"] = json!(if value.is_error { ToolState::Failed } else { ToolState::Completed });
-            tau_blocks::put(db,session,call,b"")?;
+            tau_block_store::put(db,session,call,b"")?;
         }
     }
     if let Some(attachment) = &value.attachment {
         let id = file_id(&value.entry_id);
-        if tau_blocks::header(db,session,&id)?.is_none() {
+        if tau_block_store::header(db,session,&id)?.is_none() {
             let h = header(id,Some(value.id.clone()),1,match attachment.kind {
-                tau_protocol::AttachmentKind::Image => BlockKind::Image,
-                tau_protocol::AttachmentKind::File => BlockKind::File,
+                tau_net::AttachmentKind::Image => BlockKind::Image,
+                tau_net::AttachmentKind::File => BlockKind::File,
             },json!({"attachment":{"kind":attachment.kind,"size":attachment.size},"entry":value.entry_id,"materialized":false}),false);
-            tau_blocks::put(db,session,h,b"")?;
+            tau_block_store::put(db,session,h,b"")?;
         }
     }
     Ok(())
@@ -111,15 +111,15 @@ pub fn queue(db: &Connection, session: &str, value: &QueueState) -> Result<()> {
     let members = value.requests.iter().map(|r| (&r.request_id, r.revision)).collect::<Vec<_>>();
     let membership = blake3::hash(&serde_json::to_vec(&members)?).to_hex().to_string();
     let root = header(QUEUE.into(),None,i64::MAX as u64-1,BlockKind::Queue,json!({"queue":true,"membershipHash":membership}),true);
-    tau_blocks::put(db,session,root,&serde_json::to_vec(&state)?)?;
+    tau_block_store::put(db,session,root,&serde_json::to_vec(&state)?)?;
     let ids = value.requests.iter().map(|r|format!("queued:{}",r.request_id)).collect::<Vec<_>>();
-    for old in tau_blocks::children(db,session,Some(QUEUE))? {
-        if !ids.contains(&old.id) { tau_blocks::remove(db,session,&old.id)?; }
+    for old in tau_block_store::children(db,session,Some(QUEUE))? {
+        if !ids.contains(&old.id) { tau_block_store::remove(db,session,&old.id)?; }
     }
     for (i,request) in value.requests.iter().enumerate() {
         let mut meta = request.clone(); meta.text.clear();
         let h = header(ids[i].clone(),Some(QUEUE.into()),i as u64,BlockKind::Text,json!({"request":meta,"bodyHash":blake3::hash(request.text.as_bytes()).to_hex().to_string()}),true);
-        tau_blocks::put(db,session,h,request.text.as_bytes())?;
+        tau_block_store::put(db,session,h,request.text.as_bytes())?;
     }
     Ok(())
 }
@@ -149,7 +149,7 @@ pub fn project_existing(db: &Connection) -> Result<()> {
 /// Recovery is a source transaction, not a per-viewer reset. Interrupted content
 /// keeps its IDs, chunks and offsets, and no paid work is restarted by viewing it.
 fn recover(db: &Connection) -> Result<()> {
-    tau_blocks::discard_staging(db)?;
+    tau_block_store::discard_staging(db)?;
     let mut after=(String::new(),String::new());
     loop {
         let mut q=db.prepare("SELECT scope,id,header FROM blocks WHERE (scope,id)>(?1,?2) AND (json_extract(header,'$.meta.event.phase')='live' OR (json_extract(header,'$.kind')='tool' AND json_extract(header,'$.meta.toolState') IS NULL)) ORDER BY scope,id LIMIT 64")?;
@@ -161,9 +161,9 @@ fn recover(db: &Connection) -> Result<()> {
         if h.kind == BlockKind::Tool {
             h.meta["toolState"] = json!(ToolState::Interrupted);
             h.meta["event"]["errorMessage"] = json!("Interrupted; execution outcome may be unknown");
-            if let Some(mut input) = tau_blocks::header(db,&scope,&input_id(&h.id))? { input.sealed = true; tau_blocks::set_header(db,&scope,input)?; }
+            if let Some(mut input) = tau_block_store::header(db,&scope,&input_id(&h.id))? { input.sealed = true; tau_block_store::set_header(db,&scope,input)?; }
         }
-        tau_blocks::set_header(db,&scope,h)?;
+        tau_block_store::set_header(db,&scope,h)?;
         }
     }
     let mut after=String::new();
@@ -199,12 +199,12 @@ impl StateStore {
     pub(crate) async fn recover_blocks(&self) -> Result<()> {
         self.access(|db| {let tx=db.transaction()?; recover(&tx)?; tx.commit()?; Ok(())}).await
     }
-    pub async fn block_cursor(&self) -> Result<tau_blocks::FeedCursor> { self.read(|db|tau_blocks::cursor(db)).await }
+    pub async fn block_cursor(&self) -> Result<tau_net::blocks::FeedCursor> { self.read(|db|tau_block_store::cursor(db)).await }
     pub async fn project_live(&self, session: &str, values: Vec<(Event,Option<usize>)>, removed: Vec<String>) -> Result<()> {
         let session = session.to_owned();
         self.access(move |db| {
             let tx = db.transaction()?;
-            for id in removed { tau_blocks::remove(&tx,&session,&id)?; }
+            for id in removed { tau_block_store::remove(&tx,&session,&id)?; }
             let next = values.iter().map(|(e,_)|e.order+1).max().unwrap_or(0);
             for (value,append_from) in values { event_inner(&tx,&session,&value,append_from)?; }
             // Reserving display positions also survives a crash before the
@@ -221,13 +221,13 @@ impl Drop for StagedFile {
         // Cancellation may happen while the QUIC stream is being dropped. Any
         // interrupted cleanup is also performed transactionally at startup.
         let state=self.state.clone(); let id=self.id.clone();
-        tokio::spawn(async move { let _=state.access(move |db| {let tx=db.transaction()?; tau_blocks::discard_stage(&tx,&id)?;tx.commit()?;Ok(())}).await; });
+        tokio::spawn(async move { let _=state.access(move |db| {let tx=db.transaction()?; tau_block_store::discard_stage(&tx,&id)?;tx.commit()?;Ok(())}).await; });
     }
 }
 impl AgentManager {
     async fn materialize_file(&self, scope: &str, id: &str) -> Result<()> {
         let scope=scope.to_owned(); let id=id.to_owned();
-        let read_header = || {let scope=scope.clone(); let id=id.clone(); self.inner.state.read(move |db|tau_blocks::header(db,&scope,&id))};
+        let read_header = || {let scope=scope.clone(); let id=id.clone(); self.inner.state.read(move |db|tau_block_store::header(db,&scope,&id))};
         let Some(h)=read_header().await? else {return Ok(());};
         if h.meta.get("materialized") != Some(&json!(false)) {return Ok(());}
         let _permit=self.inner.block_imports.acquire().await?;
@@ -237,16 +237,16 @@ impl AgentManager {
         let attachment=self.resolve_attachment(&scope,entry).await?;
         let mut file=attachment.file;
         let before=file.metadata().await?;
-        ensure!(before.len() <= tau_blocks::MAX_BLOCK_BYTES,"File is too large");
+        ensure!(before.len() <= tau_net::blocks::MAX_BLOCK_BYTES,"File is too large");
         let staging=StagedFile {state:self.inner.state.clone(),id:uuid::Uuid::new_v4().to_string()};
-        let mut offset=0; let mut buffer=vec![0; tau_blocks::BLOCK_CHUNK_BYTES*8];
+        let mut offset=0; let mut buffer=vec![0; tau_net::blocks::BLOCK_CHUNK_BYTES*8];
         use sha2::Digest;
         use tokio::io::AsyncReadExt;
         let mut hash=sha2::Sha256::new();
         loop {
             let n=file.read(&mut buffer).await?;
             let bytes=buffer[..n].to_vec(); let stage=staging.id.clone();
-            self.inner.state.access(move |db| {let tx=db.transaction()?;tau_blocks::stage_append(&tx,&stage,offset,&bytes)?;tx.commit()?;Ok(())}).await?;
+            self.inner.state.access(move |db| {let tx=db.transaction()?;tau_block_store::stage_append(&tx,&stage,offset,&bytes)?;tx.commit()?;Ok(())}).await?;
             hash.update(&buffer[..n]); offset+=n as u64;
             if n==0 {break;}
         }
@@ -258,39 +258,39 @@ impl AgentManager {
         let stage=staging.id.clone();
         self.inner.state.access(move |db| {
             let tx=db.transaction()?;
-            let current=tau_blocks::header(&tx,&scope,&id)?.context("File no longer exists")?;
-            if current.meta.get("materialized") == Some(&json!(false)) {tau_blocks::publish_stage(&tx,&stage,&scope,&id,meta)?;}
-            else {tau_blocks::discard_stage(&tx,&stage)?;}
+            let current=tau_block_store::header(&tx,&scope,&id)?.context("File no longer exists")?;
+            if current.meta.get("materialized") == Some(&json!(false)) {tau_block_store::publish_stage(&tx,&stage,&scope,&id,meta)?;}
+            else {tau_block_store::discard_stage(&tx,&stage)?;}
             tx.commit()?;Ok(())
         }).await
     }
 }
 
-impl tau_transfer::blocks::Backend for AgentManager {
-    fn feed(&self, request: tau_blocks::FeedRequest) -> futures_util::future::BoxFuture<'static,Result<tau_blocks::FeedPage>> {
+impl tau_net::native::Backend for AgentManager {
+    fn feed(&self, request: tau_net::blocks::FeedRequest) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::FeedPage>> {
         let state = self.inner.state.clone();
         async move {
             state.read(move |db| {
                 ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&request.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
-                tau_blocks::feed(db,&request)
+                tau_block_store::feed(db,&request)
             }).await
         }.boxed()
     }
-    fn read(&self, request: tau_blocks::BlockRequest) -> futures_util::future::BoxFuture<'static,Result<tau_blocks::ContentRange>> {
+    fn read(&self, request: tau_net::blocks::BlockRequest) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::ContentRange>> {
         let manager = self.clone();
         async move {
             let req=request.clone();
             let ready=manager.inner.state.read(move |db| {
-                ensure!(req.scope == tau_blocks::CONTROL_SCOPE || db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
-                let h=tau_blocks::header(db,&req.scope,&req.id)?.context("Unknown block")?;
-                if h.meta.get("materialized")==Some(&json!(false)) {Ok(None)} else {tau_blocks::read(db,&req).map(Some)}
+                ensure!(req.scope == tau_net::blocks::CONTROL_SCOPE || db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
+                let h=tau_block_store::header(db,&req.scope,&req.id)?.context("Unknown block")?;
+                if h.meta.get("materialized")==Some(&json!(false)) {Ok(None)} else {tau_block_store::read(db,&req).map(Some)}
             }).await?;
             if let Some(range)=ready {return Ok(range);}
             manager.materialize_file(&request.scope,&request.id).await?;
-            manager.inner.state.read(move |db| tau_blocks::read(db,&request)).await
+            manager.inner.state.read(move |db| tau_block_store::read(db,&request)).await
         }.boxed()
     }
-    fn files(&self, request: tau_protocol::files::FileRequest) -> futures_util::future::BoxFuture<'static, Result<tau_protocol::files::FileReply>> {
+    fn files(&self, request: tau_net::files::FileRequest) -> futures_util::future::BoxFuture<'static, Result<tau_net::files::FileReply>> {
         let manager = self.clone();
         async move {
             let session = request.session_id.clone();
@@ -304,13 +304,13 @@ impl tau_transfer::blocks::Backend for AgentManager {
         }.boxed()
     }
     fn changes(&self) -> tokio::sync::watch::Receiver<u64> { self.inner.state.block_changes.subscribe() }
-    fn upload_begin(&self, spec: tau_blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_blocks::UploadStatus>> {
+    fn upload_begin(&self, spec: tau_net::blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::UploadStatus>> {
         let manager = self.clone(); async move {manager.begin_upload(spec).await}.boxed()
     }
-    fn upload_write(&self, spec: tau_blocks::UploadSpec, offset: u64, bytes: Vec<u8>) -> futures_util::future::BoxFuture<'static,Result<()>> {
+    fn upload_write(&self, spec: tau_net::blocks::UploadSpec, offset: u64, bytes: Vec<u8>) -> futures_util::future::BoxFuture<'static,Result<()>> {
         let manager = self.clone(); async move {manager.write_upload(spec,offset,bytes).await}.boxed()
     }
-    fn upload_finish(&self, spec: tau_blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_blocks::UploadStatus>> {
+    fn upload_finish(&self, spec: tau_net::blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::UploadStatus>> {
         let manager = self.clone(); async move {manager.finish_upload(spec).await}.boxed()
     }
 }
@@ -322,42 +322,42 @@ mod tests {
     #[test]
     fn user_and_queue_headers_certify_exact_text_without_embedding_it() {
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA foreign_keys=ON").unwrap(); tau_blocks::initialize(&db).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap(); tau_block_store::initialize(&db).unwrap();
         let text = "authored café 😀\n".repeat(3000);
         let raw=json!({"type":"message","id":"entry","origin":{"requestId":"request"},"message":{"role":"user","content":[{"type":"text","text":text}]}});
         let value=Event::from_entry(&raw,false).unwrap().remove(0);
         let tx=db.transaction().unwrap(); event(&tx,"chat",&value).unwrap();
-        let mut state=QueueState::native();state.requests.push(tau_protocol::QueuedRequest {request_id:"request".into(),revision:0,kind:"steer".into(),text:text.clone(),images:0,timestamp_ms:None});
+        let mut state=QueueState::native();state.requests.push(tau_net::QueuedRequest {request_id:"request".into(),revision:0,kind:"steer".into(),text:text.clone(),images:0,timestamp_ms:None});
         queue(&tx,"chat",&state).unwrap();tx.commit().unwrap();
         for id in [&value.id,"queued:request"] {
-            let h=tau_blocks::header(&db,"chat",id).unwrap().unwrap();
+            let h=tau_block_store::header(&db,"chat",id).unwrap().unwrap();
             assert_eq!(h.meta["bodyHash"],blake3::hash(text.as_bytes()).to_hex().as_str());
             assert_eq!(h.length,text.len() as u64);assert!(h.sealed);
-            assert!(serde_json::to_vec(&h).unwrap().len()<tau_blocks::MAX_BLOCK_HEADER_BYTES);
+            assert!(serde_json::to_vec(&h).unwrap().len()<tau_net::blocks::MAX_BLOCK_HEADER_BYTES);
             assert!(!h.meta.to_string().contains("authored café"));
         }
-        let before=tau_blocks::header(&db,"chat",QUEUE).unwrap().unwrap();
+        let before=tau_block_store::header(&db,"chat",QUEUE).unwrap().unwrap();
         state.requests.clear();
         let tx=db.transaction().unwrap();queue(&tx,"chat",&state).unwrap();tx.commit().unwrap();
-        let after=tau_blocks::header(&db,"chat",QUEUE).unwrap().unwrap();
+        let after=tau_block_store::header(&db,"chat",QUEUE).unwrap().unwrap();
         assert!(after.revision>before.revision,"even deletion-only changes advance the root directory");
         assert_eq!(after.version,before.version,"unchanged queue-state bytes are not downloaded again");
     }
 
     #[test]
     fn oversized_metadata_is_preserved_as_a_referenced_body() {
-        let mut db=Connection::open_in_memory().unwrap();db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&db).unwrap();
+        let mut db=Connection::open_in_memory().unwrap();db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_block_store::initialize(&db).unwrap();
         let raw=json!({"type":"message","id":"entry","message":{"role":"assistant","content":[{"type":"text","text":"answer"}],"errorMessage":"\0🦀".repeat(5000)}});
         let mut value=crate::transcript::Event::from_entry(&raw,false).unwrap().remove(0);value.order=1;
         let tx=db.transaction().unwrap();event(&tx,"chat",&value).unwrap();tx.commit().unwrap();
-        let h=tau_blocks::header(&db,"chat",&value.id).unwrap().unwrap();assert!(serde_json::to_vec(&h).unwrap().len()<=tau_blocks::MAX_BLOCK_HEADER_BYTES);
-        let id=h.meta["fullEvent"]["id"].as_str().unwrap();let bytes=tau_blocks::cached_content(&db,"chat",id).unwrap();
+        let h=tau_block_store::header(&db,"chat",&value.id).unwrap().unwrap();assert!(serde_json::to_vec(&h).unwrap().len()<=tau_net::blocks::MAX_BLOCK_HEADER_BYTES);
+        let id=h.meta["fullEvent"]["id"].as_str().unwrap();let bytes=tau_block_store::cached_content(&db,"chat",id).unwrap();
         let restored:Event=serde_json::from_slice(&bytes).unwrap();assert_eq!(restored.error_message,value.error_message);
-        assert_eq!(tau_blocks::cached_content(&db,"chat",&value.id).unwrap(),b"answer");
+        assert_eq!(tau_block_store::cached_content(&db,"chat",&value.id).unwrap(),b"answer");
     }
     #[test]
     fn tool_projection_keeps_raw_streamed_input_and_seals_without_replacement() {
-        let mut db=Connection::open_in_memory().unwrap();db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_blocks::initialize(&db).unwrap();
+        let mut db=Connection::open_in_memory().unwrap();db.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_block_store::initialize(&db).unwrap();
         let raw=format!("{{\"command\":\"{}\"}}","x".repeat(40000));
         let stream="stable-stream";
         let project=|raw:&str,saved:bool| {
@@ -367,12 +367,12 @@ mod tests {
             crate::transcript::Event::from_entry(&entry,!saved).unwrap().remove(0)
         };
         for prefix in [100,10000,raw.len()] {let tx=db.transaction().unwrap();event(&tx,"chat",&project(&raw[..prefix],false)).unwrap();tx.commit().unwrap();}
-        let finished=project(&raw,true);let input=input_id(&finished.id);let before=tau_blocks::header(&db,"chat",&input).unwrap().unwrap();
+        let finished=project(&raw,true);let input=input_id(&finished.id);let before=tau_block_store::header(&db,"chat",&input).unwrap().unwrap();
         let tx=db.transaction().unwrap();event(&tx,"chat",&finished).unwrap();tx.commit().unwrap();
-        let range=tau_blocks::read(&db,&tau_blocks::BlockRequest {scope:"chat".into(),id:input,version:before.version,offset:before.length,follow:false}).unwrap();
+        let range=tau_block_store::read(&db,&tau_net::blocks::BlockRequest {scope:"chat".into(),id:input,version:before.version,offset:before.length,follow:false}).unwrap();
         assert!(range.bytes.is_empty());assert!(range.header.sealed);assert_eq!(range.header.version,before.version);
-        let card=tau_blocks::header(&db,"chat",&finished.id).unwrap().unwrap();assert_eq!(card.length,0);
-        assert!(serde_json::to_vec(&card).unwrap().len()<2048);assert_eq!(tau_blocks::children(&db,"chat",Some(&card.id)).unwrap().len(),1);
+        let card=tau_block_store::header(&db,"chat",&finished.id).unwrap().unwrap();assert_eq!(card.length,0);
+        assert!(serde_json::to_vec(&card).unwrap().len()<2048);assert_eq!(tau_block_store::children(&db,"chat",Some(&card.id)).unwrap().len(),1);
     }
     #[tokio::test]
     async fn published_tool_contract_handles_reused_ids_orphans_overflow_and_interruption() {
@@ -390,23 +390,23 @@ mod tests {
                     else {json!({"role":"toolResult","toolCallId":provider,"toolName":"bash","isError":error,"content":[{"type":"text","text":id}]})};
                 let mut value=Event::from_entry(&json!({"type":"message","id":id,"message":message}),false)?.remove(0);
                 value.order=order as u64;event(&tx,"chat",&value)?;ids.insert(id,value.id.clone());
-                let h=tau_blocks::header(&tx,"chat",&value.id)?.unwrap();
+                let h=tau_block_store::header(&tx,"chat",&value.id)?.unwrap();
                 assert_eq!(h.parent.as_ref(),parent.map(|p|&ids[p]));
-                let metadata=tau_blocks::cached_content(&tx,"chat",h.meta["fullEvent"]["id"].as_str().unwrap())?;
+                let metadata=tau_block_store::cached_content(&tx,"chat",h.meta["fullEvent"]["id"].as_str().unwrap())?;
                 assert_eq!(serde_json::from_slice::<Event>(&metadata)?.tool_call_id.as_deref(),Some(provider.as_str()));
                 if call {
-                    let input=tau_blocks::header(&tx,"chat",&input_id(&h.id))?.unwrap();
+                    let input=tau_block_store::header(&tx,"chat",&input_id(&h.id))?.unwrap();
                     assert_eq!(input.tool_body(),Some(ToolBody::Input));
                     assert_eq!(h.tool_state(),Some(ToolState::Running));
                 } else {assert_eq!(h.tool_body(),Some(if error {ToolBody::Error} else {ToolBody::Output}));}
             }
             for (id,expected) in [("a",ToolState::Completed),("b",ToolState::Failed)] {
-                assert_eq!(tau_blocks::header(&tx,"chat",&ids[id])?.unwrap().tool_state(),Some(expected));
+                assert_eq!(tau_block_store::header(&tx,"chat",&ids[id])?.unwrap().tool_state(),Some(expected));
             }
             recover(&tx)?;
-            let interrupted=tau_blocks::header(&tx,"chat",&ids["unfinished"])?.unwrap();
+            let interrupted=tau_block_store::header(&tx,"chat",&ids["unfinished"])?.unwrap();
             assert_eq!(interrupted.tool_state(),Some(ToolState::Interrupted));
-            assert!(interrupted.sealed && tau_blocks::header(&tx,"chat",&input_id(&interrupted.id))?.unwrap().sealed);
+            assert!(interrupted.sealed && tau_block_store::header(&tx,"chat",&input_id(&interrupted.id))?.unwrap().sealed);
             tx.commit()?;Ok(())
         }).await.unwrap();
     }

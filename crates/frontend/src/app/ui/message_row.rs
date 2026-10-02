@@ -3,7 +3,7 @@ use super::{attachments::AttachmentCard, controls::Control};
 use crate::{app::{attachments, code, literal}, clock, controller::Chat, feed::{MessageId, MessageBody}, icons::Icon, render::color};
 use sanscale::{Rect, Vec2};
 use std::hash::{Hash, Hasher};
-use tau_protocol::{EventKind, EventRole, EventPhase, ClientCommand, QueueOperation, QueueRef};
+use tau_net::{EventKind, EventRole, EventPhase, ClientCommand, QueueOperation, QueueRef};
 
 /// Only identities are kept in the transcript's order/height index. Text,
 /// metadata and commands are borrowed from their existing owners when needed.
@@ -359,7 +359,7 @@ fn display_body(chat: &Chat, id: &str, user: bool) -> String {
     if body.is_some_and(|b| b.limited) { source.push_str("\n\n[Preview limited. Fetch the complete message with Copy.]"); }
     source
 }
-fn detail_group<'a>(chat: &'a Chat, root: &str) -> Vec<&'a tau_protocol::Event> {
+fn detail_group<'a>(chat: &'a Chat, root: &str) -> Vec<&'a tau_net::Event> {
     let order = &chat.feed.order;
     let Some(index) = order.iter().position(|id| chat.feed.messages[id].event.as_deref() == Some(root)) else { return vec![]; };
     let start = order[..index].iter().rposition(|id| !is_detail(chat, id)).map_or(0, |i| i + 1);

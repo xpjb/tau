@@ -1,7 +1,7 @@
 //! Native resumable upload publication. Chunk commits and final file exports are
 //! bounded; no HTTP body, per-file endpoint, or runtime load participates.
 use anyhow::{Context, Result, ensure};
-use tau_blocks::*;
+use tau_net::blocks::*;
 use tokio::io::AsyncWriteExt;
 use crate::manager::{AgentManager, safe_file_name};
 
@@ -13,7 +13,7 @@ impl AgentManager {
                 ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[session_id],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
             }
             let tx = db.transaction()?;
-            let result = tau_blocks::uploads::begin(&tx,&spec)?;
+            let result = tau_block_store::uploads::begin(&tx,&spec)?;
             tx.commit()?;
             Ok(result)
         }).await?;
@@ -34,7 +34,7 @@ impl AgentManager {
     pub(crate) async fn write_upload(&self, spec: UploadSpec, offset: u64, bytes: Vec<u8>) -> Result<()> {
         self.inner.state.access(move |db| {
             let tx = db.transaction()?;
-            tau_blocks::uploads::write(&tx,&spec,offset,&bytes)?;
+            tau_block_store::uploads::write(&tx,&spec,offset,&bytes)?;
             tx.commit()?;
             Ok(())
         }).await
@@ -83,7 +83,7 @@ impl AgentManager {
         let mut offset = 0;
         while offset < spec.length {
             let id = spec.id.clone();
-            let range = self.inner.state.read(move |db|tau_blocks::read(db,&BlockRequest {scope:UPLOAD_SCOPE.into(),id,version:1,offset,follow:false})).await?;
+            let range = self.inner.state.read(move |db|tau_block_store::read(db,&BlockRequest {scope:UPLOAD_SCOPE.into(),id,version:1,offset,follow:false})).await?;
             ensure!(range.offset == offset && !range.bytes.is_empty(),"Upload has a missing range");
             hash.update(&range.bytes);
             if let Some((_,file,..)) = &mut export {file.write_all(&range.bytes).await?;}
@@ -118,7 +118,7 @@ impl AgentManager {
                 if let Some(parent)=root.parent() {std::fs::File::open(parent)?.sync_all()?;}
                 Ok(())
             }).await??;
-            Some(tau_protocol::UploadedFile {name,path:target.to_str().context("Upload path is not UTF-8")?.into(),size:spec.length})
+            Some(tau_net::UploadedFile {name,path:target.to_str().context("Upload path is not UTF-8")?.into(),size:spec.length})
         } else {None};
         state.access(move |db| {
             let tx = db.transaction()?;
@@ -126,7 +126,7 @@ impl AgentManager {
                 ensure!(tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[session_id],|r|r.get::<_,bool>(0))?,"Chat was deleted during upload");
             }
             if file.is_some() {tx.execute("UPDATE file_publications SET sealed=1 WHERE id=?1",[&spec.id])?;}
-            let status = tau_blocks::uploads::seal(&tx,&spec,&hash,file)?;
+            let status = tau_block_store::uploads::seal(&tx,&spec,&hash,file)?;
             tx.commit()?; Ok(status)
         }).await
         }).await?

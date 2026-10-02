@@ -5,7 +5,7 @@ mod paint;
 use sanscale::{Align, BlockKey, Draw, PaintHandle, PaintSpan, ParagraphKey, ParagraphSource, Style};
 use std::{borrow::Cow, sync::Arc};
 use tau_code_viewer::{Document, Selection};
-use tau_protocol::files::*;
+use tau_net::files::*;
 use ui::controls::{Controls, TextField};
 use ui::controls::ButtonStyle;
 use ui::scroll::ScrollState;

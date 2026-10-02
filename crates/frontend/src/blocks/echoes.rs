@@ -3,7 +3,7 @@
 //! these bytes into the verified replica. Entries survive queue -> history moves.
 use super::*;
 use rusqlite::{OptionalExtension, params};
-use tau_protocol::{ClientCommand, QueueOperation};
+use tau_net::{ClientCommand, QueueOperation};
 
 const MAX_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ENTRIES: usize = 256;
@@ -25,7 +25,7 @@ impl Cache {
         // must not turn startup/viewport contention into a lock error popup.
         let Some(tx) = try_replica_maintenance(&db)? else { return Ok(()); };
         // Never lend bytes or retire authored work across a source restore.
-        if tau_blocks::cursor(&tx)?.lineage != lineage { return Ok(()); }
+        if tau_block_store::cursor(&tx)?.lineage != lineage { return Ok(()); }
         for pending in &local.pending {
             let (request, text) = match &pending.request.command {
                 ClientCommand::Prompt { text, .. } => (&pending.request.id, text),
@@ -68,15 +68,15 @@ pub(super) fn adopt(db: &Connection, scope: &str, h: &BlockHeader) -> Result<boo
         h.meta.pointer("/event/origin/requestId").and_then(|v| v.as_str())
     } else { None };
     let (Some(request), Some(hash)) = (request, h.meta.get("bodyHash").and_then(|v| v.as_str())) else { return Ok(false); };
-    if tau_blocks::cache_budget::stored_bytes(db, scope, &h.id)? == h.length { return Ok(false); }
+    if tau_block_store::cache_budget::stored_bytes(db, scope, &h.id)? == h.length { return Ok(false); }
     let bytes: Option<Vec<u8>> = db.query_row("SELECT body FROM local_echoes WHERE scope=?1 AND request=?2 AND hash=?3",
         params![scope, request, hash], |r| r.get(0)).optional()?;
     let Some(bytes) = bytes else { return Ok(false); };
     if bytes.len() as u64 != h.length || blake3::hash(&bytes).to_hex().as_str() != hash { return Ok(false); }
     for (i, bytes) in bytes.chunks(BLOCK_CHUNK_BYTES).enumerate() {
-        tau_blocks::cache_range(db, scope, &ContentRange { header: h.clone(), offset: (i * BLOCK_CHUNK_BYTES) as u64,
+        tau_block_store::cache_range(db, scope, &ContentRange { header: h.clone(), offset: (i * BLOCK_CHUNK_BYTES) as u64,
             hash: blake3::hash(bytes).to_hex().to_string(), bytes: bytes.to_vec() })?;
     }
-    tau_blocks::cache_budget::enforce(db, scope, &h.id, tau_blocks::cache_budget::DEFAULT_CACHE_BYTES)?;
+    tau_block_store::cache_budget::enforce(db, scope, &h.id, tau_block_store::cache_budget::DEFAULT_CACHE_BYTES)?;
     Ok(true)
 }

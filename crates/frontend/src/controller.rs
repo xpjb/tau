@@ -9,20 +9,20 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-use tau_protocol::*;
+use tau_net::*;
 
 pub struct Download {
-    pub status: tau_transfer::TransferStatus,
+    pub status: tau_net::TransferStatus,
     pub path: PathBuf,
     pub bytes_per_second: Option<u64>,
     last_progress: Option<(std::time::Instant, u64)>,
 }
 impl Download {
-    pub fn new(status: tau_transfer::TransferStatus, path: PathBuf) -> Self {
+    pub fn new(status: tau_net::TransferStatus, path: PathBuf) -> Self {
         let last_progress = (!status.done).then(|| (std::time::Instant::now(), status.transferred));
         Self { status, path, bytes_per_second: None, last_progress }
     }
-    fn update(&mut self, status: tau_transfer::TransferStatus, path: PathBuf) {
+    fn update(&mut self, status: tau_net::TransferStatus, path: PathBuf) {
         let now = std::time::Instant::now();
         if status.done || self.path != path || status.transferred < self.status.transferred {
             self.bytes_per_second = None;
@@ -62,7 +62,7 @@ pub struct Controller {
     pub identity: String,
     pub account: Account,
     pub model_preferences: crate::models::Preferences,
-    pub model_catalog: tau_protocol::ModelCatalog,
+    pub model_catalog: tau_net::ModelCatalog,
     model_catalog_revision: Option<u64>,
     model_catalog_attempt: Option<std::time::Instant>,
     pub chats: HashMap<String, Chat>,
@@ -72,10 +72,10 @@ pub struct Controller {
     pub viewing_chat: bool,
     pub project_result: Option<(String, bool)>,
     pub settings_result: Option<(String, bool)>,
-    pub daemon_settings: Option<tau_protocol::settings::Settings>,
+    pub daemon_settings: Option<tau_net::settings::Settings>,
     pub connection: String,
     pub health: crate::connection::Health,
-    pub native_metrics:tau_transfer::blocks::Stats,
+    pub native_metrics:tau_net::native::Stats,
     pub epoch: Option<u64>,
     pub notice: Option<crate::notice::Notice>,
     pub transport_error: Option<String>,
@@ -541,13 +541,13 @@ impl Controller {
     }
     pub(crate) fn file_wake(&self) -> Wake { self.wake.clone() }
     pub(crate) fn viewer_generation(&self) -> u64 {self.file_generation}
-    pub fn view_files(&mut self, request: Option<tau_protocol::files::FileRequest>) -> Result<u64> {
+    pub fn view_files(&mut self, request: Option<tau_net::files::FileRequest>) -> Result<u64> {
         self.view_files_document(request, None)
     }
-    pub(crate) fn view_files_document(&mut self, request: Option<tau_protocol::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>) -> Result<u64> {
+    pub(crate) fn view_files_document(&mut self, request: Option<tau_net::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>) -> Result<u64> {
         self.view_files_preview(request, document, false)
     }
-    pub(crate) fn view_files_preview(&mut self, request: Option<tau_protocol::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>, preview: bool) -> Result<u64> {
+    pub(crate) fn view_files_preview(&mut self, request: Option<tau_net::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>, preview: bool) -> Result<u64> {
         self.file_generation += 1;
         self.file_update = None;
         if let Some(network)=&self.network {
@@ -598,7 +598,7 @@ impl Controller {
     fn report_sync_error(&mut self, error: anyhow::Error) {
         // Connection loss is status, not a failed content read. Preserve typed
         // errors so corruption/storage/unknown-block failures stay actionable.
-        if tau_transfer::blocks::is_connection_error(&error) { self.transport_error = Some(format!("{error:#}")); }
+        if tau_net::native::is_connection_error(&error) { self.transport_error = Some(format!("{error:#}")); }
         else { self.notice = Some(format!("{error:#}").into()); }
     }
     pub fn diagnostics(&self)->String {
@@ -1043,7 +1043,7 @@ impl Controller {
             if let Some(download)=self.downloads.get_mut(&key)
                 && download.path==path && (!download.status.done || download.status.failure.is_some()) {
                 let size=path.metadata()?.len();
-                download.update(tau_transfer::TransferStatus {transferred:size,total:size,
+                download.update(tau_net::TransferStatus {transferred:size,total:size,
                     network_bytes:download.status.network_bytes,done:true,failure:None},path.clone());
             }
             return Ok(path);
@@ -1064,7 +1064,7 @@ impl Controller {
         })?;
         self.downloads.insert(
             key,
-            Download::new(tau_transfer::TransferStatus {
+            Download::new(tau_net::TransferStatus {
                 transferred: 0,
                 total: 0,
                 network_bytes: 0,
@@ -1830,8 +1830,8 @@ async fn connection_status_does_not_popup_but_real_content_and_storage_failures_
     assert_eq!(c.notice.as_deref(),Some("Block content integrity check failed"));
     c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context("Write replica"));
     assert!(c.notice.as_deref().unwrap().starts_with("Write replica:"),"A storage IO error is not connection loss");
-    let broken=tau_transfer::blocks::Frame {
-        header:tau_transfer::blocks::Header::Data {version:1,offset:0,hash:String::new(),length:32,codec:tau_transfer::blocks::Codec::Zstd},
+    let broken=tau_net::native::Frame {
+        header:tau_net::native::Header::Data {version:1,offset:0,hash:String::new(),length:32,codec:tau_net::native::Codec::Zstd},
         data:b"not a zstd frame".to_vec(),
     };
     c.notice=None;c.report_sync_error(broken.decoded().unwrap_err().context("Content sync"));

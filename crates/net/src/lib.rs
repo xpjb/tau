@@ -1,3 +1,5 @@
+//! Shared Tau messages, content contracts and optional native streams.
+//! No SQLite or frontend/daemon policy lives in this crate.
 use serde::{Deserialize, Serialize};
 
 pub mod settings;
@@ -492,3 +494,16 @@ impl std::str::FromStr for SessionModel {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct OperationReceipt { pub id:String, pub accepted:bool, pub complete:bool, pub error:Option<String>, pub notice:Option<String> }
+
+/// Authenticated native streams. Protocol-only consumers need no runtime.
+#[cfg(feature = "native")]
+pub mod native;
+
+#[derive(Debug, Clone)]
+pub struct TransferStatus {
+    pub transferred: u64,
+    pub total: u64,
+    pub network_bytes: u64,
+    pub done: bool,
+    pub failure: Option<String>,
+}

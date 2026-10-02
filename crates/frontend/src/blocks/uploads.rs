@@ -1,7 +1,7 @@
 //! Client-originated content uses the same managed connection as display/files.
 use super::*;
 use crate::store::LocalFile;
-use tau_protocol::{ClientCommand, ClientRequest, MAX_PROMPT_CHARS};
+use tau_net::{ClientCommand, ClientRequest, MAX_PROMPT_CHARS};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[derive(Debug)]
@@ -52,7 +52,7 @@ impl files::Downloads {
             let (mut source, before, hash) = async {
                 let mut source = tokio::fs::File::open(&file.path).await?;
                 let before = source.metadata().await?;
-                ensure!(before.is_file() && before.len() == file.size && file.size <= tau_protocol::MAX_UPLOAD_BYTES as u64,"Attachment changed or exceeds 50 MB");
+                ensure!(before.is_file() && before.len() == file.size && file.size <= tau_net::MAX_UPLOAD_BYTES as u64,"Attachment changed or exceeds 50 MB");
                 let mut hasher = blake3::Hasher::new();
                 let mut buffer = vec![0;BLOCK_CHUNK_BYTES];
                 loop {let n=source.read(&mut buffer).await?;if n==0 {break;}hasher.update(&buffer[..n]);}
@@ -97,7 +97,7 @@ impl files::Downloads {
         Ok(text)
     }
 
-    pub(crate) async fn descriptor(mut self, reference: ContentRef) -> Result<tau_protocol::ServerMessage> {
+    pub(crate) async fn descriptor(mut self, reference: ContentRef) -> Result<tau_net::ServerMessage> {
         ensure!(reference.scope == CONTROL_SCOPE && reference.length <= MAX_BLOCK_BYTES,"Invalid data descriptor");
         let (client,lineage) = self.connection().await?;
         ensure!(reference.lineage == lineage,"Descriptor belongs to an old data source");
@@ -130,11 +130,11 @@ impl files::Downloads {
         let cache=self.cache.clone();
         tokio::task::spawn_blocking(move || {
             let db=cache.db.lock().unwrap();
-            ensure!(super::replica_epoch(&db)?==epoch && tau_blocks::cursor(&db)?.lineage==lineage,"Descriptor source changed");
-            let bytes=tau_blocks::cached_content(&db,&reference.scope,&reference.id)?;drop(db);
+            ensure!(super::replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==lineage,"Descriptor source changed");
+            let bytes=tau_block_store::cached_content(&db,&reference.scope,&reference.id)?;drop(db);
             ensure!(bytes.len() as u64==reference.length && blake3::hash(&bytes).to_hex().as_str()==reference.hash,"Descriptor integrity check failed");
             let message=serde_json::from_slice(&bytes)?;
-            ensure!(!matches!(message,tau_protocol::ServerMessage::Data {..}|tau_protocol::ServerMessage::BlockConnection {..}),"Recursive descriptor");Ok(message)
+            ensure!(!matches!(message,tau_net::ServerMessage::Data {..}|tau_net::ServerMessage::BlockConnection {..}),"Recursive descriptor");Ok(message)
         }).await?
     }
 }

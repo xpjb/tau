@@ -67,13 +67,13 @@ mod tests {
 pub struct PathIndex {
     pub root: String,
     pub revision: String,
-    pub entries: Vec<tau_protocol::files::IndexedPath>,
+    pub entries: Vec<tau_net::files::IndexedPath>,
     pub visible: usize,
 }
 impl PathIndex {
-    pub fn apply(previous: Option<&Self>, reply: &tau_protocol::files::FileReply) -> anyhow::Result<Self> {
+    pub fn apply(previous: Option<&Self>, reply: &tau_net::files::FileReply) -> anyhow::Result<Self> {
         use anyhow::{bail, ensure};
-        use tau_protocol::files::*;
+        use tau_net::files::*;
         let FileReply::Index { path, revision, base, entries, removed, .. } = reply else { bail!("Expected a file index") };
         ensure!(path.len() <= MAX_PATH_BYTES && revision.len() == 64, "Invalid index identity");
         ensure!(entries.len() <= MAX_INDEX_PATHS && removed.len() <= MAX_INDEX_PATHS, "Index change exceeds client limits");

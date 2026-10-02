@@ -3,7 +3,7 @@
 //! an upload reference. Interrupted effects are never automatically replayed.
 use anyhow::{Result,ensure};
 use rusqlite::{OptionalExtension,params};
-use tau_protocol::{ClientCommand,ClientRequest,ServerMessage};
+use tau_net::{ClientCommand,ClientRequest,ServerMessage};
 use crate::state::StateStore;
 
 impl StateStore {
@@ -41,7 +41,7 @@ impl StateStore {
             Ok(ServerMessage::Operation {operation_id:id,registered,response})
         }).await
     }
-    pub(crate) async fn operation_receipt(&self,id:&str)->Result<Option<tau_protocol::OperationReceipt>> {
+    pub(crate) async fn operation_receipt(&self,id:&str)->Result<Option<tau_net::OperationReceipt>> {
         let id=id.to_owned();
         self.read(move |db| {
             let row=db.query_row("SELECT response FROM operations WHERE id=?1",[&id],|r|r.get::<_,Option<String>>(0)).optional()?;
@@ -50,7 +50,7 @@ impl StateStore {
                 let (error,notice)=if let Some(response)=response {
                     match serde_json::from_str::<ServerMessage>(&response)? {ServerMessage::Response {error,notice,..}=>(error,notice),_=>(None,None)}
                 } else {(None,None)};
-                Ok(tau_protocol::OperationReceipt {id,accepted:true,complete,error,notice})
+                Ok(tau_net::OperationReceipt {id,accepted:true,complete,error,notice})
             }).transpose()
         }).await
     }

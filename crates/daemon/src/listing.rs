@@ -2,7 +2,7 @@
 //! live activity does not restart it. Runtime status has its own monotonic stamp.
 use anyhow::Result;
 use rusqlite::params;
-use tau_protocol::{Project,ServerMessage,SessionSummary,SessionStatus};
+use tau_net::{Project,ServerMessage,SessionSummary,SessionStatus};
 use crate::{manager::AgentManager,state::StoredSession};
 impl AgentManager {
     pub(crate) async fn list_page(&self,catalog_id:String,projects:bool,after:Option<String>,revision:u64)->Result<ServerMessage> {

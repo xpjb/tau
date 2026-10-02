@@ -19,7 +19,7 @@ use std::{
 };
 mod ripple;
 use ripple::Ripple;
-use tau_protocol::*;
+use tau_net::*;
 
 mod attachments;
 mod notices;

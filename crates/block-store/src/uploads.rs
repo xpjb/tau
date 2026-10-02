@@ -5,23 +5,9 @@ use super::*;
 pub const UPLOAD_QUOTA: u64 = 1024 * 1024 * 1024;
 pub const MAX_UPLOADS: usize = 4096;
 
-pub fn validate(spec: &UploadSpec) -> Result<()> {
-    ensure!(!spec.id.is_empty() && spec.id.len() <= 128 && spec.id.bytes().all(|b|b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "Invalid upload ID");
-    ensure!(spec.hash.len() == 64 && spec.hash.bytes().all(|b|b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "Invalid upload hash");
-    let limit = match &spec.purpose {
-        UploadPurpose::Command => MAX_COMMAND_BYTES,
-        UploadPurpose::File { session_id, file_name } => {
-            ensure!(!session_id.is_empty() && session_id.len() <= 128 && session_id.bytes().all(|b|b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "Invalid upload session");
-            ensure!(!file_name.trim().is_empty() && file_name.len() <= 1024, "Invalid upload file name");
-            tau_protocol::MAX_UPLOAD_BYTES as u64
-        }
-    };
-    ensure!(spec.length > 0 && spec.length <= limit, "Upload exceeds its byte limit");
-    Ok(())
-}
 
 pub fn begin(db: &Connection, spec: &UploadSpec) -> Result<UploadStatus> {
-    writing(db)?; validate(spec)?;
+    writing(db)?; spec.validate()?;
     let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     // Pure data leases may expire; operation receipts never do. Retrying an
     // expired upload re-verifies bytes and cannot itself repeat an effect.
@@ -73,7 +59,7 @@ pub fn write(db: &Connection, spec: &UploadSpec, offset: u64, bytes: &[u8]) -> R
 
 /// The caller hashes bounded reads outside its database lock, then seals only
 /// after the declared length/digest match. Full-length inputs cannot be mutated.
-pub fn seal(db: &Connection, spec: &UploadSpec, verified_hash: &str, file: Option<tau_protocol::UploadedFile>) -> Result<UploadStatus> {
+pub fn seal(db: &Connection, spec: &UploadSpec, verified_hash: &str, file: Option<tau_net::UploadedFile>) -> Result<UploadStatus> {
     writing(db)?;
     let current = status(db, spec)?;
     ensure!(current.offset == spec.length && verified_hash == spec.hash, "Upload integrity check failed");

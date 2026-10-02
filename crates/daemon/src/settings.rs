@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::state::SessionModel;
 
-pub use tau_protocol::settings::*;
+pub use tau_net::settings::*;
 
 pub(crate) trait SettingsExt {
     fn model(&self, selected: &SessionModel) -> Result<Cow<'_, ModelSettings>>;

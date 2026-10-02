@@ -1,8 +1,8 @@
 use super::*;
 use std::sync::Arc;
 
-fn catalog(revision: u64, slug: &str) -> tau_protocol::ModelCatalog {
-    tau_protocol::ModelCatalog { revision, default_model: Some(slug.parse().unwrap()), models: vec![
+fn catalog(revision: u64, slug: &str) -> tau_net::ModelCatalog {
+    tau_net::ModelCatalog { revision, default_model: Some(slug.parse().unwrap()), models: vec![
         SlashCommandArgument { value: slug.into(), description: Some("Cached suggestion".into()) },
     ], unresolved_providers: vec![] }
 }
@@ -40,7 +40,7 @@ fn model_catalog_is_account_cached_restartable_ordered_and_source_fenced() {
     let mut c = Controller::new(Store::open(root.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     assert!(c.account.selected.is_none());
     assert_eq!(c.model_catalog.models[0].value, "fixture/new", "Suggestions exist before any chat or network");
-    assert!(c.store.get::<tau_protocol::ModelCatalog>("another-account", "model-catalog").unwrap().models.is_empty());
+    assert!(c.store.get::<tau_net::ModelCatalog>("another-account", "model-catalog").unwrap().models.is_empty());
     // Revisions are daemon/connection scoped, not permanent freshness stamps.
     c.message(ServerMessage::ModelCatalog { catalog: catalog(1, "fixture/restarted") }).unwrap();
     c.new_chat().unwrap();
@@ -51,7 +51,7 @@ fn model_catalog_is_account_cached_restartable_ordered_and_source_fenced() {
     assert_eq!(c.selected_model(&id), Some(&"fixture/manual-missing-from-catalog".parse().unwrap()));
     c.network_event(transport::Event::Source(2, "source-b".into())).unwrap();
     assert!(c.model_catalog.models.is_empty());
-    assert!(c.store.get::<tau_protocol::ModelCatalog>(&c.identity, "model-catalog").unwrap().models.is_empty());
+    assert!(c.store.get::<tau_net::ModelCatalog>(&c.identity, "model-catalog").unwrap().models.is_empty());
     assert!(c.account.create_blocked, "Source changes still fence automatic work");
     assert_eq!(c.selected_model(&id), Some(&"fixture/manual-missing-from-catalog".parse().unwrap()), "Authored choices are not disposable metadata");
 }

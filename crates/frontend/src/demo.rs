@@ -1,7 +1,7 @@
 //! Explicit, offline screenshot fixture. Never used for real connection state.
 use crate::controller::Controller;
 use anyhow::Result;
-use tau_protocol::*;
+use tau_net::*;
 pub(crate) fn sessions() -> Vec<SessionSummary> {
     let mut sessions = vec![SessionSummary {
         id: "demo".into(),
@@ -54,7 +54,7 @@ pub fn populate(c: &mut Controller) -> Result<()> {
 /// Screenshot-only sample transfers. No content service or OS picker is started.
 pub fn populate_downloads(c: &mut Controller) -> Result<()> {
     use crate::controller::Download;
-    use tau_transfer::TransferStatus;
+    use tau_net::TransferStatus;
     let mut events = c.chats["demo"].feed.events.values().cloned().collect::<Vec<_>>();
     for (order, name, size) in [(4,"queued-report.txt",None), (5,"cached-notes.txt",Some(2*1024*1024)),
         (6,"saved-notes.txt",Some(2*1024*1024)), (7,"interrupted-package.zip",Some(12*1024*1024)),

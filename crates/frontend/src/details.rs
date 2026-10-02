@@ -2,7 +2,7 @@
 //! Tool membership uses native parents. Provider call IDs remain opaque metadata.
 use crate::store::LocalChat;
 use std::collections::{HashMap, HashSet};
-use tau_protocol::{Event, EventKind, EventRole};
+use tau_net::{Event, EventKind, EventRole};
 
 /// Copy is an explicit, complete-body operation, never a display description.
 pub fn copy<'a>(group: &[&Event], events: impl Iterator<Item = &'a Event>, parents: &HashMap<String, String>) -> String {
