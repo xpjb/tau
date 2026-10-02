@@ -6,8 +6,8 @@ pub mod blocks;
 mod transcript;
 pub use transcript::*;
 
-// Protocol 21 adds read-only filesystem streams on the shared native connection.
-pub const PROTOCOL_VERSION: u32 = 22;
+// Protocol 23 pins new-chat model intent to the first prompt and adds an account catalogue.
+pub const PROTOCOL_VERSION: u32 = 23;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
@@ -66,6 +66,7 @@ pub enum ClientCommand {
     MoveSession { session_id: String, project_id: String },
     GetSettings,
     SetSettings { revision: u64, settings: Box<settings::Settings> },
+    GetModelCatalog,
     RefreshModelCatalog { provider: String },
     /// Read-only account quota; never a model prompt or a session operation.
     GetCodexUsage { #[serde(default)] force: bool },
@@ -93,6 +94,14 @@ pub enum ClientCommand {
     Prompt {
         session_id: String,
         text: String,
+        /// Optional exact choice for an unused chat, committed with this prompt.
+        /// Metadata is advisory, never a prerequisite or an allowlist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<SessionModel>,
+        /// Carry an outstanding named creation with the send rather than wait
+        /// for its response. The daemon deduplicates the same creation intent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        create: Option<ChatCreation>,
     },
     QueueControl {
         session_id: String,
@@ -199,6 +208,7 @@ pub enum ServerMessage {
     },
     Settings { request_id: String, settings: Box<settings::Settings> },
     CodexUsage { request_id: String, report: Option<CodexUsage>, error: Option<String> },
+    ModelCatalog { catalog: ModelCatalog },
     Commands {
         session_id: String,
         commands: Vec<SlashCommand>,
@@ -234,6 +244,7 @@ impl ServerMessage {
             Self::SessionState {session_id,..}=>Some(format!("state:{session_id}")),
             Self::Commands {session_id,..}=>Some(format!("commands:{session_id}")),
             Self::Settings {..}=>Some("settings".into()),
+            Self::ModelCatalog {..}=>Some("model-catalog".into()),
             Self::Data {key,..}=>Some(key.clone()),
             _=>None,
         }
@@ -443,6 +454,26 @@ pub struct CrashFrame {
 pub struct SessionModel {
     pub provider: String,
     pub model_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatCreation {
+    pub project_id: String,
+    pub keep_session_id: Option<String>,
+}
+
+/// Account-wide suggestions. The client keeps the last snapshot while the
+/// daemon revalidates provider metadata in the background.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalog {
+    #[serde(default)] pub revision: u64,
+    pub default_model: Option<SessionModel>,
+    pub models: Vec<SlashCommandArgument>,
+    /// Keep last-known client suggestions for these providers until the daemon
+    /// has an authenticated catalogue. This never disables selection.
+    #[serde(default)] pub unresolved_providers: Vec<String>,
 }
 
 impl std::str::FromStr for SessionModel {

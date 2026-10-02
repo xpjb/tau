@@ -246,7 +246,9 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                         Ok(request) => request,
                         Err(error) => {queue_server(&response_outbound,&ServerMessage::command_failure(request_id,error)).await;return;}
                     };
-                    let journalled=request.command.journalled_control();
+                    // Creation is also callable from a pipelined prompt. Its manager
+                    // boundary journals it under the same gate as standalone creation.
+                    let journalled=request.command.journalled_control() && !matches!(request.command, ClientCommand::CreateSession { .. });
                     if journalled {
                         match manager.inner.state.reserve_operation(&request).await {
                             Ok(Some(response))=>{queue_server(&response_outbound,&response).await;return;}
@@ -294,6 +296,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             Ok(page)=>{if !queue_server(&response_outbound,&page).await {return;}ServerMessage::success(request_id,None,None)},
                             Err(error)=>ServerMessage::command_failure(request_id,error)
                         },
+                        ClientCommand::GetModelCatalog => {
+                            manager.schedule_model_catalog();
+                            ServerMessage::ModelCatalog { catalog: manager.model_catalog() }
+                        }
                         ClientCommand::GetCodexUsage { force } => {
                             let result = manager.codex_usage(force).await;
                             ServerMessage::CodexUsage { request_id, report: result.report, error: result.error }
@@ -319,15 +325,10 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
-                        ClientCommand::CreateSession { keep_session_id, project_id } => match manager.create_session_requested(
-                            keep_session_id.as_deref(), &project_id,
-                            uuid::Uuid::parse_str(&request_id).ok().as_ref().map(|_| request_id.as_str()),
+                        ClientCommand::CreateSession { keep_session_id, project_id } => match manager.create_session_operation(
+                            &request_id, &crate::protocol::ChatCreation { keep_session_id, project_id },
                         ).await {
-                            Ok(session_id) => ServerMessage::success(
-                                request_id,
-                                Some(session_id),
-                                None,
-                            ),
+                            Ok(session_id) => ServerMessage::success(request_id, Some(session_id), None),
                             Err(error) => ServerMessage::command_failure(request_id, error),
                         },
                         ClientCommand::CreateProject { project_id, name, prompt } => match manager.create_project(project_id,name,prompt).await {
@@ -369,11 +370,19 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                                 Err(error) => ServerMessage::command_failure(request_id, error),
                             }
                         }
-                        ClientCommand::Prompt { session_id, text } => {
+                        ClientCommand::Prompt { session_id, text, model, create } => {
                             if text.chars().count() > MAX_PROMPT_CHARS {
                                 ServerMessage::failure(request_id, "message is too large")
                             } else {
-                                match manager.prompt(&session_id, &text, &request_id).await {
+                                let result = async {
+                                    if let Some(create) = create {
+                                        anyhow::ensure!(uuid::Uuid::parse_str(&session_id).is_ok(), "Invalid named chat");
+                                        let id = manager.create_session_operation(&session_id, &create).await?;
+                                        anyhow::ensure!(id == session_id, "Creation resolved to a different chat");
+                                    }
+                                    manager.prompt_with_model(&session_id, &text, &request_id, model.as_ref()).await
+                                }.await;
+                                match result {
                                     Ok(outcome) => ServerMessage::prompt_success(
                                         request_id,
                                         session_id,

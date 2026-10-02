@@ -80,8 +80,8 @@ async fn manual_quick_model_refreshes_catalog_and_keeps_reported_tokens_visible(
     c.save_model_preferences(preferences).unwrap();
     c.draft("Keep my draft while selecting a manual model".into()).unwrap();
     c.choose_model(&session, slug).unwrap();
-    until(&mut c, |c| script.catalog_calls.load(Ordering::SeqCst) == 1 && c.selected().is_some_and(|chat| chat.model_request.is_none())
-        && c.account.sessions.iter().any(|s| s.id == session && s.model.as_ref().is_some_and(|m| m.model_id == "gpt-6.1-sol"))).await;
+    assert_eq!(c.selected_model(&session), Some(&slug.parse().unwrap()));
+    assert!(c.selected().unwrap().local.pending.is_empty(), "Picking a model has no network command");
     assert_eq!(c.selected().unwrap().local.draft, "Keep my draft while selecting a manual model");
     c.send_prompt().unwrap();
     until(&mut c, |c| c.account.sessions.iter().any(|s| s.id == session && s.status == SessionStatus::Idle
@@ -92,5 +92,12 @@ async fn manual_quick_model_refreshes_catalog_and_keeps_reported_tokens_visible(
     assert_eq!(script.catalog_calls.load(Ordering::SeqCst), 1, "Model misses coalesce across lists, reads and turns");
     assert_eq!(script.turn_calls.load(Ordering::SeqCst), 1);
     assert_eq!(c.model_preferences.slugs, [slug]);
-    drop(c); daemon.abort(); provider.abort();
+    until(&mut c, |c| c.model_catalog.models.iter().any(|m| m.value == slug)).await;
+    drop(c);
+    // The account cache works without a selected/loaded chat or another GET.
+    let store = Store::open(local.path().into()).unwrap();
+    let settings: Settings = store.get("", "settings").unwrap();
+    let cached: ModelCatalog = store.get(&settings.identity(), "model-catalog").unwrap();
+    assert!(cached.models.iter().any(|m| m.value == slug));
+    daemon.abort(); provider.abort();
 }

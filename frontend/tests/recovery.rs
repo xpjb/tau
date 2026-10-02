@@ -15,7 +15,7 @@ use std::{
 };
 use tau_frontend::{
     controller::Controller,
-    store::{Delivery, Pending, Settings, Store},
+    store::{Delivery, Settings, Store},
     transport::{Command, Event as NetworkEvent, Network},
 };
 use tau_protocol::*;
@@ -33,69 +33,60 @@ fn offline_new_chat_and_send_are_durable_before_any_server_ack() {
     c.draft("A message typed while offline".into()).unwrap();
     c.send_prompt().unwrap();
     let prompt = c.selected().unwrap().local.pending[0].request.id.clone();
-    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForChat);
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
     drop(c);
     let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     assert_eq!(c.account.pending_create.as_ref().unwrap().id, request);
     assert_eq!(c.account.selected.as_deref(), Some(id.as_str()));
     assert_eq!(c.selected().unwrap().local.pending[0].request.id, prompt);
-    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForChat);
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
     let summary = tau_protocol::SessionSummary { id:id.clone(), project_id:general_project_id(), title:"New chat".into(), starter:true,
         status:SessionStatus::Idle, detail:None, context_usage:None, model:None, thinking_level:None,
         parent_id:None, created_at_ms:1, updated_at_ms:1 };
     c.message(ServerMessage::Sessions { sessions:vec![summary] }).unwrap();
     assert!(c.account.pending_create.is_none());
     assert_eq!(c.selected().unwrap().local.pending[0].request.id, prompt);
-    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForChat,
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection,
         "A saved prompt cannot be sent before the transport is ready");
 }
 
 #[test]
-fn new_chat_model_choices_stay_visible_through_confirmation_and_reconnect() {
+fn new_chat_model_choice_is_local_durable_and_not_overwritten_by_late_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     c.new_chat().unwrap();
     let id = c.account.selected.clone().unwrap();
-    assert!(c.quick_start(&id), "show the chooser immediately, even for a local provisional chat");
-    assert!(!c.can_choose_model(&id));
-    assert!(c.is_creating(&id), "local creation owns the chooser before daemon confirmation");
+    assert!(c.can_choose_model(&id));
     c.draft("Unsent draft".into()).unwrap();
-    assert!(c.quick_start(&id), "typing must not consume a model choice");
-
-    // The creation receipt and session list may arrive before the content feed.
+    for slug in ["openai-codex/first", "openrouter/exact/manual-id", "openai-codex/last"] {
+        c.choose_model(&id, slug).unwrap();
+        assert_eq!(c.selected_model(&id), Some(&slug.parse().unwrap()));
+        assert!(c.selected().unwrap().local.pending.is_empty(), "Selection creates no RPC or outbox control");
+        assert!(c.can_choose_model(&id));
+    }
+    drop(c);
+    let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
+    let chosen: SessionModel = "openai-codex/last".parse().unwrap();
+    assert_eq!(c.selected_model(&id), Some(&chosen));
+    assert_eq!(c.account.last_model.as_ref(), Some(&chosen));
     c.message(ServerMessage::Sessions { sessions: vec![SessionSummary {
         id: id.clone(), project_id: general_project_id(), title: "New chat".into(), starter: true,
         status: SessionStatus::Sleeping, detail: None, context_usage: None,
-        model: Some(SessionModel { provider: "openai-codex".into(), model_id: "fixture".into() }), thinking_level:None,
+        model: Some("openai-codex/old-default".parse().unwrap()), thinking_level: None,
         parent_id: None, created_at_ms: 1, updated_at_ms: 1,
     }] }).unwrap();
-    assert!(!c.is_creating(&id));
-    assert!(c.quick_start(&id));
-    c.epoch = Some(1);
-    assert!(c.can_choose_model(&id), "a confirmed chat can accept /model without a transcript read");
-
-    let request = "selection".to_owned();
-    c.chats.get_mut(&id).unwrap().model_request = Some((request.clone(), "openai-codex/fixture".into()));
-    c.chats.get_mut(&id).unwrap().local.pending.push(Pending {
-        request: ClientRequest { id: request, command: ClientCommand::Prompt { session_id: id.clone(), text: "/model openai-codex/fixture".into() } },
-        started_at_ms: None, text: "/model openai-codex/fixture".into(), files: vec![], status: Delivery::Sending, detail: None,
-    });
-    assert!(c.quick_start(&id), "an in-flight model choice must not remove the tiles");
-    assert!(!c.can_choose_model(&id), "another choice must wait for the first");
-    c.chats.get_mut(&id).unwrap().model_request = None;
-    c.chats.get_mut(&id).unwrap().local.pending[0].status = Delivery::Unconfirmed;
-    c.epoch = None;
-    c.chats.get_mut(&id).unwrap().feed.synchronized = false;
-    assert!(c.quick_start(&id), "reconnect and an uncertain /model must not collapse the chooser");
-    assert!(!c.can_choose_model(&id));
-    c.epoch = Some(2);
-    assert!(!c.can_choose_model(&id), "reconcile an uncertain model control before another selection");
-    c.chats.get_mut(&id).unwrap().local.pending.clear();
-    assert!(c.can_choose_model(&id), "transcript sync is not a prerequisite for a model choice");
-    c.epoch = None;
+    c.message(ServerMessage::ModelCatalog { catalog: ModelCatalog {
+        revision: 1, default_model: Some("openai-codex/another-default".parse().unwrap()), models: vec![], unresolved_providers: vec![],
+    }}).unwrap();
+    assert_eq!(c.selected_model(&id), Some(&chosen));
+    assert_eq!(c.selected().unwrap().local.draft, "Unsent draft");
     c.send_prompt().unwrap();
-    assert!(!c.quick_start(&id), "the first local send ends the new-chat choice");
-    assert!(!c.can_choose_model(&id));
+    assert_eq!(c.selected().unwrap().local.pending.len(), 1);
+    assert!(matches!(&c.selected().unwrap().local.pending[0].request.command,
+        ClientCommand::Prompt { model: Some(model), text, .. } if model == &chosen && text == "Unsent draft"));
+    assert!(!c.quick_start(&id));
+    c.new_chat().unwrap();
+    assert_eq!(c.selected_model(c.account.selected.as_ref().unwrap()), Some(&chosen), "New chats use the last local choice immediately");
 }
 
 #[test]
@@ -542,4 +533,55 @@ async fn missing_receipt_retries_original_intent_in_order_after_restart_in_anoth
     assert_eq!(texts, ["first", "first", "second"]);
     assert_eq!(c.account.selected.as_deref(), Some("elsewhere"), "delivery does not steal navigation");
     drop(seen); drop(c); server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_prompt_and_local_selection_do_not_wait_for_any_create_or_catalog_response() {
+    let (sent, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new().route("/v1/ws", get(move |ws: WebSocketUpgrade| {
+        let sent = sent.clone();
+        async move { ws.on_upgrade(move |mut socket| async move {
+            socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {
+                protocol_version: PROTOCOL_VERSION, daemon_version: "gated-fixture".into(), lineage: Some("same-source".into()),
+            }).unwrap().into())).await.unwrap();
+            // Deliberately send no catalogue, create receipt, session list or
+            // prompt response. Everything below must work on the local first frame.
+            while let Some(Ok(frame)) = socket.recv().await {
+                if let axum::extract::ws::Message::Text(text) = frame {
+                    let _ = sent.send(serde_json::from_str::<ClientRequest>(&text).unwrap());
+                }
+            }
+        }) }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let root = tempfile::tempdir().unwrap(); let store = Store::open(root.path().into()).unwrap();
+    store.put("", "settings", &Settings { server_url: format!("http://{address}"), token: "fixture".into() }).unwrap();
+    let mut c = Controller::new(store, Arc::new(|| {})).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop { c.poll(); if c.epoch.is_some() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
+    }).await.unwrap();
+    c.new_chat().unwrap(); let id = c.account.selected.clone().unwrap();
+    c.choose_model(&id, "fixture/first").unwrap();
+    c.choose_model(&id, "fixture/exact-last-choice").unwrap();
+    assert!(c.selected().unwrap().local.pending.is_empty());
+    c.draft("Send before the server replies".into()).unwrap(); c.send_prompt().unwrap();
+    assert!(c.is_creating(&id));
+    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::Sending);
+    let mut commands = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let request = seen.recv().await.unwrap();
+            let prompt = matches!(request.command, ClientCommand::Prompt { .. });
+            commands.push(request); if prompt { break; }
+        }
+    }).await.unwrap();
+    assert_eq!(commands.iter().filter(|r| matches!(r.command, ClientCommand::GetModelCatalog)).count(), 1);
+    let prompt = commands.last().unwrap();
+    assert!(matches!(&prompt.command, ClientCommand::Prompt {session_id, text, model:Some(model), create:Some(create)}
+        if session_id == &id && text == "Send before the server replies" && model.model_id == "exact-last-choice" && create.project_id == "general"));
+    assert_eq!(commands.iter().filter(|r| matches!(r.command, ClientCommand::Prompt { .. })).count(), 1, "No /model command or intermediate choice leaked onto the wire");
+    assert!(c.notice.is_none());
+    drop(c); server.abort();
 }

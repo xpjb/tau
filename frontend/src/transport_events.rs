@@ -27,6 +27,7 @@ fn key(event:&Event)->Option<String> {
             ServerMessage::Sessions {..}=>Some(format!("sessions:{epoch}")),
             ServerMessage::Projects {..}=>Some(format!("projects:{epoch}")),
             ServerMessage::Settings {..}=>Some(format!("settings:{epoch}")),
+            ServerMessage::ModelCatalog {..}=>Some(format!("model-catalog:{epoch}")),
             ServerMessage::Commands {session_id,..}=>Some(format!("commands:{epoch}:{session_id}")),
             ServerMessage::ResyncRequired {session_id}=>Some(format!("resync:{epoch}:{session_id:?}")),
             _=>None,
@@ -49,7 +50,7 @@ impl Events {
         } else {0};
         if let Some(key)=key(&event) && let Some(at)=queue.events.iter().enumerate().skip(after)
             .find_map(|(at,(old,_))|(self::key(old).as_ref()==Some(&key)).then_some(at)) {
-            let revision=|event:&Event|match event {Event::Message(_,message)|Event::SizedMessage(_,message,_)=>match message.as_ref() {ServerMessage::SessionState {revision,..}=>*revision,_=>0},_=>0};
+            let revision=|event:&Event|match event {Event::Message(_,message)|Event::SizedMessage(_,message,_)=>match message.as_ref() {ServerMessage::SessionState {revision,..}=>*revision,ServerMessage::ModelCatalog {catalog}=>catalog.revision,_=>0},_=>0};
             if revision(&queue.events[at].0)>revision(&event) {return true;}
             let (_,bytes)=queue.events.remove(at).unwrap();queue.bytes-=bytes;
         }

@@ -43,6 +43,7 @@ pub struct StoredSession {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Receipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub model: Option<SessionModel>,
     pub id: String,
     #[serde(default)] pub command: Option<String>,
     pub text: String,
@@ -220,7 +221,7 @@ impl StateStore {
                 params![id,now,serde_json::to_string(&session)?,serde_json::to_string(&QueueState::native())?])?;
             tx.execute("INSERT INTO entries(session_id,id,kind,data) VALUES(?1,?2,'model_change',?3)",params![id,entry["id"].as_str(),entry.to_string()])?;
             if let Some(request) = requested_id {
-                let receipt = Receipt { id:request.clone(), command:Some("create_session".into()), text:keep_receipt,
+                let receipt = Receipt { model:None, id:request.clone(), command:Some("create_session".into()), text:keep_receipt,
                     disposition:PromptDisposition::Handled, finished:true, notice:None, error:None };
                 tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
             }
@@ -501,7 +502,7 @@ impl StateStore {
                         tx.execute("INSERT INTO events(session_id,position,id,entry_id,data) VALUES(?1,?2,?3,?4,?5)",params![id,event.order,event.id,event.entry_id,serde_json::to_string(&event)?])?;
                     }
                     if entry["message"]["role"] == "user" && let Some(request) = entry["origin"]["requestId"].as_str() {
-                        let receipt = Receipt { id:request.into(),command:None,text:entry["message"]["content"].as_str().unwrap_or_default().into(),disposition:PromptDisposition::Submitted,finished:true,notice:None,error:None };
+                        let receipt = Receipt { model:None, id:request.into(),command:None,text:entry["message"]["content"].as_str().unwrap_or_default().into(),disposition:PromptDisposition::Submitted,finished:true,notice:None,error:None };
                         tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
                     }
                 }

@@ -139,13 +139,17 @@ impl ModelCatalog {
         saved.windows.get(&model.model_id).copied()
     }
     pub(crate) fn models(&self, settings: &Settings, provider: &str) -> Vec<(String, u64)> {
-        let Some(config) = settings.providers.get(provider) else { return vec![]; };
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(saved) = state.records.get(provider).filter(|r| r.ready).and_then(|r| r.saved.as_ref())
-            .filter(|s| s.api == config.api && s.base_url == config.base_url) else { return vec![]; };
-        let mut models = saved.windows.iter().map(|(id,window)| (id.clone(), *window)).collect::<Vec<_>>();
-        models.sort_by(|a,b| a.0.cmp(&b.0)); models
+        self.available_models(settings, provider).unwrap_or_default()
     }
+    pub(crate) fn available_models(&self, settings: &Settings, provider: &str) -> Option<Vec<(String, u64)>> {
+        let config = settings.providers.get(provider)?;
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = state.records.get(provider).filter(|r| r.ready).and_then(|r| r.saved.as_ref())
+            .filter(|s| s.api == config.api && s.base_url == config.base_url)?;
+        let mut models = saved.windows.iter().map(|(id,window)| (id.clone(), *window)).collect::<Vec<_>>();
+        models.sort_by(|a,b| a.0.cmp(&b.0)); Some(models)
+    }
+
 }
 
 pub(crate) async fn authorize(auth: &AuthStore, provider: &str, config: &ProviderSettings) -> Result<(String, Option<String>, String)> {

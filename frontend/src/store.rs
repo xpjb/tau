@@ -66,6 +66,7 @@ pub struct SavedDownload {
 pub struct Account {
     #[serde(default)] pub source_lineage:Option<String>,
     pub create_blocked:bool,
+    pub last_model: Option<SessionModel>,
     pub projects: Vec<Project>,
     pub selected_project: String,
     /// Per-topic resume target. Kept client-local; server membership is authoritative.
@@ -83,7 +84,7 @@ pub struct Account {
 }
 impl Default for Account {
     fn default() -> Self {
-        Self { missing_chats:BTreeSet::new(),source_lineage:None,create_blocked:false,projects: vec![Project::general()], selected_project: general_project_id(),
+        Self { last_model:None,missing_chats:BTreeSet::new(),source_lineage:None,create_blocked:false,projects: vec![Project::general()], selected_project: general_project_id(),
             last_chat_by_project: BTreeMap::new(), sessions: vec![], selected: None, recent_chats: vec![], prefetch_at: BTreeMap::new(), read_at: BTreeMap::new(), pending_create: None, pending_controls:BTreeMap::new() }
     }
 }
@@ -125,6 +126,7 @@ pub struct LocalFile {
 pub enum Delivery {
     WaitingForChat,
     WaitingForConnection,
+    /// Read-only migration of pre-23 outboxes. Never assigned to a new send.
     WaitingForModel,
     Preparing,
     Sending,
@@ -176,6 +178,7 @@ pub struct LocalActivity {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LocalChat {
+    pub model_choice: Option<SessionModel>,
     pub activity: LocalActivity,
     pub draft: String,
     pub files: Vec<LocalFile>,
@@ -188,6 +191,7 @@ pub struct LocalChat {
 impl Default for LocalChat {
     fn default() -> Self {
         Self {
+            model_choice: None,
             activity: LocalActivity::default(),
             draft: String::new(),
             files: vec![],
@@ -283,12 +287,20 @@ impl Store {
         self.db.execute("INSERT INTO local VALUES(?,?,?) ON CONFLICT(account,key) DO UPDATE SET value=excluded.value", params![account,key,serde_json::to_string(value)?])?;
         Ok(())
     }
+    pub fn save_model_choice(&self, identity: &str, session: &str, chat: &LocalChat, account: &Account) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        self.save_chat(identity, session, chat)?;
+        self.put(identity, "account", account)?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn bind_source(&self,account:&str,lineage:&str)->Result<bool> {
         let tx=self.db.unchecked_transaction()?;
         let mut state:Account=self.get(account,"account")?;
         if state.source_lineage.as_deref()==Some(lineage) {return Ok(false);}
         let changed=state.source_lineage.is_some();state.source_lineage=Some(lineage.into());
         if changed {
+            tx.execute("DELETE FROM local WHERE account=?1 AND key='model-catalog'", [account])?;
             state.create_blocked=true;
             for saved in state.pending_controls.values_mut() {saved.blocked=true;}
             let ids=self.db.prepare("SELECT substr(key,6) FROM local WHERE account=?1 AND key LIKE 'chat:%'")?.query_map([account],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -453,9 +465,10 @@ impl Store {
             else if target.draft!=source.draft || target.files.iter().map(|f|&f.id).collect::<Vec<_>>()!=source.files.iter().map(|f|&f.id).collect::<Vec<_>>() {
                 // A draft and its attachments are one authored bundle. Do not
                 // silently attach the provisional files to a different draft.
-                target.pending.push(Pending {request:ClientRequest {id:uuid::Uuid::new_v4().to_string(),command:ClientCommand::Prompt {session_id:into.into(),text:source.draft.clone()}},started_at_ms:None,text:source.draft,files:source.files,status:Delivery::Rejected,detail:Some("Another local draft was present; restore this draft and its attachments explicitly".into())});
+                target.pending.push(Pending {request:ClientRequest {id:uuid::Uuid::new_v4().to_string(),command:ClientCommand::Prompt {session_id:into.into(),text:source.draft.clone(), model: None, create: None }},started_at_ms:None,text:source.draft,files:source.files,status:Delivery::Rejected,detail:Some("Another local draft was present; restore this draft and its attachments explicitly".into())});
             }
         }
+        target.model_choice = source.model_choice.or(target.model_choice);
         target.activity = target.activity.max(source.activity);
         let pending_ids: HashSet<_> = target.pending.iter().map(|p| p.request.id.clone()).collect();
         target.pending.extend(source.pending.into_iter().filter(|p| !pending_ids.contains(&p.request.id)));

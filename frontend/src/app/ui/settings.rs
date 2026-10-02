@@ -30,6 +30,7 @@ impl ModelsDialog {
         ui.size.1 as f32 / ui.scale >= 320.
     }
     pub fn new(cx: &mut Context<'_>) -> Result<Self> {
+        cx.model.warm_model_catalog();
         let id = Id::new();
         let mut models = TextField::new(id, "Quick models", Editor::new(cx.model.model_preferences.text()));
         models.placeholder = "provider/model".into();
@@ -37,12 +38,6 @@ impl ModelsDialog {
         let mut search = TextField::new(id, "Search model suggestions", Editor::line(String::new()));
         search.placeholder = "Search optional model suggestions".into();
         search.size = 16.;
-        if let Some(chat) = cx.model.selected()
-            && !chat.commands_loaded
-            && cx.model.epoch.is_some()
-        {
-            cx.model.request(ClientCommand::GetCommands { session_id: cx.model.account.selected.clone().unwrap() })?;
-        }
         cx.ui.focus = Some(models.control.target);
         Ok(Self {
             id,
@@ -159,19 +154,9 @@ impl Widget for ModelsDialog {
         let list_y = search_y + 44. * s;
         let query = self.search.editor.value.to_lowercase();
         let count = if show_suggestions { ((footer - 52. * s - list_y) / (32. * s)).max(0.) as usize } else { 0 };
-        let slugs = cx
-            .model
-            .selected()
-            .and_then(|c| c.commands.iter().find(|c| c.name == "model" && c.source == SlashCommandSource::Builtin))
-            .map(|c| {
-                c.arguments
-                    .iter()
-                    .filter(|m| m.value.to_lowercase().contains(&query))
-                    .take(count)
-                    .map(|m| m.value.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let slugs = cx.model.model_catalog.models.iter()
+            .filter(|m| m.value.to_lowercase().contains(&query))
+            .take(count).map(|m| m.value.clone()).collect::<Vec<_>>();
         self.suggestions.begin();
         let preferences = crate::models::Preferences::parse(&self.models.editor.value).ok();
         for (i, slug) in slugs.into_iter().enumerate() {

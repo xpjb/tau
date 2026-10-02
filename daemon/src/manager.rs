@@ -1,3 +1,4 @@
+use crate::settings::SettingsExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
@@ -82,17 +83,24 @@ impl AgentManager {
         let context_window = self.inner.catalog.capacity(settings, model);
         (tokens.is_some() || context_window.is_some()).then_some(ContextUsage { tokens, context_window })
     }
+    pub(crate) fn schedule_model_catalog(&self) {
+        let settings = self.inner.settings.get();
+        for provider in settings.providers.keys() {
+            self.schedule_catalog_for(provider, None);
+        }
+    }
     pub(crate) fn schedule_catalog(&self, model: &SessionModel) {
+        self.schedule_catalog_for(&model.provider, Some(&model.model_id));
+    }
+    fn schedule_catalog_for(&self, provider: &str, model_id: Option<&str>) {
         if self.inner.shutting_down.load(Ordering::Acquire) { return; }
         let settings = self.inner.settings.get();
-        let Some(config) = settings.providers.get(&model.provider) else { return; };
-        if !self.inner.catalog.begin(&model.provider, config, Some(&model.model_id), false) { return; }
-        let config = config.clone(); let provider = model.provider.clone(); let model_id = model.model_id.clone(); let manager = self.clone();
+        let Some(config) = settings.providers.get(provider) else { return; };
+        if !self.inner.catalog.begin(provider, config, model_id, false) { return; }
+        let config = config.clone(); let provider = provider.to_owned(); let model_id = model_id.map(str::to_owned); let manager = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = manager.resolve_catalog(&provider, &config, Some(&model_id), false).await {
+            if let Err(error) = manager.resolve_catalog(&provider, &config, model_id.as_deref(), false).await {
                 warn!(%provider, reason = %error.root_cause(), "model catalog unavailable");
-                let message = format!("Could not load {provider} model catalog: {error}. Refresh from daemon settings after checking provider access.");
-                let _ = manager.inner.events.send(ServerMessage::Notice { session_id:String::new(), message:bounded(&message, 320) });
             }
             manager.broadcast_sessions().await;
         });
@@ -111,6 +119,7 @@ impl AgentManager {
             self.inner.catalog.save(provider, config, identity, windows).await
         }.await;
         if result.is_err() { self.inner.catalog.failed(provider); }
+        let _ = self.inner.events.send(ServerMessage::ModelCatalog { catalog: self.model_catalog() });
         self.refresh_catalog_usage(provider).await;
         result
     }
@@ -158,8 +167,42 @@ impl AgentManager {
     pub async fn create_session(&self, keep_session_id: Option<&str>, project_id: &str) -> Result<String> {
         self.create_session_requested(keep_session_id, project_id, None).await
     }
+    #[cfg(test)]
     pub async fn create_session_requested(&self, keep_session_id: Option<&str>, project_id: &str, requested_id: Option<&str>) -> Result<String> {
         let _gate = self.inner.projects.lock().await;
+        self.create_session_inner(keep_session_id, project_id, requested_id).await
+    }
+    /// Both standalone and pipelined creates own the same immutable journal
+    /// entry under the topic gate. A delayed create cannot reset a used chat,
+    /// and retrying after deletion/restart cannot recreate it or repeat a turn.
+    pub async fn create_session_operation(&self, request_id: &str, creation: &tau_protocol::ChatCreation) -> Result<String> {
+        let _gate = self.inner.projects.lock().await;
+        let request = tau_protocol::ClientRequest { id: request_id.into(), command: tau_protocol::ClientCommand::CreateSession {
+            project_id: creation.project_id.clone(), keep_session_id: creation.keep_session_id.clone(),
+        }};
+        if let Some(response) = self.inner.state.reserve_operation(&request).await? {
+            match response {
+                ServerMessage::Response { ok: true, uncertain: false, session_id: Some(id), .. } => {
+                    anyhow::ensure!(self.inner.state.get(&id).await?.is_some(), "Created chat was deleted; nothing was resent");
+                    return Ok(id);
+                }
+                ServerMessage::Response { uncertain: true, error, .. } => return Err(crate::protocol::UncertainOutcome(
+                    error.unwrap_or_else(|| "Chat creation interrupted; reconcile the saved creation before sending".into())).into()),
+                ServerMessage::Response { error, .. } => bail!("{}", error.unwrap_or_else(|| "Chat creation failed".into())),
+                _ => bail!("Invalid creation receipt"),
+            }
+        }
+        let result = self.create_session_inner(creation.keep_session_id.as_deref(), &creation.project_id,
+            uuid::Uuid::parse_str(request_id).ok().as_ref().map(|_| request_id)).await;
+        let response = match &result {
+            Ok(id) => ServerMessage::success(request_id.into(), Some(id.clone()), None),
+            Err(error) => ServerMessage::failure(request_id.into(), error.to_string()),
+        };
+        self.inner.state.finish_operation(request_id.into(), &response).await
+            .map_err(|error| crate::protocol::UncertainOutcome(format!("Creation outcome could not be saved: {error}")))?;
+        result
+    }
+    async fn create_session_inner(&self, keep_session_id: Option<&str>, project_id: &str, requested_id: Option<&str>) -> Result<String> {
         if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
         if let Some(request) = requested_id
             && let Some(id) = self.inner.state.created_session(request, keep_session_id, project_id).await? {
@@ -213,7 +256,11 @@ impl AgentManager {
         }
         Ok(ServerMessage::Receipts { session_id:id.into(),reports })
     }
+    #[cfg(test)]
     pub async fn prompt(&self, id: &str, text: &str, request_id: &str) -> Result<PromptOutcome> {
+        self.prompt_with_model(id, text, request_id, None).await
+    }
+    pub async fn prompt_with_model(&self, id: &str, text: &str, request_id: &str, model: Option<&SessionModel>) -> Result<PromptOutcome> {
         if text.trim().is_empty() || text.chars().count() > MAX_PROMPT_CHARS { bail!("Message must contain 1–{MAX_PROMPT_CHARS} characters"); }
         if request_id.is_empty() || request_id.len() > 128 { bail!("Invalid request ID"); }
         let runtime = self.runtime(id).await?;
@@ -222,17 +269,18 @@ impl AgentManager {
         self.ensure_loaded(id, &runtime, &mut content).await?;
         if let Some(receipt) = self.inner.state.receipt(id,request_id).await? {
             if receipt.command.as_deref().is_some_and(|kind|kind != "builtin") { bail!("Request ID was already used for another operation"); }
-            if receipt.text != text { bail!("Request ID was already used for different text"); }
+            if receipt.text != text || receipt.model.as_ref() != model { bail!("Request ID was already used for different prompt intent"); }
             if !receipt.finished { return Ok(PromptOutcome {disposition:PromptDisposition::Accepted,notice:Some("Command is already accepted; awaiting outcome".into())}); }
             if let Some(error) = receipt.error { bail!("{error}"); }
             return Ok(PromptOutcome { disposition:receipt.disposition,notice:receipt.notice });
         }
         self.inner.state.require_execution(id).await?;
         if let Some(rest) = text.strip_prefix('/') {
+            anyhow::ensure!(model.is_none(), "Slash commands cannot carry a starting model");
             let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             if ["compact", "model", "thinking", "name", "fast"].contains(&name) {
                 if name=="compact" && content.agent.as_ref().unwrap().running {bail!("Stop the current run before compacting");}
-                let receipt = Receipt { id:request_id.into(),command:Some("builtin".into()),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
+                let receipt = Receipt { model:None, id:request_id.into(),command:Some("builtin".into()),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
                 content.commit(id,Vec::new(),None,Some(receipt.clone())).await?;
                 self.broadcast_sessions().await;
                 if name=="compact" {
@@ -262,11 +310,25 @@ impl AgentManager {
                 bail!("Use Tau's menu for /{name}; Pi terminal extensions are not loaded");
             }
         }
+        let mut model_change = Vec::new();
+        if let Some(model) = model {
+            let settings = self.inner.settings.get();
+            settings.model(model)?;
+            let stored = self.inner.state.get(id).await?.context("Unknown session")?;
+            if stored.model != *model {
+                anyhow::ensure!(stored.starter && !content.agent.as_ref().unwrap().running
+                    && content.transcript.as_ref().unwrap().queue.requests.is_empty(), "Starting model can only be changed before the first message");
+                let slug = format!("{}/{}", model.provider, model.model_id);
+                let thinking = settings.agent.model_thinking_levels.get(&slug).unwrap_or(&settings.agent.thinking_level);
+                model_change.push(json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":thinking}));
+            }
+        }
         let disposition = if content.agent.as_ref().unwrap().running || content.transcript.as_ref().unwrap().queue.paused { PromptDisposition::Queued } else { PromptDisposition::Submitted };
         let mut queue = content.transcript.as_ref().unwrap().queue.clone();
         if queue.requests.len() >= 256 { bail!("Queue is full (256 messages)"); }
         queue.requests.push(QueuedRequest { request_id:request_id.into(), revision:0, kind:"steer".into(), text:text.into(), images:0, timestamp_ms:Some(crate::agent::now_ms()) });
-        content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:None,text:text.into(),disposition,finished:true,notice:None,error:None })).await?;
+        content.commit(id,model_change,Some(queue),Some(Receipt { model:model.cloned(), id:request_id.into(),command:None,text:text.into(),disposition,finished:true,notice:None,error:None })).await?;
+        if let Some(model) = model { self.schedule_catalog(model); }
         // Queue, receipt and retained session metadata commit together before acknowledgement.
         let paused = content.transcript.as_ref().unwrap().queue.paused && !content.agent.as_ref().unwrap().running;
         self.start_run(id, &runtime, &mut content);
@@ -342,7 +404,7 @@ impl AgentManager {
             && (control.requests.len() > queue.requests.len() || control.requests.iter().zip(&queue.requests).any(|(a,b)| a.request_id != b.request_id || a.revision != b.revision)) {
             bail!("Cancel the pending prefix before editing its messages");
         }
-        content.save_queue(id, queue, Some(Receipt { id:command_id.into(),command:Some("queue_control".into()),text:payload,disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
+        content.save_queue(id, queue, Some(Receipt { model:None, id:command_id.into(),command:Some("queue_control".into()),text:payload,disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
         if let Some(continuation) = continuation { content.agent.as_mut().unwrap().resume_after_stop = continuation; }
         self.start_run(id, &runtime, &mut content);
         Ok("accepted".into())
@@ -362,7 +424,7 @@ impl AgentManager {
         if let Some(agent)=&content.agent {
             if agent.running || agent.needs_turn || !queue.requests.is_empty() { queue.paused=true; }
         }
-        content.save_queue(id,queue,Some(Receipt { id:request_id.into(),command:Some("abort".into()),text:String::new(),disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
+        content.save_queue(id,queue,Some(Receipt { model:None, id:request_id.into(),command:Some("abort".into()),text:String::new(),disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
         if let Some(agent)=&mut content.agent {agent.stop();}
         Ok(())
     }
@@ -479,7 +541,9 @@ impl AgentManager {
     }
     pub async fn set_settings(&self, revision: u64, settings: Settings) -> Result<Settings> {
         let updated = self.inner.settings.set(revision, settings).await?;
-        // Capacity edits should update open and sleeping chat summaries immediately.
+        // Publish suggestions independently of any chat's commands/feed.
+        let _ = self.inner.events.send(ServerMessage::ModelCatalog { catalog: self.model_catalog() });
+        self.schedule_model_catalog();
         self.broadcast_sessions().await;
         Ok(updated)
     }
