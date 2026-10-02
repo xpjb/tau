@@ -112,3 +112,37 @@ pub(super) fn matched_label(code: &mut View, row: usize, name: &str, rect: Rect,
         layer.draws.push(Draw { block, at: Vec2::new(rect.x, rect.y), size: 14.*cx.ui.scale, color: color(0xd8dee9), clip: Some(crate::render::intersect(rect, viewport)), paint: cached.1 });
     }
 }
+
+/// Quiet, single-line explorer rows. Directory identity is plain ASCII, never a
+/// font-dependent icon; files have no decoration or reserved icon column.
+pub(super) fn entry_label(name: &str, directory: bool, rect: Rect, viewport: Rect, layer: &mut Layer, cx: &mut Context<'_>) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let name = display_path(name);
+    let suffix = if directory { "/".to_owned() } else {
+        name.rsplit_once('.').filter(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.graphemes(true).count() <= 10)
+            .map(|(_, ext)| format!(".{ext}")).unwrap_or_default()
+    };
+    let label = format!("{name}{}", if directory { "/" } else { "" });
+    let style = Style { chain: cx.services.renderer.faces.mono[0], wrap_em: None, align: Align::Left, line_spacing: 1. };
+    let size = 14. * cx.ui.scale;
+    let text = &mut cx.services.renderer.text;
+    let Some(mut block) = text.shape_transient(&label, &style) else { return; };
+    if text.measure(block).width_em() * size > rect.width {
+        let tail = format!("…{suffix}");
+        let Some(tail_block) = text.shape_transient(&tail, &style) else { return; };
+        let tail = if text.measure(tail_block).width_em() * size <= rect.width { tail } else { "…".into() };
+        let end = label.len() - suffix.len();
+        let cuts = label[..end].grapheme_indices(true).map(|(i, _)| i).chain(std::iter::once(end)).collect::<Vec<_>>();
+        let (mut lo, mut hi) = (0, cuts.len());
+        block = text.shape_transient(&tail, &style).unwrap();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let candidate = text.shape_transient(&format!("{}{tail}", &label[..cuts[mid]]), &style).unwrap();
+            if text.measure(candidate).width_em() * size <= rect.width { block = candidate; lo = mid + 1; }
+            else { hi = mid; }
+        }
+    }
+    layer.draws.push(Draw { block, at: Vec2::new(rect.x, rect.y), size,
+        color: color(if directory { 0x8bd6ff } else { 0xd8dee9 }),
+        clip: Some(crate::render::intersect(rect, viewport)), paint: None });
+}
