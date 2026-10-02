@@ -67,10 +67,12 @@ c.store.bind_source(&c.identity,"before").unwrap();c.account=c.store.get(&c.iden
 let local=LocalChat {draft:"keep me".into(),pending:vec![Pending {request:ClientRequest {id:"original".into(),command:ClientCommand::Prompt {session_id:"missing".into(),text:"possibly paid".into(), model: None, create: None }},text:"possibly paid".into(),files:vec![],status:Delivery::WaitingForConnection,started_at_ms:None,detail:None}],..Default::default()};
 c.store.save_chat(&c.identity,"missing",&local).unwrap();
 let db=rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();db.execute_batch("CREATE TRIGGER fail_fence BEFORE UPDATE ON local WHEN NEW.key='account' BEGIN SELECT RAISE(ABORT,'fence full');END").unwrap();
-assert!(c.network_event(NetworkEvent::Source(1,"after".into())).is_err());assert!(c.network_event(NetworkEvent::Ready { epoch: 1, at: std::time::Instant::now() }).is_err());assert!(c.epoch.is_none());
+c.epoch=Some(99);
+assert!(c.network_event(NetworkEvent::Ready {epoch:1,lineage:"after".into(),at:std::time::Instant::now()}).is_err());
+assert!(c.epoch.is_none(),"Source persistence must revoke the previous epoch before any fallible write");
 assert_eq!(c.store.load_chat(&c.identity,"missing").unwrap().pending[0].status,Delivery::WaitingForConnection);
 assert_eq!(c.store.get::<crate::store::Account>(&c.identity,"account").unwrap().source_lineage.as_deref(),Some("before"));
-db.execute_batch("DROP TRIGGER fail_fence").unwrap();c.network_event(NetworkEvent::Source(1,"after".into())).unwrap();
+db.execute_batch("DROP TRIGGER fail_fence").unwrap();c.bind_source("after".into()).unwrap();
 assert_eq!(c.selected().unwrap().local.pending[0].status,Delivery::Unconfirmed);
 c.network_event(NetworkEvent::NotSent("original".into(), "late old-connection callback".into())).unwrap();
 c.message(ServerMessage::Receipts {session_id:"missing".into(),reports:vec![OperationReceipt {

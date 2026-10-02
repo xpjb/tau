@@ -71,8 +71,7 @@ async fn probe_uses_ping_pong_not_session_list_and_reports_measured_rtt() {
     let (settings, server) = fixture(true).await;
     let mut network = Network::start(settings, Arc::new(|| {}));
     assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 1, .. }));
-    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
-    assert!(matches!(event(&mut network).await, Event::Ready { epoch: 1, .. }));
+    assert!(matches!(event(&mut network).await, Event::Ready {epoch:1,lineage,..} if !lineage.is_empty()));
     let started = Instant::now();
     let sent = match event(&mut network).await {
         Event::HeartbeatSent { epoch: 1, at } => at,
@@ -99,8 +98,7 @@ async fn unanswered_ping_reconnects_on_deadline_not_on_next_probe() {
     let (settings, server) = fixture(false).await;
     let mut network = Network::start(settings, Arc::new(|| {}));
     assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 1, .. }));
-    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
-    assert!(matches!(event(&mut network).await, Event::Ready { epoch: 1, .. }));
+    assert!(matches!(event(&mut network).await, Event::Ready {epoch:1,lineage,..} if !lineage.is_empty()));
     let sent = match event(&mut network).await {
         Event::HeartbeatSent { epoch: 1, at } => at,
         _ => panic!("expected ping"),
@@ -179,8 +177,7 @@ async fn oversized_legacy_frame_is_rejected_before_reading_its_body() {
     let settings = Settings { server_url:format!("http://{address}"), token:"audit-fixture".into() };
     let mut network = Network::start(settings, Arc::new(|| {}));
     assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 1, .. }));
-    assert!(matches!(event(&mut network).await,Event::Source(1,_)));
-    assert!(matches!(event(&mut network).await, Event::Ready { epoch: 1, .. }));
+    assert!(matches!(event(&mut network).await, Event::Ready {epoch:1,lineage,..} if !lineage.is_empty()));
     let started=Instant::now();
     match event(&mut network).await {
         Event::Disconnected(reason)=>assert!(!reason.contains("Ping timed out"),"{reason}"),

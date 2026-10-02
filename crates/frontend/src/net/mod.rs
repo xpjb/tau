@@ -54,8 +54,7 @@ pub enum Command {
 pub enum Event {
     Connecting { attempt: u64, at: Instant },
     RetryScheduled { at: Instant },
-    Ready { epoch: u64, at: Instant },
-    Source(u64,String),
+    Ready { epoch: u64, lineage: String, at: Instant },
     HeartbeatSent { epoch: u64, at: Instant },
     HeartbeatReply { epoch: u64, at: Instant, rtt: Duration },
     Message(u64, Box<ServerMessage>),
@@ -254,8 +253,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             epoch += 1;
             generations.clear();
             let connected_at=Instant::now();
-            if !events.send(Event::Source(epoch,lineage.context("Missing source lineage")?)) {return Ok(());}
-            if !events.send(Event::Ready { epoch, at: connected_at }) { return Ok(()); }
+            if !events.send(Event::Ready {epoch,lineage:lineage.context("Missing source lineage")?,at:connected_at}) {return Ok(());}
             let mut next_ping = connected_at + HEARTBEAT_INTERVAL;
             let mut waiting: Option<(Vec<u8>, Instant)> = None;
             let mut metrics=tokio::time::interval_at(tokio::time::Instant::now()+Duration::from_secs(5),Duration::from_secs(5));

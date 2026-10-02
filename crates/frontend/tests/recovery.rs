@@ -334,7 +334,6 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         Arc::new(|| {}),
     );
     assert!(matches!(tokio::time::timeout(Duration::from_secs(3),n.events.recv()).await.unwrap(),Some(NetworkEvent::Connecting { attempt: 1, .. })));
-    assert!(matches!(tokio::time::timeout(Duration::from_secs(3),n.events.recv()).await.unwrap(),Some(NetworkEvent::Source(1,_))));
     let epoch = match tokio::time::timeout(Duration::from_secs(3), n.events.recv())
         .await
         .unwrap()

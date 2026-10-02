@@ -3,21 +3,21 @@ use std::time::{Duration,Instant};
 #[test]
 fn sleeping_ui_coalesces_failed_acquisitions_without_erasing_disconnect_boundaries() {
     let (events,mut receiver)=channel(Arc::new(||{}));let now=Instant::now();
-    assert!(events.send(Event::Ready {epoch:1,at:now}));
+    assert!(events.send(Event::Ready {epoch:1,lineage:"first".into(),at:now}));
     assert!(events.send(Event::NotSent("intent".into(),"socket lost".into())));
     for attempt in 1..=1000 {
         assert!(events.send(Event::Connecting {attempt,at:now}));
         assert!(events.send(Event::Disconnected(format!("failure {attempt}"))));
         assert!(events.send(Event::RetryScheduled {at:now+Duration::from_secs(1)}));
     }
-    assert!(events.send(Event::Ready {epoch:2,at:now}));
+    assert!(events.send(Event::Ready {epoch:2,lineage:"second".into(),at:now}));
     assert!(events.send(Event::Disconnected("second socket lost".into())));
-    assert!(matches!(receiver.try_recv().unwrap(),Event::Ready {epoch:1,..}));
+    assert!(matches!(receiver.try_recv().unwrap(),Event::Ready {epoch:1,lineage,..} if lineage=="first"));
     assert!(matches!(receiver.try_recv().unwrap(),Event::NotSent(id,_) if id=="intent"));
     assert!(matches!(receiver.try_recv().unwrap(),Event::Connecting {attempt:1000,..}));
     assert!(matches!(receiver.try_recv().unwrap(),Event::Disconnected(detail) if detail=="failure 1000"));
     assert!(matches!(receiver.try_recv().unwrap(),Event::RetryScheduled {..}));
-    assert!(matches!(receiver.try_recv().unwrap(),Event::Ready {epoch:2,..}));
+    assert!(matches!(receiver.try_recv().unwrap(),Event::Ready {epoch:2,lineage,..} if lineage=="second"));
     assert!(matches!(receiver.try_recv().unwrap(),Event::Disconnected(detail) if detail=="second socket lost"));
     assert!(receiver.try_recv().is_err());
 }

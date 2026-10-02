@@ -41,7 +41,7 @@ impl EventSender {
         // episode: retaining the disconnect before each new Ready is essential
         // to fencing in-flight intents and checking their receipts on recovery.
         let after = if matches!(event, Event::Connecting { .. } | Event::RetryScheduled { .. } | Event::Disconnected(_)) {
-            queue.events.iter().rposition(|(event,_)| matches!(event, Event::Ready { .. } | Event::Source(..) | Event::Fatal(_))).map_or(0,|at|at+1)
+            queue.events.iter().rposition(|(event,_)| matches!(event, Event::Ready { .. } | Event::Fatal(_))).map_or(0,|at|at+1)
         } else {0};
         if let Some(key)=key(&event) && let Some(at)=queue.events.iter().enumerate().skip(after)
             .find_map(|(at,(old,_))|(self::key(old).as_ref()==Some(&key)).then_some(at)) {

@@ -188,3 +188,26 @@ queued peer, and restart a download on a new node: the matching lineage resumes
 at the verified prefix; the differing lineage publishes no file. The prior 412
 test cases remain. This checkpoint is a separate ownership change, not another
 wire-version change; protocol 25 / ALPN 3 remain current.
+
+### Atomic control readiness checkpoint
+
+Control now publishes one `Ready { epoch, lineage, at }` event instead of a
+`Source` event followed by `Ready`. The controller durably binds that source
+before enabling the epoch, so the intermediate `source_guard` state and its
+cross-event ordering requirement disappear. A failed source write first
+revokes any previous epoch; saved work remains intact and cannot be submitted.
+The mailbox still treats readiness as an ordering barrier. Source-only unit
+fixtures call the concrete source-binding method rather than inventing a
+transport event.
+
+After the 414-test full pass, **232/232 affected frontend unit, connection-probe
+and recovery tests passed** for this change. The source-fence fault test now also
+starts with an enabled old epoch and proves that a failed bind disables it.
+The source-bound-peer checkpoint's workspace, protocol-only, rustdoc, Android
+and Windows compilation checks all passed; these are not device/native-Windows
+runtime claims. No additional wire-version change or deployment occurred.
+
+Current measured tree: **31,224 non-test Rust lines** and
+**46,866 total Rust lines**. Relative to merge `53d9a67`, that is
+-7 non-test lines and +166 total lines. These boundary checkpoints
+reduce exposed state/coordination, but do not constitute a large LOC reduction.
