@@ -1,7 +1,7 @@
 use super::*;
 use chad::{Config, HeadlessCtx};
 use std::sync::Arc;
-use tau_markdown::markdown::{Content, TextKind, inline};
+use tau_markdown::{Content, TextKind, inline};
 
 #[test]
 fn native_thinking_stream_updates_markdown_before_sealing() {

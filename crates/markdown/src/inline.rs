@@ -435,5 +435,5 @@ fn parse_inner(s: &str, table: bool) -> RichText {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/markdown/inline.rs"]
+#[path = "../tests/unit/markdown/inline.rs"]
 mod tests;

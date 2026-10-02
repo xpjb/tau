@@ -1,6 +1,6 @@
 //! Window-independent sanscale adapter. Layout, projected/source coordinates,
 //! table dependency tracking, and paint ownership are separate from the demo UI.
-use super::markdown::{
+use super::{
     self as md, Content, Document, Element, Id, Origin, RawLine, TextKind,
     inline::{self, RichText},
 };
