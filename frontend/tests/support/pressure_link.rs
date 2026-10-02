@@ -114,6 +114,7 @@ impl Proxy {
         // Same advertised UDP port on private aliases; no WebSocket termination
         // or synthetic Pong. Both clients share the physical link's FIFOs.
         let socket=Arc::new(UdpSocket::bind(format!("{alias}:{}",udp.port())).await.unwrap());
+        let udp_address=socket.local_addr().unwrap();
         let udp_task=tokio::spawn(async move {
             let mut client=None;let mut buf=[0;65536];let mut packets=tokio::task::JoinSet::new();
             loop {tokio::select! {
@@ -121,17 +122,17 @@ impl Proxy {
                     let (n,from)=received.unwrap();let direction=usize::from(from==udp);
                     let target=if direction==1 {let Some(client)=client else {continue;};client} else {client=Some(from);udp};
                     let serial=link.udp.fetch_add(1,Ordering::Relaxed)+1;
-                    native_trace::packet("received",direction,n);
+                    native_trace::packet("received",udp_address,direction,n);
                     if link.blackhole.load(Ordering::Relaxed) || link.udp_blackhole.load(Ordering::Relaxed) {
-                        native_trace::packet("blackholed",direction,n);
+                        native_trace::packet("blackholed",udp_address,direction,n);
                         link.dropped.fetch_add(1,Ordering::Relaxed);link.blackholed.fetch_add(1,Ordering::Relaxed);continue;
                     }
                     let lost=if link.profile.name=="legacy" {serial%23==0} else {draw(link.seed,serial)%10_000<link.profile.loss_per_10k};
-                    if lost || packets.len()>=512 {native_trace::packet("lost",direction,n);link.dropped.fetch_add(1,Ordering::Relaxed);continue;}
+                    if lost || packets.len()>=512 {native_trace::packet("lost",udp_address,direction,n);link.dropped.fetch_add(1,Ordering::Relaxed);continue;}
                     let bytes=buf[..n].to_vec();let socket=socket.clone();let link=link.clone();
                     packets.spawn(async move {
-                        if !link.wait(direction,n,true).await {native_trace::packet("discarded",direction,n);return;}
-                        if socket.send_to(&bytes,target).await.is_ok() {native_trace::packet("forwarded",direction,n);link.udp_bytes.fetch_add(n as u64,Ordering::Relaxed);}
+                        if !link.wait(direction,n,true).await {native_trace::packet("discarded",udp_address,direction,n);return;}
+                        if socket.send_to(&bytes,target).await.is_ok() {native_trace::packet("forwarded",udp_address,direction,n);link.udp_bytes.fetch_add(n as u64,Ordering::Relaxed);}
                     });
                 }
                 _=packets.join_next(),if !packets.is_empty()=>{}

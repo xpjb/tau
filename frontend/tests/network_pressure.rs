@@ -96,7 +96,9 @@ impl Observed {
         for (n,c) in f.clients.iter_mut().enumerate() {
             let at=Instant::now();c.poll();if self.poll_us.len()<20_000 {self.poll_us.push(at.elapsed().as_micros() as u64);}
             if let Some(notice)=c.notice.take() && self.notices.len()<200 {self.notices.push(format!("client {n}: {}", &*notice));}
-            if let Some(detail)=&c.transport_error {self.transport.insert(detail.clone());}
+            if let Some(detail)=&c.transport_error && self.transport.insert(detail.clone()) {
+                native_trace::event(&format!("client {n} transport issue: {detail}"));
+            }
             if self.epochs[n].is_some() && c.epoch.is_none() {self.disconnects[n]+=1;}
             self.epochs[n]=c.epoch;
         }
@@ -210,6 +212,7 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
     until(&mut f,&mut o,"catalogue",|f|f.clients[1].account.sessions.iter().any(|s|s.id==session)).await;
     f.clients[1].select(&session).unwrap();
     until(&mut f,&mut o,"second reader",|f|f.clients[1].selected().is_some_and(|c|c.feed.synchronized)).await;
+    native_trace::event("both clients have a synchronized feed; baseline begins");
     recorder.take();
     let baseline=tokio::spawn(probe(f.proxies[0].address,session.clone(),18,15));
     let baseline=await_probe(&mut f,&mut o,baseline).await;let baseline_db=recorder.take();

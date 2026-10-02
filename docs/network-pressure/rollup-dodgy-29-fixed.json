@@ -1,0 +1,332 @@
+{
+  "alerts": [],
+  "all_disconnects": [
+    0,
+    0
+  ],
+  "all_transport_issues": [],
+  "baseline": {
+    "control_reads": {
+      "count": 18,
+      "max_ms": 406.563,
+      "p50_ms": 215.512,
+      "p95_ms": 406.563,
+      "total_ms": 4348.598
+    },
+    "server": {
+      "admission": {
+        "dispatch": {
+          "count": 18,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "total_ms": 0.0
+        },
+        "outcomes": {
+          "started": 18
+        },
+        "sample_cap": 20000,
+        "wait": {
+          "count": 18,
+          "max_ms": 0.076,
+          "p50_ms": 0.036,
+          "p95_ms": 0.076,
+          "total_ms": 0.8200000000000003
+        },
+        "work": {
+          "count": 18,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "total_ms": 0.0
+        }
+      },
+      "content_failures": [],
+      "database": {
+        "reader": {
+          "dispatch": {
+            "count": 35,
+            "max_ms": 0.139,
+            "p50_ms": 0.022,
+            "p95_ms": 0.11,
+            "total_ms": 1.105
+          },
+          "outcomes": {
+            "ok": 35
+          },
+          "sample_cap": 20000,
+          "wait": {
+            "count": 35,
+            "max_ms": 0.002,
+            "p50_ms": 0.0,
+            "p95_ms": 0.001,
+            "total_ms": 0.015000000000000006
+          },
+          "work": {
+            "count": 35,
+            "max_ms": 0.919,
+            "p50_ms": 0.088,
+            "p95_ms": 0.199,
+            "total_ms": 3.862999999999999
+          }
+        }
+      }
+    }
+  },
+  "baseline_errors": [],
+  "control_receipts": 24,
+  "elapsed_ms": 50282,
+  "link": {
+    "base_latency_ms": 35,
+    "blackholed": 0,
+    "bytes_per_second": 196608,
+    "dropped": 123,
+    "jitter_ms": 45,
+    "loss_per_10k": 300,
+    "max_scheduled_delay_ms": 307.742,
+    "profile": "dodgy",
+    "queue_dropped": 0,
+    "queue_limit_ms": 650,
+    "seed": 29,
+    "stalls": 63,
+    "tcp_bytes": 85042,
+    "tcp_connections": 4,
+    "udp_bytes": 2662639,
+    "udp_datagrams": 4077
+  },
+  "native": [
+    {
+      "active_streams": 1,
+      "bulk_slots": 0,
+      "cancelled_streams": 1,
+      "connection_attempts": 1,
+      "connections": 1,
+      "content_rx_bytes": 1077093,
+      "content_tx_bytes": 131072,
+      "descriptor_slots": 0,
+      "foreground_slots": 0,
+      "frame_rx_bytes": 1098613,
+      "frame_tx_bytes": 143287,
+      "integrity_failures": 0,
+      "metadata_slots": 1,
+      "quic_lost_packets": 31,
+      "quic_rtt_ms": 175,
+      "quic_rx_bytes": 1149996,
+      "quic_tx_bytes": 190176,
+      "resumed_bytes": 65536,
+      "streams": 19
+    },
+    {
+      "active_streams": 1,
+      "bulk_slots": 0,
+      "cancelled_streams": 1,
+      "connection_attempts": 1,
+      "connections": 1,
+      "content_rx_bytes": 1077296,
+      "content_tx_bytes": 131072,
+      "descriptor_slots": 0,
+      "foreground_slots": 0,
+      "frame_rx_bytes": 1102402,
+      "frame_tx_bytes": 143677,
+      "integrity_failures": 0,
+      "metadata_slots": 1,
+      "quic_lost_packets": 20,
+      "quic_rtt_ms": 151,
+      "quic_rx_bytes": 1147539,
+      "quic_tx_bytes": 178059,
+      "resumed_bytes": 0,
+      "streams": 23
+    }
+  ],
+  "original_prompt_copies": [
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "outage_case": false,
+  "pressure": {
+    "bulk_bytes": 2097152,
+    "bulk_elapsed_ms": 34057,
+    "bulk_goodput_kib_s": 60.13448042986757,
+    "concurrent_upload_bytes": 131072,
+    "control_reads": {
+      "count": 48,
+      "max_ms": 471.744,
+      "p50_ms": 321.065,
+      "p95_ms": 430.531,
+      "total_ms": 15581.863000000001
+    },
+    "control_writes": {
+      "count": 24,
+      "max_ms": 808.448,
+      "p50_ms": 780.454,
+      "p95_ms": 806.978,
+      "total_ms": 17852.855
+    },
+    "controller_poll": {
+      "count": 8968,
+      "max_ms": 25.618,
+      "p50_ms": 0.005,
+      "p95_ms": 0.013,
+      "total_ms": 478.1389999999902
+    },
+    "injected_writer_pause_ms": 400,
+    "observed_pause_ms": 400.062,
+    "server": {
+      "admission": {
+        "dispatch": {
+          "count": 111,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "total_ms": 0.0
+        },
+        "outcomes": {
+          "started": 111
+        },
+        "sample_cap": 20000,
+        "wait": {
+          "count": 111,
+          "max_ms": 407.966,
+          "p50_ms": 0.041,
+          "p95_ms": 330.856,
+          "total_ms": 2871.783000000002
+        },
+        "work": {
+          "count": 111,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "total_ms": 0.0
+        }
+      },
+      "content_failures": [],
+      "database": {
+        "reader": {
+          "dispatch": {
+            "count": 559,
+            "max_ms": 0.57,
+            "p50_ms": 0.018,
+            "p95_ms": 0.064,
+            "total_ms": 14.573999999999991
+          },
+          "outcomes": {
+            "ok": 559
+          },
+          "sample_cap": 20000,
+          "wait": {
+            "count": 559,
+            "max_ms": 0.106,
+            "p50_ms": 0.001,
+            "p95_ms": 0.002,
+            "total_ms": 0.6800000000000004
+          },
+          "work": {
+            "count": 559,
+            "max_ms": 0.826,
+            "p50_ms": 0.139,
+            "p95_ms": 0.251,
+            "total_ms": 82.59900000000003
+          }
+        },
+        "writer": {
+          "dispatch": {
+            "count": 140,
+            "max_ms": 0.191,
+            "p50_ms": 0.015,
+            "p95_ms": 0.022,
+            "total_ms": 2.4689999999999976
+          },
+          "outcomes": {
+            "ok": 140
+          },
+          "sample_cap": 20000,
+          "wait": {
+            "count": 140,
+            "max_ms": 404.213,
+            "p50_ms": 2.889,
+            "p95_ms": 284.517,
+            "total_ms": 5752.76400000001
+          },
+          "work": {
+            "count": 140,
+            "max_ms": 404.996,
+            "p50_ms": 1.845,
+            "p95_ms": 4.426,
+            "total_ms": 716.4889999999998
+          }
+        }
+      }
+    }
+  },
+  "profile": "dodgy",
+  "provider_calls": 3,
+  "query_errors": [],
+  "recovery": null,
+  "schema": 1,
+  "seed": 29,
+  "steady_disconnects": [
+    0,
+    0
+  ],
+  "steady_transport_issues": [],
+  "trace": [
+    "12204ms: queued message 0, client 0, request 89e69c55-8147-4d3e-ba18-d0dee4e0b107",
+    "12207ms: queued message 1, client 0, request d8efcbe5-ba4f-4cb1-9924-3e9ed13b4717",
+    "12210ms: queued message 2, client 0, request 6b01c30f-32b2-4ad7-8762-91e5460856b4",
+    "14117ms: rename 0, client 1",
+    "14118ms: rename 1, client 0",
+    "14119ms: rename 2, client 1",
+    "14121ms: rename 3, client 0",
+    "14123ms: rename 4, client 0",
+    "14124ms: rename 5, client 1",
+    "14126ms: rename 6, client 0",
+    "14127ms: rename 7, client 1",
+    "14129ms: rename 8, client 1",
+    "14130ms: rename 9, client 0",
+    "14132ms: rename 10, client 0",
+    "14133ms: rename 11, client 1",
+    "14134ms: rename 12, client 1",
+    "14136ms: rename 13, client 1",
+    "14137ms: rename 14, client 0",
+    "14139ms: rename 15, client 0",
+    "14141ms: rename 16, client 0",
+    "14142ms: rename 17, client 0",
+    "14144ms: rename 18, client 0",
+    "14146ms: rename 19, client 1",
+    "14147ms: rename 20, client 0",
+    "14149ms: rename 21, client 1",
+    "14151ms: rename 22, client 0",
+    "14153ms: rename 23, client 1",
+    "14160ms: concurrent upload, client 1",
+    "14391ms: tool interest toggle 0",
+    "14575ms: tool interest toggle 1",
+    "14716ms: tool interest toggle 2",
+    "14963ms: tool interest toggle 3",
+    "15226ms: tool interest toggle 4",
+    "15468ms: tool interest toggle 5",
+    "15704ms: tool interest toggle 6",
+    "15941ms: tool interest toggle 7",
+    "cancel at 65536",
+    "resume original file"
+  ],
+  "unread_file_parts": 0,
+  "websocket_ping_rtt": [
+    {
+      "latest_ms": 103.186175,
+      "recent_min_max_ms": [
+        95.888252,
+        322.830683
+      ]
+    },
+    {
+      "latest_ms": 80.285347,
+      "recent_min_max_ms": [
+        80.285347,
+        317.81854500000003
+      ]
+    }
+  ]
+}

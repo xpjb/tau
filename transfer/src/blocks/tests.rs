@@ -98,6 +98,48 @@ async fn connection_loss_is_status_without_hiding_content_or_storage_errors() {
 }
 
 #[tokio::test]
+async fn lost_initial_discovery_keeps_one_attempt_then_negotiates_short_idle() {
+    let backend=Memory::new();backend.put("first",None,BlockKind::Text,b"first",true);
+    let server=Server::bind("127.0.0.1:0".parse().unwrap(),backend.clone()).await.unwrap();
+    let client=Client::bind().await.unwrap();
+    let mut offer=server.authorize(&client.node_id(),backend.lineage()).unwrap();
+    let peer=std::net::SocketAddr::from(([127,0,0,1],offer.port));
+    let socket=tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    offer.port=socket.local_addr().unwrap().port();
+    let blackhole=Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped=Arc::new(AtomicUsize::new(0));
+    let proxy=tokio::spawn({let blackhole=blackhole.clone();let dropped=dropped.clone();async move {
+        let mut client=None;let mut buf=[0;65536];
+        loop {
+            let (n,from)=socket.recv_from(&mut buf).await.unwrap();
+            let target=if from==peer {let Some(client)=client else {continue;};client} else {
+                client=Some(from);
+                // Seed 29 lost the initial discovery ping and first QUIC packet.
+                if dropped.load(Ordering::Relaxed)<2 {dropped.fetch_add(1,Ordering::Relaxed);continue;}
+                peer
+            };
+            if !blackhole.load(Ordering::Relaxed) {socket.send_to(&buf[..n],target).await.unwrap();}
+        }
+    }});
+    client.configure(&offer,"127.0.0.1").await.unwrap();
+    let started=Instant::now();
+    let watch=client.watch(block_request("first",0,0,false)).await.unwrap();
+    assert_eq!(collect(watch).await.0,b"first");
+    let connected=started.elapsed();
+    assert_eq!(dropped.load(Ordering::Relaxed),2);
+    assert_eq!(client.stats().connection_attempts,1,"Discovery loss must not fail the application connect attempt");
+    assert_eq!(client.stats().connections,1);
+    let connection=client.connection().await.unwrap();
+    blackhole.store(true,Ordering::Relaxed);let silent=Instant::now();
+    let reason=tokio::time::timeout(Duration::from_secs(7),connection.closed()).await
+        .expect("Established peers must retain the negotiated five-second silence limit");
+    assert!(matches!(reason,iroh::endpoint::ConnectionError::TimedOut));
+    eprintln!("native-discovery-loss: connected={connected:?}, established peer timeout={:?}",silent.elapsed());
+    blackhole.store(false,Ordering::Relaxed);
+    client.shutdown().await;server.shutdown().await;proxy.abort();let _=proxy.await;
+}
+
+#[tokio::test]
 async fn healthy_idle_connection_is_preserved_across_native_peer_timeout_windows() {
     let (backend,server,client)=fixture().await;
     backend.put("first",None,BlockKind::Text,b"first",true);

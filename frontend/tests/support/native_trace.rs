@@ -25,6 +25,6 @@ pub(super) fn init() {
 pub(super) fn event(message: &str) {
     if let Some(start)=START.get() { eprintln!("native-trace +{:.3}s {message}",start.elapsed().as_secs_f64()); }
 }
-pub(super) fn packet(kind: &str, direction: usize, bytes: usize) {
-    if START.get().is_some() { event(&format!("UDP {kind} {} {bytes} bytes",if direction==0 {"client→server"} else {"server→client"})); }
+pub(super) fn packet(kind: &str, peer: std::net::SocketAddr, direction: usize, bytes: usize) {
+    if START.get().is_some() { event(&format!("UDP {peer} {kind} {} {bytes} bytes",if direction==0 {"client→server"} else {"server→client"})); }
 }

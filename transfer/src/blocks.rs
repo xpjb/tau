@@ -147,7 +147,7 @@ async fn receive(recv: &mut RecvStream) -> Result<(Frame,u32)> {
     Ok((Frame { header,data },(8+h+n) as u32))
 }
 
-fn config() -> TransportConfig {
+fn config(idle_timeout: Duration) -> TransportConfig {
     let mut c = TransportConfig::default();
     c.initial_mtu(1200).min_mtu(1200).mtu_discovery_config(None);
     // iroh-quinn-proto 0.13.0's multi-datagram pacing can over-account an
@@ -156,11 +156,9 @@ fn config() -> TransportConfig {
     // until upgrading to a version exercised by the shared weak-link test.
     c.enable_segmentation_offload(false);
     c.max_concurrent_bidi_streams((MAX_STREAMS as u32).into()).max_concurrent_uni_streams(0u32.into());
-    // This is peer-packet liveness, not a body/page response deadline. A quiet
-    // healthy peer still ACKs keep-alives while its backend finishes a slow read.
-    // Keeping an unreachable connection for forty seconds lets QUIC's growing
-    // probe backoff strand watches after the network has already returned.
-    c.max_idle_timeout(Some(Duration::from_secs(5).try_into().unwrap()));
+    // Packet liveness, not a body response deadline. Healthy peers ACK keep-alives
+    // during slow reads. The server's shorter limit wins QUIC idle negotiation.
+    c.max_idle_timeout(Some(idle_timeout.try_into().unwrap()));
     c.keep_alive_interval(Some(Duration::from_secs(2)));
     c
 }
@@ -230,7 +228,7 @@ impl Server {
         let ipv6=ipv6.unwrap_or_else(||SocketAddrV6::new(if address.ip().is_loopback() {Ipv6Addr::LOCALHOST} else {Ipv6Addr::UNSPECIFIED},0,0,0));
         let endpoint = Endpoint::builder().bind_addr_v4(address)
             .bind_addr_v6(ipv6).relay_mode(RelayMode::Disabled)
-            .alpns(vec![ALPN.to_vec()]).transport_config(config()).bind().await?;
+            .alpns(vec![ALPN.to_vec()]).transport_config(config(Duration::from_secs(5))).bind().await?;
         if address.port() != 0 && endpoint.bound_sockets().0.port() != address.port() {
             endpoint.close().await; bail!("Tau block UDP port is already in use");
         }
@@ -475,8 +473,11 @@ pub struct Client {
 }
 impl Client {
     pub async fn bind() -> Result<Self> {
+        // Iroh retries a lost discovery ping after five seconds. Allow that within
+        // the existing connect deadline; established peers negotiate the server's
+        // five-second idle limit instead of retaining a silent connection.
         let endpoint = Endpoint::builder().bind_addr_v6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED,0,0,0))
-            .relay_mode(RelayMode::Disabled).transport_config(config()).bind().await.context(ConnectionIssue)?;
+            .relay_mode(RelayMode::Disabled).transport_config(config(IO_TIMEOUT)).bind().await.context(ConnectionIssue)?;
         Ok(Self { stats:Arc::new(Counters::default()),endpoint,peer:tokio::sync::Mutex::new(None),connection:tokio::sync::Mutex::new(None),streams:Arc::new(Semaphore::new(MAX_STREAMS-2)),bulk:Arc::new(Semaphore::new(6)),metadata:Arc::new(Semaphore::new(2)),foreground:Arc::new(Semaphore::new(4)),descriptors:Arc::new(Semaphore::new(2)) })
     }
     pub fn node_id(&self) -> String { self.endpoint.node_id().to_string() }

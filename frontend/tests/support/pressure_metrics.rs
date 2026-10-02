@@ -34,7 +34,12 @@ impl Recorder {
         let filter=tracing_subscriber::filter::Targets::new()
             .with_target("taud::db",tracing::Level::DEBUG).with_target("taud::control_admission",tracing::Level::DEBUG)
             .with_target("tau::content",tracing::Level::DEBUG).with_target("log",tracing::Level::DEBUG);
+        let filter=if std::env::var_os("TAU_NATIVE_TRACE").is_some() {
+            filter.with_target("iroh_quinn_proto::connection",tracing::Level::TRACE)
+                .with_target("tau_native_watch",tracing::Level::TRACE).with_target("log",tracing::Level::TRACE)
+        } else {filter};
         tracing_subscriber::registry().with(recorder.clone().with_filter(filter)).try_init().unwrap();
+        super::native_trace::init();
         log::debug!(target:"tau::content","pressure observer self-check");
         assert_eq!(recorder.take()["content_failures"][0],"pressure observer self-check","Content diagnostic bridge must be active");
         recorder
@@ -60,6 +65,12 @@ impl Visit for Fields {
 impl<S:Subscriber> Layer<S> for Recorder {
     fn on_event(&self,event:&Event<'_>,_:Context<'_,S>) {
         let mut fields=Fields::default();event.record(&mut fields);
+        let target=if fields.log_target.is_empty() {event.metadata().target()} else {&fields.log_target};
+        if target=="tau_native_watch" || target.starts_with("iroh_quinn_proto::connection")
+            && ["PTO fired", "keep-alive", "timeout", "handshake", "established", "keys", "CRYPTO", "TimedOut", "closing connection"]
+                .iter().any(|text| fields.message.contains(text)) {
+            super::native_trace::event(&format!("{target}: {}",fields.message));
+        }
         if fields.phase=="start" {
             if fields.pool=="writer" {
                 let milliseconds=self.0.pause_ms.swap(0,Ordering::SeqCst);
