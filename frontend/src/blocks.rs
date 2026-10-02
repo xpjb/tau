@@ -334,18 +334,9 @@ impl Cache {
         // verified read. Never wait for another writer (or upgrade a stale WAL
         // snapshot) just to refresh it, including the first viewport's visit.
         // Actual content writes retain the normal busy timeout and durability.
-        if touch && !accessed.is_empty() {
-            db.busy_timeout(Duration::ZERO)?;
-            let transaction = rusqlite::Transaction::new_unchecked(&db, rusqlite::TransactionBehavior::Immediate);
-            db.busy_timeout(DB_BUSY_TIMEOUT)?;
-            match transaction {
-                Ok(tx) => {
-                    tau_blocks::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
-                    tx.commit()?;
-                }
-                Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::DatabaseBusy => {}
-                Err(error) => return Err(error.into()),
-            }
+        if touch && !accessed.is_empty() && let Some(tx) = try_replica_maintenance(&db)? {
+            tau_blocks::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
+            tx.commit()?;
         }
         let mut previews = preview_ids.into_iter().map(|(root,ids)| {
             let used=256*1024-group_budgets[root.as_str()]; (root,ids,used)
@@ -548,6 +539,20 @@ impl Cache {
         Ok(Plan { scope:scope.into(),parents,blocks:heads,older,foreground,background:false })
     }
 }
+// Admission only for optional read-recency/local-echo reuse, never authored or
+// verified-content commits. The caller holds the cache mutex, so the zero wait
+// cannot leak to another job; restore the durable-write timeout on both paths.
+fn try_replica_maintenance(db: &Connection) -> Result<Option<rusqlite::Transaction<'_>>> {
+    db.busy_timeout(Duration::ZERO)?;
+    let transaction = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate);
+    db.busy_timeout(DB_BUSY_TIMEOUT)?;
+    match transaction {
+        Ok(tx) => Ok(Some(tx)),
+        Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::DatabaseBusy => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn replica_epoch(db:&Connection)->Result<u64> {Ok(db.query_row("SELECT epoch FROM replica_epoch WHERE singleton=1",[],|r|r.get(0))?)}
 fn metadata_length(db:&Connection,scope:&str,reference:&serde_json::Value)->Result<Option<u64>> {
     let id=reference["id"].as_str().context("Invalid metadata reference")?;

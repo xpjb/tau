@@ -816,11 +816,20 @@ fn busy_recency_never_gates_verified_reads_or_weakens_content_writes() {
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
     let view = f.cache.preview("chat", None).unwrap().unwrap();
     assert_eq!(view.events[0].text, "verified body");
+    let local = LocalChat { pending: vec![crate::store::Pending {
+        request: tau_protocol::ClientRequest { id: "uncertain".into(), command: tau_protocol::ClientCommand::Prompt { session_id: "chat".into(), text: "keep locally".into() } },
+        started_at_ms: None, text: "keep locally".into(), files: vec![],
+        status: crate::store::Delivery::Unconfirmed, detail: None,
+    }], ..Default::default() };
+    f.cache.remember_local("chat", &local, &f.lineage).unwrap();
+    assert_eq!(f.cache.db.lock().unwrap().query_row("SELECT count(*) FROM local_echoes", [], |r| r.get::<_,u32>(0)).unwrap(), 0);
     assert_eq!(clock(), before, "busy optional recency was skipped, not a required content write");
     assert_eq!(f.cache.db.lock().unwrap().query_row("PRAGMA busy_timeout", [], |r| r.get::<_,u32>(0)).unwrap(), 5000);
     writer.execute_batch("ROLLBACK").unwrap();
     f.cache.preview("chat", None).unwrap();
     assert!(clock() > before, "uncontended visits still protect bodies from eviction");
+    f.cache.remember_local("chat", &local, &f.lineage).unwrap();
+    assert_eq!(f.cache.db.lock().unwrap().query_row("SELECT count(*) FROM local_echoes", [], |r| r.get::<_,u32>(0)).unwrap(), 1, "local body reuse resumes when uncontended");
     writer.execute_batch("CREATE TRIGGER fail_touch BEFORE UPDATE ON block_usage BEGIN SELECT RAISE(ABORT,'recency fault'); END").unwrap();
     let error = f.cache.preview("chat", None).err().expect("non-contention failures must not be hidden");
     assert!(format!("{error:#}").contains("recency fault"));

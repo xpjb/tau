@@ -14,6 +14,12 @@ fn cached_phone_first_frame_does_not_wait_for_a_replica_writer() {
         "text":"verified offline body", "origin":{}, "isError":false
     })).unwrap();
     controller.preview("chat", vec![event], QueueState::default(), None).unwrap();
+    controller.chats.get_mut("chat").unwrap().local.pending.push(crate::store::Pending {
+        request: ClientRequest { id: "uncertain".into(), command: ClientCommand::Prompt { session_id: "chat".into(), text: "do not replay me".into() } },
+        started_at_ms: None, text: "do not replay me".into(), files: vec![],
+        status: crate::store::Delivery::Unconfirmed, detail: None,
+    });
+    controller.save_chat("chat").unwrap();
     let replica = root.path().join("blocks").join(format!("{}.sqlite3", crate::store::hash(&controller.identity)));
     let db = rusqlite::Connection::open(&replica).unwrap();
     let lineage = tau_blocks::cursor(&db).unwrap().lineage;
@@ -33,6 +39,10 @@ fn cached_phone_first_frame_does_not_wait_for_a_replica_writer() {
         app.tick(0.);
         app.frame(&ctx, ctx.view());
         assert_eq!(app.controller.selected().unwrap().local.draft, "local draft");
+        let pending = &app.controller.selected().unwrap().local.pending;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].text, "do not replay me");
+        assert_eq!(pending[0].status, crate::store::Delivery::Unconfirmed);
         assert_eq!(app.services.renderer.messages["chat/saved"].source, "verified offline body");
         assert!(app.controller.notice.is_none(), "ordinary contention must not become a storage popup");
         let pixels = ctx.read_rgba8().unwrap();
