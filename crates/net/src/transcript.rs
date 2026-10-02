@@ -88,9 +88,7 @@ pub struct QueueRef {
 pub struct QueuedRequest {
     pub request_id: String,
     pub revision: u64,
-    pub kind: String,
     pub text: String,
-    pub images: usize,
     pub timestamp_ms: Option<u64>,
 }
 
@@ -100,7 +98,6 @@ pub struct QueueControl {
     pub command_id: String,
     pub run_id: Option<String>,
     pub action: String,
-    pub boundary: Option<String>,
     pub requests: Vec<QueueRef>,
     pub status: String,
     pub detail: Option<String>,
@@ -114,11 +111,9 @@ pub struct QueueState {
     pub run_id: Option<String>,
     pub paused: bool,
     pub control: Option<QueueControl>,
-    pub capabilities: Vec<String>,
-    pub boundaries: Vec<String>,
 }
 impl QueueState {
-    pub fn native() -> Self { Self { available:true, capabilities:["queue_edit","queue_delete","queue_pause","queue_resume","queue_run_prefix","queue_cancel_control"].into_iter().map(str::to_owned).collect(), boundaries:vec!["turn".into()], ..Default::default() } }
+    pub fn native() -> Self { Self { available:true, ..Default::default() } }
 }
 
 

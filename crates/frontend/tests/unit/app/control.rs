@@ -61,7 +61,6 @@ fn queue_controls_follow_run_state() {
         command_id: "pause-control".into(),
         run_id: Some("held-run".into()),
         action: "pause".into(),
-        boundary: None,
         requests: vec![],
         status: "waiting".into(),
         detail: None,

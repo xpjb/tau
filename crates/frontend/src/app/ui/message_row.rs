@@ -402,13 +402,12 @@ fn message_actions(chat: &Chat, id: &MessageId, session: &str) -> Vec<(String, M
         let (index, q) = state.requests.iter().enumerate().find(|(_, q)| &q.request_id == qid).unwrap();
         let complete = !feed.incomplete.contains(&format!("queued:{qid}"));
         if !complete { actions.clear(); }
-        if !feed.queue_transitions.contains_key(qid) {
-            if complete && state.capabilities.iter().any(|c| c == "queue_edit") { actions.push(("Edit".into(), MenuChoice::EditQueue(qid.clone(), q.revision, q.text.clone()))); }
-            if state.capabilities.iter().any(|c| c == "queue_delete") { actions.push(("Delete".into(), MenuChoice::Queue(QueueOperation::Delete { request_id: qid.clone(), revision: q.revision }))); }
+        if state.available && !feed.queue_transitions.contains_key(qid) {
+            if complete { actions.push(("Edit".into(), MenuChoice::EditQueue(qid.clone(), q.revision, q.text.clone()))); }
+            actions.push(("Delete".into(), MenuChoice::Queue(QueueOperation::Delete { request_id: qid.clone(), revision: q.revision })));
         }
-        if state.available && feed.queue_transitions.is_empty() && state.capabilities.iter().any(|c| c == "queue_run_prefix")
-            && let Some(boundary) = state.boundaries.iter().find(|b| b.as_str() == "reasoning_checkpoint").or(state.boundaries.first()) {
-            actions.push(("Run through here, then pause".into(), MenuChoice::Queue(QueueOperation::Prefix { run_id: state.run_id.clone(), requests: state.requests[..=index].iter().map(|q| QueueRef { request_id: q.request_id.clone(), revision: q.revision }).collect(), boundary: boundary.clone() })));
+        if state.available && feed.queue_transitions.is_empty() {
+            actions.push(("Run through here, then pause".into(), MenuChoice::Queue(QueueOperation::Prefix { run_id: state.run_id.clone(), requests: state.requests[..=index].iter().map(|q| QueueRef { request_id: q.request_id.clone(), revision: q.revision }).collect(), boundary: "turn".into() })));
         }
     } else if let Some(p) = m.intent.as_ref().and_then(|id| chat.local.pending.iter().find(|p| &p.request.id == id)) {
         if matches!(p.status, crate::store::Delivery::Rejected | crate::store::Delivery::Unconfirmed) && matches!(p.request.command, ClientCommand::Prompt { .. }) {

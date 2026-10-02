@@ -1,4 +1,4 @@
-//! Real protocol-18 test client: bounded control plus explicit native reads.
+//! Real test client: bounded control plus explicit native reads.
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value,json};

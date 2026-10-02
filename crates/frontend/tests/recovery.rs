@@ -381,13 +381,13 @@ fn accepted_queue_edit_retains_optimistic_text_until_complete_replication_after_
     c.store.put(&c.identity,"account",&c.account).unwrap();
     let pending=tau_frontend::store::Pending {request:ClientRequest {id:"edit".into(),command:ClientCommand::QueueControl {session_id:"chat".into(),generation:"g".into(),operation:QueueOperation::Edit {request_id:"queued".into(),revision:0,text:"new complete text".into()}}},started_at_ms:None,text:"new complete text".into(),files:vec![],status:Delivery::Sending,detail:None};
     let chat=c.chats.get_mut("chat").unwrap();chat.local.pending.push(pending);chat.feed.queue=QueueState::native();
-    chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:0,kind:"steer".into(),text:"old text".into(),images:0,timestamp_ms:None});
+    chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:0,text:"old text".into(),timestamp_ms:None});
     c.message(ServerMessage::success("edit".into(),Some("chat".into()),None)).unwrap();
     assert_eq!(c.chats["chat"].local.pending[0].status,Delivery::Accepted);
     drop(c);
     let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
     let chat=c.chats.get_mut("chat").unwrap();assert_eq!(chat.local.pending[0].status,Delivery::Accepted);
-    chat.feed.queue=QueueState::native();chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:1,kind:"steer".into(),text:"new".into(),images:0,timestamp_ms:None});
+    chat.feed.queue=QueueState::native();chat.feed.queue.requests.push(QueuedRequest {request_id:"queued".into(),revision:1,text:"new".into(),timestamp_ms:None});
     chat.feed.incomplete.insert("queued:queued".into());
     chat.local.reconcile_complete(&chat.feed.queue,&[],&chat.feed.incomplete);assert_eq!(chat.local.pending.len(),1);
     chat.reconcile();

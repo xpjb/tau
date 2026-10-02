@@ -326,7 +326,7 @@ impl AgentManager {
         let disposition = if content.agent.as_ref().unwrap().running || content.transcript.as_ref().unwrap().queue.paused { PromptDisposition::Queued } else { PromptDisposition::Submitted };
         let mut queue = content.transcript.as_ref().unwrap().queue.clone();
         if queue.requests.len() >= 256 { bail!("Queue is full (256 messages)"); }
-        queue.requests.push(QueuedRequest { request_id:request_id.into(), revision:0, kind:"steer".into(), text:text.into(), images:0, timestamp_ms:Some(crate::agent::now_ms()) });
+        queue.requests.push(QueuedRequest { request_id:request_id.into(), revision:0, text:text.into(), timestamp_ms:Some(crate::agent::now_ms()) });
         content.commit(id,model_change,Some(queue),Some(Receipt { model:model.cloned(), id:request_id.into(),command:None,text:text.into(),disposition,finished:true,notice:None,error:None })).await?;
         if let Some(model) = model { self.schedule_catalog(model); }
         // Queue, receipt and retained session metadata commit together before acknowledgement.
@@ -380,13 +380,13 @@ impl AgentManager {
             QueueOperation::Pause { run_id, boundary } | QueueOperation::Prefix { run_id, boundary, requests: _ } if boundary != "turn" || run_id != queue.run_id => {
                 bail!("Unsupported boundary or stale run ID");
             }
-            QueueOperation::Pause { run_id, boundary } => {
-                queue.control = Some(QueueControl { command_id:command_id.into(), run_id, action:"pause".into(), boundary:Some(boundary), requests:vec![], status:"waiting".into(), detail:None });
+            QueueOperation::Pause { run_id, .. } => {
+                queue.control = Some(QueueControl { command_id:command_id.into(), run_id, action:"pause".into(), requests:vec![], status:"waiting".into(), detail:None });
                 if !content.agent.as_ref().unwrap().running || stopping { queue.paused = true; queue.control.as_mut().unwrap().status = "applied".into(); }
             }
-            QueueOperation::Prefix { run_id, boundary, requests } => {
+            QueueOperation::Prefix { run_id, requests, .. } => {
                 if requests.is_empty() || requests.len() > queue.requests.len() || requests.iter().zip(&queue.requests).any(|(a,b)| a.request_id != b.request_id || a.revision != b.revision) { bail!("Queue prefix changed"); }
-                queue.control = Some(QueueControl { command_id:command_id.into(), run_id, action:"prefix".into(), boundary:Some(boundary), requests, status:"waiting".into(), detail:None });
+                queue.control = Some(QueueControl { command_id:command_id.into(), run_id, action:"prefix".into(), requests, status:"waiting".into(), detail:None });
                 queue.paused = false;
             }
             QueueOperation::Resume { run_id } => {

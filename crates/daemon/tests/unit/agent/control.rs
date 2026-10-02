@@ -273,7 +273,7 @@ async fn play_recovers_legacy_orphaned_controls_even_with_a_stopped_run_id() {
             let mut content = runtime.content.lock().await;
             let mut queue = content.transcript.as_ref().unwrap().queue.clone();
             queue.control = Some(QueueControl { command_id:"orphan".into(), run_id:Some("stopped-run".into()), action:action.into(),
-                boundary:Some("turn".into()), requests:if action == "prefix" {vec![QueueRef {request_id:"one".into(), revision:0}]} else {vec![]},
+                requests:if action == "prefix" {vec![QueueRef {request_id:"one".into(), revision:0}]} else {vec![]},
                 status:"waiting".into(), detail:None });
             content.save_queue(&id, queue, None).await.unwrap();
         }

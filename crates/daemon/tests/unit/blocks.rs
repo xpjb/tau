@@ -8,7 +8,7 @@ fn user_and_queue_headers_certify_exact_text_without_embedding_it() {
     let raw=json!({"type":"message","id":"entry","origin":{"requestId":"request"},"message":{"role":"user","content":[{"type":"text","text":text}]}});
     let value=Event::from_entry(&raw,false).unwrap().remove(0);
     let tx=db.transaction().unwrap(); event(&tx,"chat",&value).unwrap();
-    let mut state=QueueState::native();state.requests.push(tau_net::QueuedRequest {request_id:"request".into(),revision:0,kind:"steer".into(),text:text.clone(),images:0,timestamp_ms:None});
+    let mut state=QueueState::native();state.requests.push(tau_net::QueuedRequest {request_id:"request".into(),revision:0,text:text.clone(),timestamp_ms:None});
     queue(&tx,"chat",&state).unwrap();tx.commit().unwrap();
     for id in [&value.id,"queued:request"] {
         let h=tau_block_store::header(&db,"chat",id).unwrap().unwrap();

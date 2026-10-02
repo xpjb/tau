@@ -61,7 +61,7 @@ fn queue_directory_paginates_fully_and_partial_text_is_not_editable() {
     let mut f=Fixture::new();
     f.put(QUEUE,None,i64::MAX as u64,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
     for n in 0..99 {
-        let id=format!("request-{n}");let meta=json!({"request":tau_net::QueuedRequest {request_id:id.clone(),revision:0,kind:"steer".into(),text:String::new(),images:0,timestamp_ms:None}});
+        let id=format!("request-{n}");let meta=json!({"request":tau_net::QueuedRequest {request_id:id.clone(),revision:0,text:String::new(),timestamp_ms:None}});
         f.put(&format!("queued:{id}"),Some(QUEUE),n,BlockKind::Text,meta,b"whole message");
     }
     f.page(None,None);f.body(QUEUE);f.page(Some(QUEUE),None);
