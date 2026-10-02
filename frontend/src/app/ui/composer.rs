@@ -173,6 +173,7 @@ impl Composer {
     }
 }
 impl Widget for Composer {
+    fn update(&mut self, dt: f32, cx: &mut Context<'_>) { self.field.update_scroll(dt, cx); }
     fn owns(&self, target: Target, model: &Controller, _ui: &UiState) -> bool {
         self.bound(model) && (self.field.control.target == target || self.controls.owns(target))
     }

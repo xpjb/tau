@@ -78,7 +78,7 @@ fn modal_scope_blocks_background_pointer_wheel_middle_and_context() {
     let point = Vec2::new(8., 300.);
     h.app.press(7, point, true); h.app.motion(7, Vec2::new(8., 150.)); h.app.release(7, point);
     h.app.wheel(300., false, point); h.app.middle(true, point); h.app.context_at(point);
-    assert!(h.app.root.workspace.chat.code.pointer.is_none()); assert!(h.app.root.workspace.chat.transcript.scroll.wheel.is_none());
+    assert!(h.app.root.workspace.chat.code.pointer.is_none()); assert!(h.app.root.workspace.chat.transcript.scroll.motion.wheel.is_none());
     assert!(h.app.root.workspace.chat.transcript.autoscroll.is_none()); assert!(h.app.root.menu.is_none());
     assert_eq!(h.app.controller.selected().unwrap().local.draft, before);
     assert!(h.app.root.dialog.is_some());

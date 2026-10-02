@@ -252,6 +252,7 @@ impl CodeBrowser {
             code.horizontal.stop();
             code.preview_scroll.stop();
             code.preview_horizontal.stop();
+            if let Some(field) = &mut code.search { field.editor.stop_scrolling(); }
         }
     }
     fn activate(&mut self, action: Choice, cx: &mut Context<'_>) {
@@ -924,25 +925,15 @@ impl CodeBrowser {
         cx.ui.dirty = true;
         true
     }
-    pub(super) fn code_wheel(&mut self, amount: f32, horizontal: bool, point: Vec2, cx: &mut Context<'_>) -> bool {
-        let Some(code) = &mut self.view else {
-            return false;
-        };
-        if code.search.is_some() && contains(code.preview_viewport, point) {
-            let scroll = if horizontal { &mut code.preview_horizontal } else { &mut code.preview_scroll };
-            scroll.value = (scroll.value + amount).clamp(0., scroll.max);
-            cx.ui.dirty = true; return true;
-        }
-        if !contains(code.viewport, point) {
-            return false;
-        }
-        if horizontal {
-            code.horizontal.value = (code.horizontal.value + amount).clamp(0., code.horizontal.max);
-        } else {
-            code.scroll.value = (code.scroll.value + amount).clamp(0., code.scroll.max);
-        }
-        cx.ui.dirty = true;
-        true
+    fn code_wheel(&mut self, event: &InputEvent<'_>, cx: &mut Context<'_>) -> bool {
+        let InputEvent::Wheel { horizontal, point, .. } = *event else { return false; };
+        let Some(code) = &mut self.view else { return false; };
+        let scroll = if code.search.is_some() && contains(code.preview_viewport, point) {
+            if horizontal { &mut code.preview_horizontal } else { &mut code.preview_scroll }
+        } else if contains(code.viewport, point) {
+            if horizontal { &mut code.horizontal } else { &mut code.scroll }
+        } else { return false; };
+        scroll.event(event, false, cx)
     }
     pub(super) fn code_key(&mut self, key: &str, ctrl: bool, shift: bool, cx: &mut Context<'_>) -> bool {
         if ctrl && matches!(key, "Space" | " ") {
@@ -1067,6 +1058,7 @@ impl Widget for CodeBrowser {
         if let Some(code) = &mut self.view {
             code.scroll.update(dt, cx); code.horizontal.update(dt, cx);
             code.preview_scroll.update(dt, cx); code.preview_horizontal.update(dt, cx);
+            if let Some(field) = &mut code.search { field.update_scroll(dt, cx); }
         }
     }
     fn owns(&self, target: ui::Target, model: &Controller, _ui: &ui::UiState) -> bool {
@@ -1163,8 +1155,8 @@ impl Widget for CodeBrowser {
                     self.pointer = None;
                 }
             }
-            InputEvent::Wheel { amount, horizontal, point } => {
-                return self.code_wheel(amount, horizontal, point, cx);
+            InputEvent::Wheel { .. } => {
+                return self.code_wheel(event, cx);
             }
             _ => {}
         }
@@ -1172,23 +1164,12 @@ impl Widget for CodeBrowser {
             return child;
         };
         if code.search.is_some() {
-            let preview_handled = code.preview_scroll.event(event, child, cx);
-            if preview_handled { return true; }
+            let handled = ScrollState::axes_event(&mut code.preview_scroll, &mut code.preview_horizontal, event, child, cx);
+            if handled { return true; }
         }
-        let horizontal = match event {
-            InputEvent::Move { point, .. } => {
-                self.pointer.as_ref().is_some_and(|p| (point.x - p.start.x).abs() > 1.5 * (point.y - p.start.y).abs())
-            }
-            _ => false,
-        };
-        if horizontal {
-            let h = code.horizontal.event(event, child, cx);
-            code.scroll.event(event, h, cx)
-        } else {
-            let v = code.scroll.event(event, child, cx);
-            if !matches!(event, InputEvent::Move { .. }) { code.horizontal.event(event, v, cx) } else { v }
-        }
+        ScrollState::axes_event(&mut code.scroll, &mut code.horizontal, event, child, cx)
     }
+
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         if self.view.is_none() {
             return;

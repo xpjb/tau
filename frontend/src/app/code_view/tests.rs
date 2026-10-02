@@ -415,7 +415,51 @@ fn code_view_wheel_uses_the_shared_smooth_scroll_owner() {
     let before = view.scroll.value;
     h.app.wheel(96., false, point);
     let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
-    assert!(view.scroll.wheel.is_some(), "Files must use the same smooth wheel scrolling as the transcript");
+    assert!(view.scroll.motion.wheel.is_some(), "Files must use the same smooth wheel scrolling as the transcript");
     assert_eq!(view.scroll.value, before, "A wheel notch is animated, not a different immediate jump in Files");
     assert!(h.app.needs_redraw(), "Wheel input starts the on-demand animation");
+    h.app.scroll(24., false, point, true);
+    let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+    assert_eq!(view.scroll.value, before + 24.);
+    assert!(!view.scroll.motion.active(), "Native touchpad input must not receive a second easing/momentum tail");
+}
+
+#[test]
+fn file_and_picker_preview_horizontal_touch_flings_share_physics_and_cancel() {
+    for preview in [false, true] {
+        let mut h = Harness::new((360, 720), 1., true);
+        let text = format!("{}\n", "a wide source line ".repeat(20)).repeat(30);
+        if preview {
+            h.index(&["src/long.rs"], false);
+            h.app.key("Space", true, false);
+            h.matched();
+            h.preview(&text);
+        } else { h.files(); h.text(&text); }
+        let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+        let viewport = if preview { view.preview_viewport } else { view.viewport };
+        let start = Vec2::new(viewport.x + viewport.width / 2., viewport.y + viewport.height / 2.);
+        h.app.press(61, start, true);
+        let mut end = start;
+        for i in 1..=3 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            end.x = start.x - i as f32 * 24.;
+            h.app.motion(61, end);
+        }
+        h.app.release(61, end);
+        let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+        let axis = if preview { &view.preview_horizontal } else { &view.horizontal };
+        let released = axis.value;
+        assert!(axis.motion.active(), "preview={preview}");
+        h.frame(); // Layout must not discard a newly released fling.
+        assert!(h.app.tick(1. / 60.));
+        h.app.frame(&h.ctx, h.ctx.view());
+        let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+        assert!((if preview { view.preview_horizontal.value } else { view.horizontal.value }) > released);
+        assert_eq!(view.scroll.value, 0.);
+        assert_eq!(view.preview_scroll.value, 0.);
+        h.app.cancel_pointer();
+        let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+        assert!(!view.horizontal.motion.active() && !view.preview_horizontal.motion.active());
+        assert_eq!(h.app.controller.selected().unwrap().local.draft, "");
+    }
 }

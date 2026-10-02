@@ -88,12 +88,32 @@ fn nested_attachment_button_promotes_touch_to_its_scroll_parent_without_activati
     let p = Vec2::new(rect.x + rect.width / 2., rect.y + rect.height / 2.);
     h.app.press(10, p, true);
     assert_eq!(h.app.ui.capture.unwrap().target, target);
+    std::thread::sleep(std::time::Duration::from_millis(16));
     h.app.motion(10, Vec2::new(p.x, p.y - 45.));
+    std::thread::sleep(std::time::Duration::from_millis(16));
+    h.app.motion(10, Vec2::new(p.x, p.y - 85.));
     assert_eq!(h.app.ui.capture.unwrap().target, h.app.root.workspace.attachments.scroll.target);
     assert!(h.app.root.workspace.attachments.scroll.value > 0.);
     assert_eq!(h.app.root.workspace.chat.transcript.scroll.value, 0.);
     h.app.release(10, p);
     assert!(h.app.actions().is_empty(), "Scroll takeover cancels the child activation even on a returning release");
+    assert!(h.app.root.workspace.attachments.scroll.motion.active());
+    let released = h.app.root.workspace.attachments.scroll.value;
+    h.app.tick(1. / 60.);
+    assert!(h.app.root.workspace.attachments.scroll.value > released);
+    h.frame();
+    let viewport = h.app.root.workspace.attachments.scroll.rect;
+    let rect = h.app.root.workspace.attachments.cards.values().flat_map(|card| card.controls.items.iter())
+        .find_map(|(_, b, choice)| {
+            if !matches!(choice, CardChoice::UseSaved(SavedAction::Open)) { return None; }
+            let r = crate::render::intersect(b.control.rect?, viewport);
+            (r.width > 0. && r.height > 0.).then_some(r)
+        }).unwrap();
+    let catch = Vec2::new(rect.x + rect.width / 2., rect.y + rect.height / 2.);
+    h.app.press(12, catch, true);
+    h.app.release(12, catch);
+    assert!(!h.app.root.workspace.attachments.scroll.motion.active());
+    assert!(h.app.actions().is_empty(), "A tap catching momentum stops the list, not Open on its moving child");
     h.app.root.workspace.attachments.scroll.stop();
     h.app.root.workspace.attachments.scroll.value = 0.;
     h.frame();
@@ -154,7 +174,7 @@ fn nested_capture_is_clipped_and_cannot_activate_a_replaced_card_or_another_poin
         assert!(!b.control.contains(p));
     }
     h.app.cancel_pointer();
-    assert!(h.app.root.workspace.attachments.scroll.velocity == 0.);
+    assert!(h.app.root.workspace.attachments.scroll.motion.velocity == 0.);
 }
 
 #[test]

@@ -208,6 +208,7 @@ impl Workspace {
     }
     pub fn cancel(&mut self, cx: &mut Context<'_>) {
         self.chat.transcript.cancel();
+        self.chat.composer.field.editor.stop_scrolling();
         self.sidebar.scroll.stop();
         self.sidebar.projects.scroll.stop();
         self.attachments.scroll.stop();

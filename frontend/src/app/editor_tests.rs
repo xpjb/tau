@@ -117,7 +117,7 @@ fn actual_prompt_settings_reuse_input_geometry_clipboard_ime_and_scrolling() {
     let field = h.app.root.dialog.as_ref().unwrap().fields()[0].control.rect.unwrap();
     let pointer = Vec2::new(field.x + field.width * 0.5, field.y + field.height * 0.5);
     let transcript_scroll = h.app.root.workspace.chat.transcript.scroll.value;
-    h.app.wheel(-100_000., false, pointer);
+    h.app.scroll(-100_000., false, pointer, true); // Native precision input uses the displayed origin.
     let scrolled = h.frame();
     assert_eq!(h.app.root.workspace.chat.transcript.scroll.value, transcript_scroll, "wheel over settings is not transcript scrolling");
     assert_eq!(scrolled, h.frame(), "idle render must not undo manual field scrolling");

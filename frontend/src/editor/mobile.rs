@@ -45,6 +45,7 @@ impl Editor {
         let changed = self.value != value;
         if !changed && self.anchor == anchor && self.caret.byte_index == caret
             && self.native_composition == composition { return false; }
+        self.stop_scrolling();
         if changed {
             self.undo.push(self.snapshot());
             if self.undo.len() > 64 { self.undo.remove(0); }

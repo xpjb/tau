@@ -5,7 +5,7 @@ use crate::{
 };
 use chad::winit::{
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, MouseButton, WindowEvent},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, UserAttentionType},
 };
@@ -15,8 +15,11 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
+    time::Instant,
 };
 use tau_protocol::SessionStatus;
+mod scroll;
+use scroll::WheelDecoder;
 
 // Account/session are captured when the document picker is opened.
 enum DesktopEvent {
@@ -29,6 +32,7 @@ struct Desktop {
     cursor: Vec2,
     cursor_icon: CursorIcon,
     modifiers: ModifiersState,
+    scroll: WheelDecoder,
     clipboard: Option<arboard::Clipboard>,
     rx: mpsc::Receiver<DesktopEvent>,
     tx: mpsc::Sender<DesktopEvent>,
@@ -78,6 +82,7 @@ impl ChadApp for Desktop {
             cursor: Vec2::new(0., 0.),
             cursor_icon: CursorIcon::Default,
             modifiers: ModifiersState::empty(),
+            scroll: WheelDecoder::default(),
             clipboard: arboard::Clipboard::new().ok(),
             rx,
             tx,
@@ -140,12 +145,8 @@ impl ChadApp for Desktop {
                 self.app.context_at(self.cursor);
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let (x, y) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (-x * 48. * ctx.scale_factor() as f32, -y * 48. * ctx.scale_factor() as f32),
-                    MouseScrollDelta::PixelDelta(p) => (-p.x as f32, -p.y as f32),
-                };
-                let horizontal = x.abs() > y.abs();
-                self.app.wheel(if horizontal { x } else { y }, horizontal || self.modifiers.shift_key(), self.cursor);
+                let (amount, horizontal, precise) = self.scroll.decode(delta, ctx.scale_factor() as f32, self.modifiers.shift_key(), Instant::now());
+                self.app.scroll(amount, horizontal, self.cursor, precise);
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Ime(Ime::Commit(text)) => self.app.input(text),
@@ -181,6 +182,7 @@ impl ChadApp for Desktop {
             WindowEvent::Focused(false) => {
                 self.app.ui.window_focused = false;
                 self.modifiers = ModifiersState::empty();
+                self.scroll = WheelDecoder::default();
                 self.app.cancel_preedit();
                 self.app.cancel_pointer();
                 let result = self.app.save();

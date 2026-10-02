@@ -40,6 +40,16 @@ impl Dialog {
             }
         })
     }
+    fn for_each_field(&mut self, mut run: impl FnMut(&mut TextField)) {
+        match self {
+            Self::Connection(d) => { run(&mut d.url); run(&mut d.token); }
+            Self::Topic(d) => { for field in d.fields() { run(field); } }
+            Self::Models(d) => { run(&mut d.models); run(&mut d.search); }
+            Self::Daemon(d) => { if let Some(field) = &mut d.value { run(field); } }
+            Self::Operation(d) => { if let Some(field) = &mut d.value { run(field); } }
+        }
+    }
+    pub fn stop_scrolling(&mut self) { self.for_each_field(|field| field.editor.stop_scrolling()); }
     pub fn id(&self) -> Id {
         match self {
             Self::Connection(d) => d.form.id,
@@ -124,6 +134,7 @@ impl Widget for Dialog {
             Self::Daemon(d) => d.update(dt, cx),
             Self::Operation(d) => d.update(dt, cx),
         }
+        self.for_each_field(|field| field.update_scroll(dt, cx));
     }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         match self {

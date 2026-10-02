@@ -85,7 +85,7 @@ pub(super) enum Event<'a> {
     Move { pointer: u64, point: Vec2 },
     Up { pointer: u64, point: Vec2 },
     Hover(Option<Vec2>),
-    Wheel { amount: f32, horizontal: bool, point: Vec2 },
+    Wheel { amount: f32, horizontal: bool, point: Vec2, precise: bool },
     Key { key: &'a str, ctrl: bool, shift: bool },
     Text(&'a str),
     Preedit(&'a str, Option<(usize, usize)>),

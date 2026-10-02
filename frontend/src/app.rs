@@ -211,7 +211,11 @@ impl App {
     }
     #[cfg(not(target_os = "android"))]
     pub fn wheel(&mut self, amount: f32, horizontal: bool, point: Vec2) {
-        self.ui_event(ui::Event::Wheel { amount, horizontal, point });
+        self.scroll(amount, horizontal, point, false);
+    }
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn scroll(&mut self, amount: f32, horizontal: bool, point: Vec2, precise: bool) {
+        self.ui_event(ui::Event::Wheel { amount, horizontal, point, precise });
     }
     #[cfg(not(target_os = "android"))]
     pub fn middle(&mut self, pressed: bool, point: Vec2) {
@@ -228,6 +232,7 @@ impl App {
         if self.ui.native.is_none() { self.cancel_preedit(); }
         self.with_ui(|root, cx| {
             root.workspace.cancel(cx);
+            if let Some(dialog) = &mut root.dialog { dialog.stop_scrolling(); }
             if let Some(viewer) = &mut root.viewer { viewer.cancel_pointer(); }
             root.tooltips.dismiss();
         });

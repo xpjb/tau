@@ -138,8 +138,8 @@ impl Transcript {
     }
     /// Called for actual scrolling, not as a paint-time save/restore round trip.
     pub fn remember_scroll(&mut self, cx: &mut Context<'_>) {
-        let follow = self.scroll.wheel.is_none() && self.autoscroll.is_none()
-            && !self.scroll.dragging_bar() && self.scroll.max - self.scroll.value < cx.ui.scale;
+        let follow = !self.scroll.moving() && self.autoscroll.is_none()
+            && self.scroll.max - self.scroll.value < cx.ui.scale;
         self.reading = Reading::Position(self.position(follow).unwrap_or_default());
         self.checkpoint(cx);
     }
@@ -248,7 +248,7 @@ impl Widget for Transcript {
     fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
         let capture = cx.ui.capture;
         let old_scroll = self.scroll.value;
-        let was_wheeling = self.scroll.wheel.is_some();
+        let was_scrolling = self.scroll.moving();
         if let Some(auto) = &self.autoscroll {
             self.scroll.set(self.scroll.value + auto.speed(cx.ui.scale) * dt.min(0.05));
         }
@@ -272,7 +272,7 @@ impl Widget for Transcript {
         for row in &mut self.rows {
             row.update(dt, cx);
         }
-        if self.scroll.value != old_scroll || was_wheeling && self.scroll.wheel.is_none() {
+        if self.scroll.value != old_scroll || was_scrolling && !self.scroll.moving() {
             self.remember_scroll(cx);
             cx.ui.dirty = true;
         }
@@ -524,7 +524,7 @@ impl Transcript {
                 }
                 child = true;
             }
-            Event::Wheel { amount: _, horizontal, point } if !child && contains(self.scroll.rect, point) => {
+            Event::Wheel { horizontal, point, .. } if !child && contains(self.scroll.rect, point) => {
                 self.autoscroll = None;
                 self.history_attempt = None;
                 let handled = if horizontal {
@@ -544,14 +544,7 @@ impl Transcript {
             }
             _ => {}
         }
-        let horizontal = matches!(event,Event::Move {point,..} if capture.is_some_and(|c|(point.x-c.start.x).abs()>1.5*(point.y-c.start.y).abs()));
-        let handled = if horizontal {
-            let h = self.horizontal.event(event, child, cx);
-            self.scroll.event(event, h, cx)
-        } else {
-            let v = self.scroll.event(event, child, cx);
-            if !matches!(event, Event::Move { .. }) { self.horizontal.event(event, v, cx) } else { v }
-        };
+        let handled = ScrollState::axes_event(&mut self.scroll, &mut self.horizontal, event, child, cx);
         if let Event::Up { pointer, .. } = *event
             && capture.is_some_and(|c| c.pointer == pointer)
         {
