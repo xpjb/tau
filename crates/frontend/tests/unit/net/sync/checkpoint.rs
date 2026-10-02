@@ -66,14 +66,14 @@ impl Fixture {
         }, bytes).unwrap();
         tx.commit().unwrap();
     }
-    async fn connect(&self, slow_feed: bool) -> (Server, Client, watch::Sender<u64>) {
+    async fn connect(&self, slow_feed: bool) -> (Server, Client, Peer, watch::Sender<u64>) {
         let (changes, changed) = watch::channel(0);
         let server = Server::bind("127.0.0.1:0".parse().unwrap(), Arc::new(SlowSource {
             db: self.source.clone(), changed, slow_feed, feed_calls: AtomicUsize::new(0), reads: self.reads.clone(),
         })).await.unwrap();
         let client = Client::bind().await.unwrap();
-        client.configure(&server.authorize(&client.node_id(), self.lineage.clone()).unwrap(), "127.0.0.1").await.unwrap();
-        (server, client, changes)
+        let peer=client.configure(&server.authorize(&client.node_id(), self.lineage.clone()).unwrap(), "127.0.0.1").await.unwrap();
+        (server, client, peer, changes)
     }
 }
 
@@ -82,11 +82,11 @@ async fn checkpoint_scheduling_commits_a_slow_metadata_round_instead_of_restarti
     let f = Fixture::new();
     f.put("parent", None, b"");
     f.put("child", Some("parent"), b"not requested");
-    let (server, client, _changes) = f.connect(true).await;
+    let (server, client, peer, _changes) = f.connect(true).await;
     let (notices, mut received) = mpsc::channel(32);
     let wake: crate::net::Wake = Arc::new(|| {});
     let key=Key::Feeds("chat".into(), vec![None, Some("parent".into())], false);
-    let worker=watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake);
+    let worker=watch_once(&key,&peer,&f.cache,&notices,&wake);
     tokio::pin!(worker);
     tokio::time::timeout(Duration::from_secs(10),async {
         loop {tokio::select! {
@@ -109,12 +109,12 @@ async fn checkpoint_scheduling_resumes_after_a_slow_chunk_without_replaying_its_
     let f = Fixture::new();
     let bytes = vec![b'x'; BLOCK_CHUNK_BYTES * 2 + 17];
     f.put("body", None, &bytes);
-    let (server, client, _changes) = f.connect(false).await;
+    let (server, client, peer, _changes) = f.connect(false).await;
     let (notices, _received) = mpsc::channel(32);
     let wake: crate::net::Wake = Arc::new(|| {});
     let key = Key::Block("chat".into(), "body".into(), true);
     assert!(tokio::time::timeout(Duration::from_secs(10),watch_once(
-        &key,&client,&f.cache,&f.lineage,&notices,&wake,
+        &key,&peer,&f.cache,&notices,&wake,
     )).await.unwrap().unwrap());
     assert_eq!(client.stats().streams,2,"The slow chunk must commit before the transport renews its slice");
     assert_eq!(tau_block_store::cached_content(&f.replica(), "chat", "body").unwrap(), bytes);
@@ -135,10 +135,10 @@ async fn background_live_body_releases_its_slot_after_catching_up_and_resumes_ne
         let mut h=tau_block_store::header(&tx,"chat","live").unwrap().unwrap();h.sealed=false;
         tau_block_store::put(&tx,"chat",h,b"prefix").unwrap();tx.commit().unwrap();
     }
-    let (server,client,_changes)=f.connect(true).await; // Only the unused feed path is slow.
+    let (server,client,peer,_changes)=f.connect(true).await; // Only the unused feed path is slow.
     let (notices,_received)=mpsc::channel(32);let wake:crate::net::Wake=Arc::new(||{});
     let key=Key::BackgroundBlock("chat".into(),"live".into());
-    assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake)).await.unwrap().unwrap(),
+    assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&peer,&f.cache,&notices,&wake)).await.unwrap().unwrap(),
         "a background catch-up must End, not wait five seconds for more live bytes");
     assert_eq!(client.stats().bulk_slots,0);
     {
@@ -146,7 +146,7 @@ async fn background_live_body_releases_its_slot_after_catching_up_and_resumes_ne
         let h=tau_block_store::header(&tx,"chat","live").unwrap().unwrap();
         tau_block_store::append(&tx,"chat","live",h.version,h.length,b" suffix",false).unwrap();tx.commit().unwrap();
     }
-    assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake)).await.unwrap().unwrap());
+    assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&peer,&f.cache,&notices,&wake)).await.unwrap().unwrap());
     assert_eq!(tau_block_store::cached_content(&f.replica(),"chat","live").unwrap(),b"prefix suffix");
     let reads=f.reads.lock().unwrap().clone();assert_eq!(reads.len(),2);assert_eq!(reads[1].offset,6);
     assert_eq!(client.stats().bulk_slots,0);client.shutdown().await;server.shutdown().await;
@@ -163,15 +163,15 @@ async fn disappearing_body_is_not_an_alert_or_an_unordered_replica_tombstone() {
         let mut db=f.source.lock().unwrap();let tx=db.transaction().unwrap();
         tau_block_store::remove(&tx,"chat","queued:consumed").unwrap();tx.commit().unwrap();
     }
-    let (server,client,_changes)=f.connect(false).await;
+    let (server,client,peer,_changes)=f.connect(false).await;
     // Skip the separate slow-chunk fixture behavior in this race regression.
     f.reads.lock().unwrap().push(BlockRequest {scope:"chat".into(),id:"setup".into(),version:0,offset:0,follow:false});
     let (notices,mut received)=mpsc::channel(32);let wake:crate::net::Wake=Arc::new(||{});
-    assert!(watch_once(&Key::Block("chat".into(),"queued:consumed".into(),true),&client,&f.cache,&f.lineage,&notices,&wake).await.unwrap());
+    assert!(watch_once(&Key::Block("chat".into(),"queued:consumed".into(),true),&peer,&f.cache,&notices,&wake).await.unwrap());
     assert!(received.try_recv().is_err(),"An obsolete body interest must not produce an error or fabricate a change");
     assert!(f.cache.cached_header("chat","queued:consumed").unwrap().is_some(),"Absence does not certify a directory deletion");
     assert_eq!(f.cache.feed_request("chat",None,None).unwrap().cursor,before.cursor);
-    let mut reader=client.read(BlockWatch::Feed(before),Priority::Foreground).await.unwrap();
+    let mut reader=peer.read(BlockWatch::Feed(before),Priority::Foreground).await.unwrap();
     let update=reader.next().await.unwrap().unwrap();
     f.cache.apply(&f.lineage,update,f.cache.epoch()).await.unwrap();
     assert!(f.cache.cached_header("chat","queued:consumed").unwrap().is_none(),"The ordered directory tombstone owns deletion");

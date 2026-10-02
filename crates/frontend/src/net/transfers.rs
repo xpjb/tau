@@ -3,14 +3,13 @@ use super::{Event, mailbox::EventSender};
 use crate::{replica::Cache, store::LocalFile};
 use anyhow::{Context, Result, ensure};
 use std::{path::{Path, PathBuf}, time::{Duration, Instant}};
-use tau_net::{blocks::*, native::{Client, Priority, Update}, TransferStatus, ClientCommand, ClientRequest, MAX_PROMPT_CHARS};
+use tau_net::{blocks::*, native::{Peer, Priority, Update}, TransferStatus, ClientCommand, ClientRequest, MAX_PROMPT_CHARS};
 use tokio::{sync::watch, io::AsyncReadExt};
 
 #[derive(Clone)]
 pub(super) struct Transfers {
     pub cache: Cache,
-    pub client: Client,
-    pub ready: watch::Receiver<Option<String>>,
+    pub ready: watch::Receiver<Option<Peer>>,
     pub events: EventSender,
 }
 impl Transfers {
@@ -37,20 +36,19 @@ impl Transfers {
         let (header,lineage)=if complete {
             (cached.unwrap(),self.cache.lineage()?)
         } else {
-            while self.ready.borrow().is_none() {self.ready.changed().await.context("Content service stopped")?;}
-            let lineage=self.ready.borrow().clone().unwrap();
+            let lineage=self.connection().await?.lineage().to_owned();
             ensure!(lineage==original_lineage,"Content source changed; retry the download");
-            let client=self.client.clone();
             let mut failures=0;
             let mut delay=100;
             let h=loop {
-                ensure!(self.cache.epoch()==epoch && self.ready.borrow().as_ref()==Some(&lineage),
+                let peer=self.peer(&lineage)?;
+                ensure!(self.cache.epoch()==epoch,
                     "Content source or replica changed; retry the download");
                 request=self.cache.block_request(scope,id)?; request.follow=false;
                 if let Some(h)=self.cache.cached_header(scope,id)? && h.sealed && h.length==request.offset {break h;}
                 let before=request.offset;
                 let result=async {
-                    let mut reader=client.read(BlockWatch::Block(request.clone()),Priority::Background).await?;
+                    let mut reader=peer.read(BlockWatch::Block(request.clone()),Priority::Background).await?;
                     let mut head=None;let mut reported=Instant::now()-Duration::from_secs(1);
                     let previous_network=status.network_bytes;
                     status.transferred=request.offset;
@@ -109,22 +107,23 @@ impl std::fmt::Display for InvalidAttachment {
 impl std::error::Error for InvalidAttachment {}
 
 impl Transfers {
-    async fn connection(&mut self) -> Result<(Client,String)> {
+    async fn connection(&mut self)->Result<Peer> {
         while self.ready.borrow().is_none() {self.ready.changed().await.context("Content service stopped")?;}
-        let lineage = self.ready.borrow().clone().unwrap();
-        let client = self.client.clone();
-        Ok((client,lineage))
+        Ok(self.ready.borrow().clone().unwrap())
+    }
+    fn peer(&self,lineage:&str)->Result<Peer> {
+        self.ready.borrow().clone().filter(|p|p.lineage()==lineage).context("Content source changed; reconcile before retrying")
     }
     pub(crate) async fn input(mut self, request: ClientRequest) -> Result<ClientRequest> {
         let bytes = serde_json::to_vec(&request)?;
         ensure!(bytes.len() as u64 <= MAX_COMMAND_BYTES,"Command exceeds its content limit");
-        let (client,lineage) = self.connection().await?;
+        let lineage=self.connection().await?.lineage().to_owned();
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let spec = UploadSpec {id:hash.clone(),length:bytes.len() as u64,hash:hash.clone(),purpose:UploadPurpose::Command};
         for attempt in 0..4 {
-            ensure!(self.ready.borrow().as_ref() == Some(&lineage),"Content source changed; reconcile before retrying");
+            let peer=self.peer(&lineage)?;
             let result = async {
-                let mut upload = client.uploader(spec.clone()).await?;
+                let mut upload = peer.uploader(spec.clone()).await?;
                 upload.copy_from(&mut std::io::Cursor::new(&bytes)).await?;
                 upload.finish().await?;
                 Ok::<_,anyhow::Error>(())
@@ -141,7 +140,7 @@ impl Transfers {
     pub(crate) async fn upload(mut self, session:String, mut text:String, files:Vec<LocalFile>) -> Result<String> {
         if text.trim().is_empty() {text = "Please inspect the attached files.".into();}
         if !files.is_empty() {text.push_str("\n\nAttached files are available at:\n");}
-        let (client,lineage) = self.connection().await?;
+        let lineage=self.connection().await?.lineage().to_owned();
         for file in files {
             let (mut source, before, hash) = async {
                 let mut source = tokio::fs::File::open(&file.path).await?;
@@ -162,9 +161,9 @@ impl Transfers {
             };
             let mut published = None;
             for attempt in 0..4 {
-                ensure!(self.ready.borrow().as_ref() == Some(&lineage),"Content source changed; retry the attachment explicitly");
+                let peer=self.peer(&lineage)?;
                 let result = async {
-                    let mut upload = client.uploader(spec.clone()).await?;
+                    let mut upload = peer.uploader(spec.clone()).await?;
                     upload.copy_from(&mut source).await?;
                     let after=source.metadata().await?;
                     ensure!(before.len()==after.len() && before.modified()?==after.modified()?,"Attachment changed during upload");
@@ -187,12 +186,13 @@ impl Transfers {
 
     pub(crate) async fn descriptor(mut self, reference: ContentRef) -> Result<tau_net::ServerMessage> {
         ensure!(reference.scope == CONTROL_SCOPE && reference.length <= MAX_BLOCK_BYTES,"Invalid data descriptor");
-        let (client,lineage) = self.connection().await?;
+        let peer=self.connection().await?;
+        let lineage=peer.lineage();
         ensure!(reference.lineage == lineage,"Descriptor belongs to an old data source");
         let epoch=self.cache.epoch();
         let mut request = self.cache.block_request(&reference.scope,&reference.id)?;
         request.follow = false;
-        let mut reader=client.read(BlockWatch::Block(request),Priority::Descriptor).await?;
+        let mut reader=peer.read(BlockWatch::Block(request),Priority::Descriptor).await?;
         while let Some(update)=reader.next().await? {
             match &update {
                 Update::Block {block,..}=>ensure!(block.length==reference.length && block.sealed && block.version==1,"Descriptor changed"),

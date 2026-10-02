@@ -19,7 +19,7 @@ pub enum Update {
 /// credit and advances from the applied checkpoint. Drop cancels only this read.
 /// Scheduled slices are renewed here, without replaying an applied prefix/page.
 pub struct Reader {
-    client: Client,
+    peer: Peer,
     connection: Connection,
     stream: Option<Watcher>,
     request: BlockWatch,
@@ -30,38 +30,41 @@ pub struct Reader {
     received: u64,
     complete: bool,
 }
-impl Client {
+impl Peer {
     pub async fn read(&self, request: BlockWatch, priority: Priority) -> Result<Reader> {
         let count=match &request {BlockWatch::Feed(_)=>1,BlockWatch::Feeds {requests}=>requests.len(),BlockWatch::Block(_)=>0};
         ensure!(count<=16 && !matches!(&request,BlockWatch::Feeds {requests} if requests.is_empty()),"Invalid feed batch");
         let (stream,connection)=self.reader_stream(request.clone(),priority,None).await?;
-        Ok(Reader {client:self.clone(),connection,stream:Some(stream),request,priority,records:vec![vec![];count],head:None,credit:0,received:0,complete:false})
+        Ok(Reader {peer:self.clone(),connection,stream:Some(stream),request,priority,records:vec![vec![];count],head:None,credit:0,received:0,complete:false})
     }
     async fn reader_stream(&self, request:BlockWatch, priority:Priority, connection:Option<Connection>) -> Result<(Watcher,Connection)> {
-        let metadata=matches!(request,BlockWatch::Feed(_)|BlockWatch::Feeds {..});
-        let (class,priority)=match priority {
-            Priority::Background=>(&self.bulk,-10), Priority::Descriptor=>(&self.descriptors,8),
-            Priority::Foreground if metadata=>(&self.metadata,10), Priority::Foreground=>(&self.foreground,5),
-        };
-        let class=class.clone().acquire_owned().await?;
-        let permit=self.streams.clone().acquire_owned().await?;
-        // Renew on the original authenticated connection, never a newly
-        // configured peer/source. Connection recovery belongs to the owner.
-        let connection=match connection {Some(connection)=>connection,None=>self.connection().await?};
-        let (mut send,recv)=connection.open_bi().await?;
-        let offset=if let BlockWatch::Block(block)=&request {block.offset} else {0};
-        let bytes=encode(&Frame::metadata(Header::Watch {request,credit:BLOCK_WINDOW_BYTES,priority}))?;
-        send.write_all(&bytes).await?;self.stats.tx.fetch_add(bytes.len() as u64,Ordering::Relaxed);
-        self.stats.opened();self.stats.resumed.fetch_add(offset,Ordering::Relaxed);
-        Ok((Watcher {stats:self.stats.clone(),complete:false,send,recv,_permit:permit,_class:class},connection))
+        self.during(async {
+            let metadata=matches!(request,BlockWatch::Feed(_)|BlockWatch::Feeds {..});
+            let (class,priority)=match priority {
+                Priority::Background=>(&self.transport.bulk,-10), Priority::Descriptor=>(&self.transport.descriptors,8),
+                Priority::Foreground if metadata=>(&self.transport.metadata,10), Priority::Foreground=>(&self.transport.foreground,5),
+            };
+            let class=class.clone().acquire_owned().await?;
+            let permit=self.transport.streams.clone().acquire_owned().await?;
+            // Renew on the original authenticated connection, never a newly
+            // configured peer/source. Connection recovery belongs to the owner.
+            let connection=match connection {Some(connection)=>connection,None=>self.connection().await?};
+            let (mut send,recv)=connection.open_bi().await?;
+            let offset=if let BlockWatch::Block(block)=&request {block.offset} else {0};
+            let bytes=encode(&Frame::metadata(Header::Watch {request,credit:BLOCK_WINDOW_BYTES,priority}))?;
+            send.write_all(&bytes).await?;self.transport.stats.tx.fetch_add(bytes.len() as u64,Ordering::Relaxed);
+            self.transport.stats.opened();self.transport.stats.resumed.fetch_add(offset,Ordering::Relaxed);
+            Ok((Watcher {stats:self.transport.stats.clone(),complete:false,send,recv,_permit:permit,_class:class},connection))
+        }).await
     }
 }
 impl Reader {
     pub fn received_bytes(&self) -> u64 { self.received }
     pub async fn next(&mut self) -> Result<Option<Update>> {
         if self.complete {return Ok(None);}
+        self.peer.current()?;
         loop {
-            if self.stream.is_none() {self.stream=Some(self.client.reader_stream(self.request.clone(),self.priority,Some(self.connection.clone())).await?.0);}
+            if self.stream.is_none() {self.stream=Some(self.peer.reader_stream(self.request.clone(),self.priority,Some(self.connection.clone())).await?.0);}
             let stream=self.stream.as_mut().unwrap();
             // The peer may already have finished its credit half after writing
             // End/Yield. Read-side completion, not that final ACK, is authoritative.
@@ -96,7 +99,7 @@ impl Reader {
                     let BlockWatch::Block(request)=&mut self.request else {bail!("Unrequested body");};
                     let header=self.head.as_ref().context("Content without a requested header")?;
                     ensure!(header.version==version && request.version==version && request.offset==offset,"Unexpected content version/offset");
-                    let bytes=decode(&frame,&self.client.stats)?;
+                    let bytes=decode(&frame,&self.peer.transport.stats)?;
                     ensure!(!bytes.is_empty() && offset+bytes.len() as u64<=header.length,"Content exceeds its declared head");
                     request.offset+=bytes.len() as u64;
                     let Header::Data {hash,..}=frame.header else {unreachable!()};

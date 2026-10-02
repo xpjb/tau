@@ -26,11 +26,11 @@ async fn previews_coalesce_rapid_selection_and_cancel_stale_native_reads() {
     let backend=Arc::new(Memory {calls:Mutex::new(vec![]),hints:watch::channel(0).0});
     let server=Server::bind("127.0.0.1:0".parse().unwrap(),backend.clone()).await.unwrap();
     let client=Client::bind().await.unwrap();
-    client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
-    let (_lineage,ready)=watch::channel(Some("source".into()));
+    let peer=client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
+    let (_lineage,ready)=watch::channel(Some(peer));
     let (send,updates)=watch::channel(None);
     let (plans,interest)=watch::channel(None);
-    let service=tokio::spawn(watch_files(client.clone(),ready,send,Arc::new(||{}),interest));
+    let service=tokio::spawn(watch_files(ready,send,Arc::new(||{}),interest));
     let plan=|generation,path:String|Some(FileInterest {preview:true,generation,request:FileRequest {session_id:"chat".into(),path:Some(path),operation:FileOperation::Open {revision:None}},document:None});
     for generation in 0..20 {plans.send_replace(plan(generation,format!("/file{generation}.rs")));}
     until(||updates.borrow().as_ref().is_some_and(|u|u.generation==19)).await;

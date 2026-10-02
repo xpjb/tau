@@ -165,3 +165,26 @@ This checkpoint adds **50 non-test Rust lines and 31 test lines** relative to
 Across all follow-ups since `53d9a67`, non-test Rust is 31,231 → 31,176 (-55),
 and all Rust is 46,700 → 46,749 (+49). Moving responsibility or adding regression
 coverage is not counted as progress toward a 10k-line deletion target.
+
+### Source-bound peer checkpoint
+
+The next checkpoint moves data entry points from `Client` onto `Peer`:
+`Client::configure` returns the source-bound handle; `Peer::{read, files,
+uploader}` cannot be called with a separately supplied connection/lineage pair.
+The endpoint still owns shared budgets and counters. Same-source grant renewal
+returns the same peer and preserves its live connection. Replacing the source
+retires the old handle, cancels admission/connect/filesystem work, and closes
+its connection without waiting for an in-progress connection attempt's mutex.
+
+Frontend workers now receive `Option<Peer>` after the cache binding commits;
+they no longer carry a client plus an independent ready-lineage channel.
+Transfers explicitly reacquire the current peer for retries, allowing a new
+node for the same durable lineage but refusing a different source. Descriptors
+and active readers remain pinned to their original binding.
+
+**414/414 nextest tests passed**, zero skipped, including the full pressure and
+outage tests. Added regressions hold all foreground slots while retiring a
+queued peer, and restart a download on a new node: the matching lineage resumes
+at the verified prefix; the differing lineage publishes no file. The prior 412
+test cases remain. This checkpoint is a separate ownership change, not another
+wire-version change; protocol 25 / ALPN 3 remain current.
