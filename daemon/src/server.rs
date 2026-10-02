@@ -26,6 +26,13 @@ use crate::protocol::{
 
 const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
 
+fn admission_timing(start: Option<std::time::Instant>, outcome: &'static str) {
+    if let Some(start)=start {
+        tracing::debug!(target:"taud::control_admission",outcome,
+            wait_us=start.elapsed().as_micros() as u64,"control admission timing");
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     config: Config,
@@ -199,9 +206,11 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                 let manager = state.manager.clone();
                 let transfers = state.transfers.clone();
                 let response_outbound = outbound_tx.clone();
+                let admission_started=tracing::enabled!(target:"taud::control_admission",tracing::Level::DEBUG).then(std::time::Instant::now);
                 let admission = state.admissions.clone().try_acquire_owned().and_then(|global|
                     socket_admissions.clone().try_acquire_owned().map(|local|(global,local)));
                 let Ok(admission) = admission else {
+                    admission_timing(admission_started,"overflow");
                     // Real overload remains a failure, but does not block pings
                     // behind a full response queue or create unbounded tasks.
                     let response = ServerMessage::failure(request.id, "Too many requests are waiting. Try again shortly.");
@@ -218,8 +227,9 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                     // cancels only requests that have not started; admitted
                     // effects still finish and record their durable receipts.
                     let _permits = tokio::select! { biased;
-                        _ = disconnected.cancelled() => return,
+                        _ = disconnected.cancelled() => {admission_timing(admission_started,"cancelled");return;},
                         _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                            admission_timing(admission_started,"timeout");
                             queue_server(&response_outbound, &ServerMessage::failure(request.id,
                                 "The server could not start this request in time. Please try again.")).await;
                             return;
@@ -230,6 +240,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             Ok::<_, tokio::sync::AcquireError>((local,global))
                         } => match permits { Ok(permits) => permits, Err(_) => return },
                     };
+                    admission_timing(admission_started,"started");
                     let request_id = request.id.clone();
                     let request = match manager.inner.state.resolve_input(request).await {
                         Ok(request) => request,

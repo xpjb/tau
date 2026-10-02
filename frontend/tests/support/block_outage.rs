@@ -140,7 +140,7 @@ async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) 
         Some(path)
     } else { None };
     let epoch = c.epoch; let ping_count = pings.load(Ordering::Relaxed);
-    native_trace::event("OUTAGE BEGINS"); link.blackhole.store(true,Ordering::Relaxed);
+    native_trace::event("OUTAGE BEGINS"); link.udp_blackhole.store(true,Ordering::Relaxed);
     let suffix = (0..500).map(|n| format!("{}\n",blake3::hash(format!("outage-{n}").as_bytes()).to_hex())).collect::<String>();
     {
         let mut db = source.db.lock().unwrap(); let tx = db.transaction().unwrap();
@@ -159,7 +159,7 @@ async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) 
     if downloads { assert!(!c.downloads[&download_key].status.done,
         "An interrupted read must wait/resume, not become a failed download: {:?}",c.downloads[&download_key].status.failure); }
     let file_prefix=c.downloads.get(&download_key).map_or(0,|d|d.status.transferred);
-    let restored = Instant::now(); native_trace::event("LINK RESTORED"); link.blackhole.store(false,Ordering::Relaxed);
+    let restored = Instant::now(); native_trace::event("LINK RESTORED"); link.udp_blackhole.store(false,Ordering::Relaxed);
     let expected = format!("verified prefix{suffix}").into_bytes(); let mut progress = [None,None]; let mut file_progress=None;
     loop {
         c.poll();

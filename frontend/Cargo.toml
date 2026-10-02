@@ -60,3 +60,5 @@ sanscale = { workspace = true, features = ["perf-counters"] }
 tempfile = "3"
 axum = { version = "0.8", features = ["ws"] }
 taud = { path = "../daemon" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }

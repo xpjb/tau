@@ -2,66 +2,15 @@
 //! Real TCP/QUIC on private loopback aliases. No host qdisc, routes, services,
 //! external provider or relay is touched. TCP bytes and UDP datagrams share a
 //! delayed, bandwidth-limited FIFO in each direction; UDP also loses packets.
-use std::{net::SocketAddr,sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,Instant}};
-use tokio::{io::{AsyncReadExt,AsyncWriteExt},net::{TcpListener,TcpStream,UdpSocket},sync::Mutex};
+use std::{net::SocketAddr,sync::{Arc,atomic::{AtomicU64,Ordering}},time::{Duration,Instant}};
+use tokio::net::{TcpListener,TcpStream};
 use tau_frontend::{controller::Controller,store::{Settings,Store}};
 use tau_protocol::*;
+#[path="support/pressure_link.rs"]
+#[allow(dead_code)]
+mod pressure_link;
+use pressure_link::{Link,Proxy};
 
-struct Link {next:[Mutex<tokio::time::Instant>;2],udp:AtomicU64,dropped:AtomicU64,udp_bytes:AtomicU64,blackhole:AtomicBool,blackholed:AtomicU64}
-impl Link {
-    fn new()->Arc<Self> {Arc::new(Self {next:[Mutex::new(tokio::time::Instant::now()),Mutex::new(tokio::time::Instant::now())],udp:AtomicU64::new(0),dropped:AtomicU64::new(0),udp_bytes:AtomicU64::new(0),blackhole:AtomicBool::new(false),blackholed:AtomicU64::new(0)})}
-    async fn wait(&self,direction:usize,bytes:usize) {
-        let at={let mut next=self.next[direction].lock().await;
-            *next=(*next).max(tokio::time::Instant::now()+Duration::from_millis(35))+Duration::from_secs_f64(bytes as f64/(64.*1024.));*next};
-        tokio::time::sleep_until(at).await;
-    }
-}
-struct Proxy {address:SocketAddr,tasks:Vec<tokio::task::JoinHandle<()>>}
-impl Drop for Proxy {fn drop(&mut self) {for task in &self.tasks {task.abort();}}}
-impl Proxy {
-    async fn new(alias:&str,tcp:SocketAddr,udp:SocketAddr,link:Arc<Link>)->Self {
-        let listener=TcpListener::bind(format!("{alias}:0")).await.unwrap();let address=listener.local_addr().unwrap();
-        let control=link.clone();
-        let tcp_task=tokio::spawn(async move {
-            let mut connections=tokio::task::JoinSet::new();
-            loop {tokio::select! {
-                incoming=listener.accept()=>{
-                    let (socket,_)=incoming.unwrap();let link=control.clone();
-                    connections.spawn(async move {
-                        let peer=TcpStream::connect(tcp).await.unwrap();let (a,b)=socket.into_split();let(c,d)=peer.into_split();
-                        async fn copy(mut from:tokio::net::tcp::OwnedReadHalf,mut to:tokio::net::tcp::OwnedWriteHalf,link:Arc<Link>,direction:usize) {
-                            let mut buf=[0;4096];while let Ok(n)=from.read(&mut buf).await {if n==0 {break;}link.wait(direction,n).await;if to.write_all(&buf[..n]).await.is_err() {break;}}
-                        }
-                        tokio::select! {_=copy(a,d,link.clone(),0)=>{},_=copy(c,b,link,1)=>{}}
-                    });
-                }
-                _=connections.join_next(),if !connections.is_empty()=>{}
-            }}
-        });
-        // Same advertised port on another loopback address: the transparent TCP
-        // proxy need not terminate WebSockets or accidentally answer their pings.
-        let socket=Arc::new(UdpSocket::bind(format!("{alias}:{}",udp.port())).await.unwrap());
-        let udp_task=tokio::spawn(async move {
-            let mut client=None;let mut buf=[0;65536];let mut packets=tokio::task::JoinSet::new();
-            loop {tokio::select! {
-                received=socket.recv_from(&mut buf)=>{
-                    let (n,from)=received.unwrap();let direction=usize::from(from==udp);
-                    let target=if direction==1 {let Some(client)=client else {continue;};client} else {client=Some(from);udp};
-                    let serial=link.udp.fetch_add(1,Ordering::Relaxed)+1;
-                    native_trace::packet("received",direction,n);
-                    if link.blackhole.load(Ordering::Relaxed) {native_trace::packet("blackholed",direction,n);link.blackholed.fetch_add(1,Ordering::Relaxed);continue;}
-                    if serial%23==0 || packets.len()>=512 {native_trace::packet("lost",direction,n);link.dropped.fetch_add(1,Ordering::Relaxed);continue;}
-                    let bytes=buf[..n].to_vec();let socket=socket.clone();let link=link.clone();
-                    packets.spawn(async move {link.wait(direction,n).await;
-                        if link.blackhole.load(Ordering::Relaxed) {native_trace::packet("blackholed",direction,n);link.blackholed.fetch_add(1,Ordering::Relaxed);return;}
-                        if socket.send_to(&bytes,target).await.is_ok() {native_trace::packet("forwarded",direction,n);link.udp_bytes.fetch_add(n as u64,Ordering::Relaxed);}});
-                }
-                _=packets.join_next(),if !packets.is_empty()=>{}
-            }}
-        });
-        Self {address,tasks:vec![tcp_task,udp_task]}
-    }
-}
 async fn until(a:&mut Controller,b:&mut Controller,predicate:impl Fn(&Controller,&Controller)->bool) {
     let start=Instant::now();loop {a.poll();b.poll();if predicate(a,b) {return;}
         assert!(start.elapsed()<Duration::from_secs(75),"Impaired link stalled: A={} {:?}; B={} {:?}",a.connection,a.notice,b.connection,b.notice);

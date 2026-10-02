@@ -11,6 +11,8 @@ use crate::transcript::{EventProjection, Event, QueueState};
 
 #[path = "state_reads.rs"]
 mod reads;
+#[path = "state_timing.rs"]
+mod timing;
 pub(crate) use tau_protocol::settings::DEFAULT_TITLE_PROMPT;
 pub(crate) const MAX_FLAG_CHARS: usize = 4096;
 
@@ -140,14 +142,20 @@ impl StateStore {
     }
     pub(crate) async fn access<T: Send + 'static>(&self, action: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static) -> Result<T> {
         // Wait asynchronously; don't fill the blocking pool with database lock waiters.
+        let mut timing=timing::Timing::new("writer");
         let mut connection = self.connection.clone().lock_owned().await;
+        timing.acquired();
         let changes = self.block_changes.clone();
         tokio::task::spawn_blocking(move || {
-            let before = tau_blocks::cursor(&connection)?.sequence;
-            let result = action(&mut connection);
-            let after = tau_blocks::cursor(&connection)?.sequence;
-            if after != before { changes.send_replace(after); }
-            result
+            timing.working();
+            let result=(|| {
+                let before = tau_blocks::cursor(&connection)?.sequence;
+                let result = action(&mut connection);
+                let after = tau_blocks::cursor(&connection)?.sequence;
+                if after != before { changes.send_replace(after); }
+                result
+            })();
+            timing.finished(result.is_ok());result
         }).await?
     }
     pub async fn get(&self, id: &str) -> Result<Option<StoredSession>> {

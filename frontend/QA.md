@@ -194,6 +194,33 @@ is recorded at the top of `HANDOFF.md` and in `INTEGRATION.md`.
 
 # Alerts and content/control errors — September 27, 2026 (released in beta 0.7.7)
 
+---
+
+# Seeded network pressure — September 27, 2026 (work branch)
+
+- Real controllers, daemon, caches and local provider through the existing
+  transparent TCP/QUIC impairment harness: normal, seeded loss/jitter/stalls,
+  and an eight-second blackhole. Includes concurrent uploads/downloads,
+  cancellation/resume, queued input handoff and control bursts.
+- JSON reports separate control latency, storage checkout/dispatch/work,
+  admission waiting, file progress/throughput and reconnection. Local diagnostic
+  targets only; no wire change, timeout adjustment or live service changes.
+- An earlier workspace run passed 233/233; **the latest is 232/233**. The new
+  default recovery test caught an `Unknown block` request for a consumed queued
+  body whose old header was still in the local replica. It is not skipped or
+  silenced. Temporarily restoring shared read/write connection locking also
+  failed the new guard at 619 ms read latency; that mutation was restored.
+- **Findings remain open:** seed 73 hit a post-outage no-progress guard; seed 173
+  and default recovery seed 91 caught the queued-content lifetime race. Passing
+  repeats do not resolve these scheduling-sensitive failures. Reports, scoped
+  diagnostics and reproduction settings are retained in
+  [network-pressure QA](../docs/network-pressure.md). The earlier alert fix is
+  not a claim that every content-lifetime race is fixed.
+
+---
+
+# Alerts and content/control errors — September 27, 2026 (unreleased)
+
 - Four-second popups, measured 16dp text, compact wrapping and a centered vector
   close icon. Repeated identical updates do not keep an alert alive; idle expiry
   uses the existing one-shot wake. Persistent inline errors remain available.

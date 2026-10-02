@@ -1,0 +1,336 @@
+{
+  "alerts": [],
+  "all_disconnects": [
+    0,
+    0
+  ],
+  "all_transport_issues": [
+    "Content sync: Content connection unavailable: failed connecting to remote endpoint: timed out"
+  ],
+  "baseline": {
+    "control_reads": {
+      "count": 18,
+      "max_ms": 469.122,
+      "p50_ms": 216.981,
+      "p95_ms": 469.122,
+      "total_ms": 4713.408999999999
+    },
+    "server": {
+      "admission": {
+        "dispatch": {
+          "count": 18,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "total_ms": 0.0
+        },
+        "outcomes": {
+          "started": 18
+        },
+        "sample_cap": 20000,
+        "wait": {
+          "count": 18,
+          "max_ms": 0.094,
+          "p50_ms": 0.04,
+          "p95_ms": 0.094,
+          "total_ms": 0.975
+        },
+        "work": {
+          "count": 18,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "total_ms": 0.0
+        }
+      },
+      "content_failures": [],
+      "database": {
+        "reader": {
+          "dispatch": {
+            "count": 35,
+            "max_ms": 0.18,
+            "p50_ms": 0.028,
+            "p95_ms": 0.117,
+            "total_ms": 1.5659999999999998
+          },
+          "outcomes": {
+            "ok": 35
+          },
+          "sample_cap": 20000,
+          "wait": {
+            "count": 35,
+            "max_ms": 0.002,
+            "p50_ms": 0.0,
+            "p95_ms": 0.001,
+            "total_ms": 0.016000000000000007
+          },
+          "work": {
+            "count": 35,
+            "max_ms": 0.89,
+            "p50_ms": 0.076,
+            "p95_ms": 0.223,
+            "total_ms": 3.8969999999999994
+          }
+        }
+      }
+    }
+  },
+  "baseline_errors": [],
+  "control_receipts": 24,
+  "elapsed_ms": 45312,
+  "link": {
+    "base_latency_ms": 35,
+    "blackholed": 0,
+    "bytes_per_second": 196608,
+    "dropped": 120,
+    "jitter_ms": 45,
+    "loss_per_10k": 300,
+    "max_scheduled_delay_ms": 313.971,
+    "profile": "dodgy",
+    "queue_dropped": 0,
+    "queue_limit_ms": 650,
+    "seed": 29,
+    "stalls": 61,
+    "tcp_bytes": 86705,
+    "tcp_connections": 4,
+    "udp_bytes": 2657938,
+    "udp_datagrams": 3939
+  },
+  "native": [
+    {
+      "active_streams": 1,
+      "bulk_slots": 0,
+      "cancelled_streams": 2,
+      "connection_attempts": 2,
+      "connections": 1,
+      "content_rx_bytes": 1077093,
+      "content_tx_bytes": 131072,
+      "descriptor_slots": 0,
+      "foreground_slots": 0,
+      "frame_rx_bytes": 1098233,
+      "frame_tx_bytes": 142722,
+      "integrity_failures": 0,
+      "metadata_slots": 1,
+      "quic_lost_packets": 30,
+      "quic_rtt_ms": 160,
+      "quic_rx_bytes": 1152124,
+      "quic_tx_bytes": 183608,
+      "resumed_bytes": 65536,
+      "streams": 18
+    },
+    {
+      "active_streams": 1,
+      "bulk_slots": 0,
+      "cancelled_streams": 0,
+      "connection_attempts": 1,
+      "connections": 1,
+      "content_rx_bytes": 1077296,
+      "content_tx_bytes": 131072,
+      "descriptor_slots": 0,
+      "foreground_slots": 0,
+      "frame_rx_bytes": 1102422,
+      "frame_tx_bytes": 143786,
+      "integrity_failures": 0,
+      "metadata_slots": 1,
+      "quic_lost_packets": 21,
+      "quic_rtt_ms": 150,
+      "quic_rx_bytes": 1139370,
+      "quic_tx_bytes": 177637,
+      "resumed_bytes": 0,
+      "streams": 23
+    }
+  ],
+  "original_prompt_copies": [
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "outage_case": false,
+  "pressure": {
+    "bulk_bytes": 2097152,
+    "bulk_elapsed_ms": 27926,
+    "bulk_goodput_kib_s": 73.3366754995345,
+    "concurrent_upload_bytes": 131072,
+    "control_reads": {
+      "count": 48,
+      "max_ms": 616.703,
+      "p50_ms": 370.679,
+      "p95_ms": 518.408,
+      "total_ms": 17567.564000000002
+    },
+    "control_writes": {
+      "count": 24,
+      "max_ms": 842.339,
+      "p50_ms": 738.927,
+      "p95_ms": 840.996,
+      "total_ms": 17640.486
+    },
+    "controller_poll": {
+      "count": 8068,
+      "max_ms": 21.432,
+      "p50_ms": 0.005,
+      "p95_ms": 0.013,
+      "total_ms": 489.159999999996
+    },
+    "injected_writer_pause_ms": 400,
+    "observed_pause_ms": 400.068,
+    "server": {
+      "admission": {
+        "dispatch": {
+          "count": 113,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "total_ms": 0.0
+        },
+        "outcomes": {
+          "started": 113
+        },
+        "sample_cap": 20000,
+        "wait": {
+          "count": 113,
+          "max_ms": 405.517,
+          "p50_ms": 0.044,
+          "p95_ms": 325.057,
+          "total_ms": 2854.5209999999997
+        },
+        "work": {
+          "count": 113,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p95_ms": 0.0,
+          "total_ms": 0.0
+        }
+      },
+      "content_failures": [],
+      "database": {
+        "reader": {
+          "dispatch": {
+            "count": 548,
+            "max_ms": 0.316,
+            "p50_ms": 0.018,
+            "p95_ms": 0.156,
+            "total_ms": 17.209999999999994
+          },
+          "outcomes": {
+            "ok": 548
+          },
+          "sample_cap": 20000,
+          "wait": {
+            "count": 548,
+            "max_ms": 0.179,
+            "p50_ms": 0.001,
+            "p95_ms": 0.002,
+            "total_ms": 0.8670000000000003
+          },
+          "work": {
+            "count": 548,
+            "max_ms": 0.973,
+            "p50_ms": 0.138,
+            "p95_ms": 0.265,
+            "total_ms": 80.80900000000007
+          }
+        },
+        "writer": {
+          "dispatch": {
+            "count": 140,
+            "max_ms": 0.095,
+            "p50_ms": 0.014,
+            "p95_ms": 0.029,
+            "total_ms": 2.3609999999999967
+          },
+          "outcomes": {
+            "ok": 140
+          },
+          "sample_cap": 20000,
+          "wait": {
+            "count": 140,
+            "max_ms": 404.209,
+            "p50_ms": 1.609,
+            "p95_ms": 276.29,
+            "total_ms": 5610.850000000009
+          },
+          "work": {
+            "count": 140,
+            "max_ms": 404.235,
+            "p50_ms": 1.579,
+            "p95_ms": 4.773,
+            "total_ms": 707.4120000000001
+          }
+        }
+      }
+    }
+  },
+  "profile": "dodgy",
+  "provider_calls": 3,
+  "query_errors": [],
+  "recovery": null,
+  "schema": 1,
+  "seed": 29,
+  "steady_disconnects": [
+    0,
+    0
+  ],
+  "steady_transport_issues": [
+    "Content sync: Content connection unavailable: failed connecting to remote endpoint: timed out"
+  ],
+  "trace": [
+    "11873ms: queued message 0, client 0, request 3a58896b-7b63-4451-8105-0ff539357f8d",
+    "11875ms: queued message 1, client 0, request b61a7dd2-3023-4937-a085-faaa31f09246",
+    "11878ms: queued message 2, client 0, request e6be043d-1844-4253-89aa-5144fbf54eac",
+    "13644ms: rename 0, client 1",
+    "13645ms: rename 1, client 0",
+    "13647ms: rename 2, client 1",
+    "13648ms: rename 3, client 0",
+    "13650ms: rename 4, client 0",
+    "13651ms: rename 5, client 1",
+    "13652ms: rename 6, client 0",
+    "13654ms: rename 7, client 1",
+    "13655ms: rename 8, client 1",
+    "13656ms: rename 9, client 0",
+    "13658ms: rename 10, client 0",
+    "13659ms: rename 11, client 1",
+    "13661ms: rename 12, client 1",
+    "13662ms: rename 13, client 1",
+    "13664ms: rename 14, client 0",
+    "13665ms: rename 15, client 0",
+    "13666ms: rename 16, client 0",
+    "13668ms: rename 17, client 0",
+    "13670ms: rename 18, client 0",
+    "13671ms: rename 19, client 1",
+    "13673ms: rename 20, client 0",
+    "13674ms: rename 21, client 1",
+    "13676ms: rename 22, client 0",
+    "13677ms: rename 23, client 1",
+    "13685ms: concurrent upload, client 1",
+    "13917ms: tool interest toggle 0",
+    "14105ms: tool interest toggle 1",
+    "14237ms: tool interest toggle 2",
+    "14480ms: tool interest toggle 3",
+    "14734ms: tool interest toggle 4",
+    "14980ms: tool interest toggle 5",
+    "15218ms: tool interest toggle 6",
+    "15457ms: tool interest toggle 7",
+    "cancel at 65536",
+    "resume original file"
+  ],
+  "unread_file_parts": 0,
+  "websocket_ping_rtt": [
+    {
+      "latest_ms": 141.945449,
+      "recent_min_max_ms": [
+        79.885441,
+        304.057345
+      ]
+    },
+    {
+      "latest_ms": 86.053877,
+      "recent_min_max_ms": [
+        82.070946,
+        316.572149
+      ]
+    }
+  ]
+}
