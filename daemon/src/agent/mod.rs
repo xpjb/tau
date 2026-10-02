@@ -226,6 +226,7 @@ impl AgentManager {
                 let agent = content.agent.as_ref().unwrap();
                 (agent.model.clone(),agent.thinking.clone(),agent.cancel.clone(),agent.store.clone(),agent.tokens)
             };
+            self.schedule_catalog(&selected);
             // Preparing a provider request cannot own the queue/content mutex.
             // New intents and aborts remain independently durable while this runs.
             let entries=tokio::select! {_=cancel.cancelled()=>return Ok(()),result=store.context(id,&selected)=>result?};

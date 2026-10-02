@@ -847,7 +847,7 @@ async fn provider_catalog_outweighs_configured_limits_and_uses_exact_authenticat
         if api == Api::Codex {
             assert_eq!(call["account"], "fixture-account");
             assert_eq!(call["originator"], "tau");
-            assert_eq!(call["query"],"client_version=0.156.1");
+            assert_eq!(call["query"],"client_version=0.160.0");
         } else { assert!(call["account"].is_null() && call["originator"].is_null()); }
         client.until(|m| m["type"] == "sessions" && m["sessions"].as_array().is_some_and(|list| list.iter().any(|s| s["id"] == id && s["contextUsage"].is_null()))).await;
         client.open(&id).await;
@@ -1149,6 +1149,42 @@ async fn catalog_refresh_updates_live_and_sleeping_usage_with_new_revisions() {
             let crate::protocol::ServerMessage::SessionState {context_usage, ..} = manager.session_state_message(&id).await.unwrap() else { panic!() };
             assert_eq!(context_usage, after.context_usage);
         }
+        manager.shutdown().await; server.abort();
+    }
+}
+
+#[tokio::test]
+async fn aged_catalog_revalidates_on_restart_without_waking_chats_or_executing_a_turn() {
+    for api in [Api::Codex, Api::ChatCompletions] {
+        let response = |window| if api == Api::Codex {
+            json!({"models":[{"slug":"gpt-6-astra","context_window":window}]})
+        } else { json!({"data":[{"id":"gpt-6-astra","context_length":window}]}) };
+        let mut model = ModelServer::with_catalog(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }], Some(response(200_000))).await;
+        let (root, manager, url, server) = fixture(&model, api).await;
+        manager.refresh_model_catalog("openai-codex").await.unwrap(); model.catalog_request().await;
+        let mut client = Client::connect(&url).await;
+        let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
+        client.request(json!({"id":"turn","type":"prompt","sessionId":id,"text":"Save usage for restart"})).await;
+        model.request().await;
+        client.until(|m| m["type"] == "session_state" && m["sessionId"] == id && m["status"] == "idle").await;
+        client.socket.close(None).await.unwrap();
+        let config = manager.inner.config.clone(); manager.shutdown().await; server.abort();
+        let path = root.path().join("model-catalog.json");
+        let mut file:Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        file["providers"][0]["fetchedAtMs"] = json!(crate::agent::now_ms()-3_600_000);
+        tokio::fs::write(&path, serde_json::to_vec(&file).unwrap()).await.unwrap();
+        let settings = tokio::fs::read(&config.settings_path).await.unwrap();
+        model.set_catalog(Some(response(320_000))).await;
+        let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
+        let (url, server) = serve(&manager).await; let mut client = Client::connect(&url).await;
+        client.until(|m| m["type"] == "sessions" && m["sessions"].as_array().is_some_and(|list| list.iter().any(|s| s["id"] == id && s["contextUsage"]["contextWindow"] == 320_000))).await;
+        model.catalog_request().await;
+        let crate::protocol::ServerMessage::SessionState {context_usage, status, ..} = manager.session_state_message(&id).await.unwrap() else { panic!() };
+        assert_eq!(context_usage, Some(crate::protocol::ContextUsage {tokens:Some(if api == Api::Codex {120} else {1024}), context_window:Some(320_000)}));
+        assert_eq!(status, crate::protocol::SessionStatus::Sleeping);
+        assert!(manager.inner.runtimes.lock().await.is_empty(), "Catalog revalidation must not warm a sleeping chat");
+        assert!(model.requests.try_recv().is_err(), "Revalidation is a GET, never a model turn");
+        assert_eq!(tokio::fs::read(&config.settings_path).await.unwrap(), settings, "Catalog refresh does not rewrite daemon settings");
         manager.shutdown().await; server.abort();
     }
 }

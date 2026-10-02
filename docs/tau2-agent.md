@@ -276,9 +276,14 @@ Only an exact model ID from a nonempty catalog with valid limits is accepted.
 The validated minimal catalog is persisted in private `model-catalog.json` next to
 daemon settings. On startup its credential identity and endpoint are checked
 before use; a missing/invalid file triggers a provider GET and alerts clients on
-failure. Connection settings has an explicit **Refresh models** control for
-fetching newly released models without expiring otherwise valid saved metadata.
-A failed refresh leaves the last good file intact. No configured/Pi metadata
+failure. On use, a catalog at least one hour old or missing the selected exact ID
+is revalidated asynchronously, with per-provider coalescing and a 60-second
+retry/miss cooldown. The Codex catalog client version is saved too; a pin update
+revalidates catalogs fetched under an older version. Connection settings retains
+an explicit **Refresh models** control. Age does not expire otherwise valid
+same-identity metadata, and a failed refresh leaves the last good file intact.
+Refreshed limits update open/sleeping chat usage without clearing reported tokens
+or waking cold agents. See [the October 2 source-only fix and evidence](model-catalog-refresh.md). No configured/Pi metadata
 fallback is used for the meter or automatic compaction; an exact ID missing from
 the provider catalog remains unknown. The same saved capacity gates compaction. The public OpenAI `/v1/models` listing is not used as a source of
 context windows. No Pi worker, Pi settings mirror, or guessed ID aliases are used.

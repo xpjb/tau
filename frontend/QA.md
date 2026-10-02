@@ -1,3 +1,22 @@
+# Manual Quick Model / catalog refresh — source only, October 2, 2026
+
+The user's manual `openai-codex/gpt-6.1-sol` entry was not the problem. The daemon
+kept an indefinitely fresh September 25 cache, used a Codex client-version gate
+that excludes 6.1 Sol, and could retain a stale usage capacity after refresh.
+The feature branch fixes all three, without turning optional metadata into an
+allowlist or discarding reported tokens while capacity is unknown.
+
+A real controller/daemon/local-provider test saves the manual quick-model tile,
+preserves the draft, sends the exact ID, observes reported tokens before a gated
+catalog GET completes, then observes the new capacity without another turn or
+manual refresh. It passes with one GET and one scripted local completion.
+Native daemon/frontend all-target check passed; 13 distinct targeted nextest
+cases pass across the documented runs. This is not physical-device acceptance
+or a full-suite claim. **No merge, deployment, restart or client packaging.**
+See [diagnosis, policy and validation](../docs/model-catalog-refresh.md).
+
+---
+
 # Stop/Play queue-control recovery — October 1, 2026
 
 The immediate lockout fix `6422e27` makes Stop retire deferred controls and Play
