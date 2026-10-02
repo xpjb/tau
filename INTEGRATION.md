@@ -1,3 +1,35 @@
+# October 2 branch rollup — source integration and release preparation
+
+The user requested accounting for every Tau/Tau2 branch, removing obsolete refs,
+and releasing Tau2/beta. Stable/master stays unchanged. Both fresh model-catalog
+and Android startup integrations are included.
+
+- `64a9beb`: missing block-admission/repaint/native-recovery fixes.
+- `4ebb24f`: missing new-chat chooser behavior adapted to retained UI.
+- `15acf5a`: user-requested network-pressure harness and local diagnostics.
+- The user explicitly rejected the old remove-pause experiment; its branch and
+  clean unused worktree are removed, with Git recovery material retained.
+- Every starting branch and deletion reason is listed in
+  [the rollup inventory](docs/branch-rollup-20261002.md). A verified local bundle
+  preserves the starting refs; no production data backup or restore was performed.
+
+Four regressions fail on current pre-rollup `396d5ba` and pass in the candidate,
+so new-chat and block recovery are not obsolete. Workspace/all-target compilation
+passes. The broad candidate run was 361/362; the old branch's unnecessary starter
+flag was removed, and its unchanged background-sync test now passes. The final
+focused daemon/native-link/pressure/new-chat/background run is **82/83**, with all
+but the lossy-link no-transport-errors guard passing. Preserve the exact failed
+[stress report](docs/network-pressure/rollup-dodgy-29-failure.json); correct files,
+no alerts and exactly-once authored messages are not a claim of an all-green suite.
+
+Prepare matched **0.7.11 / protocol 22** packages with the existing release script,
+without rerunning passed tests. **Deployment awaits the user's call on the stress
+finding.** This is a new hold, not the historical 0.7.8 download-confirmation hold.
+No service has been restarted and no physical-device acceptance is claimed.
+The prior dated records below remain historical evidence, not current branch refs.
+
+---
+
 # Stop/Play queue-control recovery — source only, October 1, 2026
 
 User-authorized source merge **`efd1476`** integrates `fix/tau2-control-recovery`

@@ -1,3 +1,17 @@
+# October 2 rollup verification
+
+Rechecked against `396d5ba`, including the latest catalog and Android startup
+merges. The admission, disk-hydration and extended-outage regressions still fail
+there and pass in the rollup; this branch is not obsolete. Source merge `64a9beb`
+retains the current UI/startup code and both handoff histories. The native cases
+also pass after adopting the shared pressure-link fixture. See the
+[complete rollup record](branch-rollup-20261002.md) for exact runs and release state.
+No physical-device result or blanket backlog-014 closure is claimed.
+
+The earlier implementation record follows.
+
+---
+
 # Stuck block loading and retained viewport QA
 
 Source fix on `fix/tau2-block-loading-stability`, based on `origin/tau2` at

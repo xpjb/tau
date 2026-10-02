@@ -30,7 +30,7 @@ control readiness currently does not establish that those jobs are progressing.
   not explain the gap. Do not attribute it to the earlier shared-writer read lock.
 - An instrumented repeat of the same seed passed. Small QUIC congestion windows
   and loss seen in that passing repeat do **not** establish the failed run's cause.
-- The harness is `frontend/tests/network_pressure.rs` on the unmerged QA branch.
+- The harness is `frontend/tests/network_pressure.rs`, carried into the October 2 branch rollup.
   It drives real controllers, transports, caches and daemon with a local provider
   through a private impaired link. Seeds reproduce choices, not exact OS/packet
   scheduling. These are local fixture results, not production measurements.
@@ -114,5 +114,17 @@ full daemon/impaired-link test, source/integrity guards and Windows compiler che
 pass. No service/deployment change or physical Windows/Android acceptance occurred.
 
 This fixes the demonstrated socket-wide delayed reacquisition. The original
-unmerged two-file seed-73 pressure case is **not** certified by these separate
+historical two-file seed-73 pressure case is **not** certified by these separate
 fixtures, so this backlog item remains open for that wait boundary/device evidence.
+
+## October 2 rollup pressure finding
+
+The harness is included at the user's request. Default normal/recovery cases pass
+on the rollup; that does not close the historical per-file finding above.
+Dodgy seed 29 instead records a failed native connection attempt, then correct
+file completion with one successful native connection per client, no alerts,
+no integrity failures and no duplicate messages. Its strict no-transport-errors
+guard fails. [Exact retained report](../docs/network-pressure/rollup-dodgy-29-failure.json)
+and [run/disposition](../docs/network-pressure.md). Cause and production relevance
+remain unproven; do not present this as a diagnosed healthy-stream stall or
+suppress the test. Deployment awaits the user's call on the finding.

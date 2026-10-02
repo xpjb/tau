@@ -31,7 +31,7 @@ more authorship diagnostics or on reproducing the same scheduling-sensitive seed
   unexpected `Content sync: Unknown block` alerts. Passing repeats do not close it.
 - These immutable reports were retained in `bcc541b` on
   `fix/tau2-network-pressure`. The real controller/daemon/local-provider harness is
-  `frontend/tests/network_pressure.rs` on that unmerged QA branch.
+  `frontend/tests/network_pressure.rs`, carried into the October 2 branch rollup.
 - The earlier complete, already-held-body delayed-plan fix was merged into `tau2`
   at `bdc1722`. Preserve local text reuse and that regression; it does not establish
   that every in-flight content lifetime case is covered. The original failed
