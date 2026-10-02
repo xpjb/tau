@@ -1,6 +1,6 @@
 [workspace]
-members = ["daemon", "transfer", "protocol", "blocks", "markdown", "frontend", "code-viewer"]
-exclude = ["windows"]
+members = ["crates/daemon", "crates/transfer", "crates/protocol", "crates/blocks", "crates/markdown", "crates/frontend", "crates/code-viewer"]
+exclude = ["crates/windows"]
 resolver = "2"
 
 [workspace.dependencies]

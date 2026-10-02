@@ -7,12 +7,12 @@ cargo=/usr/local/bin/cargo
 export CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=1
 [[ $# == 0 || $# == 1 && $1 == --beta ]] || { echo "Usage: $0 [--beta]" >&2; exit 1; }
 channel=Tau-Beta
-version=$(python3 -c 'import tomllib; print(tomllib.load(open("frontend/Cargo.toml", "rb"))["package"]["version"])')
+version=$(python3 -c 'import tomllib; print(tomllib.load(open("crates/frontend/Cargo.toml", "rb"))["package"]["version"])')
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid application version" >&2; exit 1; }
 work="$root/target/windows-sfx-$channel-$version"
 bundle="$work/bundle"
 payload="$work/tau-windows-payload.tar.lzma"
-windows_target=$(realpath -m "${CARGO_TARGET_DIR:-$root/windows/target}")
+windows_target=$(realpath -m "${CARGO_TARGET_DIR:-$root/crates/windows/target}")
 output="$root/dist/$channel-$version-windows-x64.exe"
 mkdir -p "$root/dist"
 rm -rf "$work"
@@ -21,7 +21,7 @@ mkdir -p "$bundle/app"
 native_target=$(realpath -m "${CARGO_TARGET_DIR:-$root/target}")
 "$cargo" xwin build --locked --release --target x86_64-pc-windows-msvc --target-dir "$native_target" -p tau-frontend --bin tau
 cp "$native_target/x86_64-pc-windows-msvc/release/tau.exe" "$bundle/app/Tau Beta.exe"
-TAU_VERSION="$version" "$cargo" xwin build --locked --manifest-path "$root/windows/Cargo.toml" --release \
+TAU_VERSION="$version" "$cargo" xwin build --locked --manifest-path "$root/crates/windows/Cargo.toml" --release \
     --target x86_64-pc-windows-msvc --target-dir "$windows_target" -p tau-launcher --bin tau-launcher
 launcher="$windows_target/x86_64-pc-windows-msvc/release/tau-launcher.exe"
 
@@ -60,7 +60,7 @@ TAU_VERSION="$version" \
 TAU_PAYLOAD_ARCHIVE="$payload" \
 TAU_LAUNCHER_EXE="$launcher" \
 "$cargo" xwin build \
-    --manifest-path "$root/windows/Cargo.toml" \
+    --manifest-path "$root/crates/windows/Cargo.toml" \
     --locked \
     --target-dir "$windows_target" \
     --release \

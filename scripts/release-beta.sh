@@ -100,7 +100,7 @@ fi
 if [[ -n "$version" ]]; then
     python3 "$helper" bump "$version"
     if ! git diff --quiet; then
-        git add Cargo.lock daemon/Cargo.toml frontend/Cargo.toml frontend/android/AndroidManifest.xml
+        git add Cargo.lock crates/daemon/Cargo.toml crates/frontend/Cargo.toml crates/frontend/android/AndroidManifest.xml
         git commit -m "Release Tau 2 beta $version"
     fi
 fi
@@ -151,8 +151,8 @@ if "$finished"; then
 else
 build_daemon() { "$cargo" build --release --locked -p taud; install -m 0700 "$root/target/release/taud" "$daemon"; }
 step daemon "$key_daemon" "$daemon" -- build_daemon
-step windows "$key_win" "$win" "$root/target/x86_64-pc-windows-msvc/release/tau.exe" "$root/target/windows-sfx-Tau-Beta-$version/tau-windows-payload.tar.lzma" "$root/windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe" -- scripts/build-windows-sfx.sh
-step android "$key_android" "$root/target/android/arm64-v8a/tau-frontend-arm64-v8a.apk" "$root/target/android/arm64-v8a/libtau_frontend.so" -- frontend/android/build.sh
+step windows "$key_win" "$win" "$root/target/x86_64-pc-windows-msvc/release/tau.exe" "$root/target/windows-sfx-Tau-Beta-$version/tau-windows-payload.tar.lzma" "$root/crates/windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe" -- scripts/build-windows-sfx.sh
+step android "$key_android" "$root/target/android/arm64-v8a/tau-frontend-arm64-v8a.apk" "$root/target/android/arm64-v8a/libtau_frontend.so" -- crates/frontend/android/build.sh
 # Verification changes need not rebuild unchanged binaries.
 verifier=$(sha256sum "$helper" | cut -d' ' -f1)
 step verify-windows "$key_win:$verifier" "$win" -- python3 "$helper" windows "$version"
@@ -177,7 +177,7 @@ fi
 if "$deploy"; then
     remote=$(git ls-remote origin refs/heads/tau2 | cut -f1)
     [[ $(git rev-parse HEAD) == "$remote" ]] || die 'Deploy requires HEAD published to origin/tau2; use --push.'
-    deploy_key=$(sha256sum "$daemon" deploy/tau2-beta.service scripts/install-daemon.sh | sha256sum | cut -d' ' -f1)
+    deploy_key=$(sha256sum "$daemon" assets/tau2-beta.service scripts/install-daemon.sh | sha256sum | cut -d' ' -f1)
     pid=$(systemctl show tau2-beta.service -p MainPID --value)
     if [[ ${pid:-0} -gt 0 ]] && python3 "$helper" hit "$state/deploy.json" "$deploy_key" && cmp -s "$daemon" "/proc/$pid/exe" && python3 "$helper" health "$version" "$protocol"; then
         say 'deploy: matching beta already running; no restart'

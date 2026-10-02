@@ -48,7 +48,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(release.hit(record, 'inputs'))
 
     def test_docs_and_frontend_changes_do_not_invalidate_daemon(self):
-        for name in ['Cargo.toml', 'Cargo.lock', 'daemon/src/lib.rs', 'frontend/src/lib.rs', 'daemon/README.md']:
+        for name in ['Cargo.toml', 'Cargo.lock', 'crates/daemon/src/lib.rs', 'crates/frontend/src/lib.rs', 'crates/daemon/README.md']:
             self.write(name, 'initial')
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
@@ -57,18 +57,18 @@ class ReleaseTests(unittest.TestCase):
             return '/bin/sh\n' if args[0] == 'rustup' else original(*args, **kwargs)
         with patch.object(release, 'run', side_effect=run):
             before = release.fingerprint('daemon')
-            self.write('daemon/README.md', 'documentation')
-            self.write('frontend/src/lib.rs', 'frontend only')
+            self.write('crates/daemon/README.md', 'documentation')
+            self.write('crates/frontend/src/lib.rs', 'frontend only')
             self.assertEqual(before, release.fingerprint('daemon'))
-            self.write('daemon/src/lib.rs', 'changed source')
+            self.write('crates/daemon/src/lib.rs', 'changed source')
             self.assertNotEqual(before, release.fingerprint('daemon'))
 
     def test_version_bump_keeps_all_packages_in_step_without_rebumping(self):
         for directory, name in [('daemon', 'taud'), ('frontend', 'tau-frontend')]:
-            self.write(directory + '/Cargo.toml', f'[package]\nname="{name}"\nversion = "0.7.4"\n')
+            self.write('crates/' + directory + '/Cargo.toml', f'[package]\nname="{name}"\nversion = "0.7.4"\n')
         self.write('Cargo.lock', '[[package]]\nname = "taud"\nversion = "0.7.4"\n[[package]]\nname = "tau-frontend"\nversion = "0.7.4"\n')
-        self.write('protocol/src/lib.rs', 'pub const PROTOCOL_VERSION: u32 = 18;')
-        self.write('frontend/android/AndroidManifest.xml', '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.tau.rust" android:versionCode="9" android:versionName="0.7.4-beta"/>')
+        self.write('crates/protocol/src/lib.rs', 'pub const PROTOCOL_VERSION: u32 = 18;')
+        self.write('crates/frontend/android/AndroidManifest.xml', '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.tau.rust" android:versionCode="9" android:versionName="0.7.4-beta"/>')
         release.bump('0.7.5')
         self.assertEqual(('0.7.5', 18, 10), release.metadata())
         release.bump('0.7.5')
@@ -78,7 +78,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_installer_verifies_both_app_archive_and_embedded_launcher(self):
         app = self.write('target/x86_64-pc-windows-msvc/release/tau.exe', b'MZapp')
-        launcher = self.write('windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe', b'MZlauncher')
+        launcher = self.write('crates/windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe', b'MZlauncher')
         raw = io.BytesIO()
         with tarfile.open(fileobj=raw, mode='w') as archive:
             member = tarfile.TarInfo('app/Tau Beta.exe')
@@ -106,10 +106,10 @@ class ReleaseTests(unittest.TestCase):
     def cached_rollout_fixture(self):
         # Exercise the real orchestration with immutable fake artifacts. SDK,
         # keychain and Cargo commands are replaced by explicit no-work doubles.
-        self.write('frontend/Cargo.toml', '[package]\nversion="0.7.5"\n')
-        self.write('daemon/Cargo.toml', '[package]\nversion="0.7.5"\n')
-        self.write('protocol/src/lib.rs', 'pub const PROTOCOL_VERSION:u32=18;')
-        self.write('frontend/android/AndroidManifest.xml', '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.tau.rust" android:versionCode="10" android:versionName="0.7.5-beta"/>')
+        self.write('crates/frontend/Cargo.toml', '[package]\nversion="0.7.5"\n')
+        self.write('crates/daemon/Cargo.toml', '[package]\nversion="0.7.5"\n')
+        self.write('crates/protocol/src/lib.rs', 'pub const PROTOCOL_VERSION:u32=18;')
+        self.write('crates/frontend/android/AndroidManifest.xml', '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.tau.rust" android:versionCode="10" android:versionName="0.7.5-beta"/>')
         self.write('.gitignore', '/dist/\n/target/\n/cache/\n')
         source = (self.old / 'scripts/release-beta.sh').read_text()
         source = source.replace('cargo=/usr/local/bin/cargo', 'cargo="$root/scripts/forbidden-build"')

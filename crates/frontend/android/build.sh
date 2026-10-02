@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 app=$(cd "$(dirname "$0")/.." && pwd)
-root=$(cd "$app/.." && pwd)
+root=$(cd "$app/../.." && pwd)
 cargo=/usr/local/bin/cargo
 export CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=1
 export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-XX:ActiveProcessorCount=1"

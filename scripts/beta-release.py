@@ -43,13 +43,13 @@ def atomic(path, value):
 
 
 def metadata():
-    front = tomllib.loads((ROOT / 'frontend/Cargo.toml').read_text())['package']['version']
-    daemon = tomllib.loads((ROOT / 'daemon/Cargo.toml').read_text())['package']['version']
+    front = tomllib.loads((ROOT / 'crates/frontend/Cargo.toml').read_text())['package']['version']
+    daemon = tomllib.loads((ROOT / 'crates/daemon/Cargo.toml').read_text())['package']['version']
     assert re.fullmatch(r'\d+\.\d+\.\d+', front) and front == daemon, 'Package version mismatch'
-    manifest = ET.parse(ROOT / 'frontend/android/AndroidManifest.xml').getroot()
+    manifest = ET.parse(ROOT / 'crates/frontend/android/AndroidManifest.xml').getroot()
     assert manifest.get('package') == 'app.tau.rust'
     assert manifest.get(ANDROID + 'versionName') == front + '-beta', 'Android version mismatch'
-    protocol = int(re.search(r'PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)', (ROOT / 'protocol/src/lib.rs').read_text())[1])
+    protocol = int(re.search(r'PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)', (ROOT / 'crates/protocol/src/lib.rs').read_text())[1])
     return front, protocol, int(manifest.get(ANDROID + 'versionCode'))
 
 
@@ -60,7 +60,7 @@ def bump(version):
         return
     assert tuple(map(int, version.split('.'))) > tuple(map(int, old.split('.'))), 'Version must increase'
     for name in ['daemon', 'frontend']:
-        p = ROOT / name / 'Cargo.toml'
+        p = ROOT / 'crates' / name / 'Cargo.toml'
         p.write_text(p.read_text().replace(f'version = "{old}"', f'version = "{version}"', 1))
     p = ROOT / 'Cargo.lock'
     text = p.read_text()
@@ -69,18 +69,18 @@ def bump(version):
         assert text.count(needle) == 1
         text = text.replace(needle, f'name = "{name}"\nversion = "{version}"')
     p.write_text(text)
-    p = ROOT / 'frontend/android/AndroidManifest.xml'
+    p = ROOT / 'crates/frontend/android/AndroidManifest.xml'
     p.write_text(p.read_text().replace(f'android:versionCode="{code}"', f'android:versionCode="{code + 1}"').replace(f'android:versionName="{old}-beta"', f'android:versionName="{version}-beta"'))
 
 
 def fingerprint(stage):
-    common = ['Cargo.toml', 'Cargo.lock', '.cargo/', 'rust-toolchain', 'blocks/', 'protocol/', 'transfer/']
+    common = ['Cargo.toml', 'Cargo.lock', '.cargo/', 'rust-toolchain', 'crates/blocks/', 'crates/protocol/', 'crates/transfer/', 'crates/code-viewer/', 'scripts/title_prompt.txt']
     paths = {
-        'daemon': common + ['daemon/', 'scripts/title_prompt.txt'],
-        'windows': common + ['frontend/', 'markdown/', 'windows/', 'scripts/build-windows-sfx.sh'],
-        'android': common + ['frontend/', 'markdown/', 'deploy/android-signing.sha256'],
-        'check': common + ['daemon/', 'frontend/', 'markdown/', 'windows/', 'scripts/title_prompt.txt'],
-        'test': common + ['daemon/', 'frontend/', 'markdown/', 'windows/', 'scripts/title_prompt.txt'],
+        'daemon': common + ['crates/daemon/'],
+        'windows': common + ['crates/frontend/', 'crates/markdown/', 'crates/windows/', 'scripts/build-windows-sfx.sh'],
+        'android': common + ['crates/frontend/', 'crates/markdown/', 'assets/android-signing.sha256'],
+        'check': common + ['crates/daemon/', 'crates/frontend/', 'crates/markdown/', 'crates/windows/'],
+        'test': common + ['crates/daemon/', 'crates/frontend/', 'crates/markdown/', 'crates/windows/'],
     }[stage]
     h = hashlib.sha256()
     names = run('git', '-C', str(ROOT), 'ls-files', '-z').decode().split('\0')
@@ -88,9 +88,9 @@ def fingerprint(stage):
         p = ROOT / name
         if not any(name == prefix or name.startswith(prefix) for prefix in paths):
             continue
-        if stage == 'windows' and name.startswith('frontend/android/'):
+        if stage == 'windows' and name.startswith('crates/frontend/android/'):
             continue
-        if p.name in {'README.md', 'PACKAGING.md', 'QA.md', 'HANDOFF.md', 'ARCHITECTURE.md'} or name.startswith('frontend/docs/'):
+        if p.suffix == '.md':
             continue
         h.update(name.encode() + b'\0' + bytes.fromhex(digest(p)))
     # Build-affecting environment and the installed toolchain/config, not docs-only commits.
@@ -131,7 +131,7 @@ def check_key():
     key = Path(os.environ.get('ANDROID_KEYSTORE', str(Path.home() / '.android/debug.keystore')))
     assert key.is_file(), 'Existing beta signing key required; refusing to create another identity'
     der = run('keytool', '-exportcert', '-keystore', str(key), '-storepass', 'android', '-alias', 'androiddebugkey', stderr=subprocess.DEVNULL)
-    assert hashlib.sha256(der).hexdigest() == (ROOT / 'deploy/android-signing.sha256').read_text().strip(), 'Wrong beta signing identity'
+    assert hashlib.sha256(der).hexdigest() == (ROOT / 'assets/android-signing.sha256').read_text().strip(), 'Wrong beta signing identity'
 
 
 def verify_windows(version):
@@ -148,7 +148,7 @@ def verify_windows(version):
         assert names == ['app/Tau Beta.exe']
     with setup.open('rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as image:
         assert image[:2] == b'MZ' and image.find(payload.read_bytes()) >= 0, 'Installer payload not embedded'
-        launcher = ROOT / 'windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe'
+        launcher = ROOT / 'crates/windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe'
         assert image.find(launcher.read_bytes()) >= 0, 'Installer launcher not embedded'
     return setup
 
@@ -157,7 +157,7 @@ def verify_android(version, code):
     tools = Path(os.environ.get('ANDROID_SDK_ROOT', os.environ.get('ANDROID_HOME', str(Path.home() / 'android-sdk')))) / 'build-tools' / os.environ.get('ANDROID_BUILD_TOOLS_VERSION', '35.0.0')
     apk = ROOT / 'target/android/arm64-v8a/tau-frontend-arm64-v8a.apk'
     lib = ROOT / 'target/android/arm64-v8a/libtau_frontend.so'
-    assert certificate(apk) == (ROOT / 'deploy/android-signing.sha256').read_text().strip(), 'APK signing identity changed'
+    assert certificate(apk) == (ROOT / 'assets/android-signing.sha256').read_text().strip(), 'APK signing identity changed'
     badging = run(str(tools / 'aapt2'), 'dump', 'badging', str(apk), text=True)
     assert f"name='app.tau.rust'" in badging.splitlines()[0]
     assert f"versionName='{version}-beta'" in badging.splitlines()[0] and f"versionCode='{code}'" in badging.splitlines()[0]

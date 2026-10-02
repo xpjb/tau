@@ -1,5 +1,5 @@
 /target/
-/windows/target/
+/crates/windows/target/
 /dist/
 *.jks
 *.keystore
