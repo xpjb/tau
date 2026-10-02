@@ -404,3 +404,18 @@ fn closing_the_picker_keeps_the_open_file_not_its_preview_and_restores_scroll() 
         assert_eq!(code.scroll.value, scroll);
     }
 }
+
+#[test]
+fn code_view_wheel_uses_the_shared_smooth_scroll_owner() {
+    let mut h = Harness::new((1000, 800), 1., false);
+    h.files();
+    h.text(&"A line long enough to scroll horizontally as well.\n".repeat(200));
+    let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+    let point = Vec2::new(view.viewport.x + 80., view.viewport.y + 100.);
+    let before = view.scroll.value;
+    h.app.wheel(96., false, point);
+    let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+    assert!(view.scroll.wheel.is_some(), "Files must use the same smooth wheel scrolling as the transcript");
+    assert_eq!(view.scroll.value, before, "A wheel notch is animated, not a different immediate jump in Files");
+    assert!(h.app.needs_redraw(), "Wheel input starts the on-demand animation");
+}

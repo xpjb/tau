@@ -231,3 +231,6 @@ impl ScrollState {
         handled
     }
 }
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests;
