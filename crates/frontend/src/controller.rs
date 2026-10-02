@@ -2,27 +2,27 @@ use crate::{
     codex_usage::UsageView,
     feed::Feed,
     store::*,
-    transport::{self, Command, Network, Wake},
+    net::{self, Command, Network, Wake},
 };
 use anyhow::{Context, Result, ensure};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-use tau_protocol::*;
+use tau_net::*;
 
 pub struct Download {
-    pub status: tau_transfer::TransferStatus,
+    pub status: tau_net::TransferStatus,
     pub path: PathBuf,
     pub bytes_per_second: Option<u64>,
     last_progress: Option<(std::time::Instant, u64)>,
 }
 impl Download {
-    pub fn new(status: tau_transfer::TransferStatus, path: PathBuf) -> Self {
+    pub fn new(status: tau_net::TransferStatus, path: PathBuf) -> Self {
         let last_progress = (!status.done).then(|| (std::time::Instant::now(), status.transferred));
         Self { status, path, bytes_per_second: None, last_progress }
     }
-    fn update(&mut self, status: tau_transfer::TransferStatus, path: PathBuf) {
+    fn update(&mut self, status: tau_net::TransferStatus, path: PathBuf) {
         let now = std::time::Instant::now();
         if status.done || self.path != path || status.transferred < self.status.transferred {
             self.bytes_per_second = None;
@@ -62,7 +62,7 @@ pub struct Controller {
     pub identity: String,
     pub account: Account,
     pub model_preferences: crate::models::Preferences,
-    pub model_catalog: tau_protocol::ModelCatalog,
+    pub model_catalog: tau_net::ModelCatalog,
     model_catalog_revision: Option<u64>,
     model_catalog_attempt: Option<std::time::Instant>,
     pub chats: HashMap<String, Chat>,
@@ -72,24 +72,24 @@ pub struct Controller {
     pub viewing_chat: bool,
     pub project_result: Option<(String, bool)>,
     pub settings_result: Option<(String, bool)>,
-    pub daemon_settings: Option<tau_protocol::settings::Settings>,
+    pub daemon_settings: Option<tau_net::settings::Settings>,
     pub connection: String,
-    pub health: crate::connection::Health,
-    pub native_metrics:tau_transfer::blocks::Stats,
+    pub health: crate::net::health::Health,
+    pub native_metrics:tau_net::native::Stats,
     pub epoch: Option<u64>,
     pub notice: Option<crate::notice::Notice>,
     pub transport_error: Option<String>,
     pub codex_usage: UsageView,
-    remote: crate::blocks::Cache,
-    block_plan: Vec<crate::blocks::Plan>,
+    remote: crate::replica::Cache,
+    block_plan: Vec<crate::replica::Plan>,
     background_dirty: std::collections::HashSet<String>,
     plan_dirty:std::cell::Cell<bool>,
     viewport:Option<(String,std::collections::BTreeSet<String>)>,
     copy:Option<(String,Vec<String>)>,
     pub copied:Option<String>,
-    pub file_update:Option<std::sync::Arc<crate::file_client::Update>>,
+    pub file_update:Option<std::sync::Arc<crate::net::files::FileUpdate>>,
     file_generation:u64,
-    pub file_index:Option<std::sync::Arc<crate::file_index::Update>>,
+    pub file_index:Option<std::sync::Arc<crate::net::files::IndexUpdate>>,
     index_generation:u64,
     index_plan:Option<(String,Option<String>)>,
     network: Option<Network>,
@@ -131,7 +131,7 @@ impl Controller {
             settings_result: None,
             daemon_settings: None,
             connection: "Not connected".into(),
-            health: crate::connection::Health::default(),native_metrics:Default::default(),
+            health: crate::net::health::Health::default(),native_metrics:Default::default(),
             epoch: None,
             notice: None,
             transport_error: None,
@@ -170,7 +170,7 @@ impl Controller {
         self.transport_error = None;
         self.epoch = None;
         self.connection = "Connecting…".into();
-        self.health = crate::connection::Health::connecting();
+        self.health = crate::net::health::Health::connecting();
         self.block_plan.clear();self.plan_dirty.set(true);
         self.requests.clear();
         self.project_deletions.clear();
@@ -532,7 +532,7 @@ impl Controller {
         // don't mark a failed submission as installed (the next tick retries).
         if plan.is_some() { self.file_index = None; }
         if let Some(network) = &self.network {
-            if let Err(error) = network.send(Command::Blocks(crate::blocks::Command::FileIndex(plan.clone().map(|(session, path)| crate::file_index::Interest { generation: self.index_generation, session, path })))) {
+            if let Err(error) = network.index_files(plan.clone().map(|(session, path)| crate::net::files::IndexInterest { generation: self.index_generation, session, path })) {
                 return Err(error);
             }
         }
@@ -541,22 +541,22 @@ impl Controller {
     }
     pub(crate) fn file_wake(&self) -> Wake { self.wake.clone() }
     pub(crate) fn viewer_generation(&self) -> u64 {self.file_generation}
-    pub fn view_files(&mut self, request: Option<tau_protocol::files::FileRequest>) -> Result<u64> {
+    pub fn view_files(&mut self, request: Option<tau_net::files::FileRequest>) -> Result<u64> {
         self.view_files_document(request, None)
     }
-    pub(crate) fn view_files_document(&mut self, request: Option<tau_protocol::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>) -> Result<u64> {
+    pub(crate) fn view_files_document(&mut self, request: Option<tau_net::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>) -> Result<u64> {
         self.view_files_preview(request, document, false)
     }
-    pub(crate) fn view_files_preview(&mut self, request: Option<tau_protocol::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>, preview: bool) -> Result<u64> {
+    pub(crate) fn view_files_preview(&mut self, request: Option<tau_net::files::FileRequest>, document: Option<std::sync::Arc<tau_code_viewer::Document>>, preview: bool) -> Result<u64> {
         self.file_generation += 1;
         self.file_update = None;
         if let Some(network)=&self.network {
-            network.send(Command::Blocks(crate::blocks::Command::Files(request.map(|request|crate::file_client::Interest {preview,generation:self.file_generation,request,document}))))?;
+            network.view_files(request.map(|request|crate::net::files::FileInterest {preview,generation:self.file_generation,request,document}))?;
         } else if request.is_some() { anyhow::bail!("Connect to browse remote files"); }
         Ok(self.file_generation)
     }
     pub fn request(&mut self, command: ClientCommand) -> Result<String> {
-        let epoch=self.epoch.ok_or_else(||anyhow::Error::from(transport::ConnectionUnavailable))?;
+        let epoch=self.epoch.ok_or_else(||anyhow::Error::from(net::ConnectionUnavailable))?;
         if matches!(command,ClientCommand::ListSessions) && let Some(catalog)=&mut self.catalog && !(catalog.sessions_done && catalog.projects_done) {catalog.refresh=true;return Ok(catalog.id.clone());}
         let durable=command.journalled_control();
         let encoded=serde_json::to_vec(&command)?;
@@ -592,13 +592,13 @@ impl Controller {
         }
     }
     pub fn report_error(&mut self, error: anyhow::Error) {
-        if error.is::<transport::ConnectionUnavailable>() { self.transport_error = Some(error.to_string()); }
+        if error.is::<net::ConnectionUnavailable>() { self.transport_error = Some(error.to_string()); }
         else { self.notice = Some(error.to_string().into()); }
     }
     fn report_sync_error(&mut self, error: anyhow::Error) {
         // Connection loss is status, not a failed content read. Preserve typed
         // errors so corruption/storage/unknown-block failures stay actionable.
-        if tau_transfer::blocks::is_connection_error(&error) { self.transport_error = Some(format!("{error:#}")); }
+        if tau_net::native::is_connection_error(&error) { self.transport_error = Some(format!("{error:#}")); }
         else { self.notice = Some(format!("{error:#}").into()); }
     }
     pub fn diagnostics(&self)->String {
@@ -607,7 +607,7 @@ impl Controller {
     }
     pub fn clear_replica(&mut self)->Result<()> {
         self.remote.clear()?;self.block_plan.clear();self.plan_dirty.set(true);self.copy=None;
-        if let Some(network)=&self.network {network.send(Command::Blocks(crate::blocks::Command::Reset))?;}
+        if let Some(network)=&self.network {network.reset_replica()?;}
         for chat in self.chats.values_mut() {chat.feed=Feed::default();chat.reconcile();}
         self.watch_blocks()?;Ok(())
     }
@@ -636,7 +636,7 @@ impl Controller {
     }
     pub fn control(&mut self,command:ClientCommand)->Result<()> {self.control_id(command).map(|_|())}
     fn control_id(&mut self, command: ClientCommand) -> Result<String> {
-        let epoch = self.epoch.ok_or_else(|| anyhow::Error::from(transport::ConnectionUnavailable))?;
+        let epoch = self.epoch.ok_or_else(|| anyhow::Error::from(net::ConnectionUnavailable))?;
         let session = match &command {
             ClientCommand::Prompt { session_id, text, .. } if text.starts_with('/') => {
                 session_id.clone()
@@ -994,7 +994,7 @@ impl Controller {
             return Ok(());
         }
         if let Some(before) = self.remote.history_cursor(&id)? {
-            self.network.as_ref().ok_or_else(||anyhow::Error::from(transport::ConnectionUnavailable))?.send(transport::Command::Blocks(crate::blocks::Command::History { scope:id.clone(),before }))?;
+            self.network.as_ref().ok_or_else(||anyhow::Error::from(net::ConnectionUnavailable))?.history(id.clone(),before)?;
             self.chats.get_mut(&id).unwrap().feed.loading = true;
         }
         Ok(())
@@ -1043,13 +1043,13 @@ impl Controller {
             if let Some(download)=self.downloads.get_mut(&key)
                 && download.path==path && (!download.status.done || download.status.failure.is_some()) {
                 let size=path.metadata()?.len();
-                download.update(tau_transfer::TransferStatus {transferred:size,total:size,
+                download.update(tau_net::TransferStatus {transferred:size,total:size,
                     network_bytes:download.status.network_bytes,done:true,failure:None},path.clone());
             }
             return Ok(path);
         }
         if !(self.network.is_some() && (self.remote.authorized() || self.remote.has_file(session,&format!("file:{entry}")))) {
-            return Err(anyhow::Error::from(transport::ConnectionUnavailable).context("Content connection is not authorized yet"));
+            return Err(anyhow::Error::from(net::ConnectionUnavailable).context("Content connection is not authorized yet"));
         }
         let key = Self::download_key(session, entry);
         if self.downloads.get(&key).is_some_and(|d| !d.status.done) {
@@ -1064,7 +1064,7 @@ impl Controller {
         })?;
         self.downloads.insert(
             key,
-            Download::new(tau_transfer::TransferStatus {
+            Download::new(tau_net::TransferStatus {
                 transferred: 0,
                 total: 0,
                 network_bytes: 0,
@@ -1077,7 +1077,7 @@ impl Controller {
     pub fn cancel_download(&self, key: &str) -> Result<()> {
         self.network
             .as_ref()
-            .ok_or_else(|| anyhow::Error::from(transport::ConnectionUnavailable))?
+            .ok_or_else(|| anyhow::Error::from(net::ConnectionUnavailable))?
             .send(Command::CancelDownload(key.into()))
     }
     fn not_sent(&mut self, id: &str, detail: &str, retryable: bool) -> Result<()> {
@@ -1135,17 +1135,19 @@ impl Controller {
         }
         let mut scopes = std::collections::HashSet::new();
         for _ in 0..256 {
-            let Some(notice) = self.network.as_mut().and_then(|n|n.blocks.try_recv().ok()) else { break; };
-            if let Some((key,path,status))=notice.transfer {
-                changed=true;
-                if let Err(error)=self.network_event(transport::Event::Download {key,path,status}) {self.report_error(error);}
-            } else if let Some(error) = notice.error {
-                changed=true;if let Some(chat)=self.chats.get_mut(&notice.scope) {chat.feed.loading=false;} self.report_sync_error(error);
-            } else {
-                // An unselected transcript chunk is disk work, not a reason to
-                // redraw the current conversation for every background token.
-                changed |= self.transport_error.take().is_some() || self.account.selected.as_ref()==Some(&notice.scope);
-                scopes.insert(notice.scope);
+            let Some(notice) = self.network.as_mut().and_then(|n|n.replicas.try_recv().ok()) else { break; };
+            match notice {
+                net::ReplicaNotice::Failed {scope,error} => {
+                    changed=true;
+                    if let Some(chat)=self.chats.get_mut(&scope) {chat.feed.loading=false;}
+                    self.report_sync_error(error);
+                }
+                net::ReplicaNotice::Changed(scope) => {
+                    // Background chunks advance interests without redrawing the
+                    // foreground conversation for every unselected token.
+                    changed |= self.transport_error.take().is_some() || self.account.selected.as_ref()==Some(&scope);
+                    scopes.insert(scope);
+                }
             }
         }
         for scope in scopes {
@@ -1194,15 +1196,9 @@ impl Controller {
     pub fn cancel_copy(&mut self) {self.copy=None;self.copied=None;self.plan_dirty.set(true);}
     pub fn copy_details(&mut self, scope:&str, ids:Vec<String>) -> Result<()> {
         self.cancel_copy();
-        // Local demo/renderer fixtures have complete events without a remote
-        // cache. Native views fetch missing bytes as an explicit copy interest.
-        if !self.remote.has_snapshot(scope)? {
-            let chat=self.chats.get(scope).context("Unknown chat")?;
-            self.copied=Some(crate::details::copy(&ids.iter().filter_map(|id|chat.feed.event(id)).collect::<Vec<_>>(), chat.feed.events.values(), &chat.feed.parents));
-        } else {
-            self.copy=Some((scope.into(),ids));self.notice=Some("Fetching details to copy…".into());
-            self.watch_blocks()?;
-        }
+        ensure!(self.chats.contains_key(scope),"Unknown chat");
+        self.copy=Some((scope.into(),ids));self.notice=Some("Fetching details to copy…".into());
+        self.watch_blocks()?;
         Ok(())
     }
     pub fn viewport(&mut self,scope:&str,ids:std::collections::BTreeSet<String>) {
@@ -1277,7 +1273,7 @@ impl Controller {
             next.push(plan);
         }
         if next != self.block_plan && let Some(network) = &self.network {
-            if let Err(error)=network.send(transport::Command::Blocks(crate::blocks::Command::Plan(next.clone()))) {
+            if let Err(error)=network.plan(next.clone()) {
                 self.plan_dirty.set(true);return Err(error);
             }
             self.block_plan = next;
@@ -1285,12 +1281,12 @@ impl Controller {
         self.background_dirty.clear();
         Ok(())
     }
-    fn network_event(&mut self, event: transport::Event) -> Result<()> {
-        let fatal = matches!(&event, transport::Event::Fatal(_));
+    fn network_event(&mut self, event: net::Event) -> Result<()> {
+        let fatal = matches!(&event, net::Event::Fatal(_));
         match event {
-            transport::Event::Connecting { attempt, at } => self.health.attempt(attempt, at),
-            transport::Event::RetryScheduled { at } => self.health.retry_scheduled(at),
-            transport::Event::Source(epoch,lineage)=>{
+            net::Event::Connecting { attempt, at } => self.health.attempt(attempt, at),
+            net::Event::RetryScheduled { at } => self.health.retry_scheduled(at),
+            net::Event::Source(epoch,lineage)=>{
                 self.source_guard=Some((epoch,false));
                 if self.store.bind_source(&self.identity,&lineage)? {
                     self.saved_downloads.clear();
@@ -1303,7 +1299,7 @@ impl Controller {
                 } else {self.account.source_lineage=Some(lineage);}
                 self.source_guard=Some((epoch,true));
             }
-            transport::Event::Ready { epoch, at } => {
+            net::Event::Ready { epoch, at } => {
                 ensure!(self.source_guard==Some((epoch,true)),"Source identity was not durably recorded; automatic submission is disabled. Repair local storage and reconnect.");
                 self.state_versions.clear();self.catalog=None;self.receipt_queue.clear();self.receipt_inflight=None;
                 self.epoch = Some(epoch);
@@ -1327,7 +1323,7 @@ impl Controller {
                     self.request(ClientCommand::GetCommands { session_id: id })?;
                 }
             }
-            transport::Event::Disconnected(detail) | transport::Event::Fatal(detail) => {
+            net::Event::Disconnected(detail) | net::Event::Fatal(detail) => {
                 self.epoch = None;
                 self.codex_usage.offline();
                 self.connection = detail;
@@ -1349,19 +1345,19 @@ impl Controller {
                     chat.reconcile();self.store.save_chat(&self.identity, session, &chat.local)?;
                 }
             }
-            transport::Event::HeartbeatSent { epoch, at } if self.epoch == Some(epoch) => {
+            net::Event::HeartbeatSent { epoch, at } if self.epoch == Some(epoch) => {
                 self.health.sent(at)
             }
-            transport::Event::HeartbeatReply { epoch, at, rtt } if self.epoch == Some(epoch) => {
+            net::Event::HeartbeatReply { epoch, at, rtt } if self.epoch == Some(epoch) => {
                 self.health.reply(rtt, at)
             }
-            transport::Event::NotSent(id, detail) => {
+            net::Event::NotSent(id, detail) => {
                 if self.is_creating(&id) {
                     self.requests.remove(&id);
                     self.transport_error = Some(detail);
                 } else { self.not_sent(&id, &detail, true)?; }
             },
-            transport::Event::Prepared { epoch, id, result, retryable } => {
+            net::Event::Prepared { epoch, id, result, retryable } => {
                 let session = self
                     .chats
                     .iter()
@@ -1404,17 +1400,17 @@ impl Controller {
                     }
                 }
             }
-            transport::Event::Download { key, status, path } => {
+            net::Event::Download { key, status, path } => {
                 if let Some(download) = self.downloads.get_mut(&key) {
                     download.update(status, path);
                 } else {
                     self.downloads.insert(key, Download::new(status, path));
                 }
             }
-            transport::Event::Metrics(stats)=>{
+            net::Event::Metrics(stats)=>{
                 self.native_metrics=stats;
             },
-            transport::Event::Message(epoch, message)|transport::Event::SizedMessage(epoch,message,_) if self.epoch == Some(epoch) => {
+            net::Event::Message(epoch, message) if self.epoch == Some(epoch) => {
                 self.message(*message)?
             }
             _ => {}
@@ -1725,11 +1721,6 @@ impl Controller {
                         self.create_failed_epoch = self.epoch;
                         self.notice = Some(error.clone().unwrap_or_else(|| "New chat is saved locally but was not confirmed; retry when connected".into()).into());
                     }
-                    if let Some(ClientCommand::GetHistory { session_id, .. }) = &command
-                        && let Some(chat) = self.chats.get_mut(session_id)
-                    {
-                        chat.feed.loading = false;
-                    }
                     if !matched {
                         self.notice = Some(error.unwrap_or_else(|| "Request failed".into()).into());
                     }
@@ -1806,159 +1797,9 @@ impl Controller {
 }
 
 #[cfg(test)]
-mod safety_tests {
-use super::*;
-use std::sync::Arc;
-use crate::transport::Event as NetworkEvent;
-#[tokio::test]
-async fn connection_status_does_not_popup_but_real_content_and_storage_failures_still_do() {
-    let root=tempfile::tempdir().unwrap();
-    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-    c.report_error(transport::ConnectionUnavailable.into());
-    assert!(c.notice.is_none());assert!(c.transport_error.is_some());
-    c.not_sent("background-read","Connection changed",true).unwrap();assert!(c.notice.is_none());
-    let timeout=tokio::time::timeout(std::time::Duration::ZERO,std::future::pending::<()>()).await.unwrap_err();
-    c.report_sync_error(anyhow::Error::from(timeout).context("Content sync"));
-    assert!(c.notice.is_none());assert!(c.diagnostics().contains("Content sync"));
-    let error=c.download("unavailable-chat","unavailable-file",1024).unwrap_err();
-    c.report_error(error);assert!(c.notice.is_none());assert!(c.transport_error.as_deref().unwrap().contains("not authorized"));
-    c.report_sync_error(anyhow::anyhow!("Unknown block").context("Content sync"));
-    assert_eq!(c.notice.as_deref(),Some("Content sync: Unknown block"));
-    c.notice=None;c.report_error(anyhow::anyhow!("Local database is full"));
-    assert_eq!(c.notice.as_deref(),Some("Local database is full"));
-    c.notice=None;c.report_sync_error(anyhow::anyhow!("Block content integrity check failed"));
-    assert_eq!(c.notice.as_deref(),Some("Block content integrity check failed"));
-    c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context("Write replica"));
-    assert!(c.notice.as_deref().unwrap().starts_with("Write replica:"),"A storage IO error is not connection loss");
-    let broken=tau_transfer::blocks::Frame {
-        header:tau_transfer::blocks::Header::Data {version:1,offset:0,hash:String::new(),length:32,codec:tau_transfer::blocks::Codec::Zstd},
-        data:b"not a zstd frame".to_vec(),
-    };
-    c.notice=None;c.report_sync_error(broken.decoded().unwrap_err().context("Content sync"));
-    assert!(c.notice.as_deref().unwrap().starts_with("Content sync: Invalid compressed block chunk:"),"Decompression's IO error must not be mistaken for a network error");
-}
-
-#[test]
-fn unsent_messages_back_off_and_keep_the_original_id_through_failure_and_retry() {
-    let root = tempfile::tempdir().unwrap();
-    let mut c = Controller::new(Store::open(root.path().into()).unwrap(), Arc::new(|| {})).unwrap();
-    c.select("chat").unwrap(); c.draft("keep this intent".into()).unwrap(); c.send_prompt().unwrap();
-    let id = c.selected().unwrap().local.pending[0].request.id.clone();
-    c.chats.get_mut("chat").unwrap().local.pending[0].status = Delivery::Sending;
-    c.not_sent(&id, "writer full", true).unwrap();
-    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
-    assert!(c.notice.is_none(), "routine retry lives on the saved message, not in a scary banner");
-    c.epoch = Some(1);
-    c.send_waiting("chat").unwrap(); // Backoff prevents touching the absent network.
-    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
-    c.retry_after = None;
-    let db = rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();
-    db.execute_batch("CREATE TRIGGER fail_send BEFORE INSERT ON local WHEN NEW.key='chat:chat' BEGIN SELECT RAISE(ABORT,'disk full');END").unwrap();
-    assert!(c.send_waiting("chat").is_err());
-    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection, "a failed commit cannot wedge the message in Sending");
-    db.execute_batch("DROP TRIGGER fail_send").unwrap();
-    c.chats.get_mut("chat").unwrap().local.pending[0].status = Delivery::Preparing;
-    c.network_event(NetworkEvent::Prepared {epoch:1,id:id.clone(),result:Err("attachment changed".into()),retryable:false}).unwrap();
-    assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::Rejected);
-    c.epoch = None;
-    c.retry_pending(&id).unwrap();
-    drop(c);
-    let c = Controller::new(Store::open(root.path().into()).unwrap(), Arc::new(|| {})).unwrap();
-    let pending = &c.selected().unwrap().local.pending[0];
-    assert_eq!(pending.request.id, id);
-    assert_eq!(pending.text, "keep this intent");
-    assert_eq!(pending.status, Delivery::WaitingForConnection);
-}
-
-#[test]
-fn lineage_fence_rolls_back_atomically_and_missing_source_work_stays_reachable() {
-    use crate::store::{LocalChat,Pending};
-    let root=tempfile::tempdir().unwrap();let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();c.select("missing").unwrap();
-    c.store.bind_source(&c.identity,"before").unwrap();c.account=c.store.get(&c.identity,"account").unwrap();
-    let local=LocalChat {draft:"keep me".into(),pending:vec![Pending {request:ClientRequest {id:"original".into(),command:ClientCommand::Prompt {session_id:"missing".into(),text:"possibly paid".into(), model: None, create: None }},text:"possibly paid".into(),files:vec![],status:Delivery::WaitingForConnection,started_at_ms:None,detail:None}],..Default::default()};
-    c.store.save_chat(&c.identity,"missing",&local).unwrap();
-    let db=rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();db.execute_batch("CREATE TRIGGER fail_fence BEFORE UPDATE ON local WHEN NEW.key='account' BEGIN SELECT RAISE(ABORT,'fence full');END").unwrap();
-    assert!(c.network_event(NetworkEvent::Source(1,"after".into())).is_err());assert!(c.network_event(NetworkEvent::Ready { epoch: 1, at: std::time::Instant::now() }).is_err());assert!(c.epoch.is_none());
-    assert_eq!(c.store.load_chat(&c.identity,"missing").unwrap().pending[0].status,Delivery::WaitingForConnection);
-    assert_eq!(c.store.get::<crate::store::Account>(&c.identity,"account").unwrap().source_lineage.as_deref(),Some("before"));
-    db.execute_batch("DROP TRIGGER fail_fence").unwrap();c.network_event(NetworkEvent::Source(1,"after".into())).unwrap();
-    assert_eq!(c.selected().unwrap().local.pending[0].status,Delivery::Unconfirmed);
-    c.network_event(NetworkEvent::NotSent("original".into(), "late old-connection callback".into())).unwrap();
-    c.message(ServerMessage::Receipts {session_id:"missing".into(),reports:vec![OperationReceipt {
-        id:"original".into(),accepted:false,complete:false,error:None,notice:None,
-    }]}).unwrap();
-    assert_eq!(c.selected().unwrap().local.pending[0].status,Delivery::Unconfirmed, "late events cannot clear the source fence");
-    c.message(ServerMessage::Sessions {sessions:vec![]}).unwrap();assert!(c.account.missing_chats.contains("missing"));assert_eq!(c.account.selected.as_deref(),Some("missing"));assert_eq!(c.selected().unwrap().local.draft,"keep me");
-    assert!(c.send_prompt().is_err());c.copy_missing_draft("missing").unwrap();assert_eq!(c.selected().unwrap().local.draft,"keep me");assert!(c.selected().unwrap().local.pending.is_empty());assert_eq!(c.chats["missing"].local.pending[0].request.id,"original");
-}
-
-
-#[test]
-fn delayed_catalogue_pages_do_not_overwrite_newer_status_even_before_membership_arrives() {
-    let root=tempfile::tempdir().unwrap();let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-    c.catalog=Some(Catalog {id:"walk".into(),..Default::default()});
-    c.message(ServerMessage::SessionState {session_id:"a".into(),revision:10,restore_review:None,status:SessionStatus::Running,detail:Some("new".into()),context_usage:None}).unwrap();
-    let a=Controller::creating_summary("a",GENERAL_PROJECT_ID,0);
-    // The first page is staged before its continuation can be sent offline.
-    assert!(c.message(ServerMessage::SessionPage {catalog_id:"walk".into(),revision:3,after:None,next:Some("a".into()),sessions:vec![a],states:std::collections::BTreeMap::from([("a".into(),9)])}).is_err());
-    c.message(ServerMessage::SessionState {session_id:"a".into(),revision:11,restore_review:None,status:SessionStatus::Idle,detail:Some("latest".into()),context_usage:None}).unwrap();
-    c.message(ServerMessage::SessionPage {catalog_id:"walk".into(),revision:3,after:Some("a".into()),next:None,sessions:vec![Controller::creating_summary("b",GENERAL_PROJECT_ID,0)],states:Default::default()}).unwrap();
-    assert_eq!(c.account.sessions[0].status,SessionStatus::Idle);assert_eq!(c.account.sessions[0].detail.as_deref(),Some("latest"));
-    c.message(ServerMessage::SessionState {session_id:"a".into(),revision:8,restore_review:None,status:SessionStatus::Running,detail:None,context_usage:None}).unwrap();
-    c.message(ServerMessage::SessionPage {catalog_id:"old-walk".into(),revision:1,after:None,next:None,sessions:vec![],states:Default::default()}).unwrap();
-    assert_eq!(c.account.sessions.len(),2);assert_eq!(c.account.sessions[0].status,SessionStatus::Idle);
-}
-
-#[test]
-fn all_ongoing_and_recent_chats_sync_without_a_count_cap() {
-    let root=tempfile::tempdir().unwrap();
-    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-    let sessions=(0..20).map(|n| {
-        let mut s=Controller::creating_summary(&format!("chat-{n}"),GENERAL_PROJECT_ID,n);
-        s.status=SessionStatus::Idle;s.updated_at_ms=n;s
-    }).collect();
-    c.message(ServerMessage::Sessions {sessions}).unwrap();
-    for n in 0..13 {c.select(&format!("chat-{n}")).unwrap();}
-    assert_eq!(c.account.recent_chats.len(),13,"recent is time-based, not eight chats");
-    assert_eq!(c.sync_scopes().len(),13);
-    let read=c.account.read_at.clone();
-    c.plan_dirty.set(false);
-    for n in 14..20 {
-        c.message(ServerMessage::SessionState {session_id:format!("chat-{n}"),revision:1,restore_review:None,
-            status:SessionStatus::Running,context_usage:None,detail:None}).unwrap();
-    }
-    assert!(c.plan_dirty.get());assert_eq!(c.sync_scopes().len(),19,"all ongoing chats participate, including never-opened old chats");
-    assert_eq!(c.sync_scopes()[0],"chat-12");assert!(!c.sync_scopes().contains(&"chat-13".into()),"don't subscribe to cold archives");
-    c.message(ServerMessage::SessionState {session_id:"chat-14".into(),revision:2,restore_review:None,
-        status:SessionStatus::Idle,context_usage:None,detail:None}).unwrap();
-    assert!(c.sync_scopes().contains(&"chat-14".into()),"a final body must catch up after the run settles");
-    c.account.prefetch_at.insert("chat-14".into(),crate::clock::now_ms().unwrap()-2*crate::store::RECENT_CHAT_MS);
-    assert!(!c.sync_scopes().contains(&"chat-14".into()));
-    c.account.sessions.iter_mut().find(|s|s.id=="chat-13").unwrap().updated_at_ms=crate::clock::now_ms().unwrap();
-    assert!(c.sync_scopes().contains(&"chat-13".into()),"recent cross-device activity is eligible too");
-    c.account.missing_chats.insert("chat-8".into());
-    c.account.sessions.iter_mut().find(|s|s.id=="chat-7").unwrap().starter=true;
-    assert_eq!(c.sync_scopes().len(),17);assert_eq!(c.account.read_at,read);
-    c.store.put(&c.identity,"account",&c.account).unwrap();drop(c);
-    let c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-    assert_eq!(c.sync_scopes().len(),17);assert_eq!(c.account.read_at,read);
-    let mut legacy:Account=serde_json::from_str(r#"{"recent_chats":["old-client-chat"]}"#).unwrap();
-    legacy.age_recent_chats(100);assert_eq!(legacy.prefetch_at["old-client-chat"],100);
-    legacy.age_recent_chats(100+crate::store::RECENT_CHAT_MS+1);assert!(legacy.recent_chats.is_empty());
-}
-
-#[test]
-fn list_resyncs_coalesce_without_starving_an_in_progress_traversal() {
-    let root=tempfile::tempdir().unwrap();let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-    c.catalog=Some(Catalog {id:"in-progress".into(),..Default::default()});c.epoch=Some(1);
-    for _ in 0..100 {assert_eq!(c.request(ClientCommand::ListSessions).unwrap(),"in-progress");}
-    assert!(c.catalog.as_ref().unwrap().refresh);assert!(c.requests.is_empty());
-    c.epoch=None;c.message(ServerMessage::SessionPage {catalog_id:"in-progress".into(),revision:1,after:None,next:None,sessions:vec![],states:Default::default()}).unwrap();assert!(c.catalog.is_some());
-    assert!(c.message(ServerMessage::ProjectPage {catalog_id:"in-progress".into(),revision:1,after:None,next:None,projects:vec![Project::general()]}).is_err());assert!(c.catalog.is_none());
-}
-
-}
+#[path = "../tests/unit/controller.rs"]
+mod safety_tests;
 
 #[cfg(test)]
-#[path = "controller_models_tests.rs"]
+#[path = "../tests/unit/controller_models.rs"]
 mod model_tests;

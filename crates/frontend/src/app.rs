@@ -1,5 +1,5 @@
 use crate::{
-    connection::{COUNTER_REFRESH, CounterTicker},
+    net::health::{COUNTER_REFRESH, CounterTicker},
     controller::Controller,
     editor::Editor,
     icons::Icon,
@@ -7,7 +7,7 @@ use crate::{
     scroll::Autoscroll,
     store::Store,
     tooltip::Content,
-    transport::Wake,
+    net::Wake,
 };
 use anyhow::Result;
 use chad::{RenderContext, wgpu};
@@ -19,7 +19,7 @@ use std::{
 };
 mod ripple;
 use ripple::Ripple;
-use tau_protocol::*;
+use tau_net::*;
 
 mod attachments;
 mod notices;
@@ -268,7 +268,7 @@ impl App {
     pub fn preview_connection(&mut self, preview: ConnectionPreview) {
         use std::time::Duration;
         let now = Instant::now();
-        self.controller.health = crate::connection::Health::default();
+        self.controller.health = crate::net::health::Health::default();
         if !matches!(preview, ConnectionPreview::Unconfigured) {
             self.controller.health.connected();
             for (ms, ago) in [(420, 8000), (123, 6000)] {
@@ -459,58 +459,47 @@ fn count(n: u64) -> String {
 }
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/connection.rs"]
 mod connection_tests;
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/control.rs"]
 mod control_tests;
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/editor.rs"]
 mod editor_tests;
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/navigation.rs"]
 mod navigation_tests;
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/project.rs"]
 mod project_tests;
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/thinking.rs"]
 mod thinking_tests;
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/startup.rs"]
 mod startup_tests;
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/tooltip.rs"]
 mod tooltip_tests;
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/viewer.rs"]
 mod viewer_tests;
 
 #[cfg(test)]
-mod usage_tests {
-    use super::*;
-
-    #[test]
-    fn token_usage_does_not_require_a_guessed_context_window() {
-        let unknown_capacity = Some(ContextUsage { tokens: Some(1_024), context_window: None });
-        let (ring, text) = context_usage_display(unknown_capacity);
-        assert_eq!(ring, None);
-        assert_eq!(text.text, "Context · ~1,024 tokens used\nCapacity unknown");
-        assert_eq!(
-            context_usage_display(Some(ContextUsage { tokens: None, context_window: None })).1.text,
-            "Context · usage unknown\nCapacity unknown"
-        );
-        assert_eq!(context_usage_display(None).1.text, "Context · usage unavailable");
-
-        let (ring, text) =
-            context_usage_display(Some(ContextUsage { tokens: Some(1_024), context_window: Some(4_096) }));
-        assert_eq!(ring, Some(0.25));
-        assert_eq!(text.text, "Context · ~25% used\n1,024 of 4,096 tokens");
-        assert_eq!(
-            context_usage_display(Some(ContextUsage { tokens: None, context_window: Some(4_096) })).1.text,
-            "Context · usage unknown\nCapacity: 4,096 tokens"
-        );
-    }
-}
+#[path = "../tests/unit/app_usage.rs"]
+mod usage_tests;
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/download_render.rs"]
 mod download_render_tests;
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/download_interaction.rs"]
 mod download_interaction_tests;
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/composer_status.rs"]
 mod composer_status_tests;
 
 #[cfg(test)]

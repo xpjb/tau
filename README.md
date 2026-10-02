@@ -15,3 +15,16 @@ cargo nextest run --locked --workspace
 Windows launcher and installer crates use a separate workspace at
 `crates/windows/Cargo.toml`. Linux packaging entry points are
 `scripts/build-windows-sfx.sh` and `crates/frontend/android/build.sh`.
+
+## Source and tests
+
+Shared messages and native streams live in `crates/net`; SQLite block storage
+lives in `crates/block-store`. Endpoint-specific networking belongs in each
+application's `net` module, not in another transport crate.
+
+Each crate keeps test code in `tests/`: public integration tests at the top level,
+private unit tests in `tests/unit/`. Unit modules use a test-only `#[path]` from
+the implementation they exercise, so testing does not widen production APIs.
+Examples are diagnostic programs, not a second regression suite. Release-script
+tests run with `python tests/release.py`; the Android harness is under
+`crates/frontend/tests/android/` and requires a disposable emulator.

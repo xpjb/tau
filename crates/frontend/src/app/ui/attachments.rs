@@ -12,7 +12,7 @@ use crate::{
 };
 use sanscale::Rect;
 use std::collections::{BTreeSet, HashMap};
-use tau_protocol::*;
+use tau_net::*;
 
 // Destinations belong to the mounted card, not to a second per-button route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -627,5 +627,5 @@ impl Widget for AttachmentBrowser {
 }
 
 #[cfg(test)]
-#[path = "attachments_tests.rs"]
+#[path = "../../../tests/unit/app/ui/attachments.rs"]
 mod tests;

@@ -5,7 +5,7 @@
 use std::{net::SocketAddr,sync::{Arc,atomic::{AtomicU64,Ordering}},time::{Duration,Instant}};
 use tokio::net::{TcpListener,TcpStream};
 use tau_frontend::{controller::Controller,store::{Settings,Store}};
-use tau_protocol::*;
+use tau_net::*;
 #[path="support/pressure_link.rs"]
 #[allow(dead_code)]
 mod pressure_link;
@@ -41,8 +41,8 @@ async fn native_loss_delay_bandwidth_upload_cancel_resume_and_two_client_control
     let model=Arc::new(Model {calls:AtomicU64::new(0),root:source.path().into(),code:code.clone()});
     let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let model_address=listener.local_addr().unwrap();
     let app=Router::new().route("/{*path}",post(reply)).with_state(model.clone());let provider=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
-    let mut settings=tau_protocol::settings::Settings::default();settings.agent.load_agents_files=false;settings.daemon.generate_titles=false;settings.daemon.idle_timeout_seconds=0;
-    let p=settings.providers.get_mut("openai-codex").unwrap();p.api=tau_protocol::settings::Api::ChatCompletions;p.base_url=format!("http://{model_address}");p.web_search=false;
+    let mut settings=tau_net::settings::Settings::default();settings.agent.load_agents_files=false;settings.daemon.generate_titles=false;settings.daemon.idle_timeout_seconds=0;
+    let p=settings.providers.get_mut("openai-codex").unwrap();p.api=tau_net::settings::Api::ChatCompletions;p.base_url=format!("http://{model_address}");p.web_search=false;
     std::fs::write(source.path().join("settings.json"),serde_json::to_vec(&settings).unwrap()).unwrap();
     std::fs::write(source.path().join("auth.json"),r#"{"openai-codex":{"type":"api_key","key":"local-fixture"}}"#).unwrap();
     {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(source.path().join("auth.json"),std::fs::Permissions::from_mode(0o600)).unwrap();}
@@ -62,12 +62,12 @@ async fn native_loss_delay_bandwidth_upload_cancel_resume_and_two_client_control
     until(&mut a,&mut b,|a,b|[a,b].iter().all(|c|c.selected().is_some_and(|chat|chat.feed.events.values().any(|e|e.text==code)))).await;
     {
         let chat=a.chats.get_mut(&session).unwrap();chat.local.details_default=true;
-        for event in chat.feed.events.values().filter(|e|e.kind==tau_protocol::EventKind::Tool) {
+        for event in chat.feed.events.values().filter(|e|e.kind==tau_net::EventKind::Tool) {
             for suffix in ["", ":Output", ":Input"] {chat.local.expansion.insert(format!("tool:{}{suffix}",event.id),true);}
         }
     }
     a.save_chat(&session).unwrap();
-    until(&mut a,&mut b,|a,_|a.selected().unwrap().feed.events.values().filter(|e|e.role==tau_protocol::EventRole::Tool && e.tool_name.as_deref()==Some("read") && e.text.contains("READ-FIXTURE")).count()==24).await;
+    until(&mut a,&mut b,|a,_|a.selected().unwrap().feed.events.values().filter(|e|e.role==tau_net::EventRole::Tool && e.tool_name.as_deref()==Some("read") && e.text.contains("READ-FIXTURE")).count()==24).await;
     assert!(!b.selected().unwrap().feed.events.values().any(|e|e.text.contains("READ-FIXTURE")),"Collapsed client fetched hidden tool bodies");
     until(&mut a,&mut b,|a,b|[a,b].iter().all(|c|c.selected().unwrap().feed.block_states.values().all(|s|*s==blocks::ToolState::Completed))).await;
     let entries=a.selected().unwrap().feed.events.values().filter_map(|e|e.attachment.as_ref().map(|f|(f.file_name.clone(),e.entry_id.clone()))).collect::<std::collections::HashMap<_,_>>();

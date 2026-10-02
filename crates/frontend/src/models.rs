@@ -1,7 +1,7 @@
 //! Favorites are exact provider/model IDs, independent of optional metadata.
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use tau_protocol::SessionModel;
+use tau_net::SessionModel;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]

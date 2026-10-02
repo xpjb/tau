@@ -2,13 +2,13 @@
 //! loopback fixtures only; no provider, real credentials or production database.
 use std::{sync::Arc, time::{Duration, Instant}};
 use tau_frontend::{controller::Controller, store::{Settings, Store}};
-use tau_protocol::files::*;
+use tau_net::files::*;
 
 async fn until(c: &mut Controller, test: impl Fn(&Controller)->bool) {
     let deadline=Instant::now()+Duration::from_secs(20);
     loop {c.poll();if test(c){return;}assert!(Instant::now()<deadline,"remote files stalled: {} {:?}",c.connection,c.notice);tokio::time::sleep(Duration::from_millis(10)).await;}
 }
-async fn query(c: &mut Controller, path: Option<String>, operation: FileOperation) -> Arc<tau_frontend::file_client::Update> {
+async fn query(c: &mut Controller, path: Option<String>, operation: FileOperation) -> Arc<tau_frontend::net::files::FileUpdate> {
     let request=FileRequest {session_id:c.account.selected.clone().unwrap(),path,operation};
     let generation=c.view_files(Some(request)).unwrap();
     until(c,|c|c.file_update.as_ref().is_some_and(|u|u.generation==generation)).await;
@@ -25,7 +25,7 @@ async fn remote_files_stream_live_updates_search_parent_traversal_and_cancel_wit
     let tcp=std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let udp=std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let settings_path=root.path().join("settings.json");
-    let mut settings=tau_protocol::settings::Settings::default();settings.agent.load_agents_files=false;settings.daemon.generate_titles=false;settings.daemon.idle_timeout_seconds=0;
+    let mut settings=tau_net::settings::Settings::default();settings.agent.load_agents_files=false;settings.daemon.generate_titles=false;settings.daemon.idle_timeout_seconds=0;
     std::fs::write(&settings_path,serde_json::to_vec(&settings).unwrap()).unwrap();
     let config=taud::Config {bind:tcp,transfer_bind:match udp {std::net::SocketAddr::V4(a)=>a,_=>unreachable!()},transfer_bind_v6:None,token:Arc::from("file-fixture"),settings_path,import_pi_dir:None,codex_auth_source:None,cwd:cwd.clone(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
     let daemon=tokio::spawn(taud::run(config));

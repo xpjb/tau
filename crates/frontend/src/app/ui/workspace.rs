@@ -295,7 +295,7 @@ impl Widget for Workspace {
                 if self.attachments.show {
                     self.back(cx);
                 } else if let Some(session_id) = cx.model.account.selected.clone() {
-                    let result = cx.model.control(tau_protocol::ClientCommand::Abort { session_id });
+                    let result = cx.model.control(tau_net::ClientCommand::Abort { session_id });
                     cx.report(result);
                 }
                 true

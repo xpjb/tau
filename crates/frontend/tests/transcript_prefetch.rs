@@ -19,8 +19,8 @@ fn has(c:&Controller,chat:&str,text:&str)->bool {
     // observer into a competing writer and perturbing the workload under test.
     let path=c.store.root.join("blocks").join(format!("{}.sqlite3",tau_frontend::store::hash(&c.identity)));
     let db=rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    tau_blocks::children(&db,chat,None).unwrap().iter().any(|h|
-        tau_blocks::cached_content(&db,chat,&h.id).unwrap()==text.as_bytes())
+    tau_block_store::children(&db,chat,None).unwrap().iter().any(|h|
+        tau_block_store::cached_content(&db,chat,&h.id).unwrap()==text.as_bytes())
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
@@ -49,9 +49,9 @@ async fn active_recent_chats_fetch_replies_without_selection_and_survive_client_
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let endpoint=listener.local_addr().unwrap();
     let app=Router::new().route("/{*path}",post(reply)).with_state(model.clone());
     let provider=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
-    let mut settings=tau_protocol::settings::Settings::default();
+    let mut settings=tau_net::settings::Settings::default();
     settings.daemon.generate_titles=false;settings.daemon.idle_timeout_seconds=0;settings.agent.load_agents_files=false;
-    let p=settings.providers.get_mut("openai-codex").unwrap();p.api=tau_protocol::settings::Api::ChatCompletions;
+    let p=settings.providers.get_mut("openai-codex").unwrap();p.api=tau_net::settings::Api::ChatCompletions;
     p.base_url=format!("http://{endpoint}");p.web_search=false;
     std::fs::write(server.path().join("settings.json"),serde_json::to_vec(&settings).unwrap()).unwrap();
     std::fs::write(server.path().join("auth.json"),r#"{"openai-codex":{"type":"api_key","key":"unpaid-local-fixture"}}"#).unwrap();
@@ -75,7 +75,7 @@ async fn active_recent_chats_fetch_replies_without_selection_and_survive_client_
     let b=c.account.selected.clone().unwrap();let read_a=c.account.read_at.get(&a).copied();
     model.gate.notify_one();
     until(&mut c,|c|has(c,&a,"Background reply ")).await;
-    assert!(c.chats[&a].feed.events.values().any(|e|e.text=="Background reply " && e.phase==tau_protocol::EventPhase::Live),
+    assert!(c.chats[&a].feed.events.values().any(|e|e.text=="Background reply " && e.phase==tau_net::EventPhase::Live),
         "the unselected chat receives live streaming bytes, not only a final snapshot");
     model.gate.notify_one();
     until(&mut c,|c|has(c,&a,"Background reply one café 😀")).await;
@@ -124,9 +124,9 @@ async fn twelve_recent_chats_and_six_live_replies_sync_without_materializing_bac
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let endpoint=listener.local_addr().unwrap();
     let app=Router::new().route("/{*path}",post(reply)).with_state(model.clone());
     let provider=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
-    let mut settings=tau_protocol::settings::Settings::default();
+    let mut settings=tau_net::settings::Settings::default();
     settings.daemon.generate_titles=false;settings.daemon.idle_timeout_seconds=0;settings.agent.load_agents_files=false;
-    let p=settings.providers.get_mut("openai-codex").unwrap();p.api=tau_protocol::settings::Api::ChatCompletions;
+    let p=settings.providers.get_mut("openai-codex").unwrap();p.api=tau_net::settings::Api::ChatCompletions;
     p.base_url=format!("http://{endpoint}");p.web_search=false;
     std::fs::write(server.path().join("settings.json"),serde_json::to_vec(&settings).unwrap()).unwrap();
     std::fs::write(server.path().join("auth.json"),r#"{"openai-codex":{"type":"api_key","key":"unpaid-local-fixture"}}"#).unwrap();

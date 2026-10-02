@@ -16,9 +16,9 @@ use std::{
 use tau_frontend::{
     controller::Controller,
     store::{Delivery, Settings, Store},
-    transport::{Command, Event as NetworkEvent, Network},
+    net::{Command, Event as NetworkEvent, Network},
 };
-use tau_protocol::*;
+use tau_net::*;
 
 
 #[test]
@@ -40,7 +40,7 @@ fn offline_new_chat_and_send_are_durable_before_any_server_ack() {
     assert_eq!(c.account.selected.as_deref(), Some(id.as_str()));
     assert_eq!(c.selected().unwrap().local.pending[0].request.id, prompt);
     assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
-    let summary = tau_protocol::SessionSummary { id:id.clone(), project_id:general_project_id(), title:"New chat".into(), starter:true,
+    let summary = tau_net::SessionSummary { id:id.clone(), project_id:general_project_id(), title:"New chat".into(), starter:true,
         status:SessionStatus::Idle, detail:None, context_usage:None, model:None, thinking_level:None,
         parent_id:None, created_at_ms:1, updated_at_ms:1 };
     c.message(ServerMessage::Sessions { sessions:vec![summary] }).unwrap();
@@ -166,7 +166,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
     }
     async fn ws(State(peer): State<Peer>, ws: WebSocketUpgrade) -> impl IntoResponse {
         ws.on_upgrade(move|mut socket|async move {
-        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&tau_protocol::ServerMessage::Hello { protocol_version:tau_protocol::PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into()) }).unwrap().into())).await.unwrap();
+        socket.send(axum::extract::ws::Message::Text(serde_json::to_string(&tau_net::ServerMessage::Hello { protocol_version:tau_net::PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into()) }).unwrap().into())).await.unwrap();
         while let Some(Ok(axum::extract::ws::Message::Text(text)))=socket.recv().await {
             let request:Value=serde_json::from_str(&text).unwrap();
             match request["type"].as_str().unwrap() {
@@ -312,8 +312,8 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
         let (socket, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
         ws.send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::to_string(&tau_protocol::ServerMessage::Hello {
-                protocol_version: tau_protocol::PROTOCOL_VERSION,
+            serde_json::to_string(&tau_net::ServerMessage::Hello {
+                protocol_version: tau_net::PROTOCOL_VERSION,
                 daemon_version: "fixture".into(),lineage:Some("fixture".into()),
             })
             .unwrap()

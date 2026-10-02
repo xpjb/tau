@@ -5,7 +5,7 @@ mod paint;
 use sanscale::{Align, BlockKey, Draw, PaintHandle, PaintSpan, ParagraphKey, ParagraphSource, Style};
 use std::{borrow::Cow, sync::Arc};
 use tau_code_viewer::{Document, Selection};
-use tau_protocol::files::*;
+use tau_net::files::*;
 use ui::controls::{Controls, TextField};
 use ui::controls::ButtonStyle;
 use ui::scroll::ScrollState;
@@ -18,7 +18,7 @@ pub(super) struct View {
     session: String,
     generation: u64,
     subscribed: bool,
-    seen: Option<Arc<crate::file_client::Update>>,
+    seen: Option<Arc<crate::net::files::FileUpdate>>,
     pub(super) path: Option<String>,
     directory: Option<String>,
     parent: Option<String>,
@@ -26,9 +26,9 @@ pub(super) struct View {
     operation: FileOperation,
     pub(super) search: Option<TextField>,
     index_root: Option<String>,
-    index_seen: Option<Arc<crate::file_index::Update>>,
-    matcher: crate::file_index::Matcher,
-    matches: Option<Arc<crate::file_index::Matches>>,
+    index_seen: Option<Arc<crate::net::files::IndexUpdate>>,
+    matcher: tau_code_viewer::finder::Matcher,
+    matches: Option<Arc<tau_code_viewer::finder::Matches>>,
     match_generation: u64,
     retained_row: Option<(String, f32)>,
     highlighter: tau_code_viewer::finder::Finder,
@@ -86,7 +86,7 @@ impl View {
             search: None,
             index_root: None,
             index_seen: None,
-            matcher: crate::file_index::Matcher::new(model.file_wake()),
+            matcher: tau_code_viewer::finder::Matcher::new(model.file_wake()),
             matches: None,
             match_generation: 0,
             retained_row: None,
@@ -1476,4 +1476,5 @@ impl Widget for CodeBrowser {
 }
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../../tests/unit/app/code_view.rs"]
 mod tests;

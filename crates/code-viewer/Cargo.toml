@@ -9,7 +9,7 @@ filesystem = ["dep:ignore", "dep:tokio", "dep:libc"]
 syntax = ["dep:tree-sitter-highlight", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-json"]
 
 [dependencies]
-tau-protocol = { path = "../protocol" }
+tau-net = { path = "../net" }
 anyhow = "1"
 blake3 = "1.8"
 similar = "2.7"

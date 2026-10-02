@@ -3,7 +3,7 @@ use super::{attachments::AttachmentCard, controls::Control};
 use crate::{app::{attachments, code, literal}, clock, controller::Chat, feed::{MessageId, MessageBody}, icons::Icon, render::color};
 use sanscale::{Rect, Vec2};
 use std::hash::{Hash, Hasher};
-use tau_protocol::{EventKind, EventRole, EventPhase, ClientCommand, QueueOperation, QueueRef};
+use tau_net::{EventKind, EventRole, EventPhase, ClientCommand, QueueOperation, QueueRef};
 
 /// Only identities are kept in the transcript's order/height index. Text,
 /// metadata and commands are borrowed from their existing owners when needed.
@@ -59,7 +59,7 @@ impl ItemId {
         match self {
             Self::Details { first, .. } => {
                 let group = detail_group(chat, first);
-                crate::details::group_state(&group, &chat.local).1.hash(&mut hash);
+                crate::feed::detail_group_state(&group, &chat.local).1.hash(&mut hash);
                 group.iter().find_map(|e| clock::event_ms(e)).hash(&mut hash);
             },
             Self::Tool(id) => for key in [format!("tool:{id}"), format!("tool:{id}:Input"), format!("tool:{id}:Output"), format!("tool:{id}:Error")] { chat.local.expansion.get(&key).hash(&mut hash); },
@@ -243,7 +243,7 @@ impl MessageRow {
             let chat = &cx.model.chats[session];
             let group = detail_group(chat, first);
             self.timestamp = clock::label(group.iter().find_map(|e| clock::event_ms(e)));
-            d.open = Some(crate::details::group_state(&group, &chat.local).1); d.label = "Details".into(); d.top = 26. * s;
+            d.open = Some(crate::feed::detail_group_state(&group, &chat.local).1); d.label = "Details".into(); d.top = 26. * s;
             return 62. * s;
         }
         let chat = &cx.model.chats[session];
@@ -359,7 +359,7 @@ fn display_body(chat: &Chat, id: &str, user: bool) -> String {
     if body.is_some_and(|b| b.limited) { source.push_str("\n\n[Preview limited. Fetch the complete message with Copy.]"); }
     source
 }
-fn detail_group<'a>(chat: &'a Chat, root: &str) -> Vec<&'a tau_protocol::Event> {
+fn detail_group<'a>(chat: &'a Chat, root: &str) -> Vec<&'a tau_net::Event> {
     let order = &chat.feed.order;
     let Some(index) = order.iter().position(|id| chat.feed.messages[id].event.as_deref() == Some(root)) else { return vec![]; };
     let start = order[..index].iter().rposition(|id| !is_detail(chat, id)).map_or(0, |i| i + 1);

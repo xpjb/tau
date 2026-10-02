@@ -1,6 +1,6 @@
 //! Presentation of source timestamps. Never timestamp old history on arrival.
 use chrono::{DateTime, Local, Utc};
-use tau_protocol::Event;
+use tau_net::Event;
 
 pub fn now_ms() -> Option<u64> {
     Utc::now().timestamp_millis().try_into().ok()

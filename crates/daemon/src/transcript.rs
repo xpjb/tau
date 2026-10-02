@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use uuid::Uuid;
 
 
 pub const PAGE_EVENTS: usize = 50;
@@ -12,7 +11,7 @@ pub const PAGE_BYTES: usize = 256 * 1024;
 pub const IMAGE_LIMIT: u64 = 10_000_000;
 pub const FILE_LIMIT: u64 = 50_000_000;
 
-pub use tau_protocol::{ChatAttachment, AttachmentKind, Event, EventPhase, EventRole, Origin, EventKind, QueuedRequest, QueueControl, QueueState,  HistoryPage, TextDelta};
+pub use tau_net::{ChatAttachment, AttachmentKind, Event, EventPhase, EventRole, Origin, EventKind, QueuedRequest, QueueControl, QueueState};
 
 pub struct AttachmentRequest {
     pub kind: AttachmentKind,
@@ -58,26 +57,24 @@ pub fn attachment_request(entry: &Value) -> Option<AttachmentRequest> {
     })
 }
 
+/// In-memory projection update. Receipts and replay ownership live in SQLite,
+/// not in this transient event cache.
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptChange {
-    pub wire: tau_protocol::TranscriptChange,
+    pub events: Vec<Event>,
+    pub removed: Vec<String>,
+    pub delta: Option<TextDelta>,
+    pub queue: Option<QueueState>,
     pub(crate) head: Option<String>,
 }
-impl std::ops::Deref for TranscriptChange {
-    type Target = tau_protocol::TranscriptChange;
-    fn deref(&self) -> &Self::Target { &self.wire }
-}
-impl std::ops::DerefMut for TranscriptChange {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.wire }
-}
+#[derive(Clone, Debug)]
+pub struct TextDelta { pub event_id: String, pub text: String }
 
 #[derive(Clone)]
 pub struct Transcript {
     pub generation: String,
-    pub sequence: u64,
     events: BTreeMap<u64, Event>,
     by_id: BTreeMap<String, u64>,
-    has_older: bool,
     next_order: u64,
     pub(crate) head: Option<String>,
     pub queue: QueueState,
@@ -186,26 +183,27 @@ impl EventProjection for Event {
 }
 
 impl Transcript {
-    pub fn new(page: HistoryPage, head: Option<String>, next_order: u64, queue: QueueState) -> Self {
-        Self { generation:Uuid::new_v4().to_string(),sequence:0,
-            by_id:page.events.iter().map(|event| (event.id.clone(),event.order)).collect(),
-            events:page.events.into_iter().map(|event| (event.order,event)).collect(),
-            has_older:page.before.is_some(), next_order, head, queue }
+    pub fn new(generation: String, head: Option<String>, next_order: u64, queue: QueueState) -> Self {
+        Self { generation, events:BTreeMap::new(), by_id:BTreeMap::new(), next_order, head, queue }
     }
+    #[cfg(test)]
+    pub(crate) fn events(&self) -> std::collections::btree_map::Values<'_,u64,Event> { self.events.values() }
     pub fn event(&self, id: &str) -> Option<&Event> { self.by_id.get(id).and_then(|order| self.events.get(order)) }
     pub fn events_mut(&mut self) -> impl Iterator<Item = &mut Event> { self.events.values_mut() }
 
-    pub fn page(&self, before: Option<u64>) -> HistoryPage {
-        let mut events = Vec::new();
-        let mut bytes = 0;
-        let mut more = false;
-        for event in self.events.range(..before.unwrap_or(self.next_order)).rev().map(|(_, event)| event) {
+    fn trim(&mut self) {
+        let (mut count, mut bytes, mut first) = (0, 0, None);
+        for event in self.events.values().rev() {
             let size = serde_json::to_vec(event).expect("event serialization").len();
-            if !events.is_empty() && (events.len() >= PAGE_EVENTS || bytes + size > PAGE_BYTES) { more = true; break; }
-            bytes += size; events.push(event.clone());
+            if count > 0 && (count >= PAGE_EVENTS || bytes + size > PAGE_BYTES) { break; }
+            count += 1; bytes += size; first = Some(event.order);
         }
-        events.reverse();
-        HistoryPage { before: if more || self.has_older { events.first().map(|event| event.order) } else { None }, events }
+        if let Some(first) = first {
+            self.events.retain(|order,event| {
+                if *order >= first || event.phase == EventPhase::Live { true }
+                else { self.by_id.remove(&event.id); false }
+            });
+        }
     }
 
     pub fn project(&self, entry: &Value, live: bool) -> Result<TranscriptChange> {
@@ -214,7 +212,6 @@ impl Transcript {
             let id = entry.get("id").and_then(Value::as_str).context("History append has no ID")?;
             if entry.get("parentId").and_then(Value::as_str) != self.head.as_deref() { bail!("History branch changed"); }
             change.head = Some(id.to_owned());
-            if let Some(id) = entry.pointer("/origin/requestId").and_then(Value::as_str) { change.delivered.push(id.to_owned()); }
         }
         change.events = Event::from_entry(entry, live)?;
         if let Some(first) = change.events.first() {
@@ -251,17 +248,11 @@ impl Transcript {
         }
         if let Some(head) = &change.head { self.head = Some(head.clone()); }
         if let Some(queue) = &change.queue { self.queue = queue.clone(); }
-        self.sequence += 1;
-        if let Some(first) = self.page(None).events.first().map(|event| event.order) {
-            self.events.retain(|order,event| {
-                if *order >= first || event.phase == EventPhase::Live { true }
-                else { self.by_id.remove(&event.id); self.has_older = true; false }
-            });
-        }
+        self.trim();
         Ok(())
     }
 }
 
 #[cfg(test)]
-#[path = "transcript_legacy_test.rs"]
-mod legacy_test;
+#[path = "../tests/unit/transcript.rs"]
+mod tests;

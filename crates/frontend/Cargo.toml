@@ -17,10 +17,9 @@ winresource = { version = "0.1", default-features = false }
 tau-code-viewer = { path = "../code-viewer", features = ["syntax"] }
 libc = "0.2"
 tempfile = "3"
-tau-blocks = { path = "../blocks" }
-tau-protocol = { path = "../protocol" }
+tau-block-store = { path = "../block-store" }
+tau-net = { path = "../net", features = ["native"] }
 tau-markdown = { path = "../markdown" }
-tau-transfer = { path = "../transfer", default-features = false }
 chad = { git = "https://github.com/xpjb/chad", rev = "a0f465e06eeb5e498bd45b0b4b23305a69778a40" }
 sanscale = { workspace = true }
 anyhow = "1"

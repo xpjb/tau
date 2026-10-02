@@ -16,7 +16,7 @@ pub(in crate::app) struct Placed {
     stamp: u64,
     pub top: f32,
     pub height: f32,
-    sender: tau_protocol::EventRole,
+    sender: tau_net::EventRole,
     text_keys: Vec<String>,
     overflow: f32,
 }
@@ -329,9 +329,9 @@ impl Widget for Transcript {
                 let group = chat.feed.order[i..].iter().take_while(|id| is_detail(chat, id))
                     .filter_map(|id| chat.feed.messages[id].event.as_deref().and_then(|id| chat.feed.event(id))).collect::<Vec<_>>();
                 i += group.len();
-                let (key, open) = crate::details::group_state(&group, &chat.local);
+                let (key, open) = crate::feed::detail_group_state(&group, &chat.local);
                 items.push(ItemId::Details { key, first: group[0].id.clone() });
-                if open { for e in group { items.push(if e.kind == tau_protocol::EventKind::Thinking && e.role != tau_protocol::EventRole::Tool {
+                if open { for e in group { items.push(if e.kind == tau_net::EventKind::Thinking && e.role != tau_net::EventRole::Tool {
                     ItemId::Thinking(e.id.clone())
                 } else { ItemId::Tool(e.id.clone()) }); } }
             }
@@ -392,7 +392,7 @@ impl Widget for Transcript {
             if let Some(id) = row.interest(&cx.model.chats[&session]) { self.interests.insert(id); }
             let screen_top = viewport.y + p.top - self.scroll.value;
             if screen_top + p.height >= viewport.y && screen_top <= viewport.y + viewport.height {
-                row.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x + if p.sender == tau_protocol::EventRole::User { width - bubble_width } else { 0. }, screen_top, bubble_width, p.height), clip: viewport }, cx);
+                row.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x + if p.sender == tau_net::EventRole::User { width - bubble_width } else { 0. }, screen_top, bubble_width, p.height), clip: viewport }, cx);
             }
             self.rows.push(row);
         }

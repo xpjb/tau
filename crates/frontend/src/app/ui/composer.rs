@@ -8,7 +8,7 @@ use crate::{
     tooltip::Content,
 };
 use sanscale::Rect;
-use tau_protocol::*;
+use tau_net::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum Choice {
     RetryCreate,
@@ -413,7 +413,7 @@ impl Widget for Composer {
             let mut suggestions = vec![];
             for command in &cx.model.chats[session].commands {
                 if let Some(arg) = query.strip_prefix(&format!("{} ", command.name)) {
-                    let arguments = if command.name == "model" && command.source == tau_protocol::SlashCommandSource::Builtin {
+                    let arguments = if command.name == "model" && command.source == tau_net::SlashCommandSource::Builtin {
                         &cx.model.model_catalog.models
                     } else { &command.arguments };
                     for a in arguments {
@@ -510,7 +510,7 @@ impl Widget for QuickModels {
                 w,
                 76. * s,
             );
-            let valid = selector.parse::<tau_protocol::SessionModel>().is_ok();
+            let valid = selector.parse::<tau_net::SessionModel>().is_ok();
             let selected = current.as_deref() == Some(selector.as_str());
             let enabled = ready && valid;
             let base = color(if selected { 0x303a66 } else { 0x18212b });

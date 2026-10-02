@@ -2,8 +2,8 @@
 //! Keep a real WAL writer alive until startup finishes: sleeps cannot hide the race.
 use rusqlite::Connection;
 use std::{path::Path, sync::{Arc, mpsc}, thread, time::{Duration, Instant}};
-use tau_frontend::{blocks::Cache, controller::Controller, store::{Settings, Store, hash}};
-use tau_protocol::*;
+use tau_frontend::{replica::Cache, controller::Controller, store::{Settings, Store, hash}};
+use tau_net::*;
 
 fn while_writing<T: Send + 'static>(path: &Path, open: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> T {
     let writer = Connection::open(path).unwrap();
@@ -61,7 +61,7 @@ fn selected_cached_chat_and_draft_restore_without_waiting_for_a_writer() {
     })).unwrap();
     c.preview("chat", vec![event], QueueState::default(), None).unwrap();
     let replica = root.path().join("blocks").join(format!("{}.sqlite3", hash(&identity)));
-    let source = tau_blocks::cursor(&Connection::open(&replica).unwrap()).unwrap().lineage;
+    let source = tau_block_store::cursor(&Connection::open(&replica).unwrap()).unwrap().lineage;
     c.store.bind_source(&identity, &source).unwrap();
     drop(c);
     let path = root.path().to_owned();

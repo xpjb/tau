@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
 };
-use tau_protocol::*;
+use tau_net::*;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Settings {
@@ -237,10 +237,10 @@ pub struct Store {
     pub root: PathBuf,
 }
 impl Store {
-    pub fn block_cache(&self, identity: &str) -> Result<crate::blocks::Cache> {
+    pub fn block_cache(&self, identity: &str) -> Result<crate::replica::Cache> {
         use sha2::Digest;
         let key = format!("{:x}",sha2::Sha256::digest(identity.as_bytes()));
-        crate::blocks::Cache::open(&self.root.join("blocks").join(format!("{key}.sqlite3")))
+        crate::replica::Cache::open(&self.root.join("blocks").join(format!("{key}.sqlite3")))
             .context("Open transcript replica")
     }
     pub fn open(root: PathBuf) -> Result<Self> {
@@ -506,10 +506,5 @@ fn copy_bytes(input:&mut impl std::io::Read,output:&mut impl std::io::Write,limi
 }
 
 #[cfg(all(test,target_os="linux"))]
-mod disk_fault_tests {
-    #[test]
-    fn kernel_enospc_aborts_the_bounded_import_copy() {
-        let mut input=std::io::Cursor::new(vec![5;32768]);let mut full=std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
-        let error=super::copy_bytes(&mut input,&mut full,50000).unwrap_err();assert!(format!("{error:#}").contains("No space left"));
-    }
-}
+#[path = "../tests/unit/store.rs"]
+mod disk_fault_tests;

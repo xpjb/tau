@@ -1,9 +1,7 @@
-pub mod blocks;
+pub mod replica;
 pub mod feed;
-pub mod file_client;
-pub mod file_index;
 pub mod store;
-pub mod transport;
+pub mod net;
 
 #[cfg(target_os = "android")]
 mod android;
@@ -11,13 +9,11 @@ mod app;
 mod cache_ttl;
 mod clock;
 mod codex_usage;
-pub mod connection;
 pub mod controller;
 #[cfg(not(target_os = "android"))]
 mod demo;
 #[cfg(not(target_os = "android"))]
 mod desktop;
-mod details;
 mod daemon_settings;
 mod editor;
 mod keyboard;
@@ -36,3 +32,7 @@ mod disk;
 mod downloads;
 
 pub mod mobile_input;
+
+#[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/end_to_end.rs"]
+mod end_to_end;

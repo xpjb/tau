@@ -2,7 +2,7 @@
 //! invented: generations, ordering, queues and delivery receipts belong to taud.
 use anyhow::{Result, ensure};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use tau_protocol::*;
+use tau_net::*;
 
 /// Logical identities and body ownership, not UI descriptions. Ordered entries
 /// refer to the durable outbox or verified feed; they never duplicate authored bytes.
@@ -47,7 +47,7 @@ pub struct Feed {
     previews:std::collections::VecDeque<(String,Vec<String>,usize)>,
     pub queue: QueueState,
     pub queue_transitions: HashMap<String,u64>, // Display-only rows awaiting the root cursor.
-    pub bodies: HashMap<String,crate::blocks::Body>,
+    pub bodies: HashMap<String,crate::replica::Body>,
     pub incomplete: HashSet<String>,
     pub block_states: HashMap<String,blocks::ToolState>,
     pub parents: HashMap<String,String>,
@@ -124,7 +124,7 @@ impl Feed {
     /// are <=4 KiB each; preview payloads and full queued text are counted too.
     pub(crate) fn resident_bytes(&self) -> usize {
         self.previews.iter().map(|(_,_,bytes)|bytes).sum::<usize>()
-            + self.events.len() * tau_blocks::MAX_BLOCK_HEADER_BYTES
+            + self.events.len() * tau_net::blocks::MAX_BLOCK_HEADER_BYTES
             + self.queue.requests.iter().map(|q|q.text.len()+1024).sum::<usize>()
     }
 
@@ -148,7 +148,7 @@ impl Feed {
             }
         }
     }
-    pub(crate) fn native_view(&mut self,mut view:crate::blocks::View)->Result<Vec<String>> {
+    pub(crate) fn native_view(&mut self,mut view:crate::replica::View)->Result<Vec<String>> {
         let mut ids = HashSet::new(); let mut orders = HashSet::new();
         ensure!(view.events.iter().all(|e| !e.id.is_empty() && ids.insert(&e.id) && orders.insert(e.order)), "Duplicate native event identity/order");
         if self.generation == view.generation {
@@ -197,4 +197,32 @@ impl Feed {
         }
         Ok(delivered)
     }
+}
+
+use crate::store::LocalChat;
+
+
+pub(crate) fn detail_group_state(group: &[&Event], local: &LocalChat) -> (String,bool) {
+    let key = group.iter().map(|e|format!("details:{}",e.id)).find(|key|local.expansion.contains_key(key))
+        .unwrap_or_else(||format!("details:{}",group[0].id));
+    let open = local.expansion.get(&key).copied().unwrap_or_else(||local.details_default || group.iter().any(|e|local.expanded.contains(&e.id)));
+    (key,open)
+}
+
+/// The same disclosure grouping used by rendering, operating on root headers only.
+pub(crate) fn expanded_details(events: &[Event], local: &LocalChat) -> HashSet<String> {
+    let visible = events.iter().filter(|e| {
+        let empty = e.attachment.is_none() && e.error_message.is_none() && !e.is_error &&
+            (e.kind == EventKind::Hidden || matches!(e.kind,EventKind::Thinking|EventKind::Text) && e.text.is_empty());
+        !empty
+    }).collect::<Vec<_>>();
+    let detail = |e:&Event|e.attachment.is_none() && (matches!(e.kind,EventKind::Thinking|EventKind::Tool) || e.role == EventRole::Tool);
+    let mut open = HashSet::new(); let mut i=0;
+    while i < visible.len() {
+        if !detail(visible[i]) {i+=1;continue;}
+        let start=i; while i<visible.len() && detail(visible[i]) {i+=1;}
+        let group=&visible[start..i];
+        if detail_group_state(group,local).1 {open.extend(group.iter().map(|e|e.id.clone()));}
+    }
+    open
 }

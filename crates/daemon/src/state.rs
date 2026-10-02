@@ -1,31 +1,28 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use crate::protocol::PromptDisposition;
+use tau_net::{ClientCommand, ClientRequest, PromptDisposition, ServerMessage};
+use std::{path::Path, time::{Duration, Instant}};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::transcript::{EventProjection, Event, QueueState};
-#[cfg(test)] use crate::transcript::{HistoryPage,PAGE_EVENTS,PAGE_BYTES};
 
-#[path = "state_reads.rs"]
-mod reads;
-#[path = "state_timing.rs"]
-mod timing;
-pub(crate) use tau_protocol::settings::DEFAULT_TITLE_PROMPT;
+pub(crate) use tau_net::settings::DEFAULT_TITLE_PROMPT;
 pub(crate) const MAX_FLAG_CHARS: usize = 4096;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Flag { pub id: String, pub timestamp_ms: u64, pub session_id: String, pub session_title: String, pub text: String }
 
-pub use tau_protocol::SessionModel;
+pub use tau_net::SessionModel;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredSession {
     pub title: String,
-    #[serde(default = "tau_protocol::general_project_id")]
+    #[serde(default = "tau_net::general_project_id")]
     pub project_id: String,
     #[serde(default)]
     pub project_prompt: String,
@@ -53,7 +50,7 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 #[derive(Clone)]
-pub struct StateStore { connection: Arc<Mutex<Connection>>, readers: Arc<reads::Readers>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>>, pub(crate) block_changes: tokio::sync::watch::Sender<u64>, #[cfg(test)] pub(crate) context_gate:Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>> }
+pub struct StateStore { connection: Arc<Mutex<Connection>>, readers: Arc<Readers>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>>, pub(crate) block_changes: tokio::sync::watch::Sender<u64>, #[cfg(test)] pub(crate) context_gate:Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>> }
 
 impl StateStore {
     pub async fn load(path: PathBuf) -> Result<Self> {
@@ -87,8 +84,8 @@ impl StateStore {
             }
             if version < 3 {
                 let tx = db.transaction()?;
-                tau_blocks::initialize(&tx)?;
-                crate::blocks::project_existing(&tx)?;
+                tau_block_store::initialize(&tx)?;
+                crate::projection::project_existing(&tx)?;
                 tx.execute_batch("PRAGMA user_version=3")?;
                 tx.commit()?;
             }
@@ -98,7 +95,7 @@ impl StateStore {
                 tx.commit()?;
             }
             if version<5 {
-                let tx=db.transaction()?;tau_blocks::initialize(&tx)?;
+                let tx=db.transaction()?;tau_block_store::initialize(&tx)?;
                 tx.execute_batch("CREATE TABLE file_publications(id TEXT PRIMARY KEY,session TEXT NOT NULL,path TEXT NOT NULL,size INTEGER NOT NULL,created INTEGER NOT NULL,sealed INTEGER NOT NULL DEFAULT 0);
                     CREATE TABLE file_owners(id TEXT NOT NULL REFERENCES file_publications(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,PRIMARY KEY(id,session));
                     INSERT INTO file_publications SELECT id,json_extract(header,'$.meta.upload.purpose.sessionId'),json_extract(header,'$.meta.file.path'),json_extract(header,'$.length'),position,1 FROM blocks WHERE scope='@uploads' AND json_extract(header,'$.sealed')=1 AND json_extract(header,'$.meta.file.path') IS NOT NULL;
@@ -118,13 +115,13 @@ impl StateStore {
                 {
                     let mut rows=tx.prepare("SELECT session_id,data FROM events WHERE json_type(data,'$.attachment')='object'")?;
                     for row in rows.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
-                        let (scope,data)=row?;crate::blocks::event(&tx,&scope,&serde_json::from_str(&data)?)?;
+                        let (scope,data)=row?;crate::projection::event(&tx,&scope,&serde_json::from_str(&data)?)?;
                     }
                     let mut rows=tx.prepare("SELECT scope,header FROM blocks WHERE json_type(header,'$.meta.fullEvent')='object' AND json_extract(header,'$.meta.fullEvent.length') IS NULL")?;
                     for row in rows.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
-                        let (scope,raw)=row?;let mut h:tau_blocks::BlockHeader=serde_json::from_str(&raw)?;
-                        if let Some(id)=h.meta["fullEvent"]["id"].as_str() && let Some(meta)=tau_blocks::header(&tx,&scope,id)? {
-                            h.meta["fullEvent"]["length"]=json!(meta.length);tau_blocks::set_header(&tx,&scope,h)?;
+                        let (scope,raw)=row?;let mut h:tau_net::blocks::BlockHeader=serde_json::from_str(&raw)?;
+                        if let Some(id)=h.meta["fullEvent"]["id"].as_str() && let Some(meta)=tau_block_store::header(&tx,&scope,id)? {
+                            h.meta["fullEvent"]["length"]=json!(meta.length);tau_block_store::set_header(&tx,&scope,h)?;
                         }
                     }
                 }
@@ -134,7 +131,7 @@ impl StateStore {
             Ok(db)
         }).await??;
         let reader_path = path.clone();
-        let readers = tokio::task::spawn_blocking(move || reads::Readers::open(&reader_path)).await??;
+        let readers = tokio::task::spawn_blocking(move || Readers::open(&reader_path)).await??;
         Ok(Self { connection:Arc::new(Mutex::new(connection)), readers:Arc::new(readers), path, flag_gate:Arc::new(tokio::sync::Mutex::new(())), block_changes:tokio::sync::watch::channel(0).0, #[cfg(test)] context_gate:Arc::new(std::sync::Mutex::new(None)) })
     }
     /// Read one committed snapshot without taking the writer's mutex.
@@ -143,16 +140,16 @@ impl StateStore {
     }
     pub(crate) async fn access<T: Send + 'static>(&self, action: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static) -> Result<T> {
         // Wait asynchronously; don't fill the blocking pool with database lock waiters.
-        let mut timing=timing::Timing::new("writer");
+        let mut timing=Timing::new("writer");
         let mut connection = self.connection.clone().lock_owned().await;
         timing.acquired();
         let changes = self.block_changes.clone();
         tokio::task::spawn_blocking(move || {
             timing.working();
             let result=(|| {
-                let before = tau_blocks::cursor(&connection)?.sequence;
+                let before = tau_block_store::cursor(&connection)?.sequence;
                 let result = action(&mut connection);
-                let after = tau_blocks::cursor(&connection)?.sequence;
+                let after = tau_block_store::cursor(&connection)?.sequence;
                 if after != before { changes.send_replace(after); }
                 result
             })();
@@ -225,7 +222,7 @@ impl StateStore {
                     disposition:PromptDisposition::Handled, finished:true, notice:None, error:None };
                 tx.execute("INSERT INTO receipts(session_id,request_id,data) VALUES(?1,?2,?3)",params![id,request,serde_json::to_string(&receipt)?])?;
             }
-            crate::blocks::queue(&tx,&id,&QueueState::native())?;
+            crate::projection::queue(&tx,&id,&QueueState::native())?;
             tx.commit()?; Ok(id)
         }).await
     }
@@ -260,7 +257,7 @@ impl StateStore {
                 if !matches!(receipt.disposition, PromptDisposition::Handled) { session.starter = false; }
             }
             if let Some(mut queue) = queue {
-                crate::blocks::queue(&tx,&id,&queue)?;
+                crate::projection::queue(&tx,&id,&queue)?;
                 if queue.requests.len() > 256 || queue.requests.iter().map(|r| r.text.len()).sum::<usize>() > 4 * 1024 * 1024 { bail!("Pending queue exceeds its limit"); }
                 let ids = queue.requests.iter().map(|r| &r.request_id).collect::<Vec<_>>();
                 tx.execute("DELETE FROM queue WHERE session_id=?1 AND request_id NOT IN (SELECT value FROM json_each(?2))",params![id,serde_json::to_string(&ids)?])?;
@@ -280,7 +277,7 @@ impl StateStore {
                 session.head = Some(entry_id.into());
             }
             for event in events {
-                crate::blocks::event(&tx,&id,&event)?;
+                crate::projection::event(&tx,&id,&event)?;
                 session.next_order = session.next_order.max(event.order + 1);
                 tx.execute("INSERT INTO events(session_id,position,id,entry_id,data) VALUES(?1,?2,?3,?4,?5)",
                     params![id,event.order,event.id,event.entry_id,serde_json::to_string(&event)?])?;
@@ -327,21 +324,7 @@ impl StateStore {
             Ok(serde_json::from_str(&data)?)
         }).await
     }
-    #[cfg(test)]
-    pub async fn page(&self, id: &str, before: Option<u64>) -> Result<HistoryPage> {
-        let id = id.to_owned();
-        self.read(move |db| {
-            let mut query = db.prepare("SELECT data FROM events WHERE session_id=?1 AND position<?2 ORDER BY position DESC LIMIT ?3")?;
-            let mut rows = query.query(params![id,before.unwrap_or(i64::MAX as u64),PAGE_EVENTS+1])?;
-            let mut events = Vec::<Event>::new(); let mut bytes = 0; let mut more = false;
-            while let Some(row) = rows.next()? {
-                let raw: String = row.get(0)?;
-                if !events.is_empty() && (events.len() >= PAGE_EVENTS || bytes + raw.len() > PAGE_BYTES) { more = true; break; }
-                bytes += raw.len(); events.push(serde_json::from_str(&raw)?);
-            }
-            events.reverse(); Ok(HistoryPage { before:if more { events.first().map(|event| event.order) } else {None}, events })
-        }).await
-    }
+
     // Only the latest applicable checkpoint and its retained suffix enter memory.
     // Display paging and attachment lookup never load provider history.
     pub(crate) async fn restore_review(&self,id:&str)->Result<bool> {
@@ -404,7 +387,7 @@ impl StateStore {
                 if entry["message"]["role"] == "user" { draft = entry["message"]["content"].as_str().map(str::to_owned); position-1 } else { position }
             } else { i64::MAX };
             let child = uuid::Uuid::new_v4().to_string();
-            session.title = crate::manager::bounded(&format!("{}{}",if entry_id.is_some() {"Fork of "} else {"Copy of "},session.title),crate::protocol::MAX_TITLE_CHARS);
+            session.title = crate::manager::bounded(&format!("{}{}",if entry_id.is_some() {"Fork of "} else {"Copy of "},session.title),tau_net::MAX_TITLE_CHARS);
             session.parent_id = Some(id.clone()); session.starter = false; session.revision = 0;
             session.created_at_ms = activity(&tx)?; session.updated_at_ms = session.created_at_ms;
             tx.execute("INSERT INTO sessions(id,starter,activity,data,queue) VALUES(?1,0,?2,?3,?4)",params![child,session.updated_at_ms,serde_json::to_string(&session)?,serde_json::to_string(&QueueState::native())?])?;
@@ -430,10 +413,10 @@ impl StateStore {
             tx.execute("UPDATE sessions SET data=?2 WHERE id=?1",params![child,serde_json::to_string(&session)?])?;
             let mut projected = tx.prepare("SELECT data FROM events WHERE session_id=?1 ORDER BY position")?;
             for raw in projected.query_map([&child],|r|r.get::<_,String>(0))? {
-                crate::blocks::event(&tx,&child,&serde_json::from_str(&raw?)?)?;
+                crate::projection::event(&tx,&child,&serde_json::from_str(&raw?)?)?;
             }
             drop(projected);
-            crate::blocks::queue(&tx,&child,&QueueState::native())?;
+            crate::projection::queue(&tx,&child,&QueueState::native())?;
             tx.commit()?; Ok((child,draft))
         }).await
     }
@@ -441,7 +424,7 @@ impl StateStore {
         let id = id.to_owned();
         self.access(move |db| {
             let tx = db.transaction()?;
-            tau_blocks::remove_scope(&tx,&id)?;
+            tau_block_store::remove_scope(&tx,&id)?;
             tx.execute("DELETE FROM blocks WHERE scope='@uploads' AND json_extract(header,'$.meta.upload.purpose.sessionId')=?1",[&id])?;
             if tx.execute("DELETE FROM sessions WHERE id=?1",[&id])? != 1 { bail!("Unknown session"); }
             tx.execute("UPDATE sessions SET data=json_set(data,'$.parent_id',NULL) WHERE json_extract(data,'$.parent_id')=?1",[&id])?;
@@ -462,7 +445,7 @@ impl StateStore {
                 uuid::Uuid::parse_str(id).context("Legacy session ID is invalid")?;
                 let model = old.get("model").filter(|model| !model.is_null()).map(|model| serde_json::from_value(model.clone())).transpose()?.unwrap_or_else(|| settings.agent.model.clone());
                 let thinking = settings.agent.model_thinking_levels.get(&format!("{}/{}",model.provider,model.model_id)).unwrap_or(&settings.agent.thinking_level).clone();
-                let mut session = StoredSession { title:old["title"].as_str().unwrap_or("Unnamed chat").into(),project_id:tau_protocol::general_project_id(),project_prompt:String::new(),starter:false,
+                let mut session = StoredSession { title:old["title"].as_str().unwrap_or("Unnamed chat").into(),project_id:tau_net::general_project_id(),project_prompt:String::new(),starter:false,
                     parent_id:old["parent_id"].as_str().filter(|parent| sessions.contains_key(*parent)).map(str::to_owned),model,thinking,
                     created_at_ms:old["created_at_ms"].as_u64().unwrap_or(0),updated_at_ms:old["updated_at_ms"].as_u64().unwrap_or(0),tokens:None,needs_turn:false,head:None,next_order:0,revision:0 };
                 let mut records = HashMap::new(); let mut head = None;
@@ -508,7 +491,7 @@ impl StateStore {
                 }
                 tx.execute("UPDATE sessions SET data=?2 WHERE id=?1",params![id,serde_json::to_string(&session)?])?;
             }
-            crate::blocks::project_existing(&tx)?;
+            crate::projection::project_existing(&tx)?;
             tx.commit()?; Ok(sessions.len())
         }).await
     }
@@ -604,3 +587,160 @@ fn activity(db: &Connection) -> Result<u64> {
     let last: Option<u64> = db.query_row("SELECT max(activity) FROM sessions",[],|row| row.get(0))?;
     Ok(crate::agent::now_ms().max(last.unwrap_or(0).saturating_add(1)))
 }
+
+const READERS: usize = 4;
+
+struct Readers {
+    idle: std::sync::Mutex<Vec<Connection>>,
+    permits: Arc<Semaphore>,
+}
+impl Readers {
+    pub fn open(path: &Path) -> Result<Self> {
+        let mut idle = Vec::with_capacity(READERS);
+        for _ in 0..READERS {
+            let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            db.busy_timeout(Duration::from_secs(5))?;
+            db.execute_batch("PRAGMA query_only=ON;")?;
+            idle.push(db);
+        }
+        Ok(Self { idle: std::sync::Mutex::new(idle), permits: Arc::new(Semaphore::new(READERS)) })
+    }
+    pub async fn read<T: Send + 'static>(self: &Arc<Self>, action: impl FnOnce(&Connection) -> Result<T> + Send + 'static) -> Result<T> {
+        let mut timing=Timing::new("reader");
+        let permit = self.permits.clone().acquire_owned().await?;
+        timing.acquired();
+        let db = self.idle.lock().unwrap().pop().expect("reader permit owns a connection");
+        let mut lease = ReadLease { db: Some(db), pool: self.clone(), _permit: permit };
+        tokio::task::spawn_blocking(move || {
+            // Every multi-query read sees one committed version. A writer can
+            // commit alongside this snapshot; the next read sees that commit.
+            timing.working();
+            let result=(|| {
+                let tx = lease.db.as_mut().unwrap().transaction()?;
+                let value = action(&tx)?;
+                tx.commit()?;
+                Ok(value)
+            })();
+            timing.finished(result.is_ok());result
+        }).await?
+    }
+}
+struct ReadLease {
+    db: Option<Connection>,
+    pool: Arc<Readers>,
+    _permit: OwnedSemaphorePermit,
+}
+impl Drop for ReadLease {
+    fn drop(&mut self) {
+        // Return on success, error, panic, or cancellation of the async caller.
+        // The permit stays owned until the blocking read actually finishes.
+        self.pool.idle.lock().unwrap().push(self.db.take().unwrap());
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/state_reads.rs"]
+mod read_tests;
+
+
+struct Clock { queued: Instant, acquired: Option<Instant>, working: Option<Instant> }
+struct Timing { pool: &'static str, clock: Option<Clock>, outcome: &'static str }
+impl Timing {
+    pub fn new(pool: &'static str) -> Self {
+        Self { pool, clock: tracing::enabled!(target:"taud::db",tracing::Level::DEBUG)
+            .then(|| Clock { queued:Instant::now(),acquired:None,working:None }), outcome:"cancelled" }
+    }
+    pub fn acquired(&mut self) { if let Some(c)=&mut self.clock {c.acquired=Some(Instant::now());} }
+    pub fn working(&mut self) {
+        if let Some(c)=&mut self.clock {
+            c.working=Some(Instant::now());
+            tracing::debug!(target:"taud::db",pool=self.pool,phase="start","database work started");
+        }
+    }
+    pub fn finished(&mut self, success: bool) { self.outcome=if success {"ok"} else {"error"}; }
+}
+impl Drop for Timing {
+    fn drop(&mut self) {
+        let Some(c)=&self.clock else {return;}; let now=Instant::now();
+        let acquired=c.acquired.unwrap_or(now);let working=c.working.unwrap_or(now);
+        tracing::debug!(target:"taud::db",pool=self.pool,phase="complete",outcome=self.outcome,
+            wait_us=acquired.duration_since(c.queued).as_micros() as u64,
+            dispatch_us=working.duration_since(acquired).as_micros() as u64,
+            work_us=now.duration_since(working).as_micros() as u64,
+            "database access timing");
+    }
+}
+
+impl StateStore {
+    pub(crate) async fn reserve_operation(&self,request:&ClientRequest)->Result<Option<ServerMessage>> {
+        let id=request.id.clone();let payload=serde_json::to_string(&request.command)?;
+        let legacy_create=if let ClientCommand::CreateSession {project_id,keep_session_id}=&request.command {
+            Some(serde_json::json!({"keepSessionId":keep_session_id,"projectId":project_id}).to_string())
+        } else {None};
+        self.access(move |db| {
+            let tx=db.transaction()?;
+            if let Some((original,response))=tx.query_row("SELECT payload,response FROM operations WHERE id=?1",[&id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).optional()? {
+                ensure!(original==payload,"Operation ID was already used for a different command");
+                return Ok(Some(if let Some(response)=response {serde_json::from_str(&response)?} else {
+                    let mut response=ServerMessage::failure(id,"Operation is already accepted; its outcome is not yet available");
+                    if let ServerMessage::Response {uncertain,..}=&mut response {*uncertain=true;}response
+                }));
+            }
+            let legacy=tx.prepare("SELECT data FROM receipts WHERE request_id=?1")?.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for data in legacy {
+                let receipt:crate::state::Receipt=serde_json::from_str(&data)?;
+                ensure!(receipt.command.as_deref()==Some("create_session") && legacy_create.as_ref()==Some(&receipt.text),"Operation ID was already used for a different intent");
+            }
+            tx.execute("INSERT INTO operations(id,payload) VALUES(?1,?2)",params![id,payload])?;tx.commit()?;Ok(None)
+        }).await
+    }
+    pub(crate) async fn finish_operation(&self,id:String,response:&ServerMessage)->Result<()> {
+        let response=serde_json::to_string(response)?;
+        self.access(move |db| {ensure!(db.execute("UPDATE operations SET response=?2 WHERE id=?1 AND response IS NULL",params![id,response])?==1,"Operation ownership changed");Ok(())}).await
+    }
+    pub(crate) async fn operation_outcome(&self,id:&str)->Result<ServerMessage> {
+        ensure!(!id.is_empty() && id.len()<=128,"Invalid operation ID");let id=id.to_owned();
+        self.read(move |db| {
+            let row=db.query_row("SELECT response FROM operations WHERE id=?1",[&id],|r|r.get::<_,Option<String>>(0)).optional()?;
+            let registered=row.is_some();let response=row.flatten().map(|s|serde_json::from_str(&s).map(Box::new)).transpose()?;
+            Ok(ServerMessage::Operation {operation_id:id,registered,response})
+        }).await
+    }
+    pub(crate) async fn operation_receipt(&self,id:&str)->Result<Option<tau_net::OperationReceipt>> {
+        let id=id.to_owned();
+        self.read(move |db| {
+            let row=db.query_row("SELECT response FROM operations WHERE id=?1",[&id],|r|r.get::<_,Option<String>>(0)).optional()?;
+            row.map(|response| {
+                let complete=response.is_some();
+                let (error,notice)=if let Some(response)=response {
+                    match serde_json::from_str::<ServerMessage>(&response)? {ServerMessage::Response {error,notice,..}=>(error,notice),_=>(None,None)}
+                } else {(None,None)};
+                Ok(tau_net::OperationReceipt {id,accepted:true,complete,error,notice})
+            }).transpose()
+        }).await
+    }
+    pub(crate) async fn recover_operations(&self)->Result<()> {
+        self.access(|db| {
+            let tx=db.transaction()?;
+            let ids=tx.prepare("SELECT id FROM operations WHERE response IS NULL")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in ids {
+                let mut response=ServerMessage::failure(id.clone(),"Operation interrupted by daemon restart; reconcile its effects before issuing another ID");
+                if let ServerMessage::Response {uncertain,..}=&mut response {*uncertain=true;}
+                tx.execute("UPDATE operations SET response=?2 WHERE id=?1",params![id,serde_json::to_string(&response)?])?;
+            }
+            tx.commit()?;Ok(())
+        }).await
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/operations.rs"]
+mod operation_tests;
+
+/// Preserve uncertainty when a nested creation resumes an interrupted journal.
+#[derive(Debug)]
+pub(crate) struct UncertainOutcome(pub String);
+impl std::fmt::Display for UncertainOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
+}
+impl std::error::Error for UncertainOutcome {}

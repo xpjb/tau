@@ -1,7 +1,7 @@
 //! Chat ordering is a mix of daemon activity and durable, device-local intent.
 use std::sync::Arc;
 use tau_frontend::{controller::Controller, store::Store};
-use tau_protocol::*;
+use tau_net::*;
 
 fn controller(root: &std::path::Path) -> Controller {
     Controller::new(Store::open(root.into()).unwrap(), Arc::new(|| {})).unwrap()

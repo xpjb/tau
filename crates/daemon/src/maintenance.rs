@@ -35,17 +35,5 @@ pub async fn rotate_lineage(path:&Path)->Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn restore_rotation_is_exclusive_and_keeps_mutation_ownership() {
-        let root=tempfile::tempdir().unwrap();let path=root.path().join("db");
-        let state=crate::state::StateStore::load(path.clone()).await.unwrap();let old=state.block_cursor().await.unwrap();
-        let request=tau_protocol::ClientRequest {id:"reserved".into(),command:tau_protocol::ClientCommand::RenameSession {session_id:"s".into(),title:"new".into()}};
-        state.reserve_operation(&request).await.unwrap();drop(state);
-        let lease=DatabaseLease::acquire(&path).unwrap();assert!(rotate_lineage(&path).await.is_err());drop(lease);
-        let new=rotate_lineage(&path).await.unwrap();assert_ne!(new,old.lineage);
-        let state=crate::state::StateStore::load(path).await.unwrap();
-        assert!(matches!(state.reserve_operation(&request).await.unwrap(),Some(tau_protocol::ServerMessage::Response {uncertain:true,..})));
-    }
-}
+#[path = "../tests/unit/maintenance.rs"]
+mod tests;

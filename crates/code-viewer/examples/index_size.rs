@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use std::{mem::size_of, path::PathBuf, time::{Duration, Instant}};
 use tau_code_viewer::{filesystem::FileSystem, finder::PathIndex};
-use tau_protocol::files::*;
+use tau_net::files::*;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     let index = PathIndex::apply(None, &reply)?;
     let FileReply::Index { limited, .. } = &reply else { unreachable!() };
     let json = serde_json::to_vec(&reply)?;
-    // Match transfer/src/files.rs: independent 16 KiB chunks, zstd level 1,
+    // Match net/src/native.rs: independent 16 KiB chunks, zstd level 1,
     // falling back to raw bytes unless compression saves at least 16 bytes.
     let mut payload = 0;
     for chunk in json.chunks(16 * 1024) {

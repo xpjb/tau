@@ -3,7 +3,7 @@ use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Wid
 use crate::{editor::Editor, render::color, store::Settings};
 use anyhow::Result;
 use sanscale::Rect;
-use tau_protocol::*;
+use tau_net::*;
 
 pub(in crate::app) enum TopicEdit {
     New,
@@ -807,4 +807,5 @@ impl Widget for TopicDialog {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/unit/app/ui/dialogs.rs"]
 mod tests;

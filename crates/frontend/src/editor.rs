@@ -114,7 +114,7 @@ impl Editor {
     fn replace_range(&mut self, range: Range<usize>, value: &str) -> bool {
         self.native_changed();
         let value = normalize(value, self.single_line);
-        if self.value.len() - range.len() + value.len() > tau_protocol::MAX_REQUEST_BYTES {
+        if self.value.len() - range.len() + value.len() > tau_net::MAX_REQUEST_BYTES {
             return false;
         }
         let changed = self.value[range.clone()] != value;
@@ -590,4 +590,5 @@ impl Boundaries for Words<'_> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/editor.rs"]
 mod tests;

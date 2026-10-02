@@ -4,7 +4,7 @@ use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::{Duration, Instant
 use axum::{Json, Router, extract::State, routing::{get, post}};
 use serde_json::{Value, json};
 use tau_frontend::{controller::Controller, store::{Settings, Store}};
-use tau_protocol::*;
+use tau_net::*;
 
 async fn until(c: &mut Controller, condition: impl Fn(&Controller) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(12);
@@ -43,10 +43,10 @@ async fn manual_quick_model_refreshes_catalog_and_keeps_reported_tokens_visible(
     let script = Provider {catalog_calls:Arc::new(AtomicUsize::new(0)), turn_calls:Arc::new(AtomicUsize::new(0)), catalog_gate:Arc::new(tokio::sync::Notify::new())};
     let app = Router::new().route("/models", get(catalog)).route("/{*path}", post(turn)).with_state(script.clone());
     let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-    let mut settings = tau_protocol::settings::Settings::default();
+    let mut settings = tau_net::settings::Settings::default();
     settings.daemon.idle_timeout_seconds = 0; settings.agent.load_agents_files = false;
     let endpoint = settings.providers.get_mut("openai-codex").unwrap();
-    endpoint.api = tau_protocol::settings::Api::ChatCompletions; endpoint.base_url = base_url.clone(); endpoint.web_search = false;
+    endpoint.api = tau_net::settings::Api::ChatCompletions; endpoint.base_url = base_url.clone(); endpoint.web_search = false;
     std::fs::write(root.join("settings.json"), serde_json::to_vec(&settings).unwrap()).unwrap();
     std::fs::write(root.join("auth.json"), r#"{"openai-codex":{"type":"api_key","key":"fixture-key"}}"#).unwrap();
     {

@@ -2,7 +2,7 @@ use super::controls::{ButtonStyle, Control, Controls};
 use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{icons::Icon, render::color};
 use sanscale::Rect;
-use tau_protocol::*;
+use tau_net::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) enum Choice {
     Back,

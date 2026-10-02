@@ -49,7 +49,7 @@ def metadata():
     manifest = ET.parse(ROOT / 'crates/frontend/android/AndroidManifest.xml').getroot()
     assert manifest.get('package') == 'app.tau.rust'
     assert manifest.get(ANDROID + 'versionName') == front + '-beta', 'Android version mismatch'
-    protocol = int(re.search(r'PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)', (ROOT / 'crates/protocol/src/lib.rs').read_text())[1])
+    protocol = int(re.search(r'PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)', (ROOT / 'crates/net/src/lib.rs').read_text())[1])
     return front, protocol, int(manifest.get(ANDROID + 'versionCode'))
 
 
@@ -74,7 +74,7 @@ def bump(version):
 
 
 def fingerprint(stage):
-    common = ['Cargo.toml', 'Cargo.lock', '.cargo/', 'rust-toolchain', 'crates/blocks/', 'crates/protocol/', 'crates/transfer/', 'crates/code-viewer/', 'scripts/title_prompt.txt']
+    common = ['Cargo.toml', 'Cargo.lock', '.cargo/', 'rust-toolchain', 'crates/block-store/', 'crates/net/', 'crates/code-viewer/', 'scripts/title_prompt.txt']
     paths = {
         'daemon': common + ['crates/daemon/'],
         'windows': common + ['crates/frontend/', 'crates/markdown/', 'crates/windows/', 'scripts/build-windows-sfx.sh'],
