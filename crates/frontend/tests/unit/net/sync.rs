@@ -6,10 +6,10 @@ use std::sync::Mutex;
 use serde_json::json;
 use crate::replica::tests::{local_prompt, user_body};
 
-fn content(cache: Cache, notices: mpsc::Sender<ReplicaNotice>) -> (Content, Subscriptions, super::super::EventReceiver) {
+async fn content(cache: Cache, notices: mpsc::Sender<ReplicaNotice>) -> (Content, Subscriptions, super::super::EventReceiver) {
     let (events,receiver)=super::super::mailbox::channel(Arc::new(||{}));
     let (subscriptions,interests)=subscriptions();
-    (Content::start(cache,events,notices,watch::channel(None).0,watch::channel(None).0,interests),subscriptions,receiver)
+    (Content::start(cache,events,notices,watch::channel(None).0,watch::channel(None).0,interests).await.unwrap(),subscriptions,receiver)
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
@@ -49,12 +49,8 @@ async fn native_watch_fetches_unknown_body_but_never_downloads_locally_known_inp
         db:Arc::new(Mutex::new(f.source)),known_reads:known.clone(),unknown_reads:unknown.clone(),changes:changed,
     })).await.unwrap();
     let (notices,mut received)=mpsc::channel(32);
-    let (service,subscriptions,_events)=content(f.cache.clone(),notices);
-    let mut identity=service.node.clone();
-    tokio::time::timeout(Duration::from_secs(5),async {
-        while identity.borrow().is_none() {identity.changed().await.unwrap();}
-    }).await.unwrap();
-    let offer=server.authorize(identity.borrow().as_ref().unwrap(),f.lineage.clone()).unwrap();
+    let (service,subscriptions,_events)=content(f.cache.clone(),notices).await;
+    let offer=server.authorize(&service.node_id(),f.lineage.clone()).unwrap();
     service.configure(offer,"127.0.0.1".into());
     subscriptions.plans.send_replace(vec![f.cache.plan("chat",&local,&[]).unwrap()]);
     tokio::time::timeout(Duration::from_secs(5),async {
@@ -107,12 +103,8 @@ async fn a_delayed_plan_does_not_refetch_known_text_after_queue_consumption() {
     let server=tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
         db:Arc::new(Mutex::new(f.source)),reads:reads.clone(),changes:changed,
     })).await.unwrap();
-    let (notices,mut received)=mpsc::channel(32);let (service,subscriptions,_events)=content(f.cache.clone(),notices);
-    let mut identity=service.node.clone();
-    tokio::time::timeout(Duration::from_secs(5),async {
-        while identity.borrow().is_none() {identity.changed().await.unwrap();}
-    }).await.unwrap();
-    service.configure(server.authorize(identity.borrow().as_ref().unwrap(),f.lineage.clone()).unwrap(),"127.0.0.1".into());
+    let (notices,mut received)=mpsc::channel(32);let (service,subscriptions,_events)=content(f.cache.clone(),notices).await;
+    service.configure(server.authorize(&service.node_id(),f.lineage.clone()).unwrap(),"127.0.0.1".into());
     subscriptions.plans.send_replace(vec![pending_plan]);
     let first=tokio::time::timeout(Duration::from_secs(5),received.recv()).await.unwrap().unwrap();
     assert!(matches!(first,ReplicaNotice::Changed(_)),"The content was already present: {first:?}");

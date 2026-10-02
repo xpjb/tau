@@ -9,7 +9,7 @@ use tokio::{sync::watch, io::{AsyncReadExt, AsyncSeekExt}};
 #[derive(Clone)]
 pub(super) struct Transfers {
     pub cache: Cache,
-    pub client: watch::Receiver<Option<Arc<Client>>>,
+    pub client: Arc<Client>,
     pub ready: watch::Receiver<Option<String>>,
     pub events: EventSender,
 }
@@ -40,7 +40,7 @@ impl Transfers {
             while self.ready.borrow().is_none() {self.ready.changed().await.context("Content service stopped")?;}
             let lineage=self.ready.borrow().clone().unwrap();
             ensure!(lineage==original_lineage,"Content source changed; retry the download");
-            let client=self.client.borrow().clone().context("Content endpoint is unavailable")?;
+            let client=self.client.clone();
             let mut failures=0;
             let mut delay=100;
             let h=loop {
@@ -121,7 +121,7 @@ impl Transfers {
     async fn connection(&mut self) -> Result<(Arc<Client>,String)> {
         while self.ready.borrow().is_none() {self.ready.changed().await.context("Content service stopped")?;}
         let lineage = self.ready.borrow().clone().unwrap();
-        let client = self.client.borrow().clone().context("Content endpoint is unavailable")?;
+        let client = self.client.clone();
         Ok((client,lineage))
     }
     pub(crate) async fn input(mut self, request: ClientRequest) -> Result<ClientRequest> {

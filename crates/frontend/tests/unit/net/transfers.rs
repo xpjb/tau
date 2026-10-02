@@ -34,10 +34,10 @@ async fn file_reconnect_does_not_retry_missing_or_corrupt_content() {
         })).await.unwrap();
         let client=Arc::new(Client::bind().await.unwrap());
         client.configure(&server.authorize(&client.node_id(),f.lineage.clone()).unwrap(),"127.0.0.1").await.unwrap();
-        let (_endpoint,endpoint)=watch::channel(Some(client.clone()));let (_ready,ready)=watch::channel(Some(f.lineage));
+        let (_ready,ready)=watch::channel(Some(f.lineage));
         let (events,mut received)=super::super::mailbox::channel(Arc::new(||{}));let (_cancel,cancel)=watch::channel(false);
         let path=f._root.path().join("download.bin");
-        let transfer=Transfers {cache:f.cache.clone(),client:endpoint,ready,events};
+        let transfer=Transfers {cache:f.cache.clone(),client:client.clone(),ready,events};
         tokio::time::timeout(Duration::from_secs(5),transfer.run("file".into(),"chat".into(),"file".into(),path.clone(),MAX_BLOCK_BYTES,cancel)).await.unwrap();
         let failure=loop {
             let Event::Download {status,..}=received.recv().await.unwrap() else {panic!("Expected transfer progress");};

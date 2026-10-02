@@ -10,20 +10,18 @@ pub struct FileUpdate {
     pub generation: u64, pub session: String, pub lineage: String,
     pub response: Result<FileReply, String>, pub document: Option<Arc<tau_code_viewer::Document>>,
 }
-pub(super) async fn watch_files(mut client: watch::Receiver<Option<Arc<tau_net::native::Client>>>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<FileUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<FileInterest>>) {
+pub(super) async fn watch_files(client: Arc<tau_net::native::Client>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<FileUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<FileInterest>>) {
     loop {
         let plan = interest.borrow_and_update().clone();
         if plan.is_none() {updates.send_replace(None);}
-        let endpoint = client.borrow_and_update().clone();
         let lineage = ready.borrow_and_update().clone();
         let read = async {
-            let (Some(plan), Some(endpoint), Some(lineage)) = (plan, endpoint, lineage) else { return std::future::pending::<()>().await; };
-            refresh_files(endpoint, plan, lineage, &updates, &wake).await;
+            let (Some(plan), Some(lineage)) = (plan, lineage) else { return std::future::pending::<()>().await; };
+            refresh_files(client.clone(), plan, lineage, &updates, &wake).await;
         };
         tokio::select! {
             _ = read => {},
             changed = interest.changed() => { if changed.is_err() { break; } },
-            changed = client.changed() => { if changed.is_err() { break; } },
             changed = ready.changed() => { if changed.is_err() { break; } },
         }
     }
@@ -80,22 +78,20 @@ pub struct IndexUpdate {
 }
 struct Cached { session: String, root: Option<String>, lineage: String, index: Arc<PathIndex>, indexing: bool, limited: bool }
 
-pub(super) async fn watch_index(mut client: watch::Receiver<Option<Arc<tau_net::native::Client>>>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<IndexUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<IndexInterest>>) {
+pub(super) async fn watch_index(client: Arc<tau_net::native::Client>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<IndexUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<IndexInterest>>) {
     let mut cached = None;
     loop {
         let plan = interest.borrow_and_update().clone();
-        let endpoint = client.borrow_and_update().clone();
         let lineage = ready.borrow_and_update().clone();
         if plan.is_none() { updates.send_replace(None); }
         if cached.as_ref().is_some_and(|c: &Cached| lineage.as_ref().is_some_and(|l| l != &c.lineage)) { cached = None; }
         let read = async {
-            let (Some(plan), Some(endpoint), Some(lineage)) = (plan, endpoint, lineage) else { return std::future::pending::<()>().await; };
-            refresh_index(endpoint, plan, lineage, &mut cached, &updates, &wake).await;
+            let (Some(plan), Some(lineage)) = (plan, lineage) else { return std::future::pending::<()>().await; };
+            refresh_index(client.clone(), plan, lineage, &mut cached, &updates, &wake).await;
         };
         tokio::select! {
             _ = read => {},
             changed = interest.changed() => { if changed.is_err() { break; } },
-            changed = client.changed() => { if changed.is_err() { break; } },
             changed = ready.changed() => { if changed.is_err() { break; } },
         }
     }

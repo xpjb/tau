@@ -27,7 +27,7 @@ pub(super) struct Interests {
     files: watch::Receiver<Option<files::FileInterest>>,
     index: watch::Receiver<Option<files::IndexInterest>>,
 }
-pub(super) enum Request { Reset, Configure(BulkOffer,String), Plan(Vec<Plan>), History { scope:String,before:FeedPosition } }
+pub(super) enum Request { Reset, History { scope:String,before:FeedPosition } }
 pub(super) fn subscriptions() -> (Subscriptions, Interests) {
     let (plans,plan_rx)=watch::channel(vec![]);
     let (requests,request_rx)=mpsc::channel(8);
@@ -38,27 +38,26 @@ pub(super) fn subscriptions() -> (Subscriptions, Interests) {
 
 pub(super) struct Content {
     configuration: watch::Sender<Option<(BulkOffer,String)>>,
-    pub node: watch::Receiver<Option<String>>,
     transfers: Transfers,
     _tasks: JoinSet<()>,
 }
 impl Content {
-    pub fn start(cache: Cache, events: EventSender, notices: mpsc::Sender<ReplicaNotice>,
-        updates: watch::Sender<Option<Arc<files::FileUpdate>>>, index_updates: watch::Sender<Option<Arc<files::IndexUpdate>>>, interests: Interests) -> Self {
+    pub async fn start(cache: Cache, events: EventSender, notices: mpsc::Sender<ReplicaNotice>,
+        updates: watch::Sender<Option<Arc<files::FileUpdate>>>, index_updates: watch::Sender<Option<Arc<files::IndexUpdate>>>, interests: Interests) -> Result<Self> {
+        let client=Arc::new(Client::bind().await?);
         let wake=events.wake.clone();
         let (configuration,config_rx)=watch::channel(None);
-        let (node,identity)=watch::channel(None);
-        let (endpoint,client)=watch::channel(None);
         let (ready,lineage)=watch::channel(None);
         let mut tasks=JoinSet::new();
         tasks.spawn(files::watch_files(client.clone(),lineage.clone(),updates,wake.clone(),interests.files));
         tasks.spawn(files::watch_index(client.clone(),lineage.clone(),index_updates,wake.clone(),interests.index));
-        let transfers=Transfers {cache:cache.clone(),client,ready:lineage,events};
-        tasks.spawn(run(cache,wake,interests.requests,interests.plans,config_rx,notices,node,endpoint,ready));
-        Self {configuration,node:identity,transfers,_tasks:tasks}
+        let transfers=Transfers {cache:cache.clone(),client:client.clone(),ready:lineage,events};
+        tasks.spawn(run(cache,client,wake,interests.requests,interests.plans,config_rx,notices,ready));
+        Ok(Self {configuration,transfers,_tasks:tasks})
     }
     pub fn configure(&self, offer: BulkOffer, host: String) { self.configuration.send_replace(Some((offer,host))); }
-    pub fn stats(&self) -> Option<tau_net::native::Stats> { self.transfers.client.borrow().as_ref().map(|c|c.stats()) }
+    pub fn node_id(&self) -> String { self.transfers.client.node_id() }
+    pub fn stats(&self) -> tau_net::native::Stats { self.transfers.client.stats() }
     pub fn transfers(&self) -> Transfers { self.transfers.clone() }
 }
 
@@ -83,25 +82,25 @@ struct Watches(HashMap<Key,tokio::task::JoinHandle<()>>);
 impl std::ops::Deref for Watches { type Target = HashMap<Key,tokio::task::JoinHandle<()>>; fn deref(&self) -> &Self::Target { &self.0 } }
 impl std::ops::DerefMut for Watches { fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 } }
 impl Drop for Watches { fn drop(&mut self) { for task in self.0.values() { task.abort(); } } }
-async fn run(cache: Cache, wake: crate::net::Wake, mut commands:mpsc::Receiver<Request>, mut plans:watch::Receiver<Vec<Plan>>, mut configuration:watch::Receiver<Option<(BulkOffer,String)>>, notices:mpsc::Sender<ReplicaNotice>, identity:watch::Sender<Option<String>>, endpoint:watch::Sender<Option<Arc<Client>>>, ready:watch::Sender<Option<String>>) {
-    let client = match Client::bind().await { Ok(client) => Arc::new(client), Err(error) => {
-        let _ = notices.send(ReplicaNotice::Failed {scope:String::new(),error}).await; (wake)(); return;
-    }};
-    endpoint.send_replace(Some(client.clone()));
-    identity.send_replace(Some(client.node_id())); (wake)();
+async fn run(cache: Cache, client:Arc<Client>, wake: crate::net::Wake, mut commands:mpsc::Receiver<Request>, mut plans:watch::Receiver<Vec<Plan>>, mut configuration:watch::Receiver<Option<(BulkOffer,String)>>, notices:mpsc::Sender<ReplicaNotice>, ready:watch::Sender<Option<String>>) {
     let mut jobs = Watches(HashMap::new());
     let mut plan = Vec::<Plan>::new();
     loop {
-        let command=tokio::select! {
-            command=commands.recv()=>{let Some(command)=command else {break;};command}
-            result=plans.changed()=>{if result.is_err() {break;}Request::Plan(plans.borrow_and_update().clone())}
-            result=configuration.changed()=>{if result.is_err() {break;}let Some((offer,host))=configuration.borrow_and_update().clone() else {continue;};Request::Configure(offer,host)}
-        };
-        match command {
-            // Reset and the coalesced plan wake may be observed in either order.
-            // Restart the current interests; never erase a just-received plan.
-            Request::Reset=>{for job in jobs.values() {job.abort();}jobs.clear();}
-            Request::Configure(offer,host) => {
+        tokio::select! {
+            command=commands.recv()=>match command {
+                None=>break,
+                // Reset restarts current interests, never a separately queued stale plan.
+                Some(Request::Reset)=>{for job in jobs.values() {job.abort();}jobs.clear();}
+                Some(Request::History {scope,before})=>{
+                    let key = Key::History(scope,None,before,false);
+                    if jobs.get(&key).is_some_and(|task|task.is_finished()) {jobs.remove(&key);}
+                    if !jobs.contains_key(&key) { jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone())); }
+                }
+            },
+            result=plans.changed()=>{if result.is_err() {break;}plan=plans.borrow_and_update().clone();}
+            result=configuration.changed()=>{
+                if result.is_err() {break;}
+                let Some((offer,host))=configuration.borrow_and_update().clone() else {continue;};
                 if let Err(error) = client.configure(&offer,&host).await {
                     let _ = notices.send(ReplicaNotice::Failed {scope:String::new(),error}).await; (wake)();
                 } else if let Err(error) = cache.configure(&offer.lineage) {
@@ -110,12 +109,6 @@ async fn run(cache: Cache, wake: crate::net::Wake, mut commands:mpsc::Receiver<R
                     if ready.borrow().as_ref().is_some_and(|old|old != &offer.lineage) { for task in jobs.values() {task.abort();} jobs.clear(); }
                     ready.send_if_modified(|current| { if current.as_ref()==Some(&offer.lineage) {false} else {*current=Some(offer.lineage);true} });
                 }
-            }
-            Request::Plan(next) => { plan = next; }
-            Request::History { scope,before } => {
-                let key = Key::History(scope,None,before,false);
-                if jobs.get(&key).is_some_and(|task|task.is_finished()) {jobs.remove(&key);}
-                if !jobs.contains_key(&key) { jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone())); }
             }
         }
         let mut desired=std::collections::HashSet::new();

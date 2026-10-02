@@ -164,8 +164,12 @@ impl std::fmt::Display for HeartbeatTimeout {
 impl std::error::Error for HeartbeatTimeout {}
 
 async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: EventSender, cache: Option<crate::replica::Cache>, block_notices:mpsc::Sender<ReplicaNotice>, file_updates:tokio::sync::watch::Sender<Option<Arc<crate::net::files::FileUpdate>>>, index_updates:tokio::sync::watch::Sender<Option<Arc<crate::net::files::IndexUpdate>>>, interests: sync::Interests) {
-    let content_service = cache.map(|cache|sync::Content::start(cache,events.clone(),block_notices,file_updates,index_updates,interests));
-    let mut block_identity = content_service.as_ref().map(|s|s.node.clone());
+    let content_service = if let Some(cache)=cache {
+        match sync::Content::start(cache,events.clone(),block_notices.clone(),file_updates,index_updates,interests).await {
+            Ok(service)=>Some(service),
+            Err(error)=>{let _=block_notices.send(ReplicaNotice::Failed {scope:String::new(),error}).await;(events.wake)();None}
+        }
+    } else {None};
     let setup = (|| -> Result<_> {
         let mut url = endpoint(&settings, &["v1", "ws"])?;
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
@@ -242,7 +246,8 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                 let Some(message)=message else {return Ok::<_,anyhow::Error>(());};
                 tokio::time::timeout(Duration::from_secs(5),writer.send(message)).await??;
             }});
-            if let Some(identity) = &mut block_identity && let Some(node_id) = identity.borrow_and_update().clone() {
+            if let Some(service) = &content_service {
+                let node_id=service.node_id();
                 let request = ClientRequest { id:"block-connection".into(),command:ClientCommand::ConnectBlocks { node_id } };
                 outgoing.try_send(Message::Text(serde_json::to_string(&request)?.into())).context("Control writer is full")?;
             }
@@ -264,7 +269,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                         if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; }
                         else { std::future::pending::<()>().await; }
                     } => return Err(HeartbeatTimeout.into()),
-                    _=metrics.tick()=>{if let Some(service)=&content_service {if let Some(stats)=service.stats() {if !events.send(Event::Metrics(stats)) {return Ok(());}}}}
+                    _=metrics.tick()=>{if let Some(service)=&content_service && !events.send(Event::Metrics(service.stats())) {return Ok(());}}
                     Some((requested,key,serial,result,_budget,bytes)) = resolved_rx.recv() => {
                         if requested==epoch && generations.get(&key)==Some(&serial) {
                             match result {
@@ -321,16 +326,6 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             start_download(&mut jobs,&mut downloads,content_service.as_ref(),key,session,entry,target,limit,&events);
                         }
                     },
-                    identity_changed = async {
-                        if let Some(identity) = &mut block_identity { identity.changed().await.is_ok() }
-                        else { std::future::pending::<bool>().await }
-                    } => {
-                        if !identity_changed {block_identity=None;}
-                        if let Some(identity) = &mut block_identity && let Some(node_id) = identity.borrow_and_update().clone() {
-                            let request = ClientRequest { id:"block-connection".into(),command:ClientCommand::ConnectBlocks { node_id } };
-                            outgoing.try_send(Message::Text(serde_json::to_string(&request)?.into())).context("Control writer is full")?;
-                        }
-                    }
                     frame = reader.next() => {
                         match frame.context("Connection closed")?? {
                             Message::Text(text) => {
@@ -388,7 +383,8 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                         waiting = Some((payload, sent));
                         if !events.send(Event::HeartbeatSent { epoch, at: sent }) { return Ok(()); }
                         if sent>=renew_blocks {
-                            if let Some(identity)=&block_identity && let Some(node_id)=identity.borrow().clone() {
+                            if let Some(service)=&content_service {
+                                let node_id=service.node_id();
                                 let request=ClientRequest {id:"block-connection".into(),command:ClientCommand::ConnectBlocks {node_id}};
                                 outgoing.try_send(Message::Text(serde_json::to_string(&request)?.into())).context("Control writer is full")?;
                             }

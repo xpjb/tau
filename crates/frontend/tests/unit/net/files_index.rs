@@ -34,11 +34,11 @@ let backend=Arc::new(Memory {reply:Mutex::new(snapshot("a",None,&["src/a.rs","sr
 let server=Server::bind("127.0.0.1:0".parse().unwrap(),backend.clone()).await.unwrap();
 let client=Arc::new(Client::bind().await.unwrap());
 client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
-let (endpoint,clients)=watch::channel(Some(client.clone())); let (lineage,ready)=watch::channel(Some("source".into()));
+let (lineage,ready)=watch::channel(Some("source".into()));
 let (send,mut updates)=watch::channel(None);
 let (wake,mut wakes)=tokio::sync::mpsc::unbounded_channel();
 let (plans,interest)=watch::channel(None);
-let service=tokio::spawn(watch_index(clients,ready,send,Arc::new(move || {let _=wake.send(());}),interest));
+let service=tokio::spawn(watch_index(client.clone(),ready,send,Arc::new(move || {let _=wake.send(());}),interest));
 let plan=|generation,session:&str|Some(IndexInterest {generation,session:session.into(),path:None});
 plans.send_replace(plan(1,"chat"));
 let first=update(&mut updates,1).await;assert_eq!(first.index.as_ref().unwrap().entries.len(),2);
@@ -81,5 +81,5 @@ assert!(matches!(&backend.calls.lock().unwrap().last().unwrap().operation,FileOp
 plans.send_replace(None);tokio::time::sleep(Duration::from_millis(40)).await;
 assert!(updates.borrow().is_none());assert_eq!(client.stats().active_streams,0);assert_eq!(client.stats().foreground_slots,0);assert_eq!(client.stats().bulk_slots,0);
 let calls=backend.calls.lock().unwrap().len();tokio::time::sleep(Duration::from_millis(80)).await;assert_eq!(backend.calls.lock().unwrap().len(),calls);
-service.abort();drop(endpoint);client.shutdown().await;server.shutdown().await;
+service.abort();client.shutdown().await;server.shutdown().await;
 }
