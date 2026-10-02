@@ -1368,24 +1368,13 @@ impl Widget for CodeBrowser {
                 } else {
                     &entry.name
                 };
-                let label = format!(
-                    "{} {}{}",
-                    if entry.directory { "▸" } else { "·" },
-                    display_path(name),
-                    if entry.directory { "/" } else { "" }
-                );
                 if code.search.is_some() {
                     let name = name.to_owned();
                     paint::matched_label(&mut code, i, &name, Rect::new(rect.x + 10.*s, y + 9.*s, rect.width - 20.*s, row_height), viewport, layer, cx);
-                } else { cx.services.renderer.clipped_label(
-                    layer,
-                    &label,
-                    Rect::new(rect.x + 10. * s, y + 11. * s, rect.width - 20. * s, 24. * s),
-                    14. * s,
-                    color(if entry.directory { 0x8bd6ff } else { 0xd8dee9 }),
-                    false,
-                    viewport,
-                );
+                } else {
+                    paint::entry_label(name, entry.directory,
+                        Rect::new(rect.x + 10. * s, y + 11. * s, rect.width - 20. * s, 24. * s),
+                        viewport, layer, cx);
                 }
                 if hit.height > 0. {
                     let action = if code.search.is_some() { Choice::FileSelect(entry.path.clone()) } else { Choice::FileOpen(entry.path.clone(), entry.directory) };

@@ -154,7 +154,7 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     assert!(!c.selected().unwrap().feed.synchronized, "The new chat must appear before a server round-trip");
     c.draft("hold".into()).unwrap();
     c.send_prompt().unwrap();
-    assert_eq!(c.selected().unwrap().local.pending[0].status, tau_frontend::store::Delivery::WaitingForChat);
+    assert_eq!(c.selected().unwrap().local.pending[0].status, tau_frontend::store::Delivery::Sending, "The first send is not gated on the creation response");
     // A provider response is deliberately gated below. Confirmation, the user
     // entry, and release of the local pending send must not await that response.
     until(&mut c, |c| c.account.pending_create.is_none()
@@ -394,13 +394,11 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     c.choose_model(&starter, "openai-codex/unlisted-exact-id").unwrap();
     c.send_prompt().unwrap();
     let waiting = c.chats[&starter].local.pending.iter().find(|p|p.text=="Keep my draft").unwrap();
-    assert!(c.chats[&starter].local.pending.iter().any(|p|p.text=="/model openai-codex/unlisted-exact-id"),"Model selection intent must also be durable");
-    assert_eq!(waiting.status,tau_frontend::store::Delivery::WaitingForModel);
+    assert!(c.chats[&starter].local.pending.iter().all(|p| !p.text.starts_with("/model ")));
+    assert!(matches!(&waiting.request.command, ClientCommand::Prompt { model: Some(model), .. } if model.model_id == "unlisted-exact-id"));
+    assert_eq!(waiting.status,tau_frontend::store::Delivery::Sending);
     assert_eq!(waiting.text,"Keep my draft");
-    assert_eq!(calls.load(Ordering::SeqCst),3,"A send queued behind model selection must not run under the previous model");
-    until(&mut c, |c| c.chats[&starter].model_request.is_none()
-        && c.account.sessions.iter().any(|s| s.id == starter && s.model.as_ref().is_some_and(|m| m.model_id == "unlisted-exact-id"))
-        && c.chats[&starter].local.pending.iter().all(|p| p.status != tau_frontend::store::Delivery::WaitingForModel)).await;
+    until(&mut c, |c| c.account.sessions.iter().any(|s| s.id == starter && s.model.as_ref().is_some_and(|m| m.model_id == "unlisted-exact-id"))).await;
     let previous = tokio::time::timeout(Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
     assert_eq!(previous["model"],"gpt-6-astra");
     let payload = tokio::time::timeout(Duration::from_secs(5), received.recv()).await.unwrap().unwrap();

@@ -7,19 +7,32 @@ use crate::protocol::{PromptDisposition, SessionStatus, SlashCommand, SlashComma
 use crate::state::SessionModel;
 
 impl AgentManager {
-    pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
-        self.runtime(id).await?;
+    pub fn model_catalog(&self) -> crate::protocol::ModelCatalog {
+        let revision = self.inner.state_clock.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
         let settings = self.inner.settings.get();
         let mut models = settings.models.iter().map(|m| (format!("{}/{}",m.provider,m.id), Some(m.name.clone())))
             .collect::<BTreeMap<_,_>>();
+        let mut unresolved_providers = Vec::new();
         for provider in settings.providers.keys() {
-            for (id, window) in self.inner.catalog.models(&settings, provider) {
+            let Some(available) = self.inner.catalog.available_models(&settings, provider) else {
+                unresolved_providers.push(provider.clone()); continue;
+            };
+            for (id, window) in available {
                 models.insert(format!("{provider}/{id}"), Some(format!("{} token context", window)));
             }
         }
+        crate::protocol::ModelCatalog {
+            revision, unresolved_providers,
+            default_model: Some(settings.agent.model.clone()),
+            models: models.into_iter().take(20_000).map(|(value, description)| SlashCommandArgument { value, description }).collect(),
+        }
+    }
+    pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
+        self.runtime(id).await?;
+        let models = self.model_catalog().models;
         Ok([
             ("compact", "Compact session context", "[instructions]", vec![]),
-            ("model", "Select the model (also the default for new chats)", "<provider/model>", models.into_iter().map(|(value, description)| SlashCommandArgument { value, description }).collect()),
+            ("model", "Select the model (also the default for new chats)", "<provider/model>", models),
             ("thinking", "Set this chat's thinking level", "<level>", crate::settings::LEVELS.iter().map(|level| SlashCommandArgument { value:(*level).into(), description:None }).collect()),
             ("name", "Rename this chat", "<title>", vec![]),
             ("fast", "Set Codex priority service for subsequent turns", "<on|off|status>", ["on","off","status"].into_iter().map(|v| SlashCommandArgument { value:v.into(), description:None }).collect()),

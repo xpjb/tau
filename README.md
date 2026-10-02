@@ -38,17 +38,15 @@ Prompt fields use the shared editor;
 advanced provider/metadata structures use JSON editors; credentials are never
 part of the wire settings document.
 
-New chats appear immediately as **Creating chat…**, including offline. Their
-creation intent and any draft, attachment or send are committed to local SQLite
-before network effects; queued sends wait locally for the chat's durable server ID.
-Existing chats also accept offline sends into a visible **Waiting for connection**
-state. Sends made during quick model selection wait locally for its confirmation;
-a failed or uncertain model change retains the authored send for explicit recovery
-rather than using the wrong model.
-The daemon records client-named creation receipts transactionally, so a lost create
-ack can be retried without creating a duplicate. If it reuses an existing starter,
-local drafts, files and queued sends move to that chat without losing the old
-session's work. A send is acknowledged after its server-side queue/receipt commit,
+New chats appear immediately, including offline. Drafts, attachments and exact
+model choices are saved locally before network effects. Both new-chat model entry
+points update immediately; there is no `/model` selection request or confirmation
+state. The first prompt carries its chosen model, and text sends can carry the
+pending named chat creation without waiting for a create response. File uploads
+still require a confirmed owning chat before publication. The daemon commits the
+model with the prompt's queue entry and receipt, and deduplicates creation by the
+client's original UUID. Existing chats also accept offline sends into a visible
+**Waiting for connection** state. A send is acknowledged after its server-side queue/receipt commit,
 not after a model response. A socket lost after an ordinary message starts a
 receipt check. If the daemon has
 not accepted it, Tau retries the saved message with the **same request ID**, so a
@@ -73,25 +71,26 @@ Above the text box, the model slug is followed by **Thinking: LEVEL**. This is
 that chat's saved selection (including `off`), not the current default for new
 chats. Long model slugs shorten before the thinking label on narrow screens.
 The value follows confirmed model/thinking changes and remains available from
-the local account cache offline; older caches show **Thinking: unknown** until
-metadata arrives. The chat thinking editor is prefilled with the same selection.
+the local account cache offline; unknown thinking metadata is omitted, and a
+new local model choice never borrows the previous model's thinking or usage. The chat thinking editor is prefilled with the same selection.
 
-New chats use the last explicitly chosen model. Quick-select favorites do not change
-that default. IDs are sent exactly; optional metadata is not an allowlist. Unknown
-context capacity comes from the **selected provider's own catalog** when available:
+New chats use the client's last explicitly chosen model (saved per account), or
+the cached daemon fallback when there is no local preference. Editing quick-select
+favorites does not choose a model. IDs are sent exactly; metadata is not an allowlist.
+The shared account model catalogue is cached on the client, available without a
+selected chat, and revalidated asynchronously on connection and picker use. Late
+metadata cannot overwrite a local choice. Last-known hints survive a cold daemon
+or a failed refresh; background metadata errors do not interrupt selection.
+
+Context capacity comes only from the **selected provider's own catalogue**:
 Codex's authenticated `/models` response (`context_window`, falling back to
-`max_context_window`) with the same account and originator as inference, or
-OpenRouter's `/models` `context_length`. Exact model IDs only; no Pi model file,
-name matching, or guessed capacity. Tau saves validated limits in its own private
-`model-catalog.json` beside daemon settings, bound to the provider endpoint and
-credential identity. It queries the provider if that file is absent or unusable;
-failed discovery alerts connected clients. **Connection settings → Refresh models**
-forces a new GET for the chosen provider and replaces the file only on success.
-The refreshed provider IDs also appear as optional model suggestions. There is no
-automatic expiration or unverified fallback. On September 24, 2026 a read-only
-Codex catalog request with Tau's originator and Codex catalog client version
-0.156.1 reported 272,000 for GPT-6 Sol, Luna and Astra. Refresh when a provider
-changes its models or limits.
+`max_context_window`) or OpenRouter's `/models` `context_length`, matched by exact
+ID. No Pi model file, name matching or guessed capacity is used. Tau saves validated
+limits privately in `model-catalog.json`, bound to endpoint and credential identity.
+The daemon revalidates hour-old caches and missing exact IDs with bounded request
+coalescing/cooldown; valid old limits survive transient errors. **Connection settings
+→ Refresh models** forces revalidation and replaces the saved file only on success.
+See [client-first models and explorer validation](docs/client-first-models.md).
 
 The context tooltip shows last provider-reported turn tokens even when capacity is unknown.
 For Codex chats, its hover/pinned card also shows read-only account quota, separate

@@ -67,10 +67,10 @@ pub fn fields(section: usize) -> &'static [Field] {
         ],
         1 => &[
             field!(
-                "Last chosen / new-chat model",
+                "Daemon fallback model",
                 "/agent/model",
                 Model,
-                "provider/model. Explicit chat model choices update this default. Quick-select favorites do not."
+                "provider/model. Used when this client has no remembered choice. New-chat selections are saved on the client and sent with the first prompt; /model also updates this daemon fallback."
             ),
             field!(
                 "Default thinking level",

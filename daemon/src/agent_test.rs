@@ -849,7 +849,17 @@ async fn provider_catalog_outweighs_configured_limits_and_uses_exact_authenticat
             assert_eq!(call["originator"], "tau");
             assert_eq!(call["query"],"client_version=0.160.0");
         } else { assert!(call["account"].is_null() && call["originator"].is_null()); }
-        client.until(|m| m["type"] == "sessions" && m["sessions"].as_array().is_some_and(|list| list.iter().any(|s| s["id"] == id && s["contextUsage"].is_null()))).await;
+        // Metadata can finish before the create response; don't wait for a
+        // second notification after the test client already consumed the first.
+        let selected: crate::state::SessionModel = "openai-codex/gpt-6-sol".parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.context_window(&manager.inner.settings.get(), &selected) != Some(window) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        client.request(json!({"id":"catalog-list","type":"list_sessions"})).await;
+        let listed = client.seen.iter().rev().find(|m| m["type"] == "sessions").unwrap();
+        assert!(listed["sessions"].as_array().unwrap().iter().any(|s| s["id"] == id && s["contextUsage"].is_null()));
         client.open(&id).await;
         let initial = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
         // An authoritative catalog without Astra must not borrow Astra's
@@ -871,7 +881,7 @@ async fn provider_catalog_outweighs_configured_limits_and_uses_exact_authenticat
 }
 
 #[tokio::test]
-async fn missing_catalog_alerts_manual_refresh_persists_and_old_file_survives_failure() {
+async fn missing_catalog_stays_nonmodal_manual_refresh_persists_and_old_file_survives_failure() {
     for api in [Api::Codex, Api::ChatCompletions] {
         let mut model = ModelServer::start(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }]).await;
         let (root, manager, url, server) = fixture(&model, api).await;
@@ -879,10 +889,14 @@ async fn missing_catalog_alerts_manual_refresh_persists_and_old_file_survives_fa
         let mut client = Client::connect(&url).await;
         let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
         assert_eq!(model.catalog_request().await["path"],"/models");
-        let alert = tokio::time::timeout(Duration::from_secs(10), async {
-            loop { if let crate::protocol::ServerMessage::Notice { message, .. } = alerts.recv().await.unwrap() { break message; } }
+        let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+            loop { match alerts.recv().await.unwrap() {
+                crate::protocol::ServerMessage::Notice { message, .. } => panic!("Optional metadata must not interrupt selection: {message}"),
+                crate::protocol::ServerMessage::ModelCatalog { catalog } => break catalog,
+                _ => {},
+            } }
         }).await.unwrap();
-        assert!(alert.contains("Could not load openai-codex model catalog"),"{alert}");
+        assert!(snapshot.unresolved_providers.iter().any(|p| p == "openai-codex"));
         assert!(!root.path().join("model-catalog.json").exists());
         client.open(&id).await;
         assert_eq!(client.request(json!({"id":"select","type":"prompt","sessionId":id,"text":"/model openai-codex/gpt-6-sol"})).await["ok"],true);
@@ -1188,3 +1202,6 @@ async fn aged_catalog_revalidates_on_restart_without_waking_chats_or_executing_a
         manager.shutdown().await; server.abort();
     }
 }
+
+#[path = "agent_test_models.rs"]
+mod models;

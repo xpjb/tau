@@ -55,7 +55,7 @@ impl OperationDialog {
             Operation::Agent(session, command) => {
                 let chat = cx.model.account.sessions.iter().find(|s| &s.id == session);
                 let (label, value) = match command.as_str() {
-                    "model" => ("provider/model", chat.and_then(|s| s.model.as_ref()).map(|m| format!("{}/{}", m.provider, m.model_id)).unwrap_or_default()),
+                    "model" => ("provider/model", cx.model.selected_model(session).map(|m| format!("{}/{}", m.provider, m.model_id)).unwrap_or_default()),
                     "thinking" => ("off / minimal / low / medium / high / xhigh / max", chat.and_then(|s| s.thinking_level.clone()).unwrap_or_default()),
                     "fast" => ("on / off / status", String::new()),
                     _ => ("Optional compaction instructions", String::new()),
@@ -158,10 +158,13 @@ impl OperationDialog {
             }
             Operation::Agent(session, command) => {
                 cx.model.ensure_chat(session)?;
-                cx.model.control(ClientCommand::Prompt {
-                    session_id: session.clone(),
-                    text: format!("/{command} {value}"),
-                })?;
+                if command == "model" && cx.model.can_choose_model(session) {
+                    cx.model.choose_model(session, value.trim())?;
+                } else {
+                    cx.model.control(ClientCommand::Prompt {
+                        session_id: session.clone(), text: format!("/{command} {value}"), model: None, create: None,
+                    })?;
+                }
             }
             Operation::Queue { session, id, revision, .. } => {
                 let generation = cx

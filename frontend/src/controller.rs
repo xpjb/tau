@@ -46,7 +46,6 @@ pub struct Chat {
     pub feed: Feed,
     pub commands: Vec<SlashCommand>,
     pub commands_loaded: bool,
-    pub model_request: Option<(String, String)>,
 }
 impl Chat {
     pub fn reconcile(&mut self) { self.feed.reconcile(&self.local); }
@@ -63,6 +62,9 @@ pub struct Controller {
     pub identity: String,
     pub account: Account,
     pub model_preferences: crate::models::Preferences,
+    pub model_catalog: tau_protocol::ModelCatalog,
+    model_catalog_revision: Option<u64>,
+    model_catalog_attempt: Option<std::time::Instant>,
     pub chats: HashMap<String, Chat>,
     local_activity: HashMap<String, LocalActivity>,
     pub downloads: HashMap<String, Download>,
@@ -108,6 +110,7 @@ impl Controller {
         let identity = settings.identity();
         let mut account:Account = store.get(&identity, "account")?;
         let model_preferences = store.get(&identity, "quick-models")?;
+        let model_catalog = store.get(&identity, "model-catalog")?;
         let remote = store.block_cache(&identity)?;
         if account.source_lineage.is_none() && let Some(previous)=remote.previous_source()? {store.bind_source(&identity,&previous)?;account=store.get(&identity,"account")?;}
         let mut c = Self {
@@ -116,6 +119,9 @@ impl Controller {
             identity,
             account,
             model_preferences,
+            model_catalog,
+            model_catalog_revision: None,
+            model_catalog_attempt: None,
             chats: HashMap::new(),
             local_activity: HashMap::new(),
             downloads: HashMap::new(),
@@ -190,6 +196,8 @@ impl Controller {
         self.local_activity = self.store.chat_activity(&self.identity)?;
         self.sort_sessions();
         self.model_preferences = self.store.get(&self.identity, "quick-models")?;
+        self.model_catalog = self.store.get(&self.identity, "model-catalog")?;
+        self.model_catalog_revision = None;
         self.chats.clear();
         self.downloads.clear();
         self.saved_downloads.clear();
@@ -223,7 +231,6 @@ impl Controller {
                     feed: Feed::default(),
                     commands: vec![],
                     commands_loaded: false,
-                    model_request: None,
                 },
             );
             self.chats.get_mut(id).unwrap().reconcile();
@@ -465,9 +472,14 @@ impl Controller {
         let session = self.account.selected.clone().ok_or_else(|| anyhow::anyhow!("Select a chat"))?;
         ensure!(!self.account.missing_chats.contains(&session),"This source chat is missing. Copy the draft to a new chat; old intents are not resent");
         let provisional = self.is_creating(&session);
+        let create = self.account.pending_create.as_ref().filter(|r| r.id == session).and_then(|r| match &r.command {
+            ClientCommand::CreateSession { project_id, keep_session_id } => Some(ChatCreation {
+                project_id: project_id.clone(), keep_session_id: keep_session_id.clone(),
+            }),
+            _ => None,
+        });
         let activity = self.next_local_activity();
         let chat = self.chats.get_mut(&session).unwrap();
-        let choosing = chat.model_request.is_some();
         ensure!(
             !chat.local.draft.trim().is_empty() || !chat.local.files.is_empty(),
             "Write a message or attach a file"
@@ -483,6 +495,8 @@ impl Controller {
             command: ClientCommand::Prompt {
                 session_id: session.clone(),
                 text: text.clone(),
+                model: (!text.starts_with('/')).then(|| chat.local.model_choice.clone()).flatten(),
+                create,
             },
         };
         let pending = Pending {
@@ -490,8 +504,7 @@ impl Controller {
             started_at_ms: crate::clock::now_ms(),
             text,
             files,
-            status: if provisional { Delivery::WaitingForChat }
-                else if choosing { Delivery::WaitingForModel }
+            status: if provisional && !chat.local.files.is_empty() { Delivery::WaitingForChat }
                 else { Delivery::WaitingForConnection },
             detail: None,
         };
@@ -507,7 +520,7 @@ impl Controller {
             .save_chat(&self.identity, &session, &replacement)?;
         chat.local = replacement;chat.reconcile();
         self.bumped_locally(&session, activity);
-        self.send_waiting(&session, false)?;
+        self.send_waiting(&session)?;
         Ok(())
     }
     /// Warm the current chat's names while it is foregrounded, before Find is
@@ -625,7 +638,7 @@ impl Controller {
     fn control_id(&mut self, command: ClientCommand) -> Result<String> {
         let epoch = self.epoch.ok_or_else(|| anyhow::Error::from(transport::ConnectionUnavailable))?;
         let session = match &command {
-            ClientCommand::Prompt { session_id, text } if text.starts_with('/') => {
+            ClientCommand::Prompt { session_id, text, .. } if text.starts_with('/') => {
                 session_id.clone()
             }
             ClientCommand::QueueControl { session_id, .. }
@@ -656,7 +669,15 @@ impl Controller {
             status: Delivery::Sending,
             detail: None,
         });
-        self.store.save_chat(&self.identity, &session, &local)?;
+        let chosen = match &request.command {
+            ClientCommand::Prompt { text, .. } => text.strip_prefix("/model ").and_then(|slug| slug.trim().parse::<SessionModel>().ok()),
+            _ => None,
+        };
+        if let Some(model) = chosen {
+            let mut account = self.account.clone(); account.last_model = Some(model);
+            self.store.save_model_choice(&self.identity, &session, &local, &account)?;
+            self.account = account;
+        } else { self.store.save_chat(&self.identity, &session, &local)?; }
         chat.local = local;chat.reconcile();
         self.remember_local_body(&session);
         self.requests.insert(request.id.clone(),request.command.clone());
@@ -679,7 +700,7 @@ impl Controller {
         pending.detail = None;
         self.store.save_chat(&self.identity, &session, &local)?;
         self.chats.get_mut(&session).unwrap().local = local;self.chats.get_mut(&session).unwrap().reconcile();
-        self.send_waiting(&session, false)
+        self.send_waiting(&session)
     }
     pub fn restore_pending(&mut self, id: &str) -> Result<()> {
         let session = self
@@ -719,9 +740,7 @@ impl Controller {
         for file in files {let chat=&self.chats[&session].local;if !chat.files.iter().chain(chat.pending.iter().flat_map(|p|&p.files)).any(|f|f.id==file.id) {self.store.discard_import(&self.identity,&session,&file)?;}}
         Ok(())
     }
-    /// Display eligibility follows the local new-chat intent, not receipt of
-    /// a remote transcript. The create receipt is still needed before sending
-    /// /model, but a content snapshot is never needed to select a model.
+    /// The chooser belongs to the local draft, not a connection or receipt.
     pub fn quick_start(&self, id: &str) -> bool {
         (self.is_creating(id) || self.account.sessions.iter().any(|s| s.id == id && s.starter))
             && !self.account.missing_chats.contains(id)
@@ -731,20 +750,26 @@ impl Controller {
                     && c.feed.queue.requests.is_empty()
                     // Even an unconfirmed /model after connection loss is not
                     // a first conversation turn; the chooser should stay put.
-                    && c.local.pending.iter().all(Self::model_control)
+                    && c.local.pending.iter().all(|p| Self::model_control(p) || p.status == Delivery::Rejected)
             })
     }
     fn model_control(pending: &Pending) -> bool {
         matches!(&pending.request.command, ClientCommand::Prompt { text, .. } if text.starts_with("/model "))
     }
     pub fn can_choose_model(&self, id: &str) -> bool {
-        self.epoch.is_some() && !self.is_creating(id) && self.quick_start(id)
-            && self.chats.get(id).is_some_and(|c| c.model_request.is_none()
-                && c.local.pending.iter().all(|p| !Self::model_control(p) || p.status == Delivery::Rejected))
+        self.quick_start(id)
     }
     pub fn create_needs_retry(&self, id: &str) -> bool {
         self.is_creating(id) && (self.account.create_blocked
             || self.epoch.is_some() && self.create_failed_epoch == self.epoch)
+    }
+    /// Stale-while-revalidate account hints. Reopening a picker can refresh an
+    /// aged connection, but a refresh (or failure) never owns selection/UI state.
+    pub fn warm_model_catalog(&mut self) {
+        if self.epoch.is_none() || self.network.is_none()
+            || self.model_catalog_attempt.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(60)) { return; }
+        self.model_catalog_attempt = Some(std::time::Instant::now());
+        if let Err(error) = self.request(ClientCommand::GetModelCatalog) { self.transport_error = Some(error.to_string()); }
     }
     pub fn save_model_preferences(
         &mut self,
@@ -755,23 +780,23 @@ impl Controller {
         self.model_preferences = preferences;
         Ok(())
     }
+    /// Save the exact choice locally. There is deliberately no network effect:
+    /// the first prompt carries it through the ordinary durable send outbox.
     pub fn choose_model(&mut self, session: &str, selector: &str) -> Result<()> {
-        ensure!(
-            self.can_choose_model(session),
-            "Wait until the new chat is connected and the previous model choice is resolved"
-        );
-        let _: tau_protocol::SessionModel = selector.parse().map_err(anyhow::Error::msg)?;
-        let slug = selector.to_owned();
-        // /model already persists the last chosen model in the daemon.
-        // Send even when it matches this chat: another chat may have changed
-        // the remembered default. Only an explicit tile click reaches here.
-        // Preserve drafts/attachments and never replay after reconnect.
-        let id = self.control_id(ClientCommand::Prompt {
-            session_id: session.into(),
-            text: format!("/model {slug}"),
-        })?;
-        self.chats.get_mut(session).unwrap().model_request = Some((id, slug));
+        ensure!(self.can_choose_model(session), "Choose the starting model before sending the first message");
+        let model: SessionModel = selector.parse().map_err(anyhow::Error::msg)?;
+        let mut local = self.chats[session].local.clone();
+        local.model_choice = Some(model.clone());
+        let mut account = self.account.clone();
+        account.last_model = Some(model);
+        self.store.save_model_choice(&self.identity, session, &local, &account)?;
+        self.chats.get_mut(session).unwrap().local = local;
+        self.account = account;
         Ok(())
+    }
+    pub fn selected_model(&self, session: &str) -> Option<&SessionModel> {
+        self.chats.get(session).and_then(|c| c.local.model_choice.as_ref())
+            .or_else(|| self.account.sessions.iter().find(|s| s.id == session).and_then(|s| s.model.as_ref()))
     }
     pub fn cache_ttl(&self, session: &SessionSummary) -> crate::cache_ttl::Estimate {
         crate::cache_ttl::Estimate::from_session(
@@ -784,7 +809,11 @@ impl Controller {
     }
     pub fn new_chat(&mut self) -> Result<()> {
         self.plan_dirty.set(true);
-        ensure!(self.account.pending_create.is_none(), "The previous new chat is still awaiting confirmation");
+        self.warm_model_catalog();
+        // Reopening a not-yet-confirmed draft is navigation, not another RPC.
+        if let Some(id) = self.account.pending_create.as_ref().map(|r| r.id.clone()) {
+            return self.select(&id);
+        }
         let keep_session_id = self.account.selected.clone()
             .filter(|id| self.chats.get(id).is_some_and(|c| c.local.has_work()));
         let request = ClientRequest { id:uuid::Uuid::new_v4().to_string(), command:ClientCommand::CreateSession { keep_session_id, project_id:self.account.selected_project.clone() } };
@@ -795,7 +824,10 @@ impl Controller {
         account.remember_chat(&request.id,now);
         account.sessions.insert(0, Self::creating_summary(&request.id, &account.selected_project, now));
         account.last_chat_by_project.insert(account.selected_project.clone(), request.id.clone());
-        let local = LocalChat { activity: self.next_local_activity(), ..Default::default() };
+        let local = LocalChat {
+            model_choice: self.account.last_model.clone().or_else(|| self.model_catalog.default_model.clone()),
+            activity: self.next_local_activity(), ..Default::default()
+        };
         self.store.save_chat(&self.identity, &request.id, &local)?;
         self.store.put(&self.identity, "account", &account)?;
         self.account = account;
@@ -891,18 +923,12 @@ impl Controller {
         self.create_failed_epoch = None;
         self.requests.remove(provisional);
         self.store.put(&self.identity, "account", &self.account)?;
-        if self.epoch.is_some() { self.open(confirmed)?; self.send_waiting(confirmed, false)?; }
+        if self.epoch.is_some() { self.open(confirmed)?; self.send_waiting(confirmed)?; }
         Ok(())
     }
-    fn send_waiting(&mut self, session: &str, model_confirmed: bool) -> Result<()> {
+    fn send_waiting(&mut self, session: &str) -> Result<()> {
         let Some(epoch) = self.epoch else { return Ok(()); };
-        if self.is_creating(session) || self.account.missing_chats.contains(session) {return Ok(());}
-        if model_confirmed && let Some(chat)=self.chats.get_mut(session) {
-            let mut local = chat.local.clone();
-            for p in &mut local.pending {if p.status==Delivery::WaitingForModel {p.status=Delivery::WaitingForConnection;}}
-            self.store.save_chat(&self.identity,session,&local)?;
-            chat.local = local;chat.reconcile();
-        }
+        if self.account.missing_chats.contains(session) {return Ok(());}
         if self.retry_after.is_some_and(|at| at > std::time::Instant::now()) {return Ok(());}
         let active=self.chats.values().flat_map(|c|&c.local.pending).filter(|p|matches!(p.status,Delivery::Sending|Delivery::Preparing)).take(4).count();
         let pending = self.chats.get(session).map(|chat| chat.local.pending.iter()
@@ -910,6 +936,10 @@ impl Controller {
             .take(1).filter(|p|matches!(p.status,Delivery::WaitingForChat|Delivery::WaitingForConnection)).take(4-active)
             .cloned().collect::<Vec<_>>()).unwrap_or_default();
         for p in pending {
+            // Text can create-and-send in one request. File publication still
+            // needs the owning session before upload; this is not a model gate.
+            if self.is_creating(session) && (self.account.create_blocked || !p.files.is_empty()
+                || !matches!(p.request.command, ClientCommand::Prompt { create: Some(_), .. })) { break; }
             let chat = self.chats.get_mut(session).unwrap();
             let mut local = chat.local.clone();
             if let Some(saved) = local.pending.iter_mut().find(|saved| saved.request.id == p.request.id) {
@@ -1056,13 +1086,6 @@ impl Controller {
         let mut retrying = false;
         if self.receipt_inflight.as_ref().is_some_and(|(request,_,_,_)|request==id) {let (_,session,ids,_)=self.receipt_inflight.take().unwrap();self.receipt_queue.push_back((session,ids));}
         for (session, chat) in &mut self.chats {
-            if chat
-                .model_request
-                .as_ref()
-                .is_some_and(|(request, _)| request == id)
-            {
-                chat.model_request = None;
-            }
             if let Some(p) = chat.local.pending.iter_mut().find(|p| p.request.id == id) {
                 if !matches!(p.status, Delivery::Sending | Delivery::Preparing | Delivery::Checking) { return Ok(()); }
                 p.status = if retryable && matches!(&p.request.command, ClientCommand::Prompt { text, .. } if !text.starts_with('/')) {
@@ -1139,7 +1162,7 @@ impl Controller {
         if let Err(error) = self.reconcile_controls() {self.report_error(error);}
         if let Err(error) = self.reconcile_receipts() {self.report_error(error);}
         let mut waiting=self.chats.keys().cloned().collect::<Vec<_>>();waiting.sort_by_key(|id|self.account.selected.as_ref()!=Some(id));
-        for id in waiting {if let Err(e)=self.send_waiting(&id,false) {self.report_error(e);}}
+        for id in waiting {if let Err(e)=self.send_waiting(&id) {self.report_error(e);}}
         changed
     }
     fn remember_local_body(&mut self, scope: &str) {
@@ -1271,6 +1294,8 @@ impl Controller {
                 self.source_guard=Some((epoch,false));
                 if self.store.bind_source(&self.identity,&lineage)? {
                     self.saved_downloads.clear();
+                    self.model_catalog = Default::default();
+                    self.model_catalog_revision = None;
                     self.account=self.store.get(&self.identity,"account")?;
                     self.sort_sessions();
                     for (id,chat) in &mut self.chats {chat.local=self.store.load_chat(&self.identity,id)?;chat.feed=Feed::default();chat.reconcile();}
@@ -1282,6 +1307,8 @@ impl Controller {
                 ensure!(self.source_guard==Some((epoch,true)),"Source identity was not durably recorded; automatic submission is disabled. Repair local storage and reconnect.");
                 self.state_versions.clear();self.catalog=None;self.receipt_queue.clear();self.receipt_inflight=None;
                 self.epoch = Some(epoch);
+                self.model_catalog_revision = None;
+                self.model_catalog_attempt = None;
                 self.retry_after = None;
                 self.create_failed_epoch = None;
                 self.control_check=None;
@@ -1291,11 +1318,12 @@ impl Controller {
                 self.health.connected_at(at);
                 for id in self.store.work_chats(&self.identity, true)? { self.ensure_chat(&id)?; }
                 self.request(ClientCommand::ListSessions)?;
+                self.warm_model_catalog();
                 for id in self.chats.keys().cloned().collect::<Vec<_>>() {
                     if !self.is_creating(&id) {self.queue_receipts(&id);}
                 }
                 if let Some(id) = self.account.selected.clone().filter(|id| !self.is_creating(id) && !self.account.missing_chats.contains(id)) {
-                    self.open(&id)?;self.send_waiting(&id,false)?;
+                    self.open(&id)?;self.send_waiting(&id)?;
                     self.request(ClientCommand::GetCommands { session_id: id })?;
                 }
             }
@@ -1307,7 +1335,6 @@ impl Controller {
                 self.requests.clear();
                 self.project_deletions.clear();
                 for (session, chat) in &mut self.chats {
-                    chat.model_request = None;
                     chat.commands_loaded = false;
                     chat.feed.synchronized = false;
                     chat.feed.loading = false;
@@ -1317,9 +1344,6 @@ impl Controller {
                             p.status = if matches!(&p.request.command, ClientCommand::Prompt { text, .. } if !text.starts_with('/')) {
                                 Delivery::Checking
                             } else { Delivery::Unconfirmed };
-                        } else if p.status == Delivery::WaitingForModel {
-                            p.status = Delivery::Rejected;
-                            p.detail = Some("Model selection unconfirmed; check the current model, then restore this draft".into());
                         }
                     }
                     chat.reconcile();self.store.save_chat(&self.identity, session, &chat.local)?;
@@ -1362,10 +1386,7 @@ impl Controller {
                                     .iter_mut()
                                     .find(|p| p.request.id == id)
                                     .unwrap();
-                                p.request.command = ClientCommand::Prompt {
-                                    session_id: session.clone(),
-                                    text,
-                                };
+                                if let ClientCommand::Prompt { text: saved, .. } = &mut p.request.command { *saved = text; }
                                 p.status = Delivery::Sending;
                                 let request = p.request.clone();
                                 self.save_chat(&session)?;
@@ -1518,6 +1539,14 @@ impl Controller {
                     if s.starter { self.account.read_at.insert(s.id.clone(), s.updated_at_ms); }
                 }
                 for session in &mut sessions {if !self.account.missing_chats.contains(&session.id) && let Some((_,status,detail,usage))=self.state_versions.get(&session.id) {session.status=*status;session.detail=detail.clone();session.context_usage=*usage;}}
+                for summary in &sessions {
+                    if let Some(chat) = self.chats.get_mut(&summary.id)
+                        && !summary.starter && chat.local.model_choice.is_some()
+                        && chat.local.model_choice == summary.model {
+                        chat.local.model_choice = None;
+                        self.store.save_chat(&self.identity, &summary.id, &chat.local)?;
+                    }
+                }
                 self.account.sessions = sessions;
                 if let Some(request) = pending {
                     if let Some(confirmed) = confirmed { self.finish_create(&request.id, &confirmed)?; }
@@ -1575,6 +1604,23 @@ impl Controller {
                     s.detail = detail;
                 }
             }
+            ServerMessage::ModelCatalog { mut catalog } => {
+                if self.model_catalog_revision.is_some_and(|revision| revision > catalog.revision) { return Ok(()); }
+                ensure!(catalog.models.len() <= 20_000, "Model catalogue exceeds its bounded working set");
+                // A cold daemon authorizes its disk cache asynchronously. Never
+                // erase usable client hints with that intermediate snapshot.
+                let mut models = catalog.models.into_iter().map(|m| (m.value.clone(), m)).collect::<std::collections::BTreeMap<_, _>>();
+                for model in &self.model_catalog.models {
+                    if models.len() >= 20_000 { break; }
+                    if model.value.split_once('/').is_some_and(|(provider, _)| catalog.unresolved_providers.iter().any(|p| p == provider)) {
+                        models.entry(model.value.clone()).or_insert_with(|| model.clone());
+                    }
+                }
+                catalog.models = models.into_values().collect();
+                self.store.put(&self.identity, "model-catalog", &catalog)?;
+                self.model_catalog_revision = Some(catalog.revision);
+                self.model_catalog = catalog;
+            }
             ServerMessage::Commands {
                 session_id,
                 commands,
@@ -1622,22 +1668,7 @@ impl Controller {
                     self.notice = Some(notice.into());
                 }
                 let mut matched = false;
-                let mut model_changed = false;
                 for (id, chat) in &mut self.chats {
-                    if chat
-                        .model_request
-                        .as_ref()
-                        .is_some_and(|(id, _)| id == &request_id)
-                    {
-                        chat.model_request = None;
-                        model_changed = ok && !uncertain;
-                        if uncertain {
-                            self.notice = Some(
-                                "Model change unconfirmed; check the current model before sending."
-                                    .into(),
-                            );
-                        }
-                    }
                     if let Some(p) = chat
                         .local
                         .pending
@@ -1689,25 +1720,10 @@ impl Controller {
                 ) {
                     self.settings_result = Some((request_id.clone(), ok && !uncertain));
                 }
-                if model_changed {
-                    if let Some(id) = session_id.as_deref() { self.send_waiting(id, true)?; }
-                    self.request(ClientCommand::ListSessions)?;
-                }
                 if !ok {
                     if create_reply || matches!(command, Some(ClientCommand::CreateSession { .. })) {
                         self.create_failed_epoch = self.epoch;
                         self.notice = Some(error.clone().unwrap_or_else(|| "New chat is saved locally but was not confirmed; retry when connected".into()).into());
-                    }
-                    if matches!(&command, Some(ClientCommand::Prompt {text,..}) if text.starts_with("/model "))
-                        && let Some(id) = session_id.as_deref() && let Some(chat) = self.chats.get_mut(id)
-                        && chat.local.pending.iter().any(|p| p.status == Delivery::WaitingForModel) {
-                        for p in &mut chat.local.pending {
-                            if p.status == Delivery::WaitingForModel {
-                                p.status = Delivery::Rejected;
-                                p.detail = Some("Model selection failed; restore the draft and choose a model".into());
-                            }
-                        }
-                        chat.reconcile();self.store.save_chat(&self.identity, id, &chat.local)?;
                     }
                     if let Some(ClientCommand::GetHistory { session_id, .. }) = &command
                         && let Some(chat) = self.chats.get_mut(session_id)
@@ -1753,7 +1769,7 @@ impl Controller {
                                     else {
                                         let chat=self.chats.get_mut(&id).unwrap();
                                         if !chat.local.pending.iter().any(|p|p.text==draft) {
-                                            chat.local.pending.push(Pending {request:ClientRequest {id:uuid::Uuid::new_v4().to_string(),command:ClientCommand::Prompt {session_id:id.clone(),text:draft.clone()}},started_at_ms:None,text:draft,files:vec![],status:Delivery::Rejected,detail:Some("Recovered fork draft; existing draft was preserved".into())});
+                                            chat.local.pending.push(Pending {request:ClientRequest {id:uuid::Uuid::new_v4().to_string(),command:ClientCommand::Prompt {session_id:id.clone(),text:draft.clone(), model: None, create: None }},started_at_ms:None,text:draft,files:vec![],status:Delivery::Rejected,detail:Some("Recovered fork draft; existing draft was preserved".into())});
                                             self.save_chat(&id)?;
                                         }
                                     }
@@ -1761,9 +1777,7 @@ impl Controller {
                             }
                         }
                         Some(ClientCommand::RefreshModelCatalog { .. }) => {
-                            if let Some(id) = self.account.selected.clone() {
-                                self.request(ClientCommand::GetCommands { session_id:id })?;
-                            }
+                            self.request(ClientCommand::GetModelCatalog)?;
                         }
                         Some(ClientCommand::DeleteSession { session_id }) => {
                             self.store.delete_chat(&self.identity, &session_id)?;
@@ -1835,12 +1849,12 @@ fn unsent_messages_back_off_and_keep_the_original_id_through_failure_and_retry()
     assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
     assert!(c.notice.is_none(), "routine retry lives on the saved message, not in a scary banner");
     c.epoch = Some(1);
-    c.send_waiting("chat", false).unwrap(); // Backoff prevents touching the absent network.
+    c.send_waiting("chat").unwrap(); // Backoff prevents touching the absent network.
     assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection);
     c.retry_after = None;
     let db = rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();
     db.execute_batch("CREATE TRIGGER fail_send BEFORE INSERT ON local WHEN NEW.key='chat:chat' BEGIN SELECT RAISE(ABORT,'disk full');END").unwrap();
-    assert!(c.send_waiting("chat", false).is_err());
+    assert!(c.send_waiting("chat").is_err());
     assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection, "a failed commit cannot wedge the message in Sending");
     db.execute_batch("DROP TRIGGER fail_send").unwrap();
     c.chats.get_mut("chat").unwrap().local.pending[0].status = Delivery::Preparing;
@@ -1861,7 +1875,7 @@ fn lineage_fence_rolls_back_atomically_and_missing_source_work_stays_reachable()
     use crate::store::{LocalChat,Pending};
     let root=tempfile::tempdir().unwrap();let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();c.select("missing").unwrap();
     c.store.bind_source(&c.identity,"before").unwrap();c.account=c.store.get(&c.identity,"account").unwrap();
-    let local=LocalChat {draft:"keep me".into(),pending:vec![Pending {request:ClientRequest {id:"original".into(),command:ClientCommand::Prompt {session_id:"missing".into(),text:"possibly paid".into()}},text:"possibly paid".into(),files:vec![],status:Delivery::WaitingForConnection,started_at_ms:None,detail:None}],..Default::default()};
+    let local=LocalChat {draft:"keep me".into(),pending:vec![Pending {request:ClientRequest {id:"original".into(),command:ClientCommand::Prompt {session_id:"missing".into(),text:"possibly paid".into(), model: None, create: None }},text:"possibly paid".into(),files:vec![],status:Delivery::WaitingForConnection,started_at_ms:None,detail:None}],..Default::default()};
     c.store.save_chat(&c.identity,"missing",&local).unwrap();
     let db=rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();db.execute_batch("CREATE TRIGGER fail_fence BEFORE UPDATE ON local WHEN NEW.key='account' BEGIN SELECT RAISE(ABORT,'fence full');END").unwrap();
     assert!(c.network_event(NetworkEvent::Source(1,"after".into())).is_err());assert!(c.network_event(NetworkEvent::Ready { epoch: 1, at: std::time::Instant::now() }).is_err());assert!(c.epoch.is_none());
@@ -1944,3 +1958,7 @@ fn list_resyncs_coalesce_without_starving_an_in_progress_traversal() {
 }
 
 }
+
+#[cfg(test)]
+#[path = "controller_models_tests.rs"]
+mod model_tests;

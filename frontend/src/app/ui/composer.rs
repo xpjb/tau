@@ -140,11 +140,10 @@ impl Composer {
             .and_then(|s| s.model.as_ref())
             .map(|m| format!("{}/{}", m.provider, m.model_id))
             .unwrap_or_else(|| "Model: unknown".into());
-        let level =
-            summary.and_then(|s| s.thinking_level.as_deref()).filter(|level| !level.is_empty()).unwrap_or("unknown");
-        let thinking = format!("Thinking: {level}");
+        let thinking = summary.and_then(|s| s.thinking_level.as_deref()).filter(|level| !level.is_empty())
+            .map(|level| format!("Thinking: {level}")).unwrap_or_default();
         let size = 12. * cx.ui.scale;
-        let gap = 12. * cx.ui.scale;
+        let gap = if thinking.is_empty() { 0. } else { 12. * cx.ui.scale };
         let thinking_width = cx.services.renderer.label_width(&thinking, size, false).ceil();
         let model_width = cx
             .services
@@ -259,7 +258,12 @@ impl Widget for Composer {
             .control
             .as_ref()
             .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
-        let summary = cx.model.account.sessions.iter().find(|s| s.id == session).cloned();
+        let mut summary = cx.model.account.sessions.iter().find(|s| s.id == session).cloned();
+        if let Some(summary) = &mut summary {
+            let selected = cx.model.selected_model(session).cloned();
+            if summary.model != selected { summary.thinking_level = None; summary.context_usage = None; }
+            summary.model = selected;
+        }
         chrome.rect(Rect::new(b.x, composer_top, b.width, composer_h), color(0x0e141b));
         let retry_create = cx.model.create_needs_retry(session);
         let status_rect =
@@ -409,7 +413,10 @@ impl Widget for Composer {
             let mut suggestions = vec![];
             for command in &cx.model.chats[session].commands {
                 if let Some(arg) = query.strip_prefix(&format!("{} ", command.name)) {
-                    for a in &command.arguments {
+                    let arguments = if command.name == "model" && command.source == tau_protocol::SlashCommandSource::Builtin {
+                        &cx.model.model_catalog.models
+                    } else { &command.arguments };
+                    for a in arguments {
                         if a.value.starts_with(arg) {
                             suggestions.push(format!("/{} {}", command.name, a.value));
                         }
@@ -472,7 +479,6 @@ impl Widget for QuickModels {
         let clip = frame.clip;
         let layer = &mut *frame.layer;
         let s = cx.ui.scale;
-        let chat = &cx.model.chats[session];
         let ready = cx.model.can_choose_model(session);
         let hint = "Optional · new chats use your last model";
         cx.services.renderer.clipped_label(
@@ -495,13 +501,7 @@ impl Widget for QuickModels {
         );
         let columns = if b.width / s >= 520. { 2 } else { 1 };
         let w = (b.width - (columns - 1) as f32 * 8. * s) / columns as f32;
-        let current = cx
-            .model
-            .account
-            .sessions
-            .iter()
-            .find(|c| c.id == session)
-            .and_then(|c| c.model.as_ref())
+        let current = cx.model.selected_model(session)
             .map(|m| format!("{}/{}", m.provider, m.model_id));
         for (i, selector) in cx.model.model_preferences.slugs.iter().enumerate() {
             let r = Rect::new(
@@ -528,14 +528,10 @@ impl Widget for QuickModels {
                 false,
                 crate::render::intersect(r, clip),
             );
-            let status = if chat.model_request.as_ref().is_some_and(|(_, slug)| slug == selector) {
-                "Selecting…"
-            } else if !valid {
+            let status = if !valid {
                 "Invalid provider/model ID"
             } else if selected {
                 "Selected"
-            } else if !ready {
-                "Available when connected"
             } else {
                 "Select"
             };

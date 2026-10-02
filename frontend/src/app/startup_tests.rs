@@ -15,7 +15,7 @@ fn cached_phone_first_frame_does_not_wait_for_a_replica_writer() {
     })).unwrap();
     controller.preview("chat", vec![event], QueueState::default(), None).unwrap();
     controller.chats.get_mut("chat").unwrap().local.pending.push(crate::store::Pending {
-        request: ClientRequest { id: "uncertain".into(), command: ClientCommand::Prompt { session_id: "chat".into(), text: "do not replay me".into() } },
+        request: ClientRequest { id: "uncertain".into(), command: ClientCommand::Prompt { session_id: "chat".into(), text: "do not replay me".into(), model: None, create: None } },
         started_at_ms: None, text: "do not replay me".into(), files: vec![],
         status: crate::store::Delivery::Unconfirmed, detail: None,
     });

@@ -401,7 +401,7 @@ fn authored_message_has_one_model_identity_across_receipt_queue_and_history() {
 fn local_prompt(id: &str, text: &str) -> LocalChat {
     use crate::store::{Delivery, Pending};
     LocalChat { pending: vec![Pending { request: tau_protocol::ClientRequest { id: id.into(),
-        command: tau_protocol::ClientCommand::Prompt { session_id: "chat".into(), text: text.into() } },
+        command: tau_protocol::ClientCommand::Prompt { session_id: "chat".into(), text: text.into(), model: None, create: None } },
         text: text.into(), files: vec![], status: Delivery::Accepted, started_at_ms: None, detail: None }], ..Default::default() }
 }
 fn user_body(id: &str, request: &str, text: &str) -> serde_json::Value {
@@ -859,7 +859,7 @@ fn busy_recency_never_gates_verified_reads_or_weakens_content_writes() {
     let view = f.cache.preview("chat", None).unwrap().unwrap();
     assert_eq!(view.events[0].text, "verified body");
     let local = LocalChat { pending: vec![crate::store::Pending {
-        request: tau_protocol::ClientRequest { id: "uncertain".into(), command: tau_protocol::ClientCommand::Prompt { session_id: "chat".into(), text: "keep locally".into() } },
+        request: tau_protocol::ClientRequest { id: "uncertain".into(), command: tau_protocol::ClientCommand::Prompt { session_id: "chat".into(), text: "keep locally".into(), model: None, create: None } },
         started_at_ms: None, text: "keep locally".into(), files: vec![],
         status: crate::store::Delivery::Unconfirmed, detail: None,
     }], ..Default::default() };
