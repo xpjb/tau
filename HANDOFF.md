@@ -2,8 +2,9 @@
 
 The user requested fixes on `tau2-integration` / `origin/tau2`. Source commits
 `fb74424` and `173e88e` were developed/pushed in the required isolated
-`fix/tau2-viewer-android-selection` worktree, based on `6dbcf02`, for a clean
-fast-forward into the requested integration branch.
+`fix/tau2-viewer-android-selection` worktree, based on `6dbcf02`. The tested source
+and validation record (`06fe7c0`) are now fast-forwarded into `tau2-integration`
+and pushed to `origin/tau2`; both checkouts were clean after integration.
 
 - Files restores the last opened buffer, selection and reading position for each
   recent chat. Find/Browse preserves the underlying reading position. Four closed

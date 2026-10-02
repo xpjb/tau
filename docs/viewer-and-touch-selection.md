@@ -3,7 +3,8 @@
 User-requested source fixes for `tau2-integration` / `origin/tau2`, based on
 `6dbcf02`. Implementation: `fb74424` (viewer), `173e88e` (selection/Android bridge).
 Work was isolated in `fix/tau2-viewer-android-selection` under the host worktree
-policy; the requested integration can fast-forward the tested source.
+policy. The tested source/validation tip `06fe7c0` was fast-forwarded into
+`tau2-integration` and pushed to `origin/tau2`; the merge changed no source inputs.
 
 ## Behavior and boundaries
 

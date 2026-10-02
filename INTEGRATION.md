@@ -731,7 +731,9 @@ preserved. Only HANDOFF/QA prepends conflicted; both histories are retained.
 ## File viewer retention / Android selection — October 2, 2026
 
 User-requested source fixes for `tau2-integration` / `origin/tau2`, prepared from
-`6dbcf02` in the required independent worktree. `fb74424` retains recent per-chat
+`6dbcf02` in the required independent worktree. The tested tip `06fe7c0` was
+fast-forwarded into `tau2-integration` and pushed to `origin/tau2`, without another
+build/test run for the identical source tree. `fb74424` retains recent per-chat
 file buffers and Find/Browse reading position; `173e88e` adds mobile selection
 handles, hold-and-drag/autoscroll and a nonmodal Android clipboard toolbar.
 Account/source/editor generation boundaries, drafts and unchanged desktop mouse
