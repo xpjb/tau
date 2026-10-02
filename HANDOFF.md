@@ -1,4 +1,4 @@
-# Android startup locking — branch source only, October 2, 2026
+# Android startup locking — integrated source, October 2, 2026
 
 User reports near-instant normal launch versus recognizable >1-second stalls,
 possibly a DB lock failure. On `fix/tau2-android-startup-lock` in
@@ -14,7 +14,18 @@ Native/Android ARM64/API29/Windows MSVC compiler checks and frontend rustdoc pas
 pixels/draft/uncertain intent under a held WAL writer, migrations and concurrent
 replica quota/GC.
 No Clippy, built-in test runner, package, deployment or production-data change.
-**Not merged or released; no attached Android device and no claim that the
+At the user's request, feature `1a8ee0c` is merged as **`1321f65`** into
+`origin/tau2` from freshly fetched `d3de9ad`, in the separate
+`merge/tau2-android-startup-lock` / `/root/tau2-android-startup-merge` worktree.
+The intervening catalog integration and both handoff/QA histories are retained;
+only documentation conflicts needed resolution. Startup source/tests exactly
+match the feature. Fresh merged native daemon/frontend all-target check and
+**12/12 targeted nextest cases** pass, including the first frame and the catalog's
+actual-controller regression (`a8923dc4-52c5-4251-b184-4ff75b449ae3`). The feature's
+210-case suite and unchanged frontend Android/Windows/rustdoc gates are reused,
+not a new full merged-suite or cross-platform-run claim.
+
+**Merged, not released; no attached Android device and no claim that the
 user's physical-phone recurrence is closed.** See
 [causes, diagnostics, exact evidence and remaining acceptance](docs/android-startup-lock.md).
 

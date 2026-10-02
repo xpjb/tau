@@ -1,10 +1,15 @@
-# Android startup lock contention — source fix, October 2, 2026
+# Android startup lock contention — integrated source, October 2, 2026
 
 Branch `fix/tau2-android-startup-lock`, worktree
 `/root/tau2-android-startup-lock`, based on `origin/tau2` at `8cceeb8`.
 Reproductions: `7d71909`; source fix and further regressions: `dd2a831`,
 with pending-work reuse correction `b5937b2`.
-**Not merged, packaged or deployed. Physical-phone diagnosis remains open.**
+User-authorized merge **`1321f65`** integrates feature `1a8ee0c` into
+`origin/tau2` from freshly fetched `d3de9ad`, in the separate worktree
+`/root/tau2-android-startup-merge` on `merge/tau2-android-startup-lock`. The model
+catalog integration is preserved; the two documentation conflicts retain both
+handoff/QA histories. **Merged, not packaged or deployed. Physical-phone diagnosis
+remains open.**
 
 ## Report and reproduced causes
 
@@ -94,7 +99,7 @@ background/resume and launch during transcript sync. For any remaining recurrenc
 compare the stage boundaries and crash/logcat output; do not assume the original
 phone issue is closed solely because these local reproductions pass.
 
-## Validation on the source fix
+## Feature-branch validation on the source fix
 
 All Rust work used managed `/usr/local/bin/cargo`, one Cargo/Rayon job and nextest.
 No Clippy, built-in Cargo test runner, production-data access, paid provider
@@ -122,3 +127,28 @@ frontend-tests,windows-check,rustdoc}.log` and
 Measured storage-only fixture completion was sub-millisecond for Store/Cache and about 2.2 ms for a
 selected cached Controller with the writer held; these are **host fixture
 measurements**, not Android launch performance guarantees.
+
+## User-approved integration — October 2, 2026
+
+Merge `1321f65` combines the startup feature with the already integrated model
+catalog/retained-usage fix. There are no source conflicts or dependency changes;
+all startup frontend source/tests are byte-for-byte the validated feature, and
+all intervening catalog source/test files are retained unchanged. Both sets of
+handoff and frontend QA notes are preserved rather than selecting one conflict
+side. The feature branch/worktree remain intact.
+
+Fresh merged-tree managed validation:
+
+- Native daemon/frontend all-target compiler check: passed.
+- Startup, migration, LRU/local-reuse/write-timeout, live quota/GC and the catalog's
+  real-controller regression: **12/12 passed**, three binaries,
+  `a8923dc4-52c5-4251-b184-4ff75b449ae3` (165 unrelated cases not selected).
+- Diff/conflict-marker checks and updated documentation links: passed.
+
+Logs: `/tmp/tau2-android-startup-merge-check.log` and
+`/tmp/tau2-android-startup-merge-tests.log`. The feature's 210-case suite and
+Android/Windows/rustdoc checks are reused for unchanged frontend source, not
+claimed as freshly rerun merged-tree gates. No full suite was repeated. Subsequent
+integration edits are Markdown only. No Clippy, built-in Cargo test runner,
+package build, service restart, production-data access or deployment. Physical
+Android recurrence/launch-time acceptance remains open.

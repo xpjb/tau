@@ -619,3 +619,30 @@ worktree are preserved.
   cache/settings/auth write, live completion request, stable/master change or
   package-version/protocol/database-schema bump. Beta remains **0.7.10 / 22**;
   physical Windows/Android acceptance and existing rollout holds are unchanged.
+
+
+## Android startup lock contention — source integration, October 2, 2026
+
+At the user's request, merge **`1321f65`** integrates
+`fix/tau2-android-startup-lock` through `1a8ee0c` into `origin/tau2`, from freshly
+fetched `d3de9ad`, in `/root/tau2-android-startup-merge` on the separate branch
+`merge/tau2-android-startup-lock`. The intervening catalog/retained-usage fix is
+preserved. Only HANDOFF/QA prepends conflicted; both histories are retained.
+
+- Current authored/replica opens no longer repeat initialization writes.
+  Optional read-LRU and local-body-reuse work cannot block first-frame rendering
+  or report a busy-cache popup for already-saved pending intent. The short
+  directory lease/GC handoff waits normally instead of failing `try_lock`.
+  Live leases/quota, actual-write timeout/durability, migration rollback and
+  authored work remain protected; Android startup stage logs retain diagnosis.
+- Startup source/tests exactly match the accepted feature; catalog source/test
+  files remain unchanged. Fresh merged native daemon/frontend all-target check
+  and **12/12 targeted nextest cases** pass, including real phone-size first-frame
+  pixels/uncertain intent under a held writer and the actual-controller catalog
+  regression (`a8923dc4-52c5-4251-b184-4ff75b449ae3`). Reuse the feature's 210-case
+  suite and unchanged frontend Android/Windows/rustdoc checks; no fresh full
+  merged-suite or platform run is claimed. See [evidence](docs/android-startup-lock.md).
+- **Source only:** no release packages, deployment, service restart, live data or
+  credential access, stable/master change or version/protocol/schema bump.
+  The user's exact physical-phone recurrence remains unconfirmed; no device was
+  attached. No Clippy or built-in Cargo test runner. Other QA/release holds remain.
