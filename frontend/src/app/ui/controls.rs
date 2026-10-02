@@ -238,6 +238,11 @@ pub(in crate::app) struct TextField {
     selection_drag: Option<(u64, Vec2)>,
 }
 impl TextField {
+    pub fn update_scroll(&mut self, dt: f32, cx: &mut Context<'_>) {
+        if !self.control.enabled || self.control.rect.is_none() { self.editor.stop_scrolling(); return; }
+        let renderer = &mut cx.services.renderer;
+        cx.ui.dirty |= self.editor.update_scroll(&mut renderer.text, renderer.faces.prose[0], dt, cx.ui.scale);
+    }
     /// A labelled field owns both its label and the remaining editor bounds.
     pub fn labeled(&mut self, rect: Rect, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let s = cx.ui.scale;
@@ -307,6 +312,16 @@ impl Widget for TextField {
             self.selection_drag = None;
         }
         let renderer = &mut cx.services.renderer;
+        let now = std::time::Instant::now();
+        if let Event::Down { point, .. } = *event
+            && self.control.enabled && self.control.contains(point) {
+            self.editor.begin_scroll(point, now);
+        }
+        if matches!(*event, Event::Up { pointer, .. } if capture.is_some_and(|c| c.pointer == pointer && c.touch && c.dragged))
+            && self.selection_drag.is_none() {
+            self.editor.end_scroll(now, cx.ui.scale);
+            cx.ui.dirty = true;
+        }
         match *event {
             Event::Down { pointer, point, touch: true }
                 if cx.ui.mobile && focused && self.control.enabled && self.control.contains(point)
@@ -340,18 +355,19 @@ impl Widget for TextField {
                     self.editor.hit(&mut renderer.text, renderer.faces.prose[0],
                         Vec2::new(point.x - offset.x, point.y - offset.y), true);
                 } else if capture.touch {
+                    self.editor.sample_scroll(point, cx.ui.scale, now);
                     let moved = (point.x - capture.start.x).abs() + (point.y - capture.start.y).abs() > 7. * cx.ui.scale;
                     if capture.dragged || moved {
                         if let Some(c) = &mut cx.ui.capture { c.claimed = true; }
-                        self.editor.wheel(&mut renderer.text, renderer.faces.prose[0], capture.point.y - point.y, false);
+                        let amount = if self.editor.single_line { capture.point.x - point.x } else { capture.point.y - point.y };
+                        self.editor.wheel(&mut renderer.text, renderer.faces.prose[0], amount, false);
                     }
                 } else {
                     self.editor.hit(&mut renderer.text, renderer.faces.prose[0], point, true);
                 }
             }
-            Event::Wheel { amount, horizontal, point } if self.control.contains(point) => {
-                self.editor.wheel(&mut renderer.text, renderer.faces.prose[0], amount, horizontal);
-                cx.ui.dirty = true;
+            Event::Wheel { amount, horizontal, point, precise } if self.control.contains(point) => {
+                cx.ui.dirty |= self.editor.scroll_input(&mut renderer.text, renderer.faces.prose[0], amount, horizontal, precise);
                 return true;
             }
 

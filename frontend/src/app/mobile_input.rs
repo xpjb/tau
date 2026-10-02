@@ -213,6 +213,46 @@ mod tests {
         assert!(h.app.controller.selected().unwrap().local.draft.is_empty());
     }
     #[test]
+    fn composer_and_dialog_touch_momentum_update_after_release_without_draft_writes() {
+        for dialog in [false, true] {
+            let mut h = Harness::new((360, 720), 1.);
+            if dialog { h.app.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::New)).unwrap(); }
+            h.frame();
+            h.tap(dialog.then_some(1));
+            let input = h.app.native_input().unwrap();
+            let value = "A long field with a stable IME selection.\n".repeat(120);
+            h.edit(&input, &value);
+            h.frame();
+            let draft = h.app.controller.selected().unwrap().local.draft.clone();
+            let input = h.app.native_input().unwrap();
+            let db = rusqlite::Connection::open(h.app.controller.store.root.join("client.sqlite3")).unwrap();
+            db.execute_batch("CREATE TABLE momentum_writes (key TEXT); CREATE TRIGGER momentum_write AFTER UPDATE ON local WHEN NEW.key LIKE 'chat:%' BEGIN INSERT INTO momentum_writes VALUES (NEW.key); END;").unwrap();
+            let start = Vec2::new(input.rect[0] + input.rect[2] / 2., input.rect[1] + input.rect[3] / 2.);
+            h.app.press(81, start, true);
+            let mut end = start;
+            for i in 1..=3 {
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                end.y = start.y + i as f32 * 24.;
+                h.app.motion(81, end);
+            }
+            h.app.release(81, end);
+            h.frame(); // dt=0 must preserve this field's momentum too.
+            let before = h.ctx.read_rgba8().unwrap();
+            assert!(h.app.tick(1. / 60.));
+            h.app.frame(&h.ctx, h.ctx.view());
+            assert_ne!(before, h.ctx.read_rgba8().unwrap(), "Uncaptured fields advance in their own mounted owner (dialog={dialog})");
+            assert_eq!(h.app.native_input().unwrap().id, input.id);
+            assert_eq!(h.app.controller.selected().unwrap().local.draft, draft);
+            assert_eq!(db.query_row("SELECT count(*) FROM momentum_writes", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
+            h.app.cancel_pointer();
+            h.frame();
+            let cancelled = h.ctx.read_rgba8().unwrap();
+            h.app.tick(0.2);
+            h.app.frame(&h.ctx, h.ctx.view());
+            assert_eq!(cancelled, h.ctx.read_rgba8().unwrap(), "Cancellation stops even a released field fling");
+        }
+    }
+    #[test]
     fn mobile_enter_scroll_and_long_press_edit_the_inline_field_not_the_transcript() {
         let mut h = Harness::new((360, 720), 1.);
         h.frame();

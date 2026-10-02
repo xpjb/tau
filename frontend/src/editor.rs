@@ -2,7 +2,8 @@
 //! geometry; this component owns text, selection, undo, composition and viewport.
 use crate::render::{Layer, Renderer, color};
 use sanscale::{Align, Boundaries, Caret, Draw, FontChainHandle, Layout, Motion, Rect, ShapedHandle, Style, TextService, Vec2};
-use std::{borrow::Cow, ops::Range};
+use std::{borrow::Cow, ops::Range, time::Instant};
+use crate::scroll::ScrollMotion;
 use unicode_segmentation::UnicodeSegmentation;
 mod mobile;
 mod touch;
@@ -61,6 +62,7 @@ pub struct Editor {
     visible: bool,
     scroll: Vec2, // em-space, independent of transcript scrolling and caret position
     follow_caret: bool,
+    motion: [ScrollMotion; 2],
 }
 impl Editor {
     pub fn new(value: String) -> Self {
@@ -74,6 +76,7 @@ impl Editor {
             single_line: false, center_one_line: false, goal: None, after_edit: true, follow_caret: true,
             composition: None, undo: Vec::new(), redo: Vec::new(), layout: None,
             view: None, visible: false, scroll: Vec2::new(0., 0.),
+            motion: [ScrollMotion::default(), ScrollMotion::default()],
         }
     }
     pub fn line(value: String) -> Self {
@@ -149,6 +152,7 @@ impl Editor {
         true
     }
     fn native_changed(&mut self) {
+        self.stop_scrolling();
         { self.native_revision += 1; self.native_composition = None; }
     }
     pub fn composing(&self) -> bool {
@@ -331,6 +335,52 @@ impl Editor {
             self.goal = None;
             self.place(caret, view.secret, extend);
         }
+    }
+    pub(crate) fn stop_scrolling(&mut self) {
+        for motion in &mut self.motion { motion.stop(); }
+    }
+    pub(crate) fn begin_scroll(&mut self, point: Vec2, now: Instant) {
+        self.motion[0].begin_drag(-point.x, now);
+        self.motion[1].begin_drag(-point.y, now);
+    }
+    pub(crate) fn sample_scroll(&mut self, point: Vec2, scale: f32, now: Instant) {
+        self.motion[0].sample(-point.x, scale, now);
+        self.motion[1].sample(-point.y, scale, now);
+    }
+    pub(crate) fn end_scroll(&mut self, now: Instant, scale: f32) {
+        let axis = usize::from(!self.single_line);
+        self.motion[1 - axis].stop();
+        self.motion[axis].end_drag(now, scale);
+    }
+    fn scroll_extent(layout: &Layout, view: View) -> Vec2 {
+        Vec2::new((layout.width_em() + 1.5 / view.size - view.inner().width / view.size).max(0.) * view.size,
+            (layout.height_em() - view.inner().height / view.size).max(0.) * view.size)
+    }
+    pub(crate) fn scroll_input(&mut self, text: &mut TextService, chain: FontChainHandle,
+        amount: f32, horizontal: bool, precise: bool) -> bool {
+        let Some(view) = self.view else { return false; };
+        let Some(block) = self.prepare_view(text, chain, false) else { return false; };
+        let max = Self::scroll_extent(text.measure(block), view);
+        let horizontal = horizontal || self.single_line;
+        let axis = usize::from(!horizontal);
+        self.motion[1 - axis].stop();
+        let before = self.scroll;
+        let (value, max) = if horizontal { (&mut self.scroll.x, max.x) } else { (&mut self.scroll.y, max.y) };
+        *value = self.motion[axis].scroll(*value * view.size, max, amount, precise, Instant::now()) / view.size;
+        self.follow_caret = false;
+        self.scroll != before || self.motion[axis].active()
+    }
+    pub(crate) fn update_scroll(&mut self, text: &mut TextService, chain: FontChainHandle, dt: f32, scale: f32) -> bool {
+        if !self.motion.iter().any(ScrollMotion::active) { return false; }
+        if !self.visible || self.follow_caret { self.stop_scrolling(); return false; }
+        let Some(view) = self.view else { self.stop_scrolling(); return false; };
+        let Some(block) = self.prepare_view(text, chain, false) else { self.stop_scrolling(); return false; };
+        if self.follow_caret { self.stop_scrolling(); return false; }
+        let max = Self::scroll_extent(text.measure(block), view);
+        let now = Instant::now();
+        self.scroll.x = self.motion[0].advance(self.scroll.x * view.size, max.x, dt, scale, now) / view.size;
+        self.scroll.y = self.motion[1].advance(self.scroll.y * view.size, max.y, dt, scale, now) / view.size;
+        true // Includes the terminal frame; the next idle update returns false.
     }
     pub fn wheel(&mut self, text: &mut TextService, chain: FontChainHandle, amount: f32, horizontal: bool) -> bool {
         let Some(view) = self.view else { return false; };

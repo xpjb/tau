@@ -2,7 +2,7 @@
 //! Children get first refusal; a touch drag may promote a button press to the
 //! containing scroll view, but a claimed text/code selection is never stolen.
 use super::{Capture, Context, Event, Id, Target};
-use crate::render::{Layer, color, contains};
+use crate::{render::{Layer, color, contains}, scroll::ScrollMotion};
 use sanscale::{Rect, Vec2};
 use std::time::Instant;
 
@@ -10,35 +10,20 @@ pub(in crate::app) struct ScrollState {
     pub target: Target,
     pub value: f32,
     pub max: f32,
-    pub velocity: f32,
+    pub motion: ScrollMotion,
     pub rect: Rect,
     pub horizontal: bool,
-    pub(in crate::app) wheel: Option<(f32, Instant)>,
     candidate: Option<Capture>,
     drag: Option<f32>,
 }
 impl ScrollState {
     pub fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
         let old = self.value;
-        if let Some((target, last)) = self.wheel {
-            let target = target.clamp(0., self.max);
-            let now = Instant::now();
-            let elapsed = now.duration_since(last).as_secs_f32().min(0.1);
-            let next = self.value + (target - self.value) * (1. - (-elapsed / 0.065).exp());
-            let settled = (target - next).abs() < 0.25 * cx.ui.scale;
-            self.value = if settled { target } else { next };
-            self.wheel = (!settled).then_some((target, now));
-            cx.ui.dirty = true;
+        let active = self.motion.active();
+        if self.candidate.is_none() {
+            self.value = self.motion.advance(self.value, self.max, dt, cx.ui.scale, Instant::now());
         }
-        if self.candidate.is_none() && self.velocity.abs() > 4. {
-            self.set(self.value + self.velocity * dt.min(0.05));
-            self.velocity *= (-9. * dt).exp();
-            if (old - self.value).abs() < 0.1 {
-                self.velocity = 0.;
-            }
-            cx.ui.dirty = true;
-        }
-        cx.ui.dirty |= self.value != old;
+        cx.ui.dirty |= active || self.value != old;
     }
 
     pub fn new(scope: Id, horizontal: bool) -> Self {
@@ -46,27 +31,28 @@ impl ScrollState {
             target: Target { scope, widget: Id::new() },
             value: 0.,
             max: 0.,
-            velocity: 0.,
+            motion: ScrollMotion::default(),
             rect: Rect::new(0., 0., 0., 0.),
             horizontal,
-            wheel: None,
             candidate: None,
             drag: None,
         }
     }
     pub fn stop(&mut self) {
-        self.wheel = None;
+        self.motion.stop();
         self.candidate = None;
         self.drag = None;
-        self.velocity = 0.;
     }
     pub fn set(&mut self, value: f32) {
         self.value = value.clamp(0., self.max);
     }
     pub fn shift_wheel(&mut self, delta: f32) {
-        if let Some((target, _)) = &mut self.wheel {
+        if let Some((target, _)) = &mut self.motion.wheel {
             *target = (*target + delta).clamp(0., self.max);
         }
+    }
+    pub fn moving(&self) -> bool {
+        self.motion.active() || self.candidate.is_some_and(|c| c.dragged) || self.dragging_bar()
     }
     pub fn dragging_bar(&self) -> bool {
         self.drag.is_some()
@@ -134,15 +120,36 @@ impl ScrollState {
         }
         false
     }
+    /// Two-axis views share gesture direction locking as well as physics.
+    pub fn axes_event(vertical: &mut Self, horizontal: &mut Self, event: &Event<'_>, child: bool, cx: &mut Context<'_>) -> bool {
+        let sideways = match *event {
+            Event::Wheel { horizontal, .. } => horizontal,
+            Event::Move { point, .. } => cx.ui.capture.is_some_and(|c|
+                if c.claimed { c.target == horizontal.target }
+                else { (point.x - c.start.x).abs() > 1.5 * (point.y - c.start.y).abs() }),
+            _ => false,
+        };
+        if sideways {
+            let handled = horizontal.event(event, child, cx);
+            vertical.event(event, handled, cx)
+        } else {
+            let handled = vertical.event(event, child, cx);
+            if matches!(event, Event::Move { .. } | Event::Wheel { .. }) { handled }
+            else { horizontal.event(event, handled, cx) }
+        }
+    }
     pub fn event(&mut self, event: &Event<'_>, child_handled: bool, cx: &mut Context<'_>) -> bool {
+        self.event_at(event, child_handled, cx, Instant::now())
+    }
+    fn event_at(&mut self, event: &Event<'_>, child_handled: bool, cx: &mut Context<'_>, now: Instant) -> bool {
         let old = self.value;
         let mut handled = child_handled;
         match *event {
             Event::Down { pointer, point, touch }
                 if contains(self.rect, point) && cx.ui.capture.is_none_or(|c| c.pointer == pointer) =>
             {
-                self.wheel = None;
-                self.velocity = 0.;
+                let catching = touch && self.motion.active() && cx.ui.capture.is_none_or(|c| !c.claimed);
+                self.motion.begin_drag(-self.coordinate(point), now);
                 self.candidate = Some(Capture {
                     target: self.target,
                     pointer,
@@ -150,10 +157,10 @@ impl ScrollState {
                     point,
                     touch,
                     dragged: false,
-                    claimed: false,
-                    started: Instant::now(),
+                    claimed: catching,
+                    started: now,
                 });
-                if cx.ui.capture.is_none() {
+                if catching || cx.ui.capture.is_none() {
                     cx.ui.capture = self.candidate;
                 }
                 handled = true;
@@ -176,20 +183,14 @@ impl ScrollState {
                     let distance = (self.coordinate(gesture.start) - self.coordinate(point)).abs();
                     let owned = cx.ui.capture.is_some_and(|c| c.target == self.target);
                     let available = cx.ui.capture.is_none_or(|c| c.pointer == pointer && !c.claimed);
-                    if self.max > 0. && distance > 7. * cx.ui.scale && (owned || available) {
+                    if gesture.touch { self.motion.sample(-self.coordinate(point), cx.ui.scale, now); }
+                    if self.max > 0. && (gesture.dragged || distance > 7. * cx.ui.scale) && (owned || available) {
                         self.set(self.value + delta);
-                        self.velocity = if gesture.touch {
-                            (delta / gesture.started.elapsed().as_secs_f32().max(0.008))
-                                .clamp(-3000. * cx.ui.scale, 3000. * cx.ui.scale)
-                        } else {
-                            0.
-                        };
                         gesture.dragged = true;
                         gesture.claimed = true;
                         handled = true;
                     }
                     gesture.point = point;
-                    gesture.started = Instant::now();
                     if gesture.claimed {
                         cx.ui.capture = Some(gesture);
                     }
@@ -201,27 +202,25 @@ impl ScrollState {
                     cx.ui.capture = None;
                     handled = true;
                 }
-                if self.candidate.is_some_and(|c| c.pointer == pointer) {
-                    if self.candidate.unwrap().started.elapsed().as_millis() > 150 {
-                        self.velocity = 0.;
-                    }
+                if let Some(gesture) = self.candidate.filter(|c| c.pointer == pointer) {
+                    if gesture.touch && gesture.claimed && gesture.dragged {
+                        self.motion.end_drag(now, cx.ui.scale);
+                        cx.ui.dirty |= self.motion.active();
+                    } else { self.motion.stop(); }
                     self.candidate = None;
                 }
                 self.drag = None;
             }
-            Event::Wheel { amount, point, .. } if !child_handled && contains(self.rect, point) => {
+            Event::Wheel { amount, point, precise, .. } if !child_handled && contains(self.rect, point) => {
                 if let Some(candidate) = self.candidate.take()
-                    && cx.ui.capture.is_some_and(|c| c.pointer == candidate.pointer && !c.claimed)
+                    && cx.ui.capture.is_some_and(|c| c.pointer == candidate.pointer && (!c.claimed || c.target == self.target))
                 {
                     cx.ui.capture = None;
                 }
-                self.velocity = 0.;
                 self.drag = None;
-                let target = self.wheel.map_or(self.value, |(t, _)| t);
-                self.wheel = Some(((target + amount).clamp(0., self.max), Instant::now()));
-                // OnDemand needs a first frame before update() can move value
-                // and keep the easing animation's redraw chain alive.
-                cx.ui.dirty = true;
+                self.value = self.motion.scroll(self.value, self.max, amount, precise, now);
+                // OnDemand must wake for both wheel easing and precision input.
+                cx.ui.dirty |= self.motion.active() || self.value != old;
                 handled = true;
             }
 
@@ -231,3 +230,6 @@ impl ScrollState {
         handled
     }
 }
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests;

@@ -394,8 +394,8 @@ fn idle_wheel_undocks_tail_and_animates_without_unrelated_wakes() {
         assert!(!h.app.controller.chats["demo"].local.position.follow, "Wheel input must undock before any live reflow");
         h.app.wheel(-48. * scale, false, point);
         let target = bottom - 96. * scale;
-        assert_eq!(h.app.root.workspace.chat.transcript.scroll.wheel.unwrap().0, target, "Wheel bursts still accumulate");
-        h.app.root.workspace.chat.transcript.scroll.wheel.as_mut().unwrap().1 -= Duration::from_millis(16);
+        assert_eq!(h.app.root.workspace.chat.transcript.scroll.motion.wheel.unwrap().0, target, "Wheel bursts still accumulate");
+        h.app.root.workspace.chat.transcript.scroll.motion.wheel.as_mut().unwrap().1 -= Duration::from_millis(16);
         assert!(h.app.tick(1. / 60.));
         let first = h.app.root.workspace.chat.transcript.scroll.value;
         assert!(target < first && first < bottom, "The first scheduled frame must advance the existing easing filter");
@@ -409,14 +409,14 @@ fn idle_wheel_undocks_tail_and_animates_without_unrelated_wakes() {
         h.app.frame(&h.ctx, h.ctx.view());
         assert!(h.app.root.workspace.chat.transcript.scroll.max > bottom);
         assert!((h.app.root.workspace.chat.transcript.scroll.value - first).abs() < 0.1, "Live reflow must retain the reading anchor");
-        assert!((h.app.root.workspace.chat.transcript.scroll.wheel.unwrap().0 - target).abs() < 0.1);
+        assert!((h.app.root.workspace.chat.transcript.scroll.motion.wheel.unwrap().0 - target).abs() < 0.1);
         for _ in 0..12 {
-            if let Some((_, last)) = &mut h.app.root.workspace.chat.transcript.scroll.wheel {
+            if let Some((_, last)) = &mut h.app.root.workspace.chat.transcript.scroll.motion.wheel {
                 *last -= Duration::from_millis(100);
             }
             if h.app.tick(0.1) { h.app.frame(&h.ctx, h.ctx.view()); }
         }
-        assert!(h.app.root.workspace.chat.transcript.scroll.wheel.is_none());
+        assert!(h.app.root.workspace.chat.transcript.scroll.motion.wheel.is_none());
         assert!((h.app.root.workspace.chat.transcript.scroll.value - target).abs() < 0.1);
         assert!(!h.app.controller.chats["demo"].local.position.follow);
         assert!(!h.app.tick(0.), "Settled scrollback must return to on-demand idle");
@@ -424,13 +424,13 @@ fn idle_wheel_undocks_tail_and_animates_without_unrelated_wakes() {
         h.app.wheel(h.app.root.workspace.chat.transcript.scroll.max, false, point);
         assert!(h.app.needs_redraw(), "Wheel input from idle scrollback must wake too");
         for _ in 0..16 {
-            if let Some((_, last)) = &mut h.app.root.workspace.chat.transcript.scroll.wheel {
+            if let Some((_, last)) = &mut h.app.root.workspace.chat.transcript.scroll.motion.wheel {
                 *last -= Duration::from_millis(100);
             }
             if h.app.tick(0.1) { h.app.frame(&h.ctx, h.ctx.view()); }
         }
         let scroll = &h.app.root.workspace.chat.transcript.scroll;
-        assert!(scroll.wheel.is_none());
+        assert!(scroll.motion.wheel.is_none());
         assert_eq!(scroll.value, scroll.max);
         assert!(h.app.controller.chats["demo"].local.position.follow, "Settling at the bottom must restore tail-follow");
         assert!(!h.app.tick(0.), "Tail-follow must not acquire a perpetual redraw loop");
@@ -452,7 +452,7 @@ fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
     });
     h.frame();
     h.app.wheel(200., false, center(h.app.root.workspace.chat.transcript.scroll.rect));
-    h.app.root.workspace.chat.transcript.scroll.wheel.as_mut().unwrap().1 -= std::time::Duration::from_millis(100);
+    h.app.root.workspace.chat.transcript.scroll.motion.wheel.as_mut().unwrap().1 -= std::time::Duration::from_millis(100);
     let point = center(h.app.root.workspace.chat.header.title.rect.unwrap());
     h.app.press(41, point, true);
     h.app.ui.capture.as_mut().unwrap().started -= std::time::Duration::from_millis(500);
@@ -551,5 +551,62 @@ fn failed_run_header_opens_the_full_reason_without_resuming_or_submitting() {
         h.app.controller.account.sessions.iter_mut().find(|s| s.id == "demo").unwrap().status = tau_protocol::SessionStatus::Running;
         h.frame(); h.app.press(2,p,mobile); h.app.release(2,p);
         assert!(h.app.controller.notice.is_none(),"A stale error detail cannot be opened after the run restarts");
+    }
+}
+
+#[test]
+fn real_touch_fling_keeps_the_reading_anchor_and_stops_on_a_new_touch() {
+    use std::time::Duration;
+    for scale in [1., 2.5] {
+        let mut h = Harness::new(true);
+        h.app.resize(h.ctx.size(), scale, Vec2::new(0., 0.));
+        let mut event = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
+        event.role = tau_protocol::EventRole::Assistant;
+        event.phase = tau_protocol::EventPhase::Live;
+        event.attachment = None;
+        event.text = "A paragraph for a moving reading anchor.\n\n".repeat(150);
+        h.app.controller.preview("demo", vec![event.clone()], Default::default(), None).unwrap();
+        h.frame();
+        h.app.with_ui(|root, cx| {
+            let transcript = &mut root.workspace.chat.transcript;
+            transcript.scroll.set(transcript.scroll.max / 2.);
+            transcript.remember_scroll(cx);
+        });
+        h.frame();
+        let viewport = h.app.root.workspace.chat.transcript.scroll.rect;
+        let start = Vec2::new(viewport.x + 4. * scale, viewport.y + viewport.height / 2.);
+        h.app.press(91, start, true);
+        let mut end = start;
+        for i in 1..=3 {
+            std::thread::sleep(Duration::from_millis(16));
+            end.y = start.y - i as f32 * 24. * scale;
+            h.app.motion(91, end);
+        }
+        h.app.motion(91, Vec2::new(end.x, end.y - 0.1 * scale));
+        h.app.release(91, end);
+        let released = h.app.root.workspace.chat.transcript.scroll.value;
+        assert!(h.app.root.workspace.chat.transcript.scroll.motion.active());
+        assert!(h.app.needs_redraw());
+        assert!(h.app.tick(0.), "A zero-time first frame cannot kill touch momentum");
+        h.app.frame(&h.ctx, h.ctx.view());
+        let before = h.ctx.read_rgba8().unwrap();
+        assert!(h.app.tick(1. / 60.));
+        h.app.frame(&h.ctx, h.ctx.view());
+        assert!(h.app.root.workspace.chat.transcript.scroll.value > released);
+        assert_ne!(before, h.ctx.read_rgba8().unwrap(), "Momentum must be visible, not just a stored velocity");
+        assert!(!h.app.controller.chats["demo"].local.position.follow);
+
+        let reading = h.app.root.workspace.chat.transcript.scroll.value;
+        event.text.push_str("A streamed paragraph during the fling.\n\n");
+        h.app.controller.preview("demo", vec![event], Default::default(), None).unwrap();
+        h.app.frame(&h.ctx, h.ctx.view());
+        assert!((h.app.root.workspace.chat.transcript.scroll.value - reading).abs() < 0.1);
+        assert!(h.app.root.workspace.chat.transcript.scroll.motion.active(), "Reflow preserves the fling as well as the anchor");
+        h.app.press(92, start, true);
+        assert!(!h.app.root.workspace.chat.transcript.scroll.motion.active(), "Touching catches the moving content immediately");
+        h.app.release(92, start);
+        h.app.tick(0.2);
+        assert!((h.app.root.workspace.chat.transcript.scroll.value - reading).abs() < 0.1);
+        assert!(h.app.actions().is_empty());
     }
 }

@@ -52,14 +52,14 @@ fn project_tabs_gestures_unread_nested_menus_and_confirmation_use_actual_native_
     let bounds = h.app.root.workspace.sidebar.projects.scroll.rect;
     let point = Vec2::new(bounds.x + bounds.width / 2., bounds.y + bounds.height / 2.);
     h.app.wheel(300.,false,point);
-    assert!(h.app.root.workspace.sidebar.projects.scroll.wheel.is_some());
-    h.app.root.workspace.sidebar.projects.scroll.wheel.as_mut().unwrap().1 = Instant::now()-std::time::Duration::from_secs(1);
+    assert!(h.app.root.workspace.sidebar.projects.scroll.motion.wheel.is_some());
+    h.app.root.workspace.sidebar.projects.scroll.motion.wheel.as_mut().unwrap().1 = Instant::now()-std::time::Duration::from_secs(1);
     h.frame(); assert!(h.app.root.workspace.sidebar.projects.scroll.value>0.); assert_eq!(h.app.root.workspace.sidebar.scroll.value,0.);
-    h.app.wheel(100.,true,point); assert!(h.app.root.workspace.sidebar.projects.scroll.wheel.is_some());
+    h.app.wheel(100.,true,point); assert!(h.app.root.workspace.sidebar.projects.scroll.motion.wheel.is_some());
     h.app.press(4,point,true); h.app.motion(4,Vec2::new(point.x - 65., point.y));
     assert!(h.app.ui.capture.as_ref().unwrap().dragged); h.app.release(4,Vec2::new(point.x - 65., point.y));
     assert!(h.app.root.menu.is_none(),"Swiping is not a long press or a tab selection");
-    h.app.root.workspace.sidebar.projects.scroll.velocity=0.; h.app.with_ui(|root, cx| root.workspace.navigate_project("p24", cx)).unwrap(); h.frame();
+    h.app.root.workspace.sidebar.projects.scroll.motion.velocity=0.; h.app.with_ui(|root, cx| root.workspace.navigate_project("p24", cx)).unwrap(); h.frame();
     assert_eq!(h.app.controller.account.selected.as_deref(),None,"Mobile waits for a chat choice");
     assert!(h.app.controller.project_unread("p24"), "Only a visible chat is read");
     assert!(h.app.root.workspace.show_chats, "Mobile topic switches keep the list open");
