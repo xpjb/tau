@@ -16,7 +16,7 @@ pub(super) struct Case {
     #[serde(default)] pub(super) image: bool,
 }
 pub(super) fn cases() -> Vec<Case> {
-    serde_json::from_str(include_str!("../../qa/downloads/cases.json")).unwrap()
+    serde_json::from_str(include_str!("download_cases.json")).unwrap()
 }
 pub(super) fn install(app: &mut App, case: &Case) -> ChatAttachment {
     let entry = case.id.as_str();
