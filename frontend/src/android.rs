@@ -23,6 +23,7 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicI32, Ordering},
     },
+    time::Instant,
 };
 
 enum NativeEvent {
@@ -62,6 +63,7 @@ fn queue(event: NativeEvent) {
 }
 struct Android {
     app: App,
+    startup: Option<Instant>,
     import_scope: Option<(String, String)>,
     modifiers: ModifiersState,
     input: Option<crate::mobile_input::Input>,
@@ -228,6 +230,8 @@ impl Android {
 }
 impl chad::android::App for Android {
     fn init(ctx: &mut Ctx) -> Result<Self, String> {
+        let startup = Instant::now();
+        log::info!("tau-startup stage=storage-begin");
         let root = ctx
             .app
             .internal_data_path()
@@ -237,9 +241,12 @@ impl chad::android::App for Android {
             events: vec![],
         });
         let window = Arc::downgrade(&ctx.window);
+        let store = Store::open(root.join("tau2"))
+            .map_err(|e| format!("Open authored local database: {e:#}"))?;
+        log::info!("tau-startup stage=storage-ready elapsed_ms={}", startup.elapsed().as_millis());
         let app = App::new(
             ctx,
-            Store::open(root.join("tau2")).map_err(|e| e.to_string())?,
+            store,
             Arc::new(move || {
                 if let Some(w) = window.upgrade() {
                     w.request_redraw();
@@ -247,9 +254,11 @@ impl chad::android::App for Android {
             }),
             true,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Restore client UI: {e:#}"))?;
+        log::info!("tau-startup stage=app-ready elapsed_ms={}", startup.elapsed().as_millis());
         let mut android = Self {
             app,
+            startup: Some(startup),
             import_scope: None,
             modifiers: ModifiersState::empty(),
             input: None,
@@ -319,6 +328,9 @@ impl chad::android::App for Android {
     }
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
         self.app.frame(ctx, view);
+        if let Some(startup) = self.startup.take() {
+            log::info!("tau-startup stage=first-frame-rendered elapsed_ms={}", startup.elapsed().as_millis());
+        }
         self.sync_input(ctx);
         if std::mem::take(&mut self.input_menu) && self.input.is_some() {
             let result = self.java(ctx, "inputMenu", None);

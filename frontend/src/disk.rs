@@ -41,7 +41,9 @@ fn lease(path:&Path)->Result<std::fs::File> {
     #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600).custom_flags(libc::O_NOFOLLOW);}
     let file=options.open(path)?;ensure!(file.metadata()?.is_file(),"Replica lease is not a regular file");Ok(file)
 }
-pub(crate) fn replica_directory_lease(root:&Path)->Result<std::fs::File> {let file=lease(&root.join(".replica-admin.lock"))?;file.try_lock()?;Ok(file)}
+// Concurrent open/GC is a normal handoff, not a startup failure. Callers must
+// release this short directory lock before SQLite journal/schema setup.
+pub(crate) fn replica_directory_lease(root:&Path)->Result<std::fs::File> {let file=lease(&root.join(".replica-admin.lock"))?;file.lock()?;Ok(file)}
 pub(crate) fn replica_lease(path:&Path)->Result<std::fs::File> {lease(&path.with_extension("lock"))}
 pub(crate) fn collect_replicas(target:&Path)->Result<()> {
     let managed=|p:&Path|p.extension().is_some_and(|e|e=="sqlite3") && p.file_stem().and_then(|s|s.to_str()).is_some_and(|s|s.len()==64 && s.bytes().all(|b|b.is_ascii_hexdigit()));

@@ -74,6 +74,56 @@ fn selected_cached_chat_and_draft_restore_without_waiting_for_a_writer() {
 }
 
 #[test]
+fn concurrent_replica_opens_keep_the_live_quota_and_authored_work() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path().into()).unwrap();
+    store.put("pair", "draft", &"not disposable").unwrap();
+    drop(store);
+    let start = Arc::new(std::sync::Barrier::new(9));
+    let (send, receive) = mpsc::channel();
+    let workers = (0..8).map(|n| {
+        let path = root.path().to_owned();
+        let start = start.clone();
+        let send = send.clone();
+        thread::spawn(move || {
+            start.wait();
+            send.send(Store::open(path).and_then(|s| s.block_cache(&format!("pair-{n}")))).unwrap();
+        })
+    }).collect::<Vec<_>>();
+    start.wait();
+    let mut live = Vec::new();
+    for _ in 0..8 {
+        match receive.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Ok(cache) => live.push(cache),
+            Err(error) => assert!(format!("{error:#}").contains("Four replica databases are active"), "{error:#}"),
+        }
+    }
+    for worker in workers { worker.join().unwrap(); }
+    assert_eq!(live.len(), 4, "not-yet-initialized live files must count toward the quota too");
+    let store = Store::open(root.path().into()).unwrap();
+    assert_eq!(store.get::<String>("pair", "draft").unwrap(), "not disposable");
+}
+
+#[test]
+fn authored_migration_preserves_work_and_rejects_a_future_version() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path().into()).unwrap();
+    store.put("pair", "draft", &"keep this through migration").unwrap();
+    drop(store);
+    let db = Connection::open(root.path().join("client.sqlite3")).unwrap();
+    db.execute_batch("DROP TABLE chat_aliases; PRAGMA user_version=1").unwrap();
+    let store = Store::open(root.path().into()).unwrap();
+    assert_eq!(store.get::<String>("pair", "draft").unwrap(), "keep this through migration");
+    assert_eq!(store.resolve_chat("pair", "chat").unwrap(), "chat");
+    assert_eq!(db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0)).unwrap(), 2);
+    drop(store);
+    db.execute_batch("PRAGMA user_version=999").unwrap();
+    assert!(Store::open(root.path().into()).is_err());
+    assert_eq!(db.query_row("SELECT value FROM local WHERE key='draft'", [], |r| r.get::<_, String>(0)).unwrap(), "\"keep this through migration\"");
+    assert_eq!(db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0)).unwrap(), 999);
+}
+
+#[test]
 fn overlapping_replica_admin_does_not_fail_startup() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path().into()).unwrap();

@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, watch};
 use crate::store::LocalChat;
 
 pub const QUEUE: &str = "@queue";
+const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub generation:String,pub sequence:u64,pub events:Vec<Event>,pub queue:QueueState,pub before:Option<u64>,pub delivered:Vec<String>, pub bodies:HashMap<String,Body>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,ToolState>, pub parents:HashMap<String,String> }
 /// Verified preview state, separate from both authored bytes and finality.
 /// None means the body directory/header has not arrived, not a completed empty body.
@@ -86,21 +87,32 @@ impl Cache {
     }
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path.parent().context("Cache path has no parent")?)?;
-        let _directory=crate::disk::replica_directory_lease(path.parent().unwrap())?;
+        let directory=crate::disk::replica_directory_lease(path.parent().unwrap())?;
         let lease=crate::disk::replica_lease(path)?;lease.try_lock_shared()?;
         crate::disk::collect_replicas(path)?;
-        let db = Connection::open(path)?;
+        // Publish the file under the quota/GC lock so other openers count even
+        // a not-yet-initialized live database. Never hold the directory lock
+        // through SQLite's journal/schema setup or another writer's wait.
+        let mut db = Connection::open(path)?;
+        drop(directory);
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path,std::fs::Permissions::from_mode(0o600))?;
         }
-        db.busy_timeout(Duration::from_secs(5))?;
+        db.busy_timeout(DB_BUSY_TIMEOUT)?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL")?;
         let version:u32=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         ensure!(version<=2,"Replica cache requires a newer client");
-        tau_blocks::initialize(&db)?;
-        echoes::initialize(&db)?;
-        db.execute_batch("UPDATE block_limits SET headers=100000,bytes=134217728; CREATE TABLE IF NOT EXISTS replica_epoch(singleton INTEGER PRIMARY KEY,epoch INTEGER NOT NULL); INSERT OR IGNORE INTO replica_epoch VALUES(1,0); PRAGMA user_version=2")?;
+        // Echo reuse was added without changing user_version. Older version-2
+        // caches still need that additive migration; current caches need no writes.
+        let echoes_ready: bool = db.query_row("SELECT count(*)=2 FROM sqlite_schema WHERE (type='table' AND name='local_echoes') OR (type='index' AND name='block_body_hash')", [], |r| r.get(0))?;
+        if version < 2 || !echoes_ready {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tau_blocks::initialize(&tx)?;
+            echoes::initialize(&tx)?;
+            tx.execute_batch("UPDATE block_limits SET headers=100000,bytes=134217728; CREATE TABLE IF NOT EXISTS replica_epoch(singleton INTEGER PRIMARY KEY,epoch INTEGER NOT NULL); INSERT OR IGNORE INTO replica_epoch VALUES(1,0); PRAGMA user_version=2")?;
+            tx.commit()?;
+        }
         let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;
         db.pragma_update(None,"max_page_count",1024u64*1024*1024/page_size)?;
         let exports=path.parent().filter(|p|p.file_name().is_some_and(|n|n=="blocks")).and_then(Path::parent).map(|root|root.join("downloads"));
@@ -318,13 +330,22 @@ impl Cache {
                 .collect::<rusqlite::Result<HashMap<String,u64>>>()?
         } else { HashMap::new() };
         events.sort_by_key(|e|e.order);
-        // Navigation, initial hydration and Copy refresh disk recency. Ordinary
-        // streaming projections already have write recency from range_at; don't
-        // add another synchronous UI-thread fsync for every arriving chunk.
+        // Recency is disposable metadata, not a prerequisite for rendering a
+        // verified read. Never wait for another writer (or upgrade a stale WAL
+        // snapshot) just to refresh it, including the first viewport's visit.
+        // Actual content writes retain the normal busy timeout and durability.
         if touch && !accessed.is_empty() {
-            let tx = db.unchecked_transaction()?;
-            tau_blocks::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
-            tx.commit()?;
+            db.busy_timeout(Duration::ZERO)?;
+            let transaction = rusqlite::Transaction::new_unchecked(&db, rusqlite::TransactionBehavior::Immediate);
+            db.busy_timeout(DB_BUSY_TIMEOUT)?;
+            match transaction {
+                Ok(tx) => {
+                    tau_blocks::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
+                    tx.commit()?;
+                }
+                Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::DatabaseBusy => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         let mut previews = preview_ids.into_iter().map(|(root,ids)| {
             let used=256*1024-group_budgets[root.as_str()]; (root,ids,used)
