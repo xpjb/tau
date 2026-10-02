@@ -4,6 +4,7 @@
 pub mod inline;
 mod parse;
 #[cfg(test)]
+#[path = "../../tests/unit/markdown.rs"]
 mod tests;
 
 use inline::RichText;

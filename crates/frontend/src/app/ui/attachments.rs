@@ -627,5 +627,5 @@ impl Widget for AttachmentBrowser {
 }
 
 #[cfg(test)]
-#[path = "attachments_tests.rs"]
+#[path = "../../../tests/unit/app/ui/attachments.rs"]
 mod tests;

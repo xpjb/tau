@@ -807,4 +807,5 @@ impl Widget for TopicDialog {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/unit/app/ui/dialogs.rs"]
 mod tests;

@@ -134,4 +134,5 @@ impl Autoscroll {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/scroll.rs"]
 mod tests;

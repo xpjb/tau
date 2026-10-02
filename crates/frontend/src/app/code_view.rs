@@ -1476,4 +1476,5 @@ impl Widget for CodeBrowser {
 }
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../../tests/unit/app/code_view.rs"]
 mod tests;

@@ -543,4 +543,5 @@ impl chad::RenderContext for Gpu {
 }
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../../../tests/unit/app/ui/lifetime.rs"]
 mod lifetime_tests;

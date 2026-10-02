@@ -33,3 +33,7 @@ mod disk;
 mod downloads;
 
 pub mod mobile_input;
+
+#[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/end_to_end.rs"]
+mod end_to_end;

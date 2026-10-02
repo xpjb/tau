@@ -263,5 +263,5 @@ impl Transcript {
 }
 
 #[cfg(test)]
-#[path = "transcript_legacy_test.rs"]
+#[path = "../tests/unit/transcript_legacy.rs"]
 mod legacy_test;

@@ -41,26 +41,8 @@ fn haystack<'a>(path: &'a str, chars: &'a mut Vec<char>) -> Utf32Str<'a> {
     }
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn forgiving_paths_unordered_words_boundaries_and_extended_terms() {
-        for (query, path) in [("fntapcdvw", "frontend/src/app/code_view.rs"), ("main src", "src/main.rs"),
-            ("cafe", "src/café.rs"), ("src !test .rs$", "src/main.rs"), ("'code_view", "frontend/src/app/code_view.rs")] {
-            assert!(Finder::new(query).score(path).is_some(), "{query}: {path}");
-        }
-        assert!(Finder::new("src !test").score("src/test.rs").is_none());
-        assert!(Finder::new("Main").score("src/main.rs").is_none());
-        assert!(Finder::new("main").score("src/main.rs") > Finder::new("main").score("many/arbitrary/intermediate/names.rs"));
-        for path in ["src/cafe\u{301}_👩‍💻.rs", "src/é👩‍💻.rs"] {
-            let ranges = Finder::new(".rs").highlights(path);
-            assert_eq!(ranges.iter().map(|r| &path[r.clone()]).collect::<String>(), ".rs");
-        }
-        let path = "src/café_🦀.rs";
-        let ranges = Finder::new("cafe 🦀").highlights(path);
-        assert_eq!(ranges.iter().map(|r| &path[r.clone()]).collect::<Vec<_>>(), ["café", "🦀"]);
-    }
-}
+#[path = "../tests/unit/finder.rs"]
+mod tests;
 
 /// A verified, sorted client snapshot. Only names live here, never file bodies.
 #[derive(Debug)]
@@ -166,26 +148,5 @@ impl Drop for Matcher {
 
 
 #[cfg(test)]
-mod matcher_tests {
-use super::*;
-use std::time::Duration;
-use tau_net::files::*;
-#[test]
-fn matching_is_latest_only_and_keeps_all_results_on_a_large_index() {
-    let paths=(0..50_000).map(|i|IndexedPath {path:format!("frontend/src/app/module_{i:05}.rs"),symlink:false}).collect::<Vec<_>>();
-    let reply=FileReply::Index {path:"/work".into(),revision:"a".repeat(64),base:None,entries:paths,removed:vec![],indexing:false,limited:false};
-    let index=Arc::new(PathIndex::apply(None,&reply).unwrap());
-    let (wake,wakes)=std::sync::mpsc::channel();
-    let matcher=Matcher::new(Arc::new(move || {let _=wake.send(());}));
-    let start=std::time::Instant::now();
-    let mut generation=0;
-    for query in ["zzzz", "module", "module4", "mdrs fnt"] {generation=matcher.query(index.clone(),query.into(),false);}
-    loop {
-        wakes.recv_timeout(Duration::from_secs(10).saturating_sub(start.elapsed())).expect("Local matcher must wake an idle UI");
-        if let Some(done)=matcher.take() && done.generation==generation {
-            assert_eq!(done.rows.len(),50_000);assert!(Arc::ptr_eq(&index,&done.index));break;
-        }
-    }
-}
-
-}
+#[path = "../tests/unit/finder_matcher.rs"]
+mod matcher_tests;

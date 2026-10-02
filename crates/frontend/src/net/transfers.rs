@@ -239,4 +239,5 @@ impl Transfers {
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/net/transfers.rs"]
 mod tests;

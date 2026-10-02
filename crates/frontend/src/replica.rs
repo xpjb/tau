@@ -778,4 +778,5 @@ fn adopt_echo(db: &Connection, scope: &str, h: &BlockHeader) -> Result<bool> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/replica.rs"]
 pub(crate) mod tests;

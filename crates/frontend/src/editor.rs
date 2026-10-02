@@ -590,4 +590,5 @@ impl Boundaries for Words<'_> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/editor.rs"]
 mod tests;

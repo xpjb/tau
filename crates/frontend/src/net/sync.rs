@@ -281,7 +281,9 @@ async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, not
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/net/sync/checkpoint.rs"]
 mod checkpoint_tests;
 
 #[cfg(test)]
+#[path = "../../tests/unit/net/sync.rs"]
 mod tests;

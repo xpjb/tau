@@ -569,6 +569,7 @@ impl Drop for Watcher {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/native.rs"]
 mod tests;
 
 async fn serve_files(send: &mut SendStream, recv: &mut RecvStream, backend: Arc<dyn Backend>, grants: &Grants, node: NodeId, request: FileRequest, mut credit: u32) -> Result<()> {

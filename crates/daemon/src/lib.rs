@@ -59,8 +59,10 @@ pub async fn run(mut config: Config) -> Result<()> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/agent/mod.rs"]
 mod agent_test;
 #[cfg(test)]
+#[path = "../tests/unit/protocol_audit.rs"]
 mod protocol_audit_test;
 
 pub async fn login_codex() -> Result<()> {

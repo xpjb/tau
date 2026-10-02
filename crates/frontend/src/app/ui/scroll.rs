@@ -232,4 +232,5 @@ impl ScrollState {
 }
 
 #[cfg(all(test, not(target_os = "android")))]
+#[path = "../../../tests/unit/app/ui/scroll.rs"]
 mod tests;

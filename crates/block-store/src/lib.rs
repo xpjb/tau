@@ -424,4 +424,5 @@ pub fn publish_stage(db: &Connection, stage: &str, scope: &str, id: &str, meta: 
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/core.rs"]
 mod tests;
