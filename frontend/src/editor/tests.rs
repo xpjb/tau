@@ -304,3 +304,34 @@ fn short_single_line_fields_keep_full_text_and_caret_inside_the_clip() {
         assert!(caret.y >= inner.y && caret.y + caret.height <= inner.y + inner.height + 0.01);
     }
 }
+
+#[test]
+fn touch_endpoints_cross_and_shrink_on_real_unicode_and_wrapped_layouts() {
+    for width in [12., 80.] {
+        let mut f = Fixture::new();
+        let mut e = Editor::new("start 😀 e\u{301}lan finish\n第二行".into());
+        f.view(&mut e, width, 12., false);
+        e.anchor = "start ".len();
+        e.caret.byte_index = "start 😀 e\u{301}lan".len();
+        e.after_edit = true;
+        let fixed = e.caret.byte_index;
+        let handle = e.selection_handles(&f.text).into_iter().find(|h| h.start).unwrap();
+        e.grab_selection_handle(&f.text, handle.center()).unwrap();
+        assert_eq!(e.anchor, fixed);
+        let original = e.value.clone();
+        for end in ["start 😀 e\u{301}lan finish".len(), "start 😀 ".len(), "start ".len()] {
+            let layout = f.layout(&e);
+            let caret = layout.caret_rect(layout.caret_after_edit(end));
+            let view = e.view.unwrap();
+            let origin = e.origin(layout, view);
+            let point = Vec2::new(origin.x + caret.x_em * view.size,
+                origin.y + (caret.y_em + caret.height_em / 2.) * view.size);
+            e.hit(&mut f.text, f.chain, point, true);
+            assert_eq!(e.anchor, fixed, "The untouched endpoint stays fixed, including crossing");
+            assert_eq!(e.caret.byte_index, end);
+            assert_eq!(e.selected(), &original[fixed.min(end)..fixed.max(end)]);
+            assert_eq!(e.value, original);
+            assert!(e.undo.is_empty(), "Selection is not an authored edit");
+        }
+    }
+}

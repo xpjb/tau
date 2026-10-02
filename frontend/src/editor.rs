@@ -5,6 +5,7 @@ use sanscale::{Align, Boundaries, Caret, Draw, FontChainHandle, Layout, Motion, 
 use std::{borrow::Cow, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
 mod mobile;
+mod touch;
 
 #[derive(Clone)]
 struct Snapshot {

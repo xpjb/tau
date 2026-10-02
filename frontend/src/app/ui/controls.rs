@@ -235,6 +235,7 @@ pub(in crate::app) struct TextField {
     pub placeholder: String,
     pub size: f32,
     pub decorated: bool,
+    selection_drag: Option<(u64, Vec2)>,
 }
 impl TextField {
     /// A labelled field owns both its label and the remaining editor bounds.
@@ -260,16 +261,38 @@ impl TextField {
             placeholder: String::new(),
             size: 15.,
             decorated: true,
+            selection_drag: None,
         }
     }
 }
 impl Widget for TextField {
     fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
-        let capture = cx.ui.capture.filter(|c| c.target == self.control.target && !c.touch && c.dragged);
-        if capture.is_some() {
+        let capture = cx.ui.capture.filter(|c| c.target == self.control.target);
+        if capture.is_none() || self.selection_drag.is_some_and(|(id,_)| id != self.editor.native_id()) {
+            self.selection_drag = None;
+        }
+        if let Some(c) = capture.filter(|c| cx.ui.mobile && c.touch && !c.dragged && !c.claimed
+            && c.started.elapsed().as_millis() >= 450 && self.control.enabled) {
             let renderer = &mut cx.services.renderer;
-            cx.ui.dirty |=
-                self.editor.drag_scroll(&mut renderer.text, renderer.faces.prose[0], capture.unwrap().point, dt);
+            self.editor.hit(&mut renderer.text, renderer.faces.prose[0], c.point, false);
+            self.editor.select_word();
+            let Some(caret) = self.editor.ime_rect(&renderer.text) else { return; };
+            self.selection_drag = Some((self.editor.native_id(),
+                Vec2::new(c.point.x - caret.x, c.point.y - caret.y - caret.height / 2.)));
+            cx.ui.focus = Some(self.control.target);
+            cx.focus_native(self.control.target, self.editor.native_id());
+            let capture = cx.ui.capture.as_mut().unwrap();
+            capture.claimed = true;
+            capture.dragged = true;
+            cx.services.platform.push(super::PlatformAction::Haptic);
+            cx.ui.dirty = true;
+            return;
+        }
+        if let Some(c) = capture.filter(|c| c.dragged && (!c.touch || self.selection_drag.is_some())) {
+            let point = self.selection_drag.map_or(c.point, |(_, offset)|
+                Vec2::new(c.point.x - offset.x, c.point.y - offset.y));
+            let renderer = &mut cx.services.renderer;
+            cx.ui.dirty |= self.editor.drag_scroll(&mut renderer.text, renderer.faces.prose[0], point, dt);
         }
     }
     fn owns(&self, target: Target, _: &Controller, _: &UiState) -> bool {
@@ -280,8 +303,32 @@ impl Widget for TextField {
         let target = self.control.target;
         let capture = cx.ui.capture.filter(|c| c.target == target);
         let focused = cx.ui.focus == Some(target);
+        if capture.is_none() || self.selection_drag.is_some_and(|(id,_)| id != self.editor.native_id()) {
+            self.selection_drag = None;
+        }
         let renderer = &mut cx.services.renderer;
         match *event {
+            Event::Down { pointer, point, touch: true }
+                if cx.ui.mobile && focused && self.control.enabled && self.control.contains(point)
+                    && cx.ui.capture.is_none() =>
+            {
+                if let Some(offset) = self.editor.grab_selection_handle(&renderer.text, point) {
+                    self.selection_drag = Some((self.editor.native_id(), offset));
+                    cx.ui.capture = Some(Capture { target, pointer, start: point, point, touch: true,
+                        dragged: true, claimed: true, started: std::time::Instant::now() });
+                    cx.ui.dirty = true;
+                    return true;
+                }
+            }
+            Event::Up { pointer, .. } if capture.is_some_and(|c| c.pointer == pointer)
+                && self.selection_drag.is_some() =>
+            {
+                self.selection_drag = None;
+                cx.ui.capture = None;
+                cx.services.platform.push(super::PlatformAction::InputMenu);
+                cx.ui.dirty = true;
+                return true;
+            }
             Event::Down { point, touch: false, .. }
                 if self.control.enabled && self.control.contains(point) && cx.ui.capture.is_none() =>
             {
@@ -289,11 +336,15 @@ impl Widget for TextField {
             }
             Event::Move { pointer, point } if capture.is_some_and(|c| c.pointer == pointer) => {
                 let capture = capture.unwrap();
-                if capture.touch {
-                    if let Some(c) = &mut cx.ui.capture {
-                        c.claimed = true;
+                if capture.touch && let Some((_, offset)) = self.selection_drag {
+                    self.editor.hit(&mut renderer.text, renderer.faces.prose[0],
+                        Vec2::new(point.x - offset.x, point.y - offset.y), true);
+                } else if capture.touch {
+                    let moved = (point.x - capture.start.x).abs() + (point.y - capture.start.y).abs() > 7. * cx.ui.scale;
+                    if capture.dragged || moved {
+                        if let Some(c) = &mut cx.ui.capture { c.claimed = true; }
+                        self.editor.wheel(&mut renderer.text, renderer.faces.prose[0], capture.point.y - point.y, false);
                     }
-                    self.editor.wheel(&mut renderer.text, renderer.faces.prose[0], capture.point.y - point.y, false);
                 } else {
                     self.editor.hit(&mut renderer.text, renderer.faces.prose[0], point, true);
                 }
@@ -376,7 +427,10 @@ impl Widget for TextField {
                 self.secret,
                 &self.placeholder,
                 self.decorated,
-            )
+            );
+            if cx.ui.mobile && self.control.enabled && cx.ui.focus == Some(self.control.target) {
+                self.editor.draw_selection_handles(&cx.services.renderer.text, layer);
+            }
         });
     }
 }

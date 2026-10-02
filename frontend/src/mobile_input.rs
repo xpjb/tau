@@ -14,6 +14,8 @@ pub struct Input {
     pub secret: bool,
     pub single_line: bool,
     pub rect: [f32; 4],
+    /// Visible selection/caret bounds in surface pixels for the floating toolbar.
+    pub selection_rect: [f32; 4],
     pub size: f32,
     pub max_bytes: usize,
 }
@@ -21,8 +23,10 @@ impl Input {
     pub fn same_configuration(&self, other: &Self) -> bool {
         // Native edits already live in the IME. Never echo an older snapshot
         // back into its Editable (which would destroy composing spans/cursor).
+        // Geometry-only changes reposition the toolbar without changing revision.
         self.id == other.id && self.revision == other.revision
             && self.request == other.request && self.rect == other.rect
+            && self.selection_rect == other.selection_rect
             && self.size == other.size && self.secret == other.secret
             && self.single_line == other.single_line
     }

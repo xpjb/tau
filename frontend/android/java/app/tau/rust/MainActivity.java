@@ -29,7 +29,8 @@ public final class MainActivity extends NativeActivity {
     private InlineInput input;
     private long inputId, inputRevision, inputRequest;
     private int inputLimit;
-    private android.widget.PopupMenu inputMenu;
+    private ActionMode inputMenu;
+    private final android.graphics.Rect inputSelection = new android.graphics.Rect();
     private boolean updatingInput, imeVisible;
     private final android.graphics.Rect lastViewport = new android.graphics.Rect();
     @Override public void onCreate(Bundle state) {
@@ -84,7 +85,7 @@ public final class MainActivity extends NativeActivity {
         try {
             if (json.equals("null")) {
                 inputId = 0;
-                if (inputMenu != null) { inputMenu.dismiss(); inputMenu = null; }
+                if (inputMenu != null) { inputMenu.finish(); inputMenu = null; }
                 if (input != null) {
                     keyboard().hideSoftInputFromWindow(input.getWindowToken(),0);
                     input.clearFocus(); input.setVisibility(View.GONE);
@@ -120,11 +121,12 @@ public final class MainActivity extends NativeActivity {
             boolean show = request != inputRequest;
             updatingInput = true;
             if (changed) {
-                if (inputMenu != null) { inputMenu.dismiss(); inputMenu = null; }
+                if (inputMenu != null) { inputMenu.finish(); inputMenu = null; }
                 boolean singleLine = state.getBoolean("single_line"), secret = state.getBoolean("secret");
                 int type = InputType.TYPE_CLASS_TEXT | (secret ? InputType.TYPE_TEXT_VARIATION_PASSWORD
                     : singleLine ? 0 : InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-                input.setInputType(type); input.setSingleLine(singleLine);
+                // setSingleLine replaces the transformation; apply password type last.
+                input.setSingleLine(singleLine); input.setInputType(type);
                 input.setImeOptions((singleLine ? EditorInfo.IME_ACTION_DONE : EditorInfo.IME_ACTION_NONE)
                     | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN
                     | (secret ? EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING : 0));
@@ -143,11 +145,18 @@ public final class MainActivity extends NativeActivity {
             layout.leftMargin = (int)Math.round(rect.getDouble(0)) + origin[0] - at[0];
             layout.topMargin = (int)Math.round(rect.getDouble(1)) + origin[1] - at[1];
             input.setLayoutParams(layout);
+            org.json.JSONArray selection = state.getJSONArray("selection_rect");
+            int selectionX = (int)Math.floor(selection.getDouble(0) - rect.getDouble(0));
+            int selectionY = (int)Math.floor(selection.getDouble(1) - rect.getDouble(1));
+            inputSelection.set(selectionX,selectionY,
+                selectionX + Math.max(1,(int)Math.ceil(selection.getDouble(2))),
+                selectionY + Math.max(1,(int)Math.ceil(selection.getDouble(3))));
             input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX,(float)state.getDouble("size"));
             int padding = Math.round((float)state.getDouble("size") * .75f);
             input.setPadding(padding,padding,padding,padding);
             input.setVisibility(View.VISIBLE); input.requestFocus();
             updatingInput = false;
+            if (inputMenu != null) { inputMenu.invalidate(); inputMenu.invalidateContentRect(); }
             if (changed) keyboard().restartInput(input);
             if (show) input.post(() -> {
                 if (inputId == id && inputRequest == request && input.hasFocus())
@@ -213,24 +222,46 @@ public final class MainActivity extends NativeActivity {
         ReplacementConnection(InputConnection connection) { super(connection); }
         @Override public boolean replaceText(int start,int end,CharSequence text,int position,TextAttribute attributes) { return active() && report(super.replaceText(start,end,text,position,attributes)); }
     }
+    /** Non-modal platform toolbar: unlike PopupMenu, outside touches go straight
+     * to Rust's selection handles, without a throwaway dismiss-first gesture. */
     public void inputMenu() { runOnUiThread(() -> {
         if (inputId == 0 || input == null) return;
-        if (inputMenu != null) inputMenu.dismiss();
+        if (inputMenu != null) inputMenu.finish();
         final long id = inputId, revision = inputRevision;
-        inputMenu = new android.widget.PopupMenu(this,input);
-        boolean selected = input.getSelectionStart() != input.getSelectionEnd();
-        boolean secret = input.getTransformationMethod() instanceof android.text.method.PasswordTransformationMethod;
-        inputMenu.getMenu().add(0,android.R.id.cut,0,android.R.string.cut).setEnabled(selected && !secret);
-        inputMenu.getMenu().add(0,android.R.id.copy,1,android.R.string.copy).setEnabled(selected && !secret);
-        inputMenu.getMenu().add(0,android.R.id.paste,2,android.R.string.paste);
-        inputMenu.getMenu().add(0,android.R.id.selectAll,3,android.R.string.selectAll);
-        inputMenu.setOnMenuItemClickListener(item -> {
-            if (inputId != id || inputRevision != revision) return false;
-            if (item.getItemId() == android.R.id.selectAll) input.setSelection(0,input.length());
-            else input.onTextContextMenuItem(item.getItemId());
-            reportEdit(); return true;
-        });
-        inputMenu.show();
+        inputMenu = input.startActionMode(new ActionMode.Callback2() {
+            private boolean active() { return inputId == id && inputRevision == revision; }
+            @Override public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+                menu.add(0,android.R.id.cut,0,android.R.string.cut).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+                menu.add(0,android.R.id.copy,1,android.R.string.copy).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+                menu.add(0,android.R.id.paste,2,android.R.string.paste).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+                menu.add(0,android.R.id.selectAll,3,android.R.string.selectAll).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+                return active();
+            }
+            @Override public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                boolean selected = input.getSelectionStart() != input.getSelectionEnd();
+                boolean secret = input.getTransformationMethod() instanceof android.text.method.PasswordTransformationMethod;
+                menu.findItem(android.R.id.cut).setVisible(selected && !secret);
+                menu.findItem(android.R.id.copy).setVisible(selected && !secret);
+                menu.findItem(android.R.id.paste).setEnabled(((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).hasPrimaryClip());
+                menu.findItem(android.R.id.selectAll).setEnabled(input.length() > 0);
+                return true;
+            }
+            @Override public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                if (!active()) { mode.finish(); return false; }
+                if (item.getItemId() == android.R.id.selectAll) input.setSelection(0,input.length());
+                else input.onTextContextMenuItem(item.getItemId());
+                reportEdit();
+                if (item.getItemId() == android.R.id.selectAll) mode.invalidate();
+                else mode.finish();
+                return true;
+            }
+            @Override public void onGetContentRect(ActionMode mode, View view, android.graphics.Rect rect) {
+                rect.set(inputSelection);
+            }
+            @Override public void onDestroyActionMode(ActionMode mode) {
+                if (inputMenu == mode) inputMenu = null;
+            }
+        }, ActionMode.TYPE_FLOATING);
     }); }
     public void hideKeyboard() { runOnUiThread(() -> {
         if (input != null) keyboard().hideSoftInputFromWindow(input.getWindowToken(),0);

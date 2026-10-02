@@ -343,7 +343,9 @@ async fn remote_picker_results_wake_and_repaint_without_input_or_polling_frames(
 fn reopening_files_restores_each_chats_buffer_and_reading_position() {
     for mobile in [false, true] {
         let mut h = Harness::new(if mobile { (360,720) } else { (1000,800) }, 1., mobile);
-        h.files(); h.text(&source());
+        h.files();
+        h.app.with_ui(|root, cx| root.workspace.chat.code.code_action(Choice::FileOpen("/workspace/src/main.rs".into(), false), cx)).unwrap();
+        h.text(&source());
         let point = h.line(3, true);
         h.app.press(3, point, mobile); h.app.release(3, point); h.frame();
         h.app.root.workspace.chat.code.view.as_mut().unwrap().scroll.value = 240.;
@@ -359,6 +361,7 @@ fn reopening_files_restores_each_chats_buffer_and_reading_position() {
             h.files();
             let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
             assert_eq!(view.path.as_deref(), Some("/workspace/src/main.rs"));
+            assert!(matches!(view.operation, FileOperation::Open { .. }), "Revalidate the file, not its parent directory");
             assert!(Arc::ptr_eq(view.document.as_ref().unwrap(), &original), "Reopening is immediate, not a blank directory reload");
             assert_eq!(view.scroll.value, scroll);
             assert_eq!(view.selection.as_ref().unwrap().range(&original), Some(3..4));
@@ -381,7 +384,9 @@ fn reopening_files_restores_each_chats_buffer_and_reading_position() {
 #[test]
 fn closing_the_picker_keeps_the_open_file_not_its_preview_and_restores_scroll() {
     let mut h = Harness::new((1000,800), 1., false);
-    h.files(); h.text(&source());
+    h.files();
+    h.app.with_ui(|root, cx| root.workspace.chat.code.code_action(Choice::FileOpen("/workspace/src/main.rs".into(), false), cx)).unwrap();
+    h.text(&source());
     h.app.root.workspace.chat.code.view.as_mut().unwrap().scroll.value = 300.; h.frame();
     let scroll = h.app.root.workspace.chat.code.view.as_ref().unwrap().scroll.value;
     for close_browser in [false, true] {

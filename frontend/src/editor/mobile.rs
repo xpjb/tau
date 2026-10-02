@@ -25,6 +25,7 @@ impl Editor {
             end: self.value[..self.caret.byte_index].encode_utf16().count() as i32,
             secret: view.secret, single_line: self.single_line,
             rect: [view.rect.x, view.rect.y, view.rect.width, view.rect.height], size: view.size,
+            selection_rect: [view.rect.x, view.rect.y, view.rect.width, view.rect.height],
             max_bytes: tau_protocol::MAX_REQUEST_BYTES,
         })
     }
