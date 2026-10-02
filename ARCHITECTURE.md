@@ -104,6 +104,13 @@ then resolve the attachment against measured layout and existing history paging.
 See [the navigation review and validation](docs/client-navigation.md), including
 the remaining event/render coupling in `App`.
 
+New-chat model selection is authored local state, not an RPC. The tile and chat
+menu share that choice; the first send pins it to the durable prompt receipt and
+queue transaction. Pending named creation can travel with a text send rather than
+cost another round trip. The account-wide model catalogue is independently cached
+and asynchronously revalidated; it supplies hints/defaults, never permission to
+select or send. See [ownership and validation](docs/client-first-models.md).
+
 Client settings include server/token and quick favorites; daemon settings are fetched
 and saved as one typed, revisioned document. Cache TTL gauges are explicitly estimated
 provider cache age from existing timestamps. Runtime idle eviction is independent: idle runtimes can be released with paused

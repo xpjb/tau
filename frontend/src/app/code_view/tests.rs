@@ -404,3 +404,27 @@ fn closing_the_picker_keeps_the_open_file_not_its_preview_and_restores_scroll() 
         assert_eq!(code.scroll.value, scroll);
     }
 }
+
+#[test]
+fn explorer_rows_are_bare_monospace_names_and_long_names_stay_on_one_line() {
+    let mut h = Harness::new((360,720), 1., true);
+    let rect = Rect::new(18., 100., 320., 24.);
+    for (name, directory, expected) in [("README.md", false, "README.md"), ("src", true, "src/")] {
+        let mut layer = Layer::default();
+        h.app.with_ui(|_, cx| paint::entry_label(name, directory, rect, rect, &mut layer, cx));
+        assert_eq!(layer.draws.len(), 1);
+        let draw = &layer.draws[0];
+        let style = Style { chain: h.app.services.renderer.faces.mono[0], wrap_em: None, align: Align::Left, line_spacing: 1. };
+        let reference = h.app.services.renderer.text.shape_transient(expected, &style).unwrap();
+        assert_eq!(h.app.services.renderer.text.measure(draw.block).width_em(), h.app.services.renderer.text.measure(reference).width_em(),
+            "Neither a prefix glyph nor an icon column belongs in a file row");
+        assert_eq!(draw.at.x, rect.x);
+    }
+    for (name, directory) in [(format!("{}.rs", "long-file-name-".repeat(30)), false), ("cafe\u{301}-directory-".repeat(30), true)] {
+        let mut layer = Layer::default();
+        h.app.with_ui(|_, cx| paint::entry_label(&name, directory, rect, rect, &mut layer, cx));
+        let draw = &layer.draws[0]; let size = h.app.services.renderer.text.measure(draw.block);
+        assert!(size.width_em() * draw.size <= rect.width);
+        assert!(size.height_em() * draw.size <= rect.height, "Long names ellipsize, never wrap into the next row");
+    }
+}

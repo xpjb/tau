@@ -213,3 +213,22 @@ fn new_chat_tiles_select_on_the_first_offline_frame_and_ignore_late_defaults() {
         assert!(matches!(&pending.request.command, ClientCommand::Prompt { model: Some(m), .. } if m.model_id == "from-menu"));
     }
 }
+
+#[test]
+fn quick_model_suggestions_work_offline_without_a_selected_chat_or_commands() {
+    for (size, mobile) in [((1000,800), false), ((360,720), true)] {
+        let mut h = Harness::new(size, mobile);
+        h.app.controller.account.selected = None;
+        h.app.controller.message(ServerMessage::ModelCatalog { catalog: ModelCatalog {
+            revision: 1, models: vec![SlashCommandArgument { value: "fixture/cached-model".into(), description: None }],
+            ..Default::default()
+        }}).unwrap();
+        assert!(h.app.controller.selected().is_none());
+        assert!(h.app.controller.epoch.is_none());
+        h.app.open_ui(ui::DialogSpec::Models).unwrap(); h.frame();
+        h.click_dialog("+ fixture/cached-model");
+        h.click_dialog("Save");
+        assert!(h.app.controller.model_preferences.slugs.iter().any(|slug| slug == "fixture/cached-model"));
+        assert!(h.app.controller.account.last_model.is_none(), "Editing favorites does not choose a model");
+    }
+}
