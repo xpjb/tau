@@ -1,3 +1,16 @@
+# Unreleased Tau2 source — October 2, 2026
+
+Client-first model selection and quiet file rows are merged as `f442792`, on top
+of the shared-scroll integration. The combined source passes 311/311 selected
+nextest cases plus native workspace/all-target, Android ARM64/API29 and Windows
+MSVC checks. [Details](docs/client-first-models.md).
+
+**Source protocol is now 23; the deployed beta below remains 22.** A matched
+client/daemon release is required. No release build or deployment was performed
+for this merge; application version/schema and stable remain unchanged.
+
+---
+
 # Beta 0.7.11 released — October 2, 2026
 
 Matched daemon, Windows x64 installer and Android ARM64 APK are built from

@@ -1,3 +1,26 @@
+# Client-first models and quiet Files rows — integrated source, October 2, 2026
+
+At the user's request, `fix/tau2-client-first-models` (`5c6fabc`) is merged as
+**`f442792`** on top of the scroll-physics integration (`8a0281a`). The dedicated
+merge worktree is `/root/tau2-merge-client-first`. One append-only test conflict
+was resolved by retaining both the scroll cases and the new filename case.
+
+- Bare monospaced file names; portable ASCII `/` directory suffixes. No dot/icon
+  column and no mobile font-dependent directory glyph.
+- New-chat choice is immediately local and durable, shared by both picker entry
+  points. First sends pin the exact model; text can pipeline named creation.
+  Catalogue suggestions are account-cached and revalidated asynchronously,
+  independently of chat state. No new `/model` selection RPC or waiting state.
+- **Merged source: 311/311 nextest cases pass, zero skipped.** Native workspace/
+  all-target, Android ARM64/API29 and Windows MSVC checks also pass on the merged
+  code. [Implementation, previews and exact evidence](docs/client-first-models.md).
+- **Source only:** protocol **23** requires a matched client/daemon release.
+  The running beta remains protocol 22; no package, deployment, service restart,
+  production-data/auth modification, real-provider call or stable/master change.
+  Application version/schema are unchanged. Physical-device acceptance is open.
+
+---
+
 # Shared scroll momentum — integrated source, October 2, 2026
 
 At the user's request, feature `29150bf` from `fix/tau2-scroll-momentum` is merged

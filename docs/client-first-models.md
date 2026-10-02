@@ -94,3 +94,21 @@ Actual synthetic headless frames (not mockups/device screenshots):
 Reproduce frames with `TAU_CODE_PREVIEW_DIR` / `TAU_PROJECT_DUMP_DIR` and the
 `code_view::tests` / `project_tests` frontend nextest filters. Physical mobile
 font/input acceptance remains open; source integration is not a beta deployment.
+
+## Requested integration
+
+Merged as **`f442792`** onto Tau2 `8a0281a` in the isolated
+`/root/tau2-merge-client-first` worktree. The newer shared-scroll implementation is
+preserved; the only conflict appended different tests to the same file, and both
+sets were retained. The actual combined tree was revalidated, not assumed equal
+to the feature tree:
+
+- Managed workspace/all-target compiler check: pass.
+- Same broad nextest selection above: **311/311 pass, zero skipped**, run
+  `7193c5d5-d237-43a2-becb-c24a4841794d` (10 binaries).
+- Managed Android ARM64/API29 and Windows MSVC frontend-library checks: pass.
+- Logs: `/tmp/tau2-client-first-merge-{check,tests,android,windows}.log`.
+
+The extra cases include the offline no-chat suggestions test and the newly
+integrated scroll tests. Source integration still does not deploy protocol 23 or
+change the running beta/stable services.
