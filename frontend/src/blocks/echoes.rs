@@ -20,8 +20,10 @@ pub(super) fn initialize(db: &Connection) -> Result<()> {
 impl Cache {
     pub(crate) fn remember_local(&self, scope: &str, local: &LocalChat, lineage: &str) -> Result<()> {
         if local.pending.is_empty() { return Ok(()); }
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
+        let db = self.db.lock().unwrap();
+        // Saved intent remains in the authored store. Optional replica reuse
+        // must not turn startup/viewport contention into a lock error popup.
+        let Some(tx) = try_replica_maintenance(&db)? else { return Ok(()); };
         // Never lend bytes or retire authored work across a source restore.
         if tau_blocks::cursor(&tx)?.lineage != lineage { return Ok(()); }
         for pending in &local.pending {
