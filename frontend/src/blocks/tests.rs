@@ -129,6 +129,48 @@ fn viewport_limits_body_interests_and_copy_waits_for_sealed_content() {
 }
 
 #[test]
+fn viewport_body_admission_advances_past_cached_rows_and_closed_tools() {
+    for mode in ["text", "closed tools", "open tools"] {
+        let mut f = Fixture::new();
+        let visible = (0..60).map(|n| format!("row-{n:03}")).collect::<BTreeSet<_>>();
+        let mut local = LocalChat::default();
+        for (n, id) in visible.iter().enumerate() {
+            let tool = mode != "text" && n >= 30;
+            f.put(id, None, n as u64, if tool { BlockKind::Tool } else { BlockKind::Text },
+                event(id, n as u64, if tool { "tool" } else { "text" }), if tool { b"" } else { b"body" });
+            if tool {
+                f.put(&tool_input_id(id), Some(id), 0, BlockKind::Code, json!({"inputFor":id}), b"body");
+                let result = format!("{id}/result");
+                let mut meta = event(&result, 60+n as u64, "text"); meta["event"]["role"] = json!("tool");
+                f.put(&result, Some(id), 1, BlockKind::Code, meta, b"result");
+                if mode == "open tools" { local.expansion.insert(format!("tool:{id}"), true); }
+            }
+        }
+        f.page(None, None);
+        while let Some(before) = f.cache.history_cursor("chat").unwrap() { f.page(None, Some(before)); }
+        for id in visible.iter().skip(30) { if mode != "text" { f.page(Some(id), None); } }
+        let mut fetched = BTreeSet::new();
+        for _ in 0..3 {
+            let plan = f.cache.plan_visible("chat", &local, &[], Some(&visible)).unwrap();
+            let missing = plan.blocks.iter().filter(|(id, head)| id != QUEUE
+                && head.is_none_or(|(_, length, _, stored)| stored < length)).map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            let groups = missing.iter().map(|id| tau_blocks::header(&f.source,"chat",id).unwrap().unwrap().parent.unwrap_or(id.clone())).collect::<BTreeSet<_>>();
+            assert!(groups.len() <= 30, "The active root cohort remains bounded");
+            for id in missing { fetched.insert(id.clone()); f.body(&id); }
+        }
+        let expected = match mode { "closed tools" => 30, "open tools" => 90, _ => 60 };
+        assert_eq!(fetched.len(), expected, "Cached rows and tool disclosures must not strand visible loading rows: {mode}");
+        let view = f.cache.snapshot("chat").unwrap().unwrap();
+        for id in visible.iter().take(if mode == "closed tools" { 30 } else { 60 }) {
+            assert_eq!(view.events.iter().find(|e| &e.id == id).unwrap().text, "body");
+        }
+        if mode == "closed tools" {
+            assert!(fetched.iter().all(|id| !id.contains('/')), "Closed tools still cannot fetch child bytes");
+        }
+    }
+}
+
+#[test]
 fn copy_interest_advances_in_bounded_cohorts_instead_of_starving_after_thirty_cards() {
     let mut f=Fixture::new();let ids=(0..100).map(|n|format!("thinking-{n}")).collect::<Vec<_>>();
     for (n,id) in ids.iter().enumerate() {f.put(id,None,n as u64,BlockKind::Thinking,event(id,n as u64,"thinking"),b"thought");}
@@ -880,4 +922,50 @@ fn prefetched_bodies_do_not_thrash_after_eviction_but_replacements_and_viewing_s
     f.body("text");f.cache.plan_background("chat").unwrap();
     f.cache.clear().unwrap();f.page(None,None);
     assert!(f.cache.plan_background("chat").unwrap().blocks.iter().any(|(id,_)|id=="text"),"explicit cache clearing resets prefetch completion");
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn file_reconnect_does_not_retry_missing_or_corrupt_content() {
+    use std::sync::atomic::{AtomicUsize,Ordering};
+    use tau_transfer::blocks::Backend;
+    struct Broken {
+        db:Arc<Mutex<Connection>>, reads:Arc<AtomicUsize>, changed:watch::Receiver<u64>, corrupt:bool,
+    }
+    impl Backend for Broken {
+        fn feed(&self,_:FeedRequest)->futures_util::future::BoxFuture<'static,Result<FeedPage>> {
+            Box::pin(async {anyhow::bail!("Unexpected metadata request")})
+        }
+        fn read(&self,request:BlockRequest)->futures_util::future::BoxFuture<'static,Result<ContentRange>> {
+            self.reads.fetch_add(1,Ordering::SeqCst);
+            let db=self.db.clone();let corrupt=self.corrupt;
+            Box::pin(async move {
+                ensure!(corrupt,"Source content is missing");
+                let mut range=tau_blocks::read(&db.lock().unwrap(),&request)?;
+                range.hash="0".repeat(64);Ok(range)
+            })
+        }
+        fn changes(&self)->watch::Receiver<u64> {self.changed.clone()}
+    }
+    for corrupt in [false,true] {
+        let mut f=Fixture::new();f.put("file",None,0,BlockKind::File,json!({}),b"file bytes");
+        let reads=Arc::new(AtomicUsize::new(0));let (_changes,changed)=watch::channel(0);
+        let server=tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Broken {
+            db:Arc::new(Mutex::new(f.source)),reads:reads.clone(),changed,corrupt,
+        })).await.unwrap();
+        let client=Arc::new(Client::bind().await.unwrap());
+        client.configure(&server.authorize(&client.node_id(),f.lineage.clone()).unwrap(),"127.0.0.1").await.unwrap();
+        let (_endpoint,endpoint)=watch::channel(Some(client.clone()));let (_ready,ready)=watch::channel(Some(f.lineage));
+        let (notices,mut received)=mpsc::channel(32);let (_cancel,cancel)=watch::channel(false);
+        let path=f._root.path().join("download.bin");
+        let transfer=files::Downloads {cache:f.cache.clone(),client:endpoint,ready,notices,wake:Arc::new(||{})};
+        tokio::time::timeout(Duration::from_secs(5),transfer.run("file".into(),"chat".into(),"file".into(),path.clone(),MAX_BLOCK_BYTES,cancel)).await.unwrap();
+        let failure=loop {
+            let (_,_,status)=received.recv().await.unwrap().transfer.unwrap();
+            if status.done {break status.failure.unwrap();}
+        };
+        assert!(failure.contains(if corrupt {"integrity"} else {"missing"}),"{failure}");
+        assert_eq!(reads.load(Ordering::SeqCst),1,"Content failure is not a connection retry");
+        assert!(!path.exists());assert_eq!(f.cache.block_request("chat","file").unwrap().offset,0);
+        client.shutdown().await;server.shutdown().await;
+    }
 }

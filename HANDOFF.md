@@ -1,3 +1,37 @@
+# Block loading and native recovery QA — source fixes, not deployed
+
+Branch/worktree: `fix/tau2-block-loading-stability`,
+`/root/tau2-block-loading-stability`, based on `origin/tau2` at `003de72`.
+All implementation/regressions are pushed: UI/admission `203c9eb`, native
+peer-packet policy `55ba46f`, and interrupted-file read resumption `754096b`.
+No merge into integration/stable, version/schema/application-protocol change,
+packages, service restart or live-data change. See [diagnosis and evidence](docs/block-loading-stability.md).
+
+The two shared-client loading causes are fixed: cached/closed rows hogging the
+thirty-root cohort, and viewport disk hydration not requesting a repaint. Missing
+cohorts advance; reading anchors are retained and idle repaint settles.
+
+The user's follow-up about a fifteen-second retry exposed a separate traced
+receive wait: the forty-second native idle policy retained a silent connection
+while packet probe gaps grew. There is no fixed fifteen-second application retry.
+Native peer detection now uses max-idle 5 seconds / keep-alive 2 seconds, **not** a
+body-response timeout. Six-second slow reads and twelve-second healthy idle both
+keep their original connection. Interrupted immutable file reads resume their
+verified prefix; cancellation/source/content/storage failures do not retry, and
+no command/provider execution is replayed.
+
+91 targeted checks passed for the peer change; final 4/4 file/recovery checks pass
+including the original real-daemon impaired link and fatal missing/corrupt data.
+Eight-/seventeen-second UDP outages resume individual replies/files within about
+1–3 seconds here while the same control socket remains healthy. The final Windows
+MSVC frontend-library compiler check passes. This is not physical device/WAN QA.
+
+Backlog 014's socket-wide reproduced failure is corrected, but its original
+seed-73 per-file gap and Windows acceptance remain open; do not claim blanket
+closure. Use managed Cargo/nextest only; Clippy and the built-in runner are banned.
+
+---
+
 # Android startup locking — integrated source, October 2, 2026
 
 User reports near-instant normal launch versus recognizable >1-second stalls,

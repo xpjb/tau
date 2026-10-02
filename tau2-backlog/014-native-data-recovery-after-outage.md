@@ -2,9 +2,11 @@
 
 **September 29 triage:** remains separate deferred reliability diagnosis. First capture a failing run's per-file wait/progress boundary (acquisition, receive/credits, commit or export), then scope a cause-specific fix. Neither the shared-state direction nor receiver extraction establishes its cause. Not a UI simplification prerequisite or LOC budget; do not silently close it.
 
-Status: **Open; deferred at the user's request on September 27, 2026.** The observed
-recovery gap is real; its exact wait/root cause and the appropriate fix remain
-unresolved. No timeout change or recovery-architecture rewrite is approved here.
+Status: **Partially addressed in source; original per-file gap and device acceptance
+remain open.** The September 27 deferral is historical: the user subsequently
+requested investigation and correction during block-loading QA. A packet-traced
+socket-wide wait now has a bounded peer-liveness/read-resumption fix below.
+That does not establish the original seed-73 failure's precise wait boundary.
 
 ## Observed problem
 
@@ -38,9 +40,10 @@ control readiness currently does not establish that those jobs are progressing.
 At investigation, control had a one-second **minimum interval between connection
 attempt starts**, with five-second acquisition and unanswered-Pong deadlines. It
 was not a one-second failure detector. Native operations have several 30-second
-limits and QUIC has a 40-second idle timeout, but the download receive loop has no
-explicit per-file no-progress deadline. The 15-second value above is the test's
-acceptance guard, not an application retry setting.
+limits and QUIC then had a 40-second idle timeout. That baseline is superseded
+by the peer-packet correction below; it is not a five-second per-file response
+deadline. The 15-second value above is the original test's acceptance guard, not
+an application retry setting.
 
 Relevant code: `frontend/src/connection.rs`, `frontend/src/transport.rs`,
 `transfer/src/blocks.rs`, and `frontend/src/blocks/files.rs`. The transport loop
@@ -62,3 +65,54 @@ centralized rewrite or that identical control/data timeouts would fix the issue.
   needless reconnects, re-download verified prefixes or replay durable controls.
 - Add a targeted regression for the identified cause and retain seeded pressure
   coverage. Do not close this item based only on a successful same-seed rerun.
+
+
+## Initial block-loading QA follow-up — historical delay observation
+
+The user raised this item again while reporting Windows transcript blocks stuck
+on Loading and intermittent reflow. [The bounded QA fix](../docs/block-loading-stability.md)
+reproduces and fixes fetch-cohort starvation and missing repaint after disk
+hydration; neither is a proven data-socket deadlock.
+
+A new production-controller/QUIC/replica case drops UDP for eight seconds while
+read-only WebSocket control remains healthy. Foreground and background transcript
+bodies both resume their verified suffix and complete exactly. Observed first
+progress varied from about 2 seconds to about 8.5 seconds after restoration.
+The per-body guard remains fifteen seconds; no application retry/timeout setting
+was changed, and healthy connections were not forcibly replaced.
+
+This is Linux loopback evidence for transcript bodies, **not** reproduction or
+closure of the original seed-73 per-file gap or physical Windows acceptance.
+The reported Windows-only pattern may be sample/viewport-related or a separate
+native issue. Capture a failing run's wait boundary before selecting that fix.
+Aggregate Copy connection diagnostics alone cannot identify a particular stuck
+block's receive/credit or commit phase. This item stays open.
+
+
+## Packet-traced native recovery correction
+
+[The current evidence](../docs/block-loading-stability.md) includes a failing
+17-second UDP blackout: streams were admitted and waiting on receive, cache
+processing had already completed, source reads had produced the suffix, and
+packet probe waits grew while the healthy control socket continued replying.
+The old forty-second idle policy retained that silent connection. This is a
+captured failure, not a root-cause claim inferred from a passing seed-73 repeat.
+
+The shared native transport now negotiates a five-second max-idle parameter and
+uses two-second keep-alives. This limits a packet-silent peer, not a slow backend
+response: six-second page/chunk reads and twelve-second healthy idle retain their
+connection. Normal QUIC high-RTT timeout floors still apply. Interrupted immutable
+file reads resume their verified offsets with bounded transport-only retry; user
+cancellation, source/cache change, missing/corrupt content and local storage/export
+failures remain terminal, with no control or paid-operation replay.
+
+Both eight- and seventeen-second outage regressions now include a real in-flight
+file along with independent foreground/background replies and healthy WebSocket
+ping/pong. All three make individual progress within five seconds after link
+restoration and complete exactly, without another Download click. The existing
+full daemon/impaired-link test, source/integrity guards and Windows compiler check
+pass. No service/deployment change or physical Windows/Android acceptance occurred.
+
+This fixes the demonstrated socket-wide delayed reacquisition. The original
+unmerged two-file seed-73 pressure case is **not** certified by these separate
+fixtures, so this backlog item remains open for that wait boundary/device evidence.

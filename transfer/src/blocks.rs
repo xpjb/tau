@@ -156,8 +156,12 @@ fn config() -> TransportConfig {
     // until upgrading to a version exercised by the shared weak-link test.
     c.enable_segmentation_offload(false);
     c.max_concurrent_bidi_streams((MAX_STREAMS as u32).into()).max_concurrent_uni_streams(0u32.into());
-    c.max_idle_timeout(Some(Duration::from_secs(40).try_into().unwrap()));
-    c.keep_alive_interval(Some(Duration::from_secs(5)));
+    // This is peer-packet liveness, not a body/page response deadline. A quiet
+    // healthy peer still ACKs keep-alives while its backend finishes a slow read.
+    // Keeping an unreachable connection for forty seconds lets QUIC's growing
+    // probe backoff strand watches after the network has already returned.
+    c.max_idle_timeout(Some(Duration::from_secs(5).try_into().unwrap()));
+    c.keep_alive_interval(Some(Duration::from_secs(2)));
     c
 }
 

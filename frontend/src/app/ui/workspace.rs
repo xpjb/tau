@@ -328,11 +328,15 @@ impl Widget for Workspace {
         } else {
             None
         };
+        let revision = cx.model.selected().map(|chat| chat.feed.revision);
         if let Some((session, interests)) = request {
             cx.model.viewport(&session, interests);
         } else if let Some(session) = cx.model.account.selected.clone() {
             cx.model.viewport(&session, std::collections::BTreeSet::new());
         }
+        // Viewport hydration runs after the children painted. If it projects
+        // disk bytes, repaint their new bodies/heights without waiting for IO.
+        cx.ui.dirty |= revision != cx.model.selected().map(|chat| chat.feed.revision);
     }
 }
 #[derive(Clone, Copy)]

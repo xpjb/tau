@@ -1,5 +1,10 @@
 # Tau2 native block sync
 
+**Unreleased native recovery update:** [block-loading and peer recovery QA](block-loading-stability.md)
+fixes fetch-cohort/repaint starvation and bounds packet-silent peer recovery with
+verified-prefix file resumption. The old transport timing below is historical;
+application protocol/schema and checkpoint response semantics are unchanged.
+
 **Unreleased client experience update:** [warm transcripts and background prefetch](transcript-prefetch.md)
 keeps bounded recent/ongoing chats current and retains scrollback across navigation.
 

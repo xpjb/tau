@@ -98,6 +98,23 @@ async fn connection_loss_is_status_without_hiding_content_or_storage_errors() {
 }
 
 #[tokio::test]
+async fn healthy_idle_connection_is_preserved_across_native_peer_timeout_windows() {
+    let (backend,server,client)=fixture().await;
+    backend.put("first",None,BlockKind::Text,b"first",true);
+    assert_eq!(collect(client.watch(block_request("first",0,0,false)).await.unwrap()).await.0,b"first");
+    let identity=client.connection().await.unwrap().stable_id();
+    assert_eq!(client.stats().active_streams,0);
+    // More than two five-second peer windows, with no application streams.
+    // Transport keep-alive ACKs, not periodic re-downloads, preserve the peer.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    backend.put("second",None,BlockKind::Text,b"second",true);
+    assert_eq!(collect(client.watch(block_request("second",0,0,false)).await.unwrap()).await.0,b"second");
+    assert_eq!(client.connection().await.unwrap().stable_id(),identity);
+    assert_eq!(client.stats().connections,1,"Healthy idle peers cannot be recycled by the recovery policy");
+    client.shutdown().await;server.shutdown().await;
+}
+
+#[tokio::test]
 async fn requested_feed_never_opens_unrequested_tool_content() {
     let (backend,server,client) = fixture().await;
     backend.put("tool",None,BlockKind::Tool,b"",true);
