@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{collections::{BTreeSet, HashMap}, path::Path, sync::{Arc, Mutex}, time::Duration};
 use tau_net::blocks::*;
-use tau_net::{ClientCommand, Event, EventKind, QueueOperation, QueueState};
+use tau_net::{ClientCommand, Event, EventKind, EventRole, QueueOperation, QueueState};
 use crate::store::LocalChat;
 use std::io::{Read, Write};
 use tokio::sync::watch;
@@ -38,7 +38,7 @@ impl Cache {
     pub(crate) fn needs_body(&self, scope: &str, id: &str, background: bool) -> bool {
         let db = self.db.lock().unwrap();
         tau_block_store::header(&db,scope,id).ok().flatten().is_none_or(|h|
-            if background {tau_block_store::cache_budget::stored_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length)}
+            if background {tau_block_store::cached_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length)}
             else {!h.sealed || tau_block_store::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length)})
     }
     pub(crate) fn body_checkpoint(&self, scope: &str, id: &str) -> Option<((u64,u64,bool),u64)> {
@@ -224,7 +224,7 @@ impl Cache {
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
         ensure!(tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
         tau_block_store::cache_range(&tx,scope,range)?;
-        tau_block_store::cache_budget::enforce(&tx,scope,&range.header.id,tau_block_store::cache_budget::DEFAULT_CACHE_BYTES)?;
+        tau_block_store::enforce_cache_budget(&tx,scope,&range.header.id,tau_block_store::DEFAULT_CACHE_BYTES)?;
         tx.commit()?;self.changed(scope,&range.header.id,false); Ok(())
     }
     #[cfg(test)]
@@ -314,7 +314,7 @@ impl Cache {
                 // is safely cached, so do not confuse truncation with absence.
                 if event.role == tau_net::EventRole::User && event.phase == tau_net::EventPhase::Saved
                     && event.kind == EventKind::Text && wanted(h) && (length == 0 || !bytes.is_empty()) && !incomplete.contains(&event.id)
-                    && tau_block_store::cache_budget::stored_bytes(&db,scope,&body)? == length
+                    && tau_block_store::cached_bytes(&db,scope,&body)? == length
                     && let Some(request) = &event.origin.request_id {
                     delivered.push(request.clone());
                 }
@@ -353,7 +353,7 @@ impl Cache {
         // snapshot) just to refresh it, including the first viewport's visit.
         // Actual content writes retain the normal busy timeout and durability.
         if touch && !accessed.is_empty() && let Some(tx) = try_replica_maintenance(&db)? {
-            tau_block_store::cache_budget::touch(&tx, scope, accessed.iter().map(String::as_str))?;
+            tau_block_store::touch_cache(&tx, scope, accessed.iter().map(String::as_str))?;
             tx.commit()?;
         }
         let mut previews = preview_ids.into_iter().map(|(root,ids)| {
@@ -369,8 +369,7 @@ impl Cache {
         let mut seen=BTreeSet::new();let ids=ids.iter().filter(|id|seen.insert(*id)).cloned().collect::<Vec<_>>();let ids=ids.as_slice();
         if !copy_complete(&self.db.lock().unwrap(),scope,ids)? {return Ok(None);}
         let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false,true)?.context("Details are not cached")?;
-        let group=ids.iter().filter_map(|id|view.events.iter().find(|e|&e.id==id)).collect::<Vec<_>>();
-        let text=crate::details::copy(&group, view.events.iter(), &view.parents);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
+        let text=view.copy_details(ids);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
     }
     pub fn history_cursor(&self, scope: &str) -> Result<Option<FeedPosition>> {
         Ok(tau_block_store::cached_feed(&self.db.lock().unwrap(),scope,None)?.and_then(|p|p.before))
@@ -426,7 +425,7 @@ impl Cache {
         for id in candidates {
             if let Some(h)=tau_block_store::header(&db,scope,&id)? {
                 let length=required(&id,h.length);
-                if length>0 && tau_block_store::cache_budget::stored_bytes(&db,scope,&id)? >= length {
+                if length>0 && tau_block_store::cached_bytes(&db,scope,&id)? >= length {
                     fetched.bodies.insert((scope.into(),id),(h.version,length));
                 }
             }
@@ -470,7 +469,7 @@ impl Cache {
             Ok(event)
         }).collect::<Result<Vec<_>>>()?;
         events.sort_by_key(|e|e.order);
-        let visible = viewport.filter(|_|rendered).map(|ids|ids.iter().cloned().collect()).unwrap_or_else(||crate::details::open_items(events.iter(),local));
+        let visible = viewport.filter(|_|rendered).map(|ids|ids.iter().cloned().collect()).unwrap_or_else(||crate::feed::expanded_details(&events,local));
         let recent=roots.iter().rev().filter(|h|h.kind==BlockKind::Text && h.meta.pointer("/event/role").and_then(|v|v.as_str())!=Some("tool") && h.length>0)
             .take(2).map(|h|h.id.clone()).collect::<BTreeSet<_>>();
         // Bootstrap without a renderer is a bounded recent window. Once the
@@ -539,7 +538,7 @@ impl Cache {
             for id in &required {
                 pending |= match tau_block_store::header(&db,scope,id)? {
                     None => true,
-                    Some(head) => tau_block_store::cache_budget::stored_bytes(&db,scope,id)? <
+                    Some(head) => tau_block_store::cached_bytes(&db,scope,id)? <
                         if copy.contains(&h.id) { head.length } else { head.length.min(256*1024) },
                 };
             }
@@ -568,7 +567,7 @@ impl Cache {
                 || id==QUEUE || h.as_ref().and_then(|h|h.parent.as_deref())==Some(QUEUE);
             let mut length=h.map_or(0,|h|h.length);
             if !complete && length>256*1024 {
-                if tau_block_store::cache_budget::stored_bytes(&db,scope,&id)?>=256*1024 {continue;}
+                if tau_block_store::cached_bytes(&db,scope,&id)?>=256*1024 {continue;}
                 length=256*1024;
             }
             if length<=budget {budget-=length;admitted.insert(id);}
@@ -576,7 +575,7 @@ impl Cache {
         blocks=admitted;
         // Include content heads in the plan so a sealed block's replacement can
         // restart its watch even if the set of IDs did not change.
-        let heads = blocks.iter().map(|id| Ok((id.clone(),tau_block_store::header(&db,scope,id)?.map(|h|(h.version,h.length,h.sealed,tau_block_store::cache_budget::stored_bytes(&db,scope,id).unwrap_or(0))))))
+        let heads = blocks.iter().map(|id| Ok((id.clone(),tau_block_store::header(&db,scope,id)?.map(|h|(h.version,h.length,h.sealed,tau_block_store::cached_bytes(&db,scope,id).unwrap_or(0))))))
             .collect::<Result<Vec<_>>>()?;
         let mut older=vec![];
         for parent in parents.iter().flatten() {
@@ -634,7 +633,7 @@ fn copy_complete(db:&Connection,scope:&str,ids:&[String])->Result<bool> {
         if let Some(length)=metadata_length(db,scope,reference)? {total=total.saturating_add(length);} else {ready=false;}
     }
     ensure!(total<=MAX_BLOCK_BYTES,"Details including metadata exceed the 64 MiB clipboard limit");
-    for h in bodies.values() {ready&=h.sealed && tau_block_store::cache_budget::stored_bytes(db,scope,&h.id)?==h.length;}
+    for h in bodies.values() {ready&=h.sealed && tau_block_store::cached_bytes(db,scope,&h.id)?==h.length;}
     if !ready {return Ok(false);}
     for (id,reference) in metadata {
         let bytes=tau_block_store::cached_content(db,scope,&id)?;
@@ -764,7 +763,7 @@ fn adopt_echo(db: &Connection, scope: &str, h: &BlockHeader) -> Result<bool> {
         h.meta.pointer("/event/origin/requestId").and_then(|v| v.as_str())
     } else { None };
     let (Some(request), Some(hash)) = (request, h.meta.get("bodyHash").and_then(|v| v.as_str())) else { return Ok(false); };
-    if tau_block_store::cache_budget::stored_bytes(db, scope, &h.id)? == h.length { return Ok(false); }
+    if tau_block_store::cached_bytes(db, scope, &h.id)? == h.length { return Ok(false); }
     let bytes: Option<Vec<u8>> = db.query_row("SELECT body FROM local_echoes WHERE scope=?1 AND request=?2 AND hash=?3",
         params![scope, request, hash], |r| r.get(0)).optional()?;
     let Some(bytes) = bytes else { return Ok(false); };
@@ -773,10 +772,56 @@ fn adopt_echo(db: &Connection, scope: &str, h: &BlockHeader) -> Result<bool> {
         tau_block_store::cache_range(db, scope, &ContentRange { header: h.clone(), offset: (i * BLOCK_CHUNK_BYTES) as u64,
             hash: blake3::hash(bytes).to_hex().to_string(), bytes: bytes.to_vec() })?;
     }
-    tau_block_store::cache_budget::enforce(db, scope, &h.id, tau_block_store::cache_budget::DEFAULT_CACHE_BYTES)?;
+    tau_block_store::enforce_cache_budget(db, scope, &h.id, tau_block_store::DEFAULT_CACHE_BYTES)?;
     Ok(true)
 }
 
 #[cfg(test)]
 #[path = "../tests/unit/replica.rs"]
 pub(crate) mod tests;
+
+impl View {
+    fn copy_details(&self, ids: &[String]) -> String {
+        let group = ids.iter().filter_map(|id|self.events.iter().find(|e|&e.id==id));
+        let mut results: HashMap<&str, Vec<&Event>> = HashMap::new();
+        for e in &self.events {
+            if e.role == EventRole::Tool && let Some(parent) = self.parents.get(&e.id) {
+                results.entry(parent).or_default().push(e);
+            }
+        }
+        let mut parts = vec![];
+        for e in group {
+            if e.kind==EventKind::Text && e.role!=EventRole::Tool {parts.push(e.text.clone());continue;}
+            if e.kind == EventKind::Thinking && e.role != EventRole::Tool {
+                if !e.text.is_empty() {
+                    parts.push(format!("Thinking\n{}", e.text));
+                }
+                continue;
+            }
+            let mut tool = format!("Tool · {}", e.tool_name.as_deref().unwrap_or("tool"));
+            if e.role != EventRole::Tool && !e.text.is_empty() {
+                tool.push_str(&format!("\nInput\n{}", e.text));
+            }
+            let results = results.get(e.id.as_str());
+            let orphan = [e];
+            let results = results.map(Vec::as_slice).unwrap_or_else(|| {
+                if e.role == EventRole::Tool {
+                    &orphan
+                } else {
+                    &[]
+                }
+            });
+            for result in results {
+                if result.kind == EventKind::Text && !result.text.is_empty() {
+                    tool.push_str(&format!(
+                        "\n{}\n{}",
+                        if result.is_error { "Error" } else { "Output" },
+                        result.text
+                    ));
+                }
+            }
+            parts.push(tool);
+        }
+        parts.join("\n\n")
+    }
+}

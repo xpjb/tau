@@ -113,8 +113,8 @@ async fn schema_four_migration_adopts_transitive_fork_owners_and_streaming_expor
     let parent=state.create(Settings::default().agent.model,"medium".into(),None,"general".into()).await.unwrap();let (child,_)=state.branch(&parent,None).await.unwrap();let (grandchild,_)=state.branch(&child,None).await.unwrap();
     let spec=file_spec("legacy-file",&parent,b"old");
     state.access(move |db| {
-        let tx=db.transaction()?;tau_block_store::uploads::begin(&tx,&spec)?;tau_block_store::uploads::write(&tx,&spec,0,b"old")?;
-        tau_block_store::uploads::seal(&tx,&spec,&spec.hash,Some(tau_net::UploadedFile {name:"old".into(),path:"/private/legacy/old".into(),size:3}))?;tx.commit()?;
+        let tx=db.transaction()?;tau_block_store::begin_upload(&tx,&spec)?;tau_block_store::write_upload(&tx,&spec,0,b"old")?;
+        tau_block_store::seal_upload(&tx,&spec,&spec.hash,Some(tau_net::UploadedFile {name:"old".into(),path:"/private/legacy/old".into(),size:3}))?;tx.commit()?;
         db.execute_batch("DROP TABLE file_owners; DROP TABLE file_publications; DROP TABLE restore_guards;
           DROP TRIGGER catalogue_insert; DROP TRIGGER catalogue_delete; DROP TRIGGER catalogue_session;
           DROP TRIGGER catalogue_project_insert; DROP TRIGGER catalogue_project_update; DROP TRIGGER catalogue_project_delete;

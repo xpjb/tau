@@ -198,3 +198,31 @@ impl Feed {
         Ok(delivered)
     }
 }
+
+use crate::store::LocalChat;
+
+
+pub(crate) fn detail_group_state(group: &[&Event], local: &LocalChat) -> (String,bool) {
+    let key = group.iter().map(|e|format!("details:{}",e.id)).find(|key|local.expansion.contains_key(key))
+        .unwrap_or_else(||format!("details:{}",group[0].id));
+    let open = local.expansion.get(&key).copied().unwrap_or_else(||local.details_default || group.iter().any(|e|local.expanded.contains(&e.id)));
+    (key,open)
+}
+
+/// The same disclosure grouping used by rendering, operating on root headers only.
+pub(crate) fn expanded_details(events: &[Event], local: &LocalChat) -> HashSet<String> {
+    let visible = events.iter().filter(|e| {
+        let empty = e.attachment.is_none() && e.error_message.is_none() && !e.is_error &&
+            (e.kind == EventKind::Hidden || matches!(e.kind,EventKind::Thinking|EventKind::Text) && e.text.is_empty());
+        !empty
+    }).collect::<Vec<_>>();
+    let detail = |e:&Event|e.attachment.is_none() && (matches!(e.kind,EventKind::Thinking|EventKind::Tool) || e.role == EventRole::Tool);
+    let mut open = HashSet::new(); let mut i=0;
+    while i < visible.len() {
+        if !detail(visible[i]) {i+=1;continue;}
+        let start=i; while i<visible.len() && detail(visible[i]) {i+=1;}
+        let group=&visible[start..i];
+        if detail_group_state(group,local).1 {open.extend(group.iter().map(|e|e.id.clone()));}
+    }
+    open
+}

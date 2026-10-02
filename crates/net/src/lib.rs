@@ -78,18 +78,6 @@ pub enum ClientCommand {
         #[serde(default)]
         keep_session_id: Option<String>,
     },
-    #[serde(skip)] // Internal legacy adapter only; no wire route.
-    OpenSession {
-        session_id: String,
-        #[serde(default)]
-        requests: Vec<String>,
-    },
-    #[serde(skip)]
-    GetHistory {
-        session_id: String,
-        generation: String,
-        before: u64,
-    },
     GetCommands {
         session_id: String,
     },

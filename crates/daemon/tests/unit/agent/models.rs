@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::{ChatCreation, SessionModel};
+use tau_net::{ChatCreation, SessionModel};
 
 #[tokio::test]
 async fn starting_model_and_prompt_commit_atomically_and_receipts_pin_both() {
@@ -78,7 +78,7 @@ async fn interrupted_creation_stays_uncertain_and_never_creates_or_executes_on_r
     let (_root, manager, url, server) = fixture(&model, Api::ChatCompletions).await;
     let id = uuid::Uuid::new_v4().to_string();
     let creation = ChatCreation { project_id: "general".into(), keep_session_id: None };
-    let request = crate::protocol::ClientRequest { id: id.clone(), command: crate::protocol::ClientCommand::CreateSession {
+    let request = tau_net::ClientRequest { id: id.clone(), command: tau_net::ClientCommand::CreateSession {
         project_id: creation.project_id.clone(), keep_session_id: None,
     }};
     assert!(manager.inner.state.reserve_operation(&request).await.unwrap().is_none());

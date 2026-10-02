@@ -185,7 +185,7 @@ async fn resume_while_abort_is_settling_is_not_overwritten_by_old_cleanup() {
             let transcript = content.transcript.as_ref().unwrap();
             (transcript.generation.clone(), transcript.queue.run_id.clone())
         };
-        let resume = crate::protocol::QueueOperation::Resume { run_id };
+        let resume = tau_net::QueueOperation::Resume { run_id };
         manager.queue_control(&id, &generation, "resume", resume.clone()).await.unwrap();
         manager.queue_control(&id, &generation, "resume", resume.clone()).await.unwrap();
         assert!(!manager.inner.state.queue(&id).await.unwrap().paused);

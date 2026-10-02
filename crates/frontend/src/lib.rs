@@ -14,7 +14,6 @@ pub mod controller;
 mod demo;
 #[cfg(not(target_os = "android"))]
 mod desktop;
-mod details;
 mod daemon_settings;
 mod editor;
 mod keyboard;

@@ -270,7 +270,7 @@ fn cache_byte_quota_evicts_old_bodies_without_advancing_or_deleting_metadata() {
         let tx=db.transaction().unwrap();
         let h=BlockHeader {id:id.into(),parent:None,order:0,kind:BlockKind::Text,meta:serde_json::json!({}),version:1,length:bytes.len() as u64,sealed:true,revision:1};
         cache_range(&tx,"chat",&ContentRange {header:h,offset:0,hash:blake3::hash(bytes).to_hex().to_string(),bytes:bytes.to_vec()}).unwrap();
-        cache_budget::enforce(&tx,"chat",id,6).unwrap();tx.commit().unwrap();
+        enforce_cache_budget(&tx,"chat",id,6).unwrap();tx.commit().unwrap();
     }
     assert!(header(&db,"chat","old").unwrap().is_some());assert!(cached_content(&db,"chat","old").unwrap().is_empty());
     assert_eq!(cached_content(&db,"chat","new").unwrap(),b"newest");

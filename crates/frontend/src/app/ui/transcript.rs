@@ -329,7 +329,7 @@ impl Widget for Transcript {
                 let group = chat.feed.order[i..].iter().take_while(|id| is_detail(chat, id))
                     .filter_map(|id| chat.feed.messages[id].event.as_deref().and_then(|id| chat.feed.event(id))).collect::<Vec<_>>();
                 i += group.len();
-                let (key, open) = crate::details::group_state(&group, &chat.local);
+                let (key, open) = crate::feed::detail_group_state(&group, &chat.local);
                 items.push(ItemId::Details { key, first: group[0].id.clone() });
                 if open { for e in group { items.push(if e.kind == tau_net::EventKind::Thinking && e.role != tau_net::EventRole::Tool {
                     ItemId::Thinking(e.id.clone())

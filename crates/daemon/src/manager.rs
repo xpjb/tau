@@ -11,7 +11,7 @@ use tracing::warn;
 use crate::agent::{AgentSession, auth::AuthStore};
 use crate::config::Config;
 use crate::catalog::ModelCatalog;
-use crate::protocol::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
+use tau_net::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
 use crate::settings::{SettingsStore, Settings};
 use crate::state::{StateStore, Receipt, SessionModel};
 use crate::transcript::{QueuedRequest, QueueControl, Transcript};
@@ -186,7 +186,7 @@ impl AgentManager {
                     anyhow::ensure!(self.inner.state.get(&id).await?.is_some(), "Created chat was deleted; nothing was resent");
                     return Ok(id);
                 }
-                ServerMessage::Response { uncertain: true, error, .. } => return Err(crate::protocol::UncertainOutcome(
+                ServerMessage::Response { uncertain: true, error, .. } => return Err(crate::state::UncertainOutcome(
                     error.unwrap_or_else(|| "Chat creation interrupted; reconcile the saved creation before sending".into())).into()),
                 ServerMessage::Response { error, .. } => bail!("{}", error.unwrap_or_else(|| "Chat creation failed".into())),
                 _ => bail!("Invalid creation receipt"),
@@ -199,7 +199,7 @@ impl AgentManager {
             Err(error) => ServerMessage::failure(request_id.into(), error.to_string()),
         };
         self.inner.state.finish_operation(request_id.into(), &response).await
-            .map_err(|error| crate::protocol::UncertainOutcome(format!("Creation outcome could not be saved: {error}")))?;
+            .map_err(|error| crate::state::UncertainOutcome(format!("Creation outcome could not be saved: {error}")))?;
         result
     }
     async fn create_session_inner(&self, keep_session_id: Option<&str>, project_id: &str, requested_id: Option<&str>) -> Result<String> {
@@ -251,7 +251,7 @@ impl AgentManager {
             anyhow::ensure!(!request.is_empty() && request.len() <= 128,"Invalid request ID");
             let receipt = self.inner.state.receipt(id,request).await?;
             if receipt.is_none() && let Some(report)=self.inner.state.operation_receipt(request).await? {reports.push(report);continue;}
-            reports.push(crate::protocol::OperationReceipt { id:request.clone(),accepted:receipt.is_some(),complete:receipt.as_ref().is_some_and(|r|r.finished),
+            reports.push(tau_net::OperationReceipt { id:request.clone(),accepted:receipt.is_some(),complete:receipt.as_ref().is_some_and(|r|r.finished),
                 error:receipt.as_ref().and_then(|r|r.error.clone()),notice:receipt.and_then(|r|r.notice) });
         }
         Ok(ServerMessage::Receipts { session_id:id.into(),reports })
@@ -504,10 +504,8 @@ impl AgentManager {
         let usage = self.context_usage(&settings, &stored.model, stored.tokens);
         // The agent needs only the durable queue/head, not display history.
         // Provider context is loaded by the owned run *after* acceptance.
-        let page = crate::transcript::HistoryPage {events:vec![],before:None};
-        let mut transcript = Transcript::new(page,stored.head,stored.next_order,queue);
-        transcript.generation = format!("{}:{id}",self.inner.state.block_cursor().await?.lineage);
-        content.transcript = Some(transcript);
+        let generation = format!("{}:{id}",self.inner.state.block_cursor().await?.lineage);
+        content.transcript = Some(Transcript::new(generation,stored.head,stored.next_order,queue));
         content.agent = Some(AgentSession { store:self.inner.state.clone(), revision:stored.revision, model:stored.model, thinking:stored.thinking,
             running:false, resume_after_stop:false, cancel:tokio_util::sync::CancellationToken::new(), task:None, tokens:stored.tokens, needs_turn:stored.needs_turn });
         self.set_runtime_state(id,runtime,SessionStatus::Idle,detail,Some(usage)); Ok(())

@@ -1,6 +1,6 @@
 //! Per-chat thinking metadata follows durable commands, not mutable defaults.
 use super::*;
-use crate::protocol::{ServerMessage, SessionStatus, SessionSummary};
+use tau_net::{ServerMessage, SessionStatus, SessionSummary};
 
 async fn page(manager: &AgentManager) -> (u64, Vec<SessionSummary>) {
     let ServerMessage::SessionPage { revision, sessions, .. } = manager.list_page("thinking".into(), false, None, 0).await.unwrap() else { panic!() };

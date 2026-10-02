@@ -122,35 +122,6 @@ impl QueueState {
 }
 
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryPage {
-    pub events: Vec<Event>,
-    pub before: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptChange {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub events: Vec<Event>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub removed: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<TextDelta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue: Option<QueueState>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub delivered: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TextDelta {
-    pub event_id: String,
-    pub text: String,
-}
-
 impl Event {
     pub fn source_key(&self) -> String {
         if let Some(id) = &self.origin.stream_id {

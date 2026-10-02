@@ -102,14 +102,13 @@ pub enum Header {
 pub struct Frame { pub header: Header, pub data: Vec<u8> }
 impl Frame {
     pub fn metadata(header: Header) -> Self { Self { header, data:vec![] } }
-    fn content(range: &ContentRange) -> Result<Self> {
-        ensure!(range.bytes.len() <= BLOCK_CHUNK_BYTES, "Block backend exceeded range limit");
-        let compressed = if range.bytes.len() >= 1024 { zstd::bulk::compress(&range.bytes,1)? } else { vec![] };
-        let (codec, data) = if !compressed.is_empty() && compressed.len()+16 < range.bytes.len() {
+    fn data(version: u64, offset: u64, hash: String, bytes: &[u8]) -> Result<Self> {
+        ensure!(bytes.len() <= BLOCK_CHUNK_BYTES, "Content chunk exceeds range limit");
+        let compressed = if bytes.len() >= 1024 { zstd::bulk::compress(bytes,1)? } else { vec![] };
+        let (codec, data) = if !compressed.is_empty() && compressed.len()+16 < bytes.len() {
             (Codec::Zstd, compressed)
-        } else { (Codec::Raw,range.bytes.clone()) };
-        Ok(Self { header:Header::Data { version:range.header.version, offset:range.offset,
-            hash:range.hash.clone(), length:range.bytes.len() as u32, codec }, data })
+        } else { (Codec::Raw,bytes.to_vec()) };
+        Ok(Self { header:Header::Data { version, offset, hash, length:bytes.len() as u32, codec }, data })
     }
     pub fn decoded(&self) -> Result<Vec<u8>> {
         let Header::Data { hash, length, codec, .. } = &self.header else { ensure!(self.data.is_empty(),"Metadata carried content"); return Ok(vec![]); };
@@ -326,7 +325,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
                     sent_revision = Some(range.header.revision);
                 }
                 if !range.bytes.is_empty() {
-                    send_credited(send,recv,&mut credit,Frame::content(&range)?,None).await?;
+                    send_credited(send,recv,&mut credit,Frame::data(range.header.version,range.offset,range.hash.clone(),&range.bytes)?,None).await?;
                 }
                 req.version = range.header.version; req.offset = range.offset + range.bytes.len() as u64;
                 let more = req.offset < range.header.length;
@@ -416,9 +415,7 @@ pub struct Uploader {
 impl Uploader {
     pub async fn write(&mut self, bytes:&[u8]) -> Result<()> {
         ensure!(!self.status.sealed && !bytes.is_empty() && bytes.len() <= BLOCK_CHUNK_BYTES && self.status.offset.saturating_add(bytes.len() as u64) <= self.spec.length, "Invalid upload write");
-        let compressed = if bytes.len() >= 1024 {zstd::bulk::compress(bytes,1)?} else {vec![]};
-        let (codec,data) = if !compressed.is_empty() && compressed.len()+16 < bytes.len() {(Codec::Zstd,compressed)} else {(Codec::Raw,bytes.to_vec())};
-        let frame = Frame {header:Header::Data {version:1,offset:self.status.offset,hash:blake3::hash(bytes).to_hex().to_string(),length:bytes.len() as u32,codec},data};
+        let frame = Frame::data(1,self.status.offset,blake3::hash(bytes).to_hex().to_string(),bytes)?;
         let encoded=encode(&frame)?.len() as u64;
         send_credited(&mut self.send,&mut self.recv,&mut self.credit,frame,Some(&self.stats)).await?;
         self.stats.tx.fetch_add(encoded,Ordering::Relaxed);self.stats.content_tx.fetch_add(bytes.len() as u64,Ordering::Relaxed);
@@ -586,9 +583,7 @@ async fn serve_files(send: &mut SendStream, recv: &mut RecvStream, backend: Arc<
     send_credited(send, recv, &mut credit, Frame::metadata(Header::Browsed { length: bytes.len() as u64, hash: blake3::hash(&bytes).to_hex().to_string() }), None).await?;
     for (i, chunk) in bytes.chunks(BLOCK_CHUNK_BYTES).enumerate() {
         ensure!(authorized(grants, &node), "Block authorization expired");
-        let compressed = if chunk.len() >= 1024 { zstd::bulk::compress(chunk, 1)? } else { vec![] };
-        let (codec, data) = if !compressed.is_empty() && compressed.len()+16 < chunk.len() { (Codec::Zstd, compressed) } else { (Codec::Raw, chunk.to_vec()) };
-        let frame = Frame { header: Header::Data { version: 1, offset: (i*BLOCK_CHUNK_BYTES) as u64, hash: blake3::hash(chunk).to_hex().to_string(), length: chunk.len() as u32, codec }, data };
+        let frame = Frame::data(1,(i*BLOCK_CHUNK_BYTES) as u64,blake3::hash(chunk).to_hex().to_string(),chunk)?;
         send_credited(send, recv, &mut credit, frame, None).await?;
     }
     send_credited(send, recv, &mut credit, Frame::metadata(Header::End), None).await

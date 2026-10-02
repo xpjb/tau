@@ -10,8 +10,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use crate::manager::{AgentManager, SessionContent, SessionRuntime, bounded};
-use crate::protocol::{ServerMessage, SessionStatus};
+use crate::manager::{AgentManager, PromptOutcome, SessionContent, SessionRuntime, bounded};
+use std::collections::BTreeMap;
+use tau_net::{PromptDisposition, SlashCommand, SlashCommandArgument, SlashCommandSource};
+use tau_net::{ServerMessage, SessionStatus};
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, TranscriptChange};
 use crate::settings::SteeringMode;
@@ -52,26 +54,14 @@ impl SessionContent {
             entry["id"] = json!(uuid::Uuid::new_v4().to_string()); entry["parentId"] = json!(projected.head);
             entry["timestamp"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true));
             let next = projected.project(&entry,false)?; projected.apply(&next)?;
-            change.events.extend(next.wire.events); change.removed.extend(next.wire.removed); change.delivered.extend(next.wire.delivered);
+            change.events.extend(next.events); change.removed.extend(next.removed);
             change.head = next.head; entries.push(entry);
         }
         change.queue = queue.clone();
-        // A receipt and queue become durable in the same SQLite commit. Publish
-        // confirmation immediately; neither a model turn nor the WebSocket
-        // response frame is needed to settle a pending edit/send on the client.
-        let receipt_id = receipt.as_ref().filter(|r| r.finished).map(|r| r.id.clone());
         let saved = agent.store.commit(id,agent.revision,entries,change.events.clone(),queue,receipt,bump).await?;
-        if let Some(receipt_id) = receipt_id && !change.delivered.contains(&receipt_id) {
-            change.delivered.push(receipt_id);
-        }
         agent.revision = saved.revision; agent.model = saved.model; agent.thinking = saved.thinking;
         agent.tokens = saved.tokens; agent.needs_turn = saved.needs_turn;
-        self.publish(id,change)
-    }
-    pub fn publish(&mut self, _id: &str, change: TranscriptChange) -> Result<()> {
-        let transcript = self.transcript.as_mut().unwrap();
-        transcript.apply(&change)?;
-        Ok(())
+        self.transcript.as_mut().unwrap().apply(&change)
     }
     pub async fn save_queue(&mut self, id: &str, queue: QueueState, receipt: Option<Receipt>) -> Result<()> {
         self.commit(id,Vec::new(),Some(queue),receipt).await
@@ -96,7 +86,7 @@ impl SessionContent {
             }
         }
         if change.events.is_empty() && change.delta.is_none() && change.removed.is_empty() { return Ok(()); }
-        self.publish(id, change)
+        self.transcript.as_mut().unwrap().apply(&change)
     }
 }
 
@@ -174,7 +164,7 @@ impl AgentManager {
             }
             if !interrupted.events.is_empty() {
                 if let Some(agent) = &content.agent { let _ = agent.store.project_live(&id,interrupted.events.iter().cloned().map(|e|(e,None)).collect(),vec![]).await; }
-                let _ = content.publish(&id, interrupted);
+                let _ = content.transcript.as_mut().unwrap().apply(&interrupted);
             }
             if let Err(error) = &result && !cancelled {
                 tracing::warn!(session=%id, error=%bounded(&error.to_string(),480), "Agent run failed; waiting for explicit resume");
@@ -431,10 +421,90 @@ impl AgentManager {
             tokio::time::timeout(std::time::Duration::from_secs(30),provider::generate(&self.inner.http,&self.inner.auth,provider::Request {
                 settings:&settings,selected:settings.daemon.title_model.as_ref().unwrap_or(&stored.model),thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Summary,
             },updates)).await.ok().and_then(Result::ok).and_then(|completion|completion.message["content"].as_str().map(str::to_owned))
-                .map(|title|title.trim().to_owned()).filter(|title|title.chars().count()>1 && title.chars().count()<=crate::protocol::MAX_TITLE_CHARS && !title.contains(['\n','\r']))
+                .map(|title|title.trim().to_owned()).filter(|title|title.chars().count()>1 && title.chars().count()<=tau_net::MAX_TITLE_CHARS && !title.contains(['\n','\r']))
         } else { None };
-        let title=generated.unwrap_or_else(|| bounded(text.lines().find(|line| !line.trim().is_empty()).unwrap_or("Unnamed chat").trim(), crate::protocol::MAX_TITLE_CHARS));
+        let title=generated.unwrap_or_else(|| bounded(text.lines().find(|line| !line.trim().is_empty()).unwrap_or("Unnamed chat").trim(), tau_net::MAX_TITLE_CHARS));
         if let Err(error) = self.inner.state.rename(id, title, true).await { tracing::warn!(%error, "Could not save generated title"); }
         self.broadcast_sessions().await;
+    }
+}
+
+impl AgentManager {
+    pub fn model_catalog(&self) -> tau_net::ModelCatalog {
+        let revision = self.inner.state_clock.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        let settings = self.inner.settings.get();
+        let mut models = settings.models.iter().map(|m| (format!("{}/{}",m.provider,m.id), Some(m.name.clone())))
+            .collect::<BTreeMap<_,_>>();
+        let mut unresolved_providers = Vec::new();
+        for provider in settings.providers.keys() {
+            let Some(available) = self.inner.catalog.available_models(&settings, provider) else {
+                unresolved_providers.push(provider.clone()); continue;
+            };
+            for (id, window) in available {
+                models.insert(format!("{provider}/{id}"), Some(format!("{} token context", window)));
+            }
+        }
+        tau_net::ModelCatalog {
+            revision, unresolved_providers,
+            default_model: Some(settings.agent.model.clone()),
+            models: models.into_iter().take(20_000).map(|(value, description)| SlashCommandArgument { value, description }).collect(),
+        }
+    }
+    pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
+        self.runtime(id).await?;
+        let models = self.model_catalog().models;
+        Ok([
+            ("compact", "Compact session context", "[instructions]", vec![]),
+            ("model", "Select the model (also the default for new chats)", "<provider/model>", models),
+            ("thinking", "Set this chat's thinking level", "<level>", crate::settings::LEVELS.iter().map(|level| SlashCommandArgument { value:(*level).into(), description:None }).collect()),
+            ("name", "Rename this chat", "<title>", vec![]),
+            ("fast", "Set Codex priority service for subsequent turns", "<on|off|status>", ["on","off","status"].into_iter().map(|v| SlashCommandArgument { value:v.into(), description:None }).collect()),
+        ].into_iter().map(|(name, description, hint, arguments)| SlashCommand { name:name.into(), description:Some(description.into()), source:SlashCommandSource::Builtin, argument_hint:Some(hint.into()), arguments }).collect())
+    }
+    pub(crate) async fn run_builtin_command(&self, id: &str, runtime: &Arc<SessionRuntime>, name: &str, arguments: &str) -> Result<PromptOutcome> {
+        let mut content = runtime.content.lock().await;
+        if content.agent.as_ref().unwrap().running && matches!(name, "model" | "thinking" | "compact") { bail!("Stop the current run before changing /{name}"); }
+        let notice = match name {
+            "model" => {
+                let model: SessionModel = arguments.parse().map_err(anyhow::Error::msg)?;
+                let mut settings = self.inner.settings.get(); settings.model(&model)?;
+                settings.agent.model = model.clone();
+                self.set_settings(settings.revision, settings).await?;
+                let settings = self.inner.settings.get();
+                let level = settings.agent.model_thinking_levels.get(arguments).unwrap_or(&settings.agent.thinking_level).clone();
+                content.append(id,json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":level})).await?;
+                self.schedule_catalog(&model);
+                let usage = self.context_usage(&settings, &model, None);
+                self.set_runtime_state(id, runtime, SessionStatus::Idle, None, Some(usage));
+                format!("Model set to {arguments}. New chats will use it too.")
+            }
+            "thinking" => {
+                if !crate::settings::LEVELS.contains(&arguments) { bail!("Usage: /thinking <off|minimal|low|medium|high|xhigh|max>"); }
+                content.append(id, json!({"type":"thinking_level_change","thinkingLevel":arguments})).await?;
+                content.agent.as_mut().unwrap().thinking = arguments.into(); format!("Thinking level set to {arguments}.")
+            }
+            "name" => {
+                if arguments.trim().is_empty() || arguments.chars().count() > tau_net::MAX_TITLE_CHARS || arguments.contains(['\n','\r']) { bail!("Usage: /name <title>"); }
+                self.inner.state.rename(id, arguments.into(), false).await?; format!("Chat renamed to {arguments}.")
+            }
+            "fast" => {
+                let mut settings = self.inner.settings.get();
+                match arguments { "on" => settings.agent.fast_mode = true, "off" => settings.agent.fast_mode = false, "status" => {}, _ => bail!("Usage: /fast <on|off|status>") }
+                if arguments != "status" { settings = self.set_settings(settings.revision, settings).await?; }
+                format!("Codex priority service is {}.", if settings.agent.fast_mode { "on" } else { "off" })
+            }
+            "compact" => {
+                let agent = content.agent.as_mut().unwrap(); agent.running = true; agent.cancel = tokio_util::sync::CancellationToken::new();
+                drop(content);
+                let result = self.compact(id, runtime, arguments).await;
+                content = runtime.content.lock().await;
+                content.agent.as_mut().unwrap().running = false;
+                self.set_runtime_state(id, runtime, SessionStatus::Idle, None, Some(None));
+                result?; "Context compacted.".into()
+            }
+            _ => bail!("Unknown command /{name}"),
+        };
+        drop(content); self.broadcast_sessions().await;
+        Ok(PromptOutcome { disposition:PromptDisposition::Handled, notice:Some(notice) })
     }
 }

@@ -62,7 +62,7 @@ impl SettingsExt for Settings {
             let _: SessionModel = slug.parse().map_err(anyhow::Error::msg)?;
         }
         for text in [&self.daemon.title_prompt, &self.agent.system_prompt].into_iter().chain(self.agent.model_system_prompts.values()) {
-            if text.chars().count() > crate::protocol::MAX_PROMPT_CHARS { bail!("Prompt is too long"); }
+            if text.chars().count() > tau_net::MAX_PROMPT_CHARS { bail!("Prompt is too long"); }
         }
         if serde_json::to_vec(self)?.len() > 900_000 { bail!("Settings exceed 900 KB"); }
         Ok(())

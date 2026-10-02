@@ -1,15 +1,12 @@
+mod net;
+mod projection;
 mod attachments;
-mod blocks;
 mod catalog;
-mod commands;
 mod config;
 mod manager;
-mod listing;
 mod projects;
 mod agent;
 mod settings;
-mod protocol;
-mod server;
 mod state;
 mod transcript;
 mod usage;
@@ -55,7 +52,7 @@ pub async fn run(mut config: Config) -> Result<()> {
     config.bind = listener.local_addr()?;
     let state = StateStore::load(config.database_path.clone()).await?;
     let manager = AgentManager::new(config.clone(), state).await?;
-    server::serve(config, manager, listener).await
+    net::serve(config, manager, listener).await
 }
 
 #[cfg(test)]
@@ -86,7 +83,4 @@ pub async fn export_history(config: Config, session: &str, destination: &std::pa
     StateStore::load(config.database_path).await?.export_history(session,destination).await
 }
 
-mod uploads;
-mod control;
-mod operations;
 pub mod maintenance;

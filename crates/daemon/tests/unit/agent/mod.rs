@@ -72,7 +72,7 @@ async fn fixture(model: &ModelServer, api: Api) -> (tempfile::TempDir, AgentMana
 async fn serve(manager: &AgentManager) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let url = format!("ws://{}/v1/ws", listener.local_addr().unwrap());
     let manager = manager.clone(); let config = manager.inner.config.clone();
-    (url, tokio::spawn(async move { crate::server::serve(config, manager, listener).await.unwrap(); }))
+    (url, tokio::spawn(async move { crate::net::serve(config, manager, listener).await.unwrap(); }))
 }
 #[path = "../../support/mod.rs"]
 mod native_client;
@@ -214,7 +214,7 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
         manager.resolve_attachment(&id, attachment["entryId"].as_str().unwrap()).await.unwrap();
     }
     // The native file primitive materializes only after an explicit body read.
-    let native_file=crate::blocks::file_id(attachment["entryId"].as_str().unwrap());
+    let native_file=crate::projection::file_id(attachment["entryId"].as_str().unwrap());
     let scope=id.clone();let file_id=native_file.clone();
     let before=manager.inner.state.access(move |db|Ok(tau_block_store::header(db,&scope,&file_id)?.unwrap())).await.unwrap();
     assert!(!before.sealed);assert_eq!(before.length,0);
@@ -891,8 +891,8 @@ async fn missing_catalog_stays_nonmodal_manual_refresh_persists_and_old_file_sur
         assert_eq!(model.catalog_request().await["path"],"/models");
         let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
             loop { match alerts.recv().await.unwrap() {
-                crate::protocol::ServerMessage::Notice { message, .. } => panic!("Optional metadata must not interrupt selection: {message}"),
-                crate::protocol::ServerMessage::ModelCatalog { catalog } => break catalog,
+                tau_net::ServerMessage::Notice { message, .. } => panic!("Optional metadata must not interrupt selection: {message}"),
+                tau_net::ServerMessage::ModelCatalog { catalog } => break catalog,
                 _ => {},
             } }
         }).await.unwrap();
@@ -978,7 +978,7 @@ async fn saved_settings_keep_exact_text_without_a_third_prompt_layer() {
     let mut settings = manager.inner.settings.get(); settings.models.clear(); settings.validate().unwrap();
     settings.agent.model_system_prompts.insert("invalid".into(),String::new()); assert!(settings.validate().is_err());
     settings.agent.model_system_prompts.clear();
-    settings.agent.model_system_prompts.insert("openai-codex/example".into(),"x".repeat(crate::protocol::MAX_PROMPT_CHARS+1));
+    settings.agent.model_system_prompts.insert("openai-codex/example".into(),"x".repeat(tau_net::MAX_PROMPT_CHARS+1));
     assert!(settings.validate().is_err());
     settings.agent.model_system_prompts.clear();
     settings.daemon.title_model=Some("missing-provider/model".parse().unwrap()); assert!(settings.validate().is_err());
@@ -1034,7 +1034,7 @@ async fn project_prompt_snapshots_reach_both_providers_and_moves_replace_them() 
         for session in [&fresh,&general,&clone] {
             let stored = manager.inner.state.get(session).await.unwrap().unwrap();
             assert_eq!((stored.project_id.as_str(),stored.project_prompt.as_str()),("general","General context"));
-            assert!(!manager.inner.state.page(session,None).await.unwrap().events.is_empty());
+            assert!(has_saved_events(&manager,session).await);
         }
         let config = manager.inner.config.clone();
         manager.shutdown().await; server.abort(); drop(client);
@@ -1088,7 +1088,7 @@ async fn moving_during_tool_run_keeps_that_turn_stable_and_project_delete_cancel
     assert!(!upload.exists());
     let survivor = manager.inner.state.get(&clone).await.unwrap().unwrap();
     assert!(survivor.parent_id.is_none());
-    assert!(!manager.inner.state.page(&clone,None).await.unwrap().events.is_empty());
+    assert!(has_saved_events(&manager,&clone).await);
     manager.inner.state.access(|db| {
         assert_eq!(db.query_row("SELECT count(*) FROM receipts WHERE session_id NOT IN (SELECT id FROM sessions)",[],|r|r.get::<_,u32>(0))?,0);
         assert_eq!(db.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0))?,"ok");
@@ -1104,7 +1104,7 @@ async fn cold_acceptance_and_abort_do_not_wait_for_provider_context_preparation(
     let id=manager.create_session(None,"general").await.unwrap();manager.close_session(&id).await.unwrap();
     let gate=Arc::new(Notify::new());*manager.inner.state.context_gate.lock().unwrap()=Some(gate.clone());
     let first=tokio::time::timeout(Duration::from_millis(500),manager.prompt(&id,"first","cold-first")).await.unwrap().unwrap();
-    assert!(matches!(first.disposition,crate::protocol::PromptDisposition::Submitted));
+    assert!(matches!(first.disposition,tau_net::PromptDisposition::Submitted));
     tokio::time::sleep(Duration::from_millis(30)).await;
     tokio::time::timeout(Duration::from_millis(500),manager.prompt(&id,"second","cold-second")).await.unwrap().unwrap();
     assert!(manager.inner.state.receipt(&id,"cold-second").await.unwrap().is_some());
@@ -1151,16 +1151,16 @@ async fn catalog_refresh_updates_live_and_sleeping_usage_with_new_revisions() {
             manager.refresh_model_catalog("openai-codex").await.unwrap();
             model.catalog_request().await;
             let after = runtime.snapshot();
-            assert_eq!(after.context_usage, Some(crate::protocol::ContextUsage { tokens:Some(tokens), context_window:Some(window) }), "A refreshed catalog must update retained runtime usage");
+            assert_eq!(after.context_usage, Some(tau_net::ContextUsage { tokens:Some(tokens), context_window:Some(window) }), "A refreshed catalog must update retained runtime usage");
             assert!(after.revision > before.revision, "Delayed pre-refresh pages and states must be fenced");
             assert_eq!(after.status, before.status);
             assert_eq!(after.detail, before.detail);
             assert_eq!(after.idle_since, before.idle_since, "Refreshing metadata must not reset the idle timer");
-            let crate::protocol::ServerMessage::SessionPage {sessions, states, ..} = manager.list_page("usage".into(), false, None, 0).await.unwrap() else { panic!() };
+            let tau_net::ServerMessage::SessionPage {sessions, states, ..} = manager.list_page("usage".into(), false, None, 0).await.unwrap() else { panic!() };
             let summary = sessions.iter().find(|s| s.id == id).unwrap();
             assert_eq!(summary.context_usage, after.context_usage);
             assert_eq!(states[&id], after.revision);
-            let crate::protocol::ServerMessage::SessionState {context_usage, ..} = manager.session_state_message(&id).await.unwrap() else { panic!() };
+            let tau_net::ServerMessage::SessionState {context_usage, ..} = manager.session_state_message(&id).await.unwrap() else { panic!() };
             assert_eq!(context_usage, after.context_usage);
         }
         manager.shutdown().await; server.abort();
@@ -1193,9 +1193,9 @@ async fn aged_catalog_revalidates_on_restart_without_waking_chats_or_executing_a
         let (url, server) = serve(&manager).await; let mut client = Client::connect(&url).await;
         client.until(|m| m["type"] == "sessions" && m["sessions"].as_array().is_some_and(|list| list.iter().any(|s| s["id"] == id && s["contextUsage"]["contextWindow"] == 320_000))).await;
         model.catalog_request().await;
-        let crate::protocol::ServerMessage::SessionState {context_usage, status, ..} = manager.session_state_message(&id).await.unwrap() else { panic!() };
-        assert_eq!(context_usage, Some(crate::protocol::ContextUsage {tokens:Some(if api == Api::Codex {120} else {1024}), context_window:Some(320_000)}));
-        assert_eq!(status, crate::protocol::SessionStatus::Sleeping);
+        let tau_net::ServerMessage::SessionState {context_usage, status, ..} = manager.session_state_message(&id).await.unwrap() else { panic!() };
+        assert_eq!(context_usage, Some(tau_net::ContextUsage {tokens:Some(if api == Api::Codex {120} else {1024}), context_window:Some(320_000)}));
+        assert_eq!(status, tau_net::SessionStatus::Sleeping);
         assert!(manager.inner.runtimes.lock().await.is_empty(), "Catalog revalidation must not warm a sleeping chat");
         assert!(model.requests.try_recv().is_err(), "Revalidation is a GET, never a model turn");
         assert_eq!(tokio::fs::read(&config.settings_path).await.unwrap(), settings, "Catalog refresh does not rewrite daemon settings");
@@ -1205,3 +1205,8 @@ async fn aged_catalog_revalidates_on_restart_without_waking_chats_or_executing_a
 
 #[path = "models.rs"]
 mod models;
+
+async fn has_saved_events(manager: &AgentManager, session: &str) -> bool {
+    let session=session.to_owned();
+    manager.inner.state.read(move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE session_id=?1)", [&session], |r|r.get(0))?)).await.unwrap()
+}

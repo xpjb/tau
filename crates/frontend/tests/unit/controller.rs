@@ -147,3 +147,17 @@ assert!(c.catalog.as_ref().unwrap().refresh);assert!(c.requests.is_empty());
 c.epoch=None;c.message(ServerMessage::SessionPage {catalog_id:"in-progress".into(),revision:1,after:None,next:None,sessions:vec![],states:Default::default()}).unwrap();assert!(c.catalog.is_some());
 assert!(c.message(ServerMessage::ProjectPage {catalog_id:"in-progress".into(),revision:1,after:None,next:None,projects:vec![Project::general()]}).is_err());assert!(c.catalog.is_none());
 }
+
+#[cfg(not(target_os = "android"))]
+#[test]
+fn offline_preview_copies_through_the_verified_replica_without_a_feed_fallback() {
+    let root=tempfile::tempdir().unwrap();
+    let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
+    crate::demo::populate(&mut c).unwrap();
+    assert!(c.network.is_none());
+    c.copy_details("demo",vec!["event-1".into(),"event-2".into()]).unwrap();
+    let copied=c.copied.take().unwrap();
+    assert!(copied.contains("Thinking\nReview the existing client"));
+    assert!(copied.contains("Input\ncargo nextest run --workspace"));
+    assert!(c.copy.is_none());assert_eq!(c.notice.as_deref(),Some("Details copied"));
+}

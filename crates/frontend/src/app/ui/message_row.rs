@@ -59,7 +59,7 @@ impl ItemId {
         match self {
             Self::Details { first, .. } => {
                 let group = detail_group(chat, first);
-                crate::details::group_state(&group, &chat.local).1.hash(&mut hash);
+                crate::feed::detail_group_state(&group, &chat.local).1.hash(&mut hash);
                 group.iter().find_map(|e| clock::event_ms(e)).hash(&mut hash);
             },
             Self::Tool(id) => for key in [format!("tool:{id}"), format!("tool:{id}:Input"), format!("tool:{id}:Output"), format!("tool:{id}:Error")] { chat.local.expansion.get(&key).hash(&mut hash); },
@@ -243,7 +243,7 @@ impl MessageRow {
             let chat = &cx.model.chats[session];
             let group = detail_group(chat, first);
             self.timestamp = clock::label(group.iter().find_map(|e| clock::event_ms(e)));
-            d.open = Some(crate::details::group_state(&group, &chat.local).1); d.label = "Details".into(); d.top = 26. * s;
+            d.open = Some(crate::feed::detail_group_state(&group, &chat.local).1); d.label = "Details".into(); d.top = 26. * s;
             return 62. * s;
         }
         let chat = &cx.model.chats[session];

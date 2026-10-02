@@ -650,7 +650,7 @@ fn disk_reads_refresh_eviction_recency_and_saved_anchors_hydrate_offline() {
     f.cache.preview("chat",Some(&BTreeSet::from(["e001".into()]))).unwrap();
     f.body("e003");
     let mut db = f.cache.db.lock().unwrap();let tx=db.transaction().unwrap();
-    tau_block_store::cache_budget::enforce(&tx,"chat","e003",14).unwrap();tx.commit().unwrap();
+    tau_block_store::enforce_cache_budget(&tx,"chat","e003",14).unwrap();tx.commit().unwrap();
     assert_eq!(tau_block_store::cached_content(&db,"chat","e001").unwrap(),b"body 01","read recency, not last download, protects revisited text");
     assert!(tau_block_store::cached_content(&db,"chat","e002").unwrap().is_empty());
     assert_eq!(tau_block_store::cached_content(&db,"chat","e003").unwrap(),b"body 03");

@@ -239,7 +239,7 @@ pub struct Renderer {
     pub selection: Option<Selection>,
     message_order: Vec<String>,
     #[cfg(test)] pub message_measurements: usize,
-    tooltip_labels: HashMap<&'static str, crate::tooltip::text::RichLabel>,
+    tooltip_labels: HashMap<&'static str, crate::tooltip::RichLabel>,
 }
 impl Renderer {
     pub fn new(ctx: &impl RenderContext) -> Result<Self, String> {
@@ -471,7 +471,7 @@ impl Renderer {
         let label = self.tooltip_labels.entry(key).or_insert_with(|| {
             let namespace = self.next_namespace;
             self.next_namespace += 1;
-            crate::tooltip::text::RichLabel::new(namespace)
+            crate::tooltip::RichLabel::new(namespace)
         });
         label.layout(&mut self.text, self.faces, content, width, size)
     }

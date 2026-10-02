@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::{PromptDisposition, ServerMessage, SessionStatus};
+use tau_net::{PromptDisposition, ServerMessage, SessionStatus};
 
 async fn activity(manager: &AgentManager, id: &str) -> u64 {
     manager.inner.state.get(id).await.unwrap().unwrap().updated_at_ms
@@ -46,8 +46,7 @@ async fn chat_activity_bumps_acceptance_and_settlement_not_streaming_tools_or_qu
     let runtime = manager.runtime(&id).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let live = runtime.content.lock().await.transcript.as_ref().unwrap().page(None).events
-                .iter().any(|e| e.phase == crate::transcript::EventPhase::Live && e.text == "Streaming final answer");
+            let live = runtime.content.lock().await.transcript.as_ref().unwrap().events().any(|e| e.phase == crate::transcript::EventPhase::Live && e.text == "Streaming final answer");
             if live { break; }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }

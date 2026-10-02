@@ -1196,15 +1196,9 @@ impl Controller {
     pub fn cancel_copy(&mut self) {self.copy=None;self.copied=None;self.plan_dirty.set(true);}
     pub fn copy_details(&mut self, scope:&str, ids:Vec<String>) -> Result<()> {
         self.cancel_copy();
-        // Local demo/renderer fixtures have complete events without a remote
-        // cache. Native views fetch missing bytes as an explicit copy interest.
-        if !self.remote.has_snapshot(scope)? {
-            let chat=self.chats.get(scope).context("Unknown chat")?;
-            self.copied=Some(crate::details::copy(&ids.iter().filter_map(|id|chat.feed.event(id)).collect::<Vec<_>>(), chat.feed.events.values(), &chat.feed.parents));
-        } else {
-            self.copy=Some((scope.into(),ids));self.notice=Some("Fetching details to copy…".into());
-            self.watch_blocks()?;
-        }
+        ensure!(self.chats.contains_key(scope),"Unknown chat");
+        self.copy=Some((scope.into(),ids));self.notice=Some("Fetching details to copy…".into());
+        self.watch_blocks()?;
         Ok(())
     }
     pub fn viewport(&mut self,scope:&str,ids:std::collections::BTreeSet<String>) {
@@ -1726,11 +1720,6 @@ impl Controller {
                     if create_reply || matches!(command, Some(ClientCommand::CreateSession { .. })) {
                         self.create_failed_epoch = self.epoch;
                         self.notice = Some(error.clone().unwrap_or_else(|| "New chat is saved locally but was not confirmed; retry when connected".into()).into());
-                    }
-                    if let Some(ClientCommand::GetHistory { session_id, .. }) = &command
-                        && let Some(chat) = self.chats.get_mut(session_id)
-                    {
-                        chat.feed.loading = false;
                     }
                     if !matched {
                         self.notice = Some(error.unwrap_or_else(|| "Request failed".into()).into());

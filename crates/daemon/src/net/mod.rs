@@ -1,8 +1,8 @@
-use crate::protocol::ResponseError;
+//! Authenticated control requests and the daemon native-stream backend.
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
@@ -19,10 +19,11 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::manager::AgentManager;
-use crate::protocol::{
-    ClientCommand, ClientRequest, CrashReport, MAX_CRASH_BYTES, MAX_PROMPT_CHARS,
-    MAX_CONTROL_BYTES, PROTOCOL_VERSION, ServerMessage,
-};
+use tau_net::*;
+use tau_net::blocks::*;
+use crate::state::{StateStore, UncertainOutcome, StoredSession};
+use rusqlite::params;
+use futures_util::FutureExt;
 
 const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -244,7 +245,7 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                     let request_id = request.id.clone();
                     let request = match manager.inner.state.resolve_input(request).await {
                         Ok(request) => request,
-                        Err(error) => {queue_server(&response_outbound,&ServerMessage::command_failure(request_id,error)).await;return;}
+                        Err(error) => {queue_server(&response_outbound,&command_failure(request_id,error)).await;return;}
                     };
                     // Creation is also callable from a pipelined prompt. Its manager
                     // boundary journals it under the same gate as standalone creation.
@@ -252,226 +253,20 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                     if journalled {
                         match manager.inner.state.reserve_operation(&request).await {
                             Ok(Some(response))=>{queue_server(&response_outbound,&response).await;return;}
-                            Err(error)=>{queue_server(&response_outbound,&ServerMessage::command_failure(request_id,error)).await;return;}
+                            Err(error)=>{queue_server(&response_outbound,&command_failure(request_id,error)).await;return;}
                             Ok(None)=>{queue_server(&response_outbound,&ServerMessage::Accepted {request_id:request_id.clone()}).await;}
                         }
                     }
-                    let operation_id=request_id.clone();
-                    let mut response = match request.command {
-                        ClientCommand::ConnectBlocks { node_id } => {
-                            match manager.inner.state.block_cursor().await.and_then(|cursor| transfers.authorize(&node_id,cursor.lineage)) {
-                                Ok(offer) => {
-                                    queue_server(&response_outbound,&ServerMessage::BlockConnection { offer }).await;
-                                    ServerMessage::success(request_id,None,None)
-                                }
-                                Err(error) => ServerMessage::command_failure(request_id,error),
-                            }
-                        }
-                        ClientCommand::GetSession { session_id } => match manager.session_state_message(&session_id).await {
-                            Ok(message) => { queue_server(&response_outbound,&message).await; ServerMessage::success(request_id,Some(session_id),None) }
-                            Err(error) => ServerMessage::command_failure(request_id,error),
-                        },
-                        ClientCommand::GetReceipts { session_id,requests } => match manager.receipt_message(&session_id,&requests).await {
-                            Ok(message) => { queue_server(&response_outbound,&message).await; ServerMessage::success(request_id,Some(session_id),None) }
-                            Err(error) => ServerMessage::command_failure(request_id,error),
-                        },
-                        ClientCommand::GetOperation {operation_id} => match manager.inner.state.operation_outcome(&operation_id).await {
-                            Ok(message)=>{queue_server(&response_outbound,&message).await;ServerMessage::success(request_id,None,None)}
-                            Err(error)=>ServerMessage::command_failure(request_id,error),
-                        },
-                        ClientCommand::ReviewRestore {session_id}=>match manager.inner.state.review_restore(&session_id).await {
-                            Ok(())=>{manager.broadcast_sessions().await;ServerMessage::success(request_id,Some(session_id),None)},
-                            Err(error)=>ServerMessage::command_failure(request_id,error)
-                        },
-                        ClientCommand::ListSessions => {
-                            let mut result=ServerMessage::success(request_id.clone(),None,None);
-                            for projects in [false,true] {
-                                match manager.list_page(request_id.clone(),projects,None,0).await {
-                                    Ok(page)=>{if !queue_server(&response_outbound,&page).await {return;}},
-                                    Err(error)=>{result=ServerMessage::command_failure(request_id.clone(),error);break;}
-                                }
-                            }result
-                        }
-                        ClientCommand::ListPage {catalog_id,projects,after,revision}=>match manager.list_page(catalog_id,projects,after,revision).await {
-                            Ok(page)=>{if !queue_server(&response_outbound,&page).await {return;}ServerMessage::success(request_id,None,None)},
-                            Err(error)=>ServerMessage::command_failure(request_id,error)
-                        },
-                        ClientCommand::GetModelCatalog => {
-                            manager.schedule_model_catalog();
-                            ServerMessage::ModelCatalog { catalog: manager.model_catalog() }
-                        }
-                        ClientCommand::GetCodexUsage { force } => {
-                            let result = manager.codex_usage(force).await;
-                            ServerMessage::CodexUsage { request_id, report: result.report, error: result.error }
-                        },
-                        ClientCommand::RefreshModelCatalog { provider } => match manager.refresh_model_catalog(&provider).await {
-                            Ok(notice) => {
-                                let mut response = ServerMessage::success(request_id, None, None);
-                                if let ServerMessage::Response { notice: field, .. } = &mut response { *field = Some(notice); }
-                                response
-                            }
-                            Err(error) => ServerMessage::command_failure(request_id, error),
-                        },
-                        command @ (ClientCommand::GetSettings | ClientCommand::SetSettings { .. }) => {
-                            let result = match command {
-                                ClientCommand::SetSettings { revision, settings } => manager.set_settings(revision, *settings).await,
-                                _ => Ok(manager.inner.settings.get()),
-                            };
-                            match result {
-                                Ok(settings) => {
-                                    queue_server(&response_outbound, &ServerMessage::Settings { request_id:request_id.clone(), settings:Box::new(settings) }).await;
-                                    ServerMessage::success(request_id, None, None)
-                                }
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
-                        ClientCommand::CreateSession { keep_session_id, project_id } => match manager.create_session_operation(
-                            &request_id, &crate::protocol::ChatCreation { keep_session_id, project_id },
-                        ).await {
-                            Ok(session_id) => ServerMessage::success(request_id, Some(session_id), None),
-                            Err(error) => ServerMessage::command_failure(request_id, error),
-                        },
-                        ClientCommand::CreateProject { project_id, name, prompt } => match manager.create_project(project_id,name,prompt).await {
-                            Ok(()) => ServerMessage::success(request_id,None,None),
-                            Err(error) => ServerMessage::command_failure(request_id,error),
-                        },
-                        ClientCommand::UpdateProject { project_id, revision, name, prompt } => match manager.update_project(project_id,revision,name,prompt).await {
-                            Ok(()) => ServerMessage::success(request_id,None,None),
-                            Err(error) => ServerMessage::command_failure(request_id,error),
-                        },
-                        ClientCommand::DeleteProject { project_id, revision, mode } => match manager.delete_project(project_id,revision,mode).await {
-                            Ok(()) => ServerMessage::success(request_id,None,None),
-                            Err(error) => ServerMessage::command_failure(request_id,error),
-                        },
-                        ClientCommand::MoveSession { session_id, project_id } => match manager.move_session(&session_id,project_id).await {
-                            Ok(()) => ServerMessage::success(request_id,Some(session_id),None),
-                            Err(error) => ServerMessage::command_failure(request_id,error),
-                        },
-                        ClientCommand::Input {..} | ClientCommand::OpenSession {..} | ClientCommand::GetHistory {..} =>
-                            ServerMessage::failure(request_id,"Unsupported control command"),
-                        ClientCommand::GetCommands { session_id } => {
-                            match manager.commands(&session_id).await {
-                                Ok(commands) => {
-                                    if !queue_server(
-                                        &response_outbound,
-                                        &ServerMessage::Commands {
-                                            session_id: session_id.clone(),
-                                            commands,
-                                        },
-                                    ).await {
-                                        return;
-                                    }
-                                    ServerMessage::success(
-                                        request_id,
-                                        Some(session_id),
-                                        None,
-                                    )
-                                }
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
-                        ClientCommand::Prompt { session_id, text, model, create } => {
-                            if text.chars().count() > MAX_PROMPT_CHARS {
-                                ServerMessage::failure(request_id, "message is too large")
-                            } else {
-                                let result = async {
-                                    if let Some(create) = create {
-                                        anyhow::ensure!(uuid::Uuid::parse_str(&session_id).is_ok(), "Invalid named chat");
-                                        let id = manager.create_session_operation(&session_id, &create).await?;
-                                        anyhow::ensure!(id == session_id, "Creation resolved to a different chat");
-                                    }
-                                    manager.prompt_with_model(&session_id, &text, &request_id, model.as_ref()).await
-                                }.await;
-                                match result {
-                                    Ok(outcome) => ServerMessage::prompt_success(
-                                        request_id,
-                                        session_id,
-                                        outcome.disposition,
-                                        outcome.notice,
-                                    ),
-                                    Err(error) => {
-                                        ServerMessage::command_failure(request_id, error)
-                                    }
-                                }
-                            }
-                        }
-                        ClientCommand::QueueControl { session_id, generation, operation } => {
-                            match manager.queue_control(&session_id, &generation, &request_id, operation).await {
-                                Ok(outcome) => {
-                                    let mut response = ServerMessage::success(request_id, Some(session_id), None);
-                                    if let ServerMessage::Response { outcome: field, .. } = &mut response { *field = Some(outcome); }
-                                    response
-                                }
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
-                        ClientCommand::Abort { session_id } => {
-                            match manager.abort(&session_id, &request_id).await {
-                                Ok(()) => ServerMessage::success(
-                                    request_id,
-                                    Some(session_id),
-                                    None,
-                                ),
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
-                        ClientCommand::CloseSession { session_id } => {
-                            match manager.close_session(&session_id).await {
-                                Ok(()) => ServerMessage::success(
-                                    request_id,
-                                    Some(session_id),
-                                    None,
-                                ),
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
-                        ClientCommand::DeleteSession { session_id } => {
-                            match manager.delete_session(&session_id).await {
-                                Ok(()) => ServerMessage::success(
-                                    request_id,
-                                    Some(session_id),
-                                    None,
-                                ),
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
-                        ClientCommand::RenameSession { session_id, title } => {
-                            match manager.rename_session(&session_id, &title).await {
-                                Ok(()) => ServerMessage::success(
-                                    request_id,
-                                    Some(session_id),
-                                    None,
-                                ),
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
-                        ClientCommand::ForkSession {
-                            session_id,
-                            entry_id,
-                        } => match manager.fork_session(&session_id, &entry_id).await {
-                            Ok((child, draft)) => ServerMessage::success(
-                                request_id,
-                                Some(child),
-                                draft,
-                            ),
-                            Err(error) => ServerMessage::command_failure(request_id, error),
-                        },
-                        ClientCommand::CloneSession { session_id } => {
-                            match manager.clone_session(&session_id).await {
-                                Ok(child) => ServerMessage::success(
-                                    request_id,
-                                    Some(child),
-                                    None,
-                                ),
-                                Err(error) => ServerMessage::command_failure(request_id, error),
-                            }
-                        }
+                    let mut response = match dispatch(&manager,&transfers,request,&response_outbound).await {
+                        Ok(Some(response)) => response,
+                        Ok(None) => return,
+                        Err(error) => command_failure(request_id.clone(),error),
                     };
                     if journalled {
                         // Some operations include file cleanup or cancellation
                         // after a DB effect. An error is not proof of no effect.
                         if let ServerMessage::Response {ok:false,uncertain,..}=&mut response {*uncertain=true;}
-                        if let Err(error)=manager.inner.state.finish_operation(operation_id,&response).await {
+                        if let Err(error)=manager.inner.state.finish_operation(request_id,&response).await {
                             warn!(%error,"Could not persist operation outcome");
                             if let ServerMessage::Response {ok,uncertain,error,..}=&mut response {*ok=false;*uncertain=true;*error=Some("Operation outcome could not be committed; reconcile before retrying".into());}
                         }
@@ -508,12 +303,12 @@ async fn crash_report(
         Ok(report) => report,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let valid_frame = |frame: &crate::protocol::CrashFrame| {
+    let valid_frame = |frame: &tau_net::CrashFrame| {
         frame.class_name.chars().count() <= 192
             && frame.method_name.chars().count() <= 192
             && frame.file_name.as_ref().is_none_or(|name| name.chars().count() <= 192)
     };
-    let valid_range = |range: &Option<crate::protocol::CrashRange>| {
+    let valid_range = |range: &Option<tau_net::CrashRange>| {
         range.as_ref().is_none_or(|range| range.text_length >= 0
             && (range.start < 0 || range.start > range.end || range.end > range.text_length))
     };
@@ -629,5 +424,268 @@ fn authorized(headers: &HeaderMap, expected: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/server.rs"]
+#[path = "../../tests/unit/server.rs"]
 mod tests;
+
+impl StateStore {
+    pub(crate) async fn resolve_input(&self, request: ClientRequest) -> Result<ClientRequest> {
+        let ClientCommand::Input {content} = request.command else {return Ok(request);};
+        let bytes = self.read(move |db|tau_block_store::uploaded_input(db,&content)).await?;
+        let decoded: ClientRequest = serde_json::from_slice(&bytes)?;
+        ensure!(decoded.id == request.id,"Input request ID does not match its control descriptor");
+        ensure!(!matches!(decoded.command,ClientCommand::Input {..} | ClientCommand::ConnectBlocks {..}),"Invalid nested input");
+        Ok(decoded)
+    }
+    pub(crate) async fn control_frame(&self, message: &ServerMessage) -> Result<String> {
+        let bytes = serde_json::to_vec(message)?;
+        if bytes.len() <= MAX_CONTROL_BYTES {return Ok(String::from_utf8(bytes)?);}
+        let mut payload=message.clone();
+        let route=match &mut payload {ServerMessage::SessionPage {catalog_id,..}|ServerMessage::ProjectPage {catalog_id,..}=>Some(std::mem::take(catalog_id)),_=>None};
+        let bytes=serde_json::to_vec(&payload)?;
+        ensure!(bytes.len() as u64 <= MAX_BLOCK_BYTES,"Descriptor exceeds its content limit");
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        let id = hash.clone();
+        let length = bytes.len() as u64;
+        let lineage = self.access(move |db| {
+            let tx = db.transaction()?;
+            let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+            tx.execute("DELETE FROM blocks WHERE scope=?1 AND position<?2",rusqlite::params![CONTROL_SCOPE,now.saturating_sub(24*3600)])?;
+            tx.execute("DELETE FROM block_changes WHERE scope=?1 AND id NOT IN (SELECT id FROM blocks WHERE scope=?1)",[CONTROL_SCOPE])?;
+            if tau_block_store::header(&tx,CONTROL_SCOPE,&id)?.is_none() {
+                let (count,size):(u64,u64)=tx.query_row("SELECT count(*),coalesce(sum(json_extract(header,'$.length')),0) FROM blocks WHERE scope=?1",[CONTROL_SCOPE],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                ensure!(count<4096 && size.saturating_add(length)<=256*1024*1024,"Descriptor storage quota is full");
+                let h = BlockHeader {id:id.clone(),parent:None,order:now,kind:BlockKind::State,meta:serde_json::json!({"descriptor":true}),version:0,length:0,sealed:true,revision:0};
+                tau_block_store::put(&tx,CONTROL_SCOPE,h,&bytes)?;
+            }
+            // Renew the immutable descriptor's lease without changing bytes.
+            tx.execute("UPDATE blocks SET position=?3 WHERE scope=?1 AND id=?2",rusqlite::params![CONTROL_SCOPE,id,now])?;
+            let lineage = tau_block_store::cursor(&tx)?.lineage;
+            tx.commit()?; Ok(lineage)
+        }).await?;
+        let short = |s: &Option<String>| s.as_ref().map(|s| {
+            let mut n = s.len().min(32);while !s.is_char_boundary(n) {n-=1;}
+            if n < s.len() {format!("{}… (full details downloading)",&s[..n])} else {s.clone()}
+        });
+        let (session_id,reports) = match message {
+            ServerMessage::Response {request_id,ok,session_id,error,notice,uncertain,..} if !uncertain => (session_id.clone(),vec![OperationReceipt {id:request_id.clone(),accepted:*ok,complete:true,error:short(error),notice:short(notice)}]),
+            ServerMessage::Receipts {session_id,reports} => (Some(session_id.clone()),reports.iter().map(|r|OperationReceipt {id:r.id.clone(),accepted:r.accepted,complete:r.complete,error:short(&r.error),notice:short(&r.notice)}).collect()),
+            _ => (None,vec![]),
+        };
+        let operation_id=if let ServerMessage::Operation {operation_id,registered:true,..}=message {Some(operation_id.clone())} else {None};
+        let descriptor = ServerMessage::Data {operation_id,route,key:message.replication_key().unwrap_or_else(||format!("receipt:{hash}")),content:ContentRef {lineage,scope:CONTROL_SCOPE.into(),id:hash.clone(),length,hash},session_id,reports};
+        let encoded = serde_json::to_string(&descriptor)?;
+        ensure!(encoded.len() <= MAX_CONTROL_BYTES,"Receipt summary exceeds the control limit");
+        Ok(encoded)
+    }
+}
+
+impl AgentManager {
+    pub(crate) async fn list_page(&self,catalog_id:String,projects:bool,after:Option<String>,revision:u64)->Result<ServerMessage> {
+        let (revision,after,rows)=self.inner.state.read(move |db| {
+            let current:u64=db.query_row("SELECT revision FROM catalogue_clock",[],|r|r.get(0))?;
+            let after=if current==revision {after} else {None};
+            let rows=if projects {
+                db.prepare("SELECT id,json_object('id',id,'name',name,'prompt',prompt,'revision',revision) FROM projects WHERE ?1 IS NULL OR id>?1 ORDER BY id LIMIT 9")?
+                    .query_map([&after],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+            } else {
+                // Never copy a captured project prompt (up to 256 KiB per chat)
+                // into a list query, nor load history or construct runtimes.
+                db.prepare("SELECT id,json_remove(data,'$.project_prompt') FROM sessions WHERE ?1 IS NULL OR id>?1 ORDER BY id LIMIT 65")?
+                    .query_map(params![after],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            Ok((current,after,rows))
+        }).await?;
+        let limit=if projects {8} else {64};
+        let next=(rows.len()>limit).then(||rows[limit-1].0.clone());
+        if projects {
+            let projects=rows.into_iter().take(limit).map(|(_,data)|serde_json::from_str::<Project>(&data)).collect::<serde_json::Result<_>>()?;
+            Ok(ServerMessage::ProjectPage {catalog_id,revision,after,next,projects})
+        } else {
+            let settings=self.inner.settings.get();let runtimes=self.inner.runtimes.lock().await;
+            let cold_revision=self.inner.state_clock.load(std::sync::atomic::Ordering::Acquire);
+            let mut providers=std::collections::HashSet::new();
+            let mut sessions=Vec::new();let mut states=std::collections::BTreeMap::new();
+            for (id,data) in rows.into_iter().take(limit) {
+                let stored:StoredSession=serde_json::from_str(&data)?;
+                if providers.contains(&stored.model.provider) || providers.len()<8 {
+                    providers.insert(stored.model.provider.clone()); self.schedule_catalog(&stored.model);
+                }
+                let state=runtimes.get(&id).map(|runtime|runtime.snapshot());
+                states.insert(id.clone(),state.as_ref().map_or(cold_revision,|s|s.revision));
+                let tokens=state.as_ref().filter(|s|s.status!=SessionStatus::Sleeping).and_then(|s|s.context_usage).and_then(|u|u.tokens).or(stored.tokens);
+                sessions.push(SessionSummary {id,title:stored.title,project_id:stored.project_id,starter:stored.starter,parent_id:stored.parent_id,model:Some(stored.model.clone()),thinking_level:Some(stored.thinking),
+                    status:state.as_ref().map(|s|s.status).unwrap_or(SessionStatus::Sleeping),detail:state.as_ref().and_then(|s|s.detail.clone()),
+                    context_usage:self.context_usage(&settings,&stored.model,tokens),created_at_ms:stored.created_at_ms,updated_at_ms:stored.updated_at_ms});
+            }
+            Ok(ServerMessage::SessionPage {catalog_id,revision,after,next,sessions,states})
+        }
+    }
+}
+
+impl tau_net::native::Backend for AgentManager {
+    fn feed(&self, request: tau_net::blocks::FeedRequest) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::FeedPage>> {
+        let state = self.inner.state.clone();
+        async move {
+            state.read(move |db| {
+                ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&request.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
+                tau_block_store::feed(db,&request)
+            }).await
+        }.boxed()
+    }
+    fn read(&self, request: tau_net::blocks::BlockRequest) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::ContentRange>> {
+        let manager = self.clone();
+        async move {
+            let req=request.clone();
+            let ready=manager.inner.state.read(move |db| {
+                ensure!(req.scope == tau_net::blocks::CONTROL_SCOPE || db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
+                let h=tau_block_store::header(db,&req.scope,&req.id)?.context("Unknown block")?;
+                if h.meta.get("materialized")==Some(&json!(false)) {Ok(None)} else {tau_block_store::read(db,&req).map(Some)}
+            }).await?;
+            if let Some(range)=ready {return Ok(range);}
+            manager.materialize_file(&request.scope,&request.id).await?;
+            manager.inner.state.read(move |db| tau_block_store::read(db,&request)).await
+        }.boxed()
+    }
+    fn files(&self, request: tau_net::files::FileRequest) -> futures_util::future::BoxFuture<'static, Result<tau_net::files::FileReply>> {
+        let manager = self.clone();
+        async move {
+            let session = request.session_id.clone();
+            manager.inner.state.read(move |db| {
+                ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)", [&session], |r| r.get::<_, bool>(0))?, "Chat no longer exists");
+                Ok(())
+            }).await?;
+            // This is the single cwd resolution point. Today's daemon uses one
+            // cwd; future per-chat roots do not alter transport or UI lifetimes.
+            manager.inner.files.request(manager.inner.config.cwd.clone(), request).await
+        }.boxed()
+    }
+    fn changes(&self) -> tokio::sync::watch::Receiver<u64> { self.inner.state.block_changes.subscribe() }
+    fn upload_begin(&self, spec: tau_net::blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::UploadStatus>> {
+        let manager = self.clone(); async move {manager.begin_upload(spec).await}.boxed()
+    }
+    fn upload_write(&self, spec: tau_net::blocks::UploadSpec, offset: u64, bytes: Vec<u8>) -> futures_util::future::BoxFuture<'static,Result<()>> {
+        let manager = self.clone(); async move {manager.write_upload(spec,offset,bytes).await}.boxed()
+    }
+    fn upload_finish(&self, spec: tau_net::blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::UploadStatus>> {
+        let manager = self.clone(); async move {manager.finish_upload(spec).await}.boxed()
+    }
+}
+
+fn command_failure(request_id: String, error: anyhow::Error) -> ServerMessage {
+    let uncertain = error.is::<UncertainOutcome>();
+    let mut response = ServerMessage::failure(request_id, error.to_string());
+    if let ServerMessage::Response { uncertain: field, .. } = &mut response { *field = uncertain; }
+    response
+}
+
+/// Execute an admitted request. Error conversion and journal completion happen
+/// once at the socket boundary, not independently in every command arm.
+async fn dispatch(manager: &AgentManager, transfers: &tau_net::native::Server,
+    request: ClientRequest, outbound: &Outbound) -> Result<Option<ServerMessage>> {
+    let ClientRequest { id: request_id, command } = request;
+    let (mut session_id, mut draft, mut notice, mut outcome) = (None, None, None, None);
+    match command {
+        ClientCommand::ConnectBlocks { node_id } => {
+            let cursor = manager.inner.state.block_cursor().await?;
+            let offer = transfers.authorize(&node_id, cursor.lineage)?;
+            queue_server(outbound, &ServerMessage::BlockConnection { offer }).await;
+        }
+        ClientCommand::GetSession { session_id: id } => {
+            queue_server(outbound, &manager.session_state_message(&id).await?).await;
+            session_id = Some(id);
+        }
+        ClientCommand::GetReceipts { session_id: id, requests } => {
+            queue_server(outbound, &manager.receipt_message(&id, &requests).await?).await;
+            session_id = Some(id);
+        }
+        ClientCommand::GetOperation { operation_id } => {
+            queue_server(outbound, &manager.inner.state.operation_outcome(&operation_id).await?).await;
+        }
+        ClientCommand::ReviewRestore { session_id: id } => {
+            manager.inner.state.review_restore(&id).await?;
+            manager.broadcast_sessions().await;
+            session_id = Some(id);
+        }
+        ClientCommand::ListSessions => {
+            for projects in [false, true] {
+                let page = manager.list_page(request_id.clone(), projects, None, 0).await?;
+                if !queue_server(outbound, &page).await { return Ok(None); }
+            }
+        }
+        ClientCommand::ListPage { catalog_id, projects, after, revision } => {
+            let page = manager.list_page(catalog_id, projects, after, revision).await?;
+            if !queue_server(outbound, &page).await { return Ok(None); }
+        }
+        ClientCommand::GetModelCatalog => {
+            manager.schedule_model_catalog();
+            return Ok(Some(ServerMessage::ModelCatalog { catalog: manager.model_catalog() }));
+        }
+        ClientCommand::GetCodexUsage { force } => {
+            let result = manager.codex_usage(force).await;
+            return Ok(Some(ServerMessage::CodexUsage { request_id, report: result.report, error: result.error }));
+        }
+        ClientCommand::RefreshModelCatalog { provider } => {
+            notice = Some(manager.refresh_model_catalog(&provider).await?);
+        }
+        command @ (ClientCommand::GetSettings | ClientCommand::SetSettings { .. }) => {
+            let settings = match command {
+                ClientCommand::SetSettings { revision, settings } => manager.set_settings(revision, *settings).await?,
+                _ => manager.inner.settings.get(),
+            };
+            queue_server(outbound, &ServerMessage::Settings { request_id: request_id.clone(), settings: Box::new(settings) }).await;
+        }
+        ClientCommand::CreateSession { keep_session_id, project_id } => {
+            session_id = Some(manager.create_session_operation(&request_id, &ChatCreation { keep_session_id, project_id }).await?);
+        }
+        ClientCommand::CreateProject { project_id, name, prompt } => manager.create_project(project_id, name, prompt).await?,
+        ClientCommand::UpdateProject { project_id, revision, name, prompt } => manager.update_project(project_id, revision, name, prompt).await?,
+        ClientCommand::DeleteProject { project_id, revision, mode } => manager.delete_project(project_id, revision, mode).await?,
+        ClientCommand::MoveSession { session_id: id, project_id } => {
+            manager.move_session(&id, project_id).await?;
+            session_id = Some(id);
+        }
+        ClientCommand::Input { .. } => anyhow::bail!("Unsupported control command"),
+        ClientCommand::GetCommands { session_id: id } => {
+            let commands = manager.commands(&id).await?;
+            if !queue_server(outbound, &ServerMessage::Commands { session_id: id.clone(), commands }).await { return Ok(None); }
+            session_id = Some(id);
+        }
+        ClientCommand::Prompt { session_id, text, model, create } => {
+            ensure!(text.chars().count() <= MAX_PROMPT_CHARS, "message is too large");
+            if let Some(create) = create {
+                ensure!(uuid::Uuid::parse_str(&session_id).is_ok(), "Invalid named chat");
+                let id = manager.create_session_operation(&session_id, &create).await?;
+                ensure!(id == session_id, "Creation resolved to a different chat");
+            }
+            let result = manager.prompt_with_model(&session_id, &text, &request_id, model.as_ref()).await?;
+            return Ok(Some(ServerMessage::prompt_success(request_id, session_id, result.disposition, result.notice)));
+        }
+        ClientCommand::QueueControl { session_id: id, generation, operation } => {
+            outcome = Some(manager.queue_control(&id, &generation, &request_id, operation).await?);
+            session_id = Some(id);
+        }
+        ClientCommand::Abort { session_id: id } => {
+            manager.abort(&id, &request_id).await?;
+            session_id = Some(id);
+        }
+        ClientCommand::CloseSession { session_id: id } => {
+            manager.close_session(&id).await?;
+            session_id = Some(id);
+        }
+        ClientCommand::DeleteSession { session_id: id } => {
+            manager.delete_session(&id).await?;
+            session_id = Some(id);
+        }
+        ClientCommand::RenameSession { session_id: id, title } => {
+            manager.rename_session(&id, &title).await?;
+            session_id = Some(id);
+        }
+        ClientCommand::ForkSession { session_id: id, entry_id } => {
+            let (child, text) = manager.fork_session(&id, &entry_id).await?;
+            session_id = Some(child); draft = text;
+        }
+        ClientCommand::CloneSession { session_id: id } => session_id = Some(manager.clone_session(&id).await?),
+    }
+    Ok(Some(ServerMessage::Response { request_id, ok: true, session_id, draft, disposition: None,
+        uncertain: false, outcome, notice, error: None }))
+}

@@ -1,12 +1,11 @@
 //! Native display projection. Tools are small blocks with separately addressed
 //! input/output children. Source events remain provider history, never the wire.
-use anyhow::{Context, Result, ensure};
-use futures_util::FutureExt;
+use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use tau_net::blocks::{BlockHeader, BlockKind, ToolBody, ToolState};
 use tau_net::{Event, EventKind, EventPhase, EventRole, QueueState};
-use crate::{manager::AgentManager, state::StateStore};
+use crate::state::StateStore;
 
 pub const QUEUE: &str = "@queue";
 pub use tau_net::blocks::tool_input_id as input_id;
@@ -215,105 +214,6 @@ impl StateStore {
     }
 }
 
-struct StagedFile { state:StateStore, id:String }
-impl Drop for StagedFile {
-    fn drop(&mut self) {
-        // Cancellation may happen while the QUIC stream is being dropped. Any
-        // interrupted cleanup is also performed transactionally at startup.
-        let state=self.state.clone(); let id=self.id.clone();
-        tokio::spawn(async move { let _=state.access(move |db| {let tx=db.transaction()?; tau_block_store::discard_stage(&tx,&id)?;tx.commit()?;Ok(())}).await; });
-    }
-}
-impl AgentManager {
-    async fn materialize_file(&self, scope: &str, id: &str) -> Result<()> {
-        let scope=scope.to_owned(); let id=id.to_owned();
-        let read_header = || {let scope=scope.clone(); let id=id.clone(); self.inner.state.read(move |db|tau_block_store::header(db,&scope,&id))};
-        let Some(h)=read_header().await? else {return Ok(());};
-        if h.meta.get("materialized") != Some(&json!(false)) {return Ok(());}
-        let _permit=self.inner.block_imports.acquire().await?;
-        let Some(h)=read_header().await? else {return Ok(());};
-        if h.meta.get("materialized") != Some(&json!(false)) {return Ok(());}
-        let entry=h.meta["entry"].as_str().context("File has no source reference")?;
-        let attachment=self.resolve_attachment(&scope,entry).await?;
-        let mut file=attachment.file;
-        let before=file.metadata().await?;
-        ensure!(before.len() <= tau_net::blocks::MAX_BLOCK_BYTES,"File is too large");
-        let staging=StagedFile {state:self.inner.state.clone(),id:uuid::Uuid::new_v4().to_string()};
-        let mut offset=0; let mut buffer=vec![0; tau_net::blocks::BLOCK_CHUNK_BYTES*8];
-        use sha2::Digest;
-        use tokio::io::AsyncReadExt;
-        let mut hash=sha2::Sha256::new();
-        loop {
-            let n=file.read(&mut buffer).await?;
-            let bytes=buffer[..n].to_vec(); let stage=staging.id.clone();
-            self.inner.state.access(move |db| {let tx=db.transaction()?;tau_block_store::stage_append(&tx,&stage,offset,&bytes)?;tx.commit()?;Ok(())}).await?;
-            hash.update(&buffer[..n]); offset+=n as u64;
-            if n==0 {break;}
-        }
-        let after=file.metadata().await?;
-        ensure!(offset==before.len() && before.len()==after.len() && before.modified()?==after.modified()?,"File changed while importing");
-        let digest=format!("{:x}",hash.finalize());
-        ensure!(attachment.sha256.is_none_or(|expected|expected==digest),"Owned file failed integrity verification");
-        let mut meta=h.meta.clone(); meta["materialized"]=json!(true);meta["sha256"]=json!(digest);
-        let stage=staging.id.clone();
-        self.inner.state.access(move |db| {
-            let tx=db.transaction()?;
-            let current=tau_block_store::header(&tx,&scope,&id)?.context("File no longer exists")?;
-            if current.meta.get("materialized") == Some(&json!(false)) {tau_block_store::publish_stage(&tx,&stage,&scope,&id,meta)?;}
-            else {tau_block_store::discard_stage(&tx,&stage)?;}
-            tx.commit()?;Ok(())
-        }).await
-    }
-}
-
-impl tau_net::native::Backend for AgentManager {
-    fn feed(&self, request: tau_net::blocks::FeedRequest) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::FeedPage>> {
-        let state = self.inner.state.clone();
-        async move {
-            state.read(move |db| {
-                ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&request.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
-                tau_block_store::feed(db,&request)
-            }).await
-        }.boxed()
-    }
-    fn read(&self, request: tau_net::blocks::BlockRequest) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::ContentRange>> {
-        let manager = self.clone();
-        async move {
-            let req=request.clone();
-            let ready=manager.inner.state.read(move |db| {
-                ensure!(req.scope == tau_net::blocks::CONTROL_SCOPE || db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
-                let h=tau_block_store::header(db,&req.scope,&req.id)?.context("Unknown block")?;
-                if h.meta.get("materialized")==Some(&json!(false)) {Ok(None)} else {tau_block_store::read(db,&req).map(Some)}
-            }).await?;
-            if let Some(range)=ready {return Ok(range);}
-            manager.materialize_file(&request.scope,&request.id).await?;
-            manager.inner.state.read(move |db| tau_block_store::read(db,&request)).await
-        }.boxed()
-    }
-    fn files(&self, request: tau_net::files::FileRequest) -> futures_util::future::BoxFuture<'static, Result<tau_net::files::FileReply>> {
-        let manager = self.clone();
-        async move {
-            let session = request.session_id.clone();
-            manager.inner.state.read(move |db| {
-                ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)", [&session], |r| r.get::<_, bool>(0))?, "Chat no longer exists");
-                Ok(())
-            }).await?;
-            // This is the single cwd resolution point. Today's daemon uses one
-            // cwd; future per-chat roots do not alter transport or UI lifetimes.
-            manager.inner.files.request(manager.inner.config.cwd.clone(), request).await
-        }.boxed()
-    }
-    fn changes(&self) -> tokio::sync::watch::Receiver<u64> { self.inner.state.block_changes.subscribe() }
-    fn upload_begin(&self, spec: tau_net::blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::UploadStatus>> {
-        let manager = self.clone(); async move {manager.begin_upload(spec).await}.boxed()
-    }
-    fn upload_write(&self, spec: tau_net::blocks::UploadSpec, offset: u64, bytes: Vec<u8>) -> futures_util::future::BoxFuture<'static,Result<()>> {
-        let manager = self.clone(); async move {manager.write_upload(spec,offset,bytes).await}.boxed()
-    }
-    fn upload_finish(&self, spec: tau_net::blocks::UploadSpec) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::UploadStatus>> {
-        let manager = self.clone(); async move {manager.finish_upload(spec).await}.boxed()
-    }
-}
 
 #[cfg(test)]
 #[path = "../tests/unit/blocks.rs"]

@@ -6,8 +6,6 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use tau_net::blocks::*;
-pub mod uploads;
-pub mod cache_budget;
 
 
 pub fn initialize(db: &Connection) -> Result<()> {
@@ -426,3 +424,116 @@ pub fn publish_stage(db: &Connection, stage: &str, scope: &str, id: &str, meta: 
 #[cfg(test)]
 #[path = "../tests/unit/core.rs"]
 mod tests;
+
+
+pub const UPLOAD_QUOTA: u64 = 1024 * 1024 * 1024;
+pub const MAX_UPLOADS: usize = 4096;
+
+
+pub fn begin_upload(db: &Connection, spec: &UploadSpec) -> Result<UploadStatus> {
+    writing(db)?; spec.validate()?;
+    let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    // Pure data leases may expire; operation receipts never do. Retrying an
+    // expired upload re-verifies bytes and cannot itself repeat an effect.
+    db.execute("DELETE FROM blocks WHERE scope=?1 AND position<?2",params![UPLOAD_SCOPE,now.saturating_sub(7*24*3600)])?;
+    if header(db, UPLOAD_SCOPE, &spec.id)?.is_none() {
+        let (count, bytes): (usize,u64) = db.query_row("SELECT count(*),coalesce(sum(CASE WHEN json_extract(header,'$.sealed')=1 AND json_extract(header,'$.meta.file') IS NOT NULL THEN 0 ELSE json_extract(header,'$.meta.upload.length') END),0) FROM blocks WHERE scope=?1", [UPLOAD_SCOPE], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        ensure!(count < MAX_UPLOADS && bytes.saturating_add(spec.length) <= UPLOAD_QUOTA, "Durable upload quota is full");
+        // Upload progress is not display state: do not journal every chunk or
+        // wake unrelated feeds. Publication is the final immutable seal.
+        store_header(db, UPLOAD_SCOPE, &BlockHeader { id:spec.id.clone(),parent:None,order:now,kind:BlockKind::File,
+            meta:serde_json::json!({"upload":spec}),version:1,length:0,sealed:false,revision:1 })?;
+    }
+    let result=upload_status(db,spec)?;
+    let mut h=header(db,UPLOAD_SCOPE,&spec.id)?.unwrap();h.order=now;store_header(db,UPLOAD_SCOPE,&h)?;
+    Ok(result)
+}
+
+pub fn upload_status(db: &Connection, spec: &UploadSpec) -> Result<UploadStatus> {
+    let h = header(db, UPLOAD_SCOPE, &spec.id)?.context("Upload not found")?;
+    ensure!(h.meta.get("upload") == Some(&serde_json::to_value(spec)?), "Upload ID was already used for different content");
+    let file = h.meta.get("file").map(|v|serde_json::from_value(v.clone())).transpose()?;
+    Ok(UploadStatus { offset:h.length,sealed:h.sealed,file })
+}
+
+pub fn write_upload(db: &Connection, spec: &UploadSpec, offset: u64, bytes: &[u8]) -> Result<()> {
+    writing(db)?;
+    let current = upload_status(db, spec)?;
+    ensure!(!bytes.is_empty() && bytes.len() <= BLOCK_CHUNK_BYTES && offset.saturating_add(bytes.len() as u64) <= spec.length, "Invalid upload range");
+    ensure!(offset <= current.offset, "Upload range has a gap");
+    // Duplicated in-flight chunks are allowed only when identical. A competing
+    // stream can never replace verified bytes under the same upload identity.
+    if offset < current.offset || current.sealed {
+        ensure!(offset + bytes.len() as u64 <= current.offset, "Upload overlap crosses its durable prefix");
+        let mut at = offset;
+        while at < offset + bytes.len() as u64 {
+            let range = read(db, &BlockRequest { scope:UPLOAD_SCOPE.into(),id:spec.id.clone(),version:1,offset:at,follow:false })?;
+            let start = (at-offset) as usize;
+            let n = range.bytes.len().min(bytes.len()-start);
+            ensure!(n > 0 && range.bytes[..n] == bytes[start..start+n], "Conflicting upload bytes");
+            at += n as u64;
+        }
+        return Ok(());
+    }
+    let mut h = header(db, UPLOAD_SCOPE, &spec.id)?.unwrap();
+    install(db, UPLOAD_SCOPE, &spec.id, 1, offset, bytes)?;
+    h.length += bytes.len() as u64;
+    store_header(db, UPLOAD_SCOPE, &h)
+}
+
+/// The caller hashes bounded reads outside its database lock, then seals only
+/// after the declared length/digest match. Full-length inputs cannot be mutated.
+pub fn seal_upload(db: &Connection, spec: &UploadSpec, verified_hash: &str, file: Option<tau_net::UploadedFile>) -> Result<UploadStatus> {
+    writing(db)?;
+    let current = upload_status(db, spec)?;
+    ensure!(current.offset == spec.length && verified_hash == spec.hash, "Upload integrity check failed");
+    ensure!(matches!(spec.purpose,UploadPurpose::File {..}) == file.is_some(), "Upload publication is incomplete");
+    let mut h = header(db, UPLOAD_SCOPE, &spec.id)?.unwrap();
+    h.sealed = true;
+    if let Some(file) = file {
+        h.meta["file"] = serde_json::to_value(file)?;
+        // The fsynced atomic export owns attachment bytes after publication.
+        db.execute("DELETE FROM block_parts WHERE scope=?1 AND id=?2",params![UPLOAD_SCOPE,spec.id])?;
+    }
+    store_header(db, UPLOAD_SCOPE, &h)?;
+    upload_status(db,spec)
+}
+
+pub fn uploaded_input(db: &Connection, reference: &ContentRef) -> Result<Vec<u8>> {
+    ensure!(reference.scope == UPLOAD_SCOPE && reference.lineage == cursor(db)?.lineage, "Input belongs to a different source");
+    let h = header(db, UPLOAD_SCOPE, &reference.id)?.context("Input is unavailable; upload it first")?;
+    let spec: UploadSpec = serde_json::from_value(h.meta["upload"].clone())?;
+    ensure!(h.sealed && spec.purpose == UploadPurpose::Command && reference.length == h.length && reference.hash == spec.hash, "Input is incomplete or does not match its reference");
+    let bytes = cached_content(db, UPLOAD_SCOPE, &reference.id)?;
+    ensure!(bytes.len() as u64 == reference.length && blake3::hash(&bytes).to_hex().as_str() == reference.hash, "Input integrity check failed");
+    Ok(bytes)
+}
+
+
+pub const DEFAULT_CACHE_BYTES:u64=512*1024*1024;
+pub fn cached_bytes(db:&Connection,scope:&str,id:&str)->Result<u64> {
+    Ok(db.query_row("SELECT coalesce(sum(length(c.data)),0) FROM block_parts p JOIN block_chunks c ON c.hash=p.hash WHERE p.scope=?1 AND p.id=?2",params![scope,id],|r|r.get(0))?)
+}
+/// Record a batch of actual body reads as one recency step. Metadata-only
+/// planning must not keep unread bodies alive or manufacture byte residency.
+pub fn touch_cache<'a>(db: &Connection, scope: &str, ids: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    writing(db)?;
+    let clock: u64 = db.query_row("UPDATE block_usage SET clock=clock+1 WHERE singleton=1 RETURNING clock", [], |r| r.get(0))?;
+    let mut update = db.prepare_cached("INSERT INTO block_cache_access(scope,id,touched)
+        SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM block_parts WHERE scope=?1 AND id=?2)
+        ON CONFLICT(scope,id) DO UPDATE SET touched=excluded.touched")?;
+    for id in ids { update.execute(params![scope,id,clock])?; }
+    Ok(())
+}
+pub fn enforce_cache_budget(db:&Connection,scope:&str,id:&str,limit:u64)->Result<()> {
+    touch_cache(db, scope, [id])?;
+    loop {
+        let bytes:u64=db.query_row("SELECT bytes FROM block_usage WHERE singleton=1",[],|r|r.get(0))?;
+        if bytes<=limit {return Ok(());}
+        let victim=db.query_row("SELECT p.scope,p.id FROM block_parts p LEFT JOIN block_cache_access a ON a.scope=p.scope AND a.id=p.id
+            WHERE p.scope!=?1 OR p.id!=?2 GROUP BY p.scope,p.id ORDER BY coalesce(a.touched,0),p.scope,p.id LIMIT 1",params![scope,id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?;
+        let (scope,id)=victim.context("Active block exceeds cache quota")?;
+        db.execute("DELETE FROM block_parts WHERE scope=?1 AND id=?2",params![scope,id])?;
+        db.execute("DELETE FROM block_cache_access WHERE scope=?1 AND id=?2",params![scope,id])?;
+    }
+}

@@ -49,7 +49,7 @@ async fn persists_bounded_crash_reports_with_safe_diagnostics() {
     use tokio::sync::Mutex;
     use crate::config::Config;
     use crate::manager::AgentManager;
-    use crate::protocol::MAX_CRASH_BYTES;
+    use tau_net::MAX_CRASH_BYTES;
     use crate::state::StateStore;
     use super::{AppState, crash_report};
 

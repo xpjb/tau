@@ -428,9 +428,9 @@ impl Backend for Store {
     fn feed(&self,r:FeedRequest)->BoxFuture<'static,anyhow::Result<FeedPage>> {let db=self.db.clone();async move {feed(&db.lock().unwrap(),&r)}.boxed()}
     fn read(&self,r:BlockRequest)->BoxFuture<'static,anyhow::Result<ContentRange>> {let db=self.db.clone();async move {read(&db.lock().unwrap(),&r)}.boxed()}
     fn changes(&self)->watch::Receiver<u64> {self.changes.subscribe()}
-    fn upload_begin(&self,s:UploadSpec)->BoxFuture<'static,anyhow::Result<UploadStatus>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;let status=uploads::begin(&tx,&s)?;tx.commit()?;Ok(status)}.boxed()}
-    fn upload_write(&self,s:UploadSpec,offset:u64,bytes:Vec<u8>)->BoxFuture<'static,anyhow::Result<()>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;uploads::write(&tx,&s,offset,&bytes)?;tx.commit()?;Ok(())}.boxed()}
-    fn upload_finish(&self,s:UploadSpec)->BoxFuture<'static,anyhow::Result<UploadStatus>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;let bytes=cached_content(&tx,UPLOAD_SCOPE,&s.id)?;let status=uploads::seal(&tx,&s,&blake3::hash(&bytes).to_hex(),None)?;tx.commit()?;Ok(status)}.boxed()}
+    fn upload_begin(&self,s:UploadSpec)->BoxFuture<'static,anyhow::Result<UploadStatus>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;let status=begin_upload(&tx,&s)?;tx.commit()?;Ok(status)}.boxed()}
+    fn upload_write(&self,s:UploadSpec,offset:u64,bytes:Vec<u8>)->BoxFuture<'static,anyhow::Result<()>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;write_upload(&tx,&s,offset,&bytes)?;tx.commit()?;Ok(())}.boxed()}
+    fn upload_finish(&self,s:UploadSpec)->BoxFuture<'static,anyhow::Result<UploadStatus>> {let db=self.db.clone();async move {let mut db=db.lock().unwrap();let tx=db.transaction()?;let bytes=cached_content(&tx,UPLOAD_SCOPE,&s.id)?;let status=seal_upload(&tx,&s,&blake3::hash(&bytes).to_hex(),None)?;tx.commit()?;Ok(status)}.boxed()}
 }
 async fn connect(store:Arc<Store>)->(Server,Client) {
     let server=Server::bind("127.0.0.1:0".parse().unwrap(),store.clone()).await.unwrap();
@@ -448,10 +448,10 @@ async fn interrupted_upload_resumes_durable_bytes_after_both_endpoints_restart()
     for chunk in bytes[..128*1024].chunks(BLOCK_CHUNK_BYTES) {upload.write(chunk).await.unwrap();}
     // A second stream proves progress is committed, not just client queued.
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
-        loop {let status=uploads::status(&store.db.lock().unwrap(),&spec).unwrap();if status.offset>=64*1024 {break;}tokio::task::yield_now().await;}
+        loop {let status=upload_status(&store.db.lock().unwrap(),&spec).unwrap();if status.offset>=64*1024 {break;}tokio::task::yield_now().await;}
     }).await.unwrap();
     drop(upload);client.shutdown().await;server.shutdown().await;drop(client);drop(server);drop(store);
-    let store=Store::open(&path);let saved=uploads::status(&store.db.lock().unwrap(),&spec).unwrap().offset;
+    let store=Store::open(&path);let saved=upload_status(&store.db.lock().unwrap(),&spec).unwrap().offset;
     assert!(saved>=64*1024 && saved<spec.length);
     let (server,client)=connect(store.clone()).await;
     let mut upload=client.uploader(spec.clone()).await.unwrap();assert_eq!(upload.status.offset,saved);
@@ -471,9 +471,9 @@ async fn upload_checks_authorization_hashes_size_gaps_and_unsealed_references() 
     let (server,client)=connect(store.clone()).await;
     let spec=UploadSpec {id:"bound".into(),length:4,hash:blake3::hash(b"good").to_hex().to_string(),purpose:UploadPurpose::Command};
     let mut upload=client.uploader(spec.clone()).await.unwrap();upload.write(b"evil").await.unwrap();assert!(upload.finish().await.is_err());drop(upload);
-    assert!(!uploads::status(&store.db.lock().unwrap(),&spec).unwrap().sealed);
+    assert!(!upload_status(&store.db.lock().unwrap(),&spec).unwrap().sealed);
     let reference=ContentRef {lineage:store.lineage(),scope:UPLOAD_SCOPE.into(),id:spec.id.clone(),length:4,hash:spec.hash.clone()};
-    assert!(uploads::input(&store.db.lock().unwrap(),&reference).is_err());
+    assert!(uploaded_input(&store.db.lock().unwrap(),&reference).is_err());
     let mut too_big=spec.clone();too_big.length=MAX_COMMAND_BYTES+1;assert!(client.uploader(too_big).await.is_err());
     let outsider=Client::bind().await.unwrap();
     let offer=server.authorize(&client.node_id(),store.lineage()).unwrap();outsider.configure(&offer,"127.0.0.1").await.unwrap();
