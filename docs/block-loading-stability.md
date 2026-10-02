@@ -8,6 +8,14 @@ also pass after adopting the shared pressure-link fixture. See the
 [complete rollup record](branch-rollup-20261002.md) for exact runs and release state.
 No physical-device result or blanket backlog-014 closure is claimed.
 
+The integrated client idle limit exposed a cold-discovery timeout under seed-29
+loss. [The October 2 correction](native-discovery-timeout.md) allows the existing
+client connection budget before peer parameters arrive, while the server still
+negotiates five-second established-peer silence detection. Both UDP outage
+regressions and healthy idle/slow-read checks pass after this correction. The
+user authorized finishing the local fix and releasing beta 0.7.11, not replacing
+Iroh with Mog.
+
 The earlier implementation record follows.
 
 ---

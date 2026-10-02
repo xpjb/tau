@@ -1,4 +1,24 @@
-# October 2 branch rollup
+# October 2 discovery correction — accepted for beta 0.7.11
+
+The user requested fixing the release finding, then proceeding with beta. The
+failed seed-29 packet trace and a new failing-before regression identify a
+five-second client idle limit racing Iroh's discovery retry. The client now allows
+its existing connection budget for discovery; the server still negotiates a
+five-second established-peer limit. No extra retry loop or relaxed test guard.
+
+Native transfer/impaired-link/pressure tests pass **26/26**, plus **2/2** slow-read
+regressions. Seed 29 has one attempt per client and no transport errors. Both UDP
+outage tests keep individual progress below five seconds; recovery seed 91 keeps
+all three files progressing and completes exact bytes. See
+[the cause, timings and run IDs](native-discovery-timeout.md). Backlog 013 and the
+original per-file seed-73 finding remain open; no device acceptance is claimed.
+
+The following rollup and September records preserve the earlier failures and
+holds. The discovery correction above supersedes the initial release hold.
+
+---
+
+# October 2 branch rollup — initial result
 
 The user requested carrying this harness into current Tau2, not archiving it.
 The port keeps one shared link fixture for `native_link` and `network_pressure`;

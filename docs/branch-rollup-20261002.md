@@ -93,18 +93,28 @@ All Rust commands use `/usr/local/bin/cargo`, one Cargo/Rayon job and nextest.
   connection attempt. Correct files and message identities survive. The exact
   report is retained at `docs/network-pressure/rollup-dodgy-29-failure.json`.
   No assertion is weakened and no passing rerun replaces the failed result.
-- Installer preparation is authorized; deployment is awaiting the user's call on
-  this stress finding. Physical-device acceptance and bugs 013/014/045 remain open.
+- The user subsequently requested fixing the stress finding, recording Mog's
+  adoption gaps without replacing the transport, and proceeding with beta.
+  [The failed trace and regression](native-discovery-timeout.md) identify the
+  discovery/idle-timeout conflict. Native transfer/link/pressure now pass 26/26;
+  two slow-read cases also pass. Seed 29 connects once per client with no transport
+  errors, and both UDP outage cases retain their five-second progress guards.
+  Physical-device acceptance and the distinct bugs 013/014/045 remain open.
 
 ## Cleanup progress
 
-Deleted **45 remote refs** in one atomic push, each guarded by its exact inspected
-tip. Deleted **93 local refs** in one expected-tip transaction. Stable and Tau2
-mainline refs were excluded. Removed the clean unused Android merge checkout and
-the explicitly rejected remove-pause checkout. The Android feature checkout is
-still used as the working directory of the host adb server, so its local branch
-and worktree remain; its tip is already integrated. The three remaining feature
-refs are retained until their combined source acceptance and publication.
+Deleted **48 remote refs** and **96 local refs**. The first atomic remote batch
+removed 45 refs, each guarded by its exact inspected tip; the first local
+expected-tip transaction removed 93. After source publication, the three merged
+feature refs were removed locally and remotely. Stable and Tau2 mainline refs
+were excluded. The remote now has only `master` and `tau2`, with default `master`.
+
+Removed the clean unused Android merge checkout, the explicitly rejected
+remove-pause checkout and the merged block-loading checkout. The Android feature
+checkout remains the working directory of the host adb server, so its local
+branch/worktree stay accounted for and intact; its tip is already integrated.
+Our rollup and detached negative-control worktrees are temporary acceptance work
+and will be removed after their evidence and merged commits are retained.
 
 ## Complete starting branch inventory
 

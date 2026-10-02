@@ -127,4 +127,21 @@ no integrity failures and no duplicate messages. Its strict no-transport-errors
 guard fails. [Exact retained report](../docs/network-pressure/rollup-dodgy-29-failure.json)
 and [run/disposition](../docs/network-pressure.md). Cause and production relevance
 remain unproven; do not present this as a diagnosed healthy-stream stall or
-suppress the test. Deployment awaits the user's call on the finding.
+suppress the test. The user later requested a cause-specific fix and beta release.
+The initial release hold is superseded by the correction below.
+
+## October 2 discovery correction
+
+The failed packet trace and a new deterministic UDP regression identify Tau's
+five-second client idle limit ending an initial handshake before Iroh can retry
+lost discovery. The client now uses its existing 30-second connection budget;
+the server still negotiates five-second established-peer silence detection.
+[Diagnosis and acceptance](../docs/native-discovery-timeout.md) retain failing-before
+and passing-after evidence. No application retry loop or weakened guard is added.
+
+All 26 native transfer/link/pressure cases and two slow-read cases pass. The
+8-/17-second UDP outage bodies and file each progress within the unchanged
+five-second guard; seed-29 cold connection succeeds once per client without
+transport errors. Seed-91 pressure files resume and complete exactly. This closes
+the diagnosed cold-discovery timeout, not the historical seed-73 per-file gap or
+physical-device acceptance. Those remain open.

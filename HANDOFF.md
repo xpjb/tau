@@ -14,18 +14,27 @@ and Android startup integrations are included.
   preserves the starting refs; no production data backup or restore was performed.
 
 Four regressions fail on current pre-rollup `396d5ba` and pass in the candidate,
-so new-chat and block recovery are not obsolete. Workspace/all-target compilation
-passes. The broad candidate run was 361/362; the old branch's unnecessary starter
-flag was removed, and its unchanged background-sync test now passes. The final
-focused daemon/native-link/pressure/new-chat/background run is **82/83**, with all
-but the lossy-link no-transport-errors guard passing. Preserve the exact failed
-[stress report](docs/network-pressure/rollup-dodgy-29-failure.json); correct files,
-no alerts and exactly-once authored messages are not a claim of an all-green suite.
+so new-chat and block recovery are not obsolete. The broad candidate run was
+361/362; the unnecessary starter flag was removed, and its unchanged background
+sync case passes. The initial focused run was 82/83: seed 29 exposed a cold native
+connection timeout. That exact failed [report](docs/network-pressure/rollup-dodgy-29-failure.json)
+is preserved, not replaced by a passing repeat.
 
-Prepare matched **0.7.11 / protocol 22** packages with the existing release script,
-without rerunning passed tests. **Deployment awaits the user's call on the stress
-finding.** This is a new hold, not the historical 0.7.8 download-confirmation hold.
-No service has been restarted and no physical-device acceptance is claimed.
+The user then requested a local fix and beta release, with a Mog adoption note
+instead of a transport replacement. The failed packet trace and new regression
+identify Tau's five-second client idle limit racing Iroh discovery retry.
+[The correction](docs/native-discovery-timeout.md) permits discovery within the
+existing connect budget; the server still negotiates five-second established-peer
+silence detection. Native transfer/link/pressure pass **26/26**, plus **2/2**
+slow-read cases. Both UDP outage cases retain their five-second individual progress
+guards; seed 29 connects once per client with no transport errors. Final workspace/
+all-target checking passes. The original 013/014 findings and device QA stay open.
+Mog's runtime is unchanged; its local documentation commit is `af01924`.
+
+Release matched **0.7.11 / protocol 22** with the existing sequential release script.
+The user has authorized proceeding; the earlier stress-finding hold is superseded.
+Check live beta activity immediately before deployment and leave stable untouched.
+At this source checkpoint no service has restarted or package been delivered.
 The prior dated records below remain historical evidence, not current branch refs.
 
 ---
