@@ -1,3 +1,19 @@
+# Shared scroll momentum — integrated source, October 2, 2026
+
+Standard fling deceleration and sampled release velocity now serve all retained
+scroll owners and shared text inputs. Zero-time/high-refresh updates no longer
+kill a fling; Files and previews use the same wheel easing; native precision
+input, including Windows fractional line reports, is not double-smoothed.
+
+User-requested merge **`ae2714d`** integrates `29150bf` into `origin/tau2`, with an
+identical tree. Feature frontend nextest **243/243** and native/Android/Windows
+compiler checks pass. Merged native all-target check and **18/18 focused cases**
+pass; previous broader/platform evidence is reused. No package/deployment or
+physical-device feel/latency acceptance is claimed. See
+[physics, input contract, evidence and remaining acceptance](../docs/scroll-momentum.md).
+
+---
+
 # Android startup lock contention — integrated source, October 2, 2026
 
 The shared startup path reproduced writer-blocked Store/replica reopens and

@@ -1,3 +1,22 @@
+# Shared scroll momentum — integrated source, October 2, 2026
+
+At the user's request, feature `29150bf` from `fix/tau2-scroll-momentum` is merged
+as **`ae2714d`** into `tau2-integration` / `origin/tau2`. The merge tree exactly
+matches the validated feature tree.
+
+- Shared Android-style fling physics, sampled release velocity, cadence/DPI
+  independence and consistent text-field/File/preview scrolling. Precision
+  touchpad input preserves the platform stream rather than adding a second tail;
+  Windows fractional-line input is handled as precision input too.
+- **243/243 frontend nextest cases pass**, plus native all-target, Android ARM64/
+  API29 and Windows MSVC checks. Merged native all-target compilation and **18/18
+  focused cases pass**; broader/platform evidence is reused for identical source.
+- **Source only:** no packages, deployment, service restart, dependency/version/
+  protocol/schema or stable change. Physical phone/Windows touchpad feel remains
+  to be accepted after a client release. [Prior art, scope and exact validation](docs/scroll-momentum.md).
+
+---
+
 # Viewer retention and Android selection — source fixes, October 2, 2026
 
 The user requested fixes on `tau2-integration` / `origin/tau2`. Source commits

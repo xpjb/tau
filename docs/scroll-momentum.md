@@ -1,10 +1,12 @@
 # Consistent scrolling and touch momentum — October 2, 2026
 
-Source-only feature branch: `fix/tau2-scroll-momentum`, worktree
+Feature branch: `fix/tau2-scroll-momentum`, worktree
 `/root/tau2-scroll-momentum`, based on `origin/tau2` at `05879ef`.
 Regression commit `b3578c7`; implementation and added coverage `60f2833`.
-No integration merge, beta deployment, packages, service restart, production-data
-access, dependency/version/protocol/schema change, or stable change.
+At the user's request, merged as **`ae2714d`** into `tau2-integration` / `origin/tau2`.
+The merge tree exactly matches validated feature tip `29150bf`.
+**Source integration only:** no beta deployment, packages, service restart,
+production-data access, dependency/version/protocol/schema change, or stable change.
 
 ## What was wrong
 
@@ -92,10 +94,14 @@ nextest; no Clippy, built-in Cargo test runner or shared-lock bypass.
   and tail-follow regressions remain passing.
 - Android ARM64/API29 NDK frontend-library check: **passed**.
 - Windows x64 MSVC frontend-library check via managed xwin: **passed**.
+- Merged native frontend/all-target check and **18/18 focused nextest cases**:
+  **passed**, run `7c8b6cc0-10c9-48ae-9eb6-42de5e396a9b`. The full 243-case and
+  platform runs above are reused for identical source, not claimed as rerun.
 - `git diff --check`: **passed**. Dead-code/platform warnings remain; no unrelated
   lint-driven rewrites.
 
-Logs: `/tmp/tau2-scroll-momentum-{before,check,input-focus,tests,android,windows}.log`.
+Logs: `/tmp/tau2-scroll-momentum-{before,check,input-focus,tests,android,windows}.log`
+and `/tmp/tau2-scroll-momentum-merged-{check,tests}.log`.
 
 ## Acceptance still needed
 
