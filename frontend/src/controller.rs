@@ -719,18 +719,32 @@ impl Controller {
         for file in files {let chat=&self.chats[&session].local;if !chat.files.iter().chain(chat.pending.iter().flat_map(|p|&p.files)).any(|f|f.id==file.id) {self.store.discard_import(&self.identity,&session,&file)?;}}
         Ok(())
     }
+    /// Display eligibility follows the local new-chat intent, not receipt of
+    /// a remote transcript. The create receipt is still needed before sending
+    /// /model, but a content snapshot is never needed to select a model.
     pub fn quick_start(&self, id: &str) -> bool {
-        self.account
-            .sessions
-            .iter()
-            .any(|s| s.id == id && s.starter)
+        (self.is_creating(id) || self.account.sessions.iter().any(|s| s.id == id && s.starter))
+            && !self.account.missing_chats.contains(id)
             && self.chats.get(id).is_some_and(|c| {
-                c.feed.synchronized
-                    && c.feed.before.is_none()
+                c.feed.before.is_none()
                     && c.feed.events.values().all(|e| e.role == EventRole::System)
                     && c.feed.queue.requests.is_empty()
-                    && c.local.pending.is_empty()
+                    // Even an unconfirmed /model after connection loss is not
+                    // a first conversation turn; the chooser should stay put.
+                    && c.local.pending.iter().all(Self::model_control)
             })
+    }
+    fn model_control(pending: &Pending) -> bool {
+        matches!(&pending.request.command, ClientCommand::Prompt { text, .. } if text.starts_with("/model "))
+    }
+    pub fn can_choose_model(&self, id: &str) -> bool {
+        self.epoch.is_some() && !self.is_creating(id) && self.quick_start(id)
+            && self.chats.get(id).is_some_and(|c| c.model_request.is_none()
+                && c.local.pending.iter().all(|p| !Self::model_control(p) || p.status == Delivery::Rejected))
+    }
+    pub fn create_needs_retry(&self, id: &str) -> bool {
+        self.is_creating(id) && (self.account.create_blocked
+            || self.epoch.is_some() && self.create_failed_epoch == self.epoch)
     }
     pub fn save_model_preferences(
         &mut self,
@@ -743,13 +757,8 @@ impl Controller {
     }
     pub fn choose_model(&mut self, session: &str, selector: &str) -> Result<()> {
         ensure!(
-            self.epoch.is_some() && self.quick_start(session),
-            "Model tiles are for an untouched, connected new chat"
-        );
-        let chat = &self.chats[session];
-        ensure!(
-            chat.model_request.is_none(),
-            "Wait for model selection to finish"
+            self.can_choose_model(session),
+            "Wait until the new chat is connected and the previous model choice is resolved"
         );
         let _: tau_protocol::SessionModel = selector.parse().map_err(anyhow::Error::msg)?;
         let slug = selector.to_owned();

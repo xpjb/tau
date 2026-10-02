@@ -145,3 +145,63 @@ fn selected_topic_stays_visible_when_its_chat_bumps_from_the_far_right() {
         assert!(h.projects().iter().any(|(_, id)| id == "p24"), "the selected tab remains visible after moving left (mobile={mobile}, scroll={}, tabs={:?})", h.app.root.workspace.sidebar.projects.scroll.value, h.projects().iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>());
     }
 }
+
+#[test]
+fn new_chat_tiles_are_present_before_creation_and_remain_on_reconnect() {
+    use ui::composer::{Choice, ModelChoice};
+    for (size, mobile) in [((1000, 800), false), ((360, 720), true)] {
+        let mut h = Harness::new(size, mobile);
+        h.frame();
+        let new = h.app.root.workspace.sidebar.controls.placed()
+            .find(|(choice, _)| matches!(choice, ui::sidebar::Choice::New)).unwrap().1;
+        h.click(new);
+        let id = h.app.controller.account.selected.clone().unwrap();
+        let chooser = |h: &Harness| h.app.root.workspace.chat.transcript.models.controls.placed()
+            .any(|(choice, _)| matches!(choice, ModelChoice::Configure));
+        let selectable = |h: &Harness| h.app.root.workspace.chat.transcript.models.controls.placed()
+            .any(|(choice, _)| matches!(choice, ModelChoice::Select(..)));
+        let retry = |h: &Harness| h.app.root.workspace.chat.composer.controls.placed()
+            .any(|(choice, _)| matches!(choice, Choice::RetryCreate));
+        assert!(h.app.controller.quick_start(&id));
+        assert!(chooser(&h), "The first local new-chat frame has a chooser (mobile={mobile})");
+        assert!(!selectable(&h), "An offline provisional chat cannot send a model choice");
+        assert!(!retry(&h), "Creation has not failed");
+        let composer_label = |h: &Harness| {
+            let field = h.app.root.workspace.chat.composer.field.control.rect.unwrap();
+            let rgba = h.ctx.read_rgba8().unwrap();
+            let stride = h.ctx.size().0 as usize * 4;
+            let x = (field.x as usize - 40) * 4;
+            let y = field.y as usize - 27;
+            (y..y+22).flat_map(|row| rgba[row*stride+x..row*stride+x+160*4].to_vec()).collect::<Vec<_>>()
+        };
+        let before = composer_label(&h);
+        h.app.controller.account.create_blocked = true;
+        h.frame();
+        assert!(retry(&h), "A failed create retains an explicit recovery action");
+        h.app.controller.account.create_blocked = false;
+        h.app.controller.message(ServerMessage::Sessions { sessions: vec![SessionSummary {
+            id: id.clone(), project_id: general_project_id(), title: "New chat".into(), starter: true,
+            status: SessionStatus::Sleeping, detail: None, context_usage: None,
+            model: None, thinking_level: None, parent_id: None, created_at_ms: 1, updated_at_ms: 1,
+        }] }).unwrap();
+        h.frame();
+        assert_eq!(composer_label(&h), before, "Confirmation without a model adds no transient status label");
+        assert!(chooser(&h), "The chooser survives confirmation before content sync");
+        h.app.controller.account.sessions[0].model = Some(SessionModel { provider: "fixture".into(), model_id: "last-chosen".into() });
+        h.frame();
+        assert_ne!(composer_label(&h), before, "The confirmed model is shown");
+        h.app.controller.epoch = Some(1);
+        h.frame();
+        assert!(selectable(&h), "A confirmed connected chat can choose without a content snapshot");
+        h.app.controller.chats.get_mut(&id).unwrap().feed.synchronized = false;
+        h.frame();
+        assert!(chooser(&h) && selectable(&h));
+        h.app.controller.epoch = None;
+        h.frame();
+        assert!(chooser(&h) && !selectable(&h), "Reconnect keeps the chooser without allowing offline commands");
+        h.app.controller.draft("First message".into()).unwrap();
+        h.app.controller.send_prompt().unwrap();
+        h.frame();
+        assert!(!chooser(&h), "The first saved prompt ends the new-chat choice");
+    }
+}

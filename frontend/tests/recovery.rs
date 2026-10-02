@@ -15,7 +15,7 @@ use std::{
 };
 use tau_frontend::{
     controller::Controller,
-    store::{Delivery, Settings, Store},
+    store::{Delivery, Pending, Settings, Store},
     transport::{Command, Event as NetworkEvent, Network},
 };
 use tau_protocol::*;
@@ -48,6 +48,54 @@ fn offline_new_chat_and_send_are_durable_before_any_server_ack() {
     assert_eq!(c.selected().unwrap().local.pending[0].request.id, prompt);
     assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForChat,
         "A saved prompt cannot be sent before the transport is ready");
+}
+
+#[test]
+fn new_chat_model_choices_stay_visible_through_confirmation_and_reconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
+    c.new_chat().unwrap();
+    let id = c.account.selected.clone().unwrap();
+    assert!(c.quick_start(&id), "show the chooser immediately, even for a local provisional chat");
+    assert!(!c.can_choose_model(&id));
+    assert!(c.is_creating(&id), "local creation owns the chooser before daemon confirmation");
+    c.draft("Unsent draft".into()).unwrap();
+    assert!(c.quick_start(&id), "typing must not consume a model choice");
+
+    // The creation receipt and session list may arrive before the content feed.
+    c.message(ServerMessage::Sessions { sessions: vec![SessionSummary {
+        id: id.clone(), project_id: general_project_id(), title: "New chat".into(), starter: true,
+        status: SessionStatus::Sleeping, detail: None, context_usage: None,
+        model: Some(SessionModel { provider: "openai-codex".into(), model_id: "fixture".into() }), thinking_level:None,
+        parent_id: None, created_at_ms: 1, updated_at_ms: 1,
+    }] }).unwrap();
+    assert!(!c.is_creating(&id));
+    assert!(c.quick_start(&id));
+    c.epoch = Some(1);
+    assert!(c.can_choose_model(&id), "a confirmed chat can accept /model without a transcript read");
+
+    let request = "selection".to_owned();
+    c.chats.get_mut(&id).unwrap().model_request = Some((request.clone(), "openai-codex/fixture".into()));
+    c.chats.get_mut(&id).unwrap().local.pending.push(Pending {
+        request: ClientRequest { id: request, command: ClientCommand::Prompt { session_id: id.clone(), text: "/model openai-codex/fixture".into() } },
+        started_at_ms: None, text: "/model openai-codex/fixture".into(), files: vec![], status: Delivery::Sending, detail: None,
+    });
+    assert!(c.quick_start(&id), "an in-flight model choice must not remove the tiles");
+    assert!(!c.can_choose_model(&id), "another choice must wait for the first");
+    c.chats.get_mut(&id).unwrap().model_request = None;
+    c.chats.get_mut(&id).unwrap().local.pending[0].status = Delivery::Unconfirmed;
+    c.epoch = None;
+    c.chats.get_mut(&id).unwrap().feed.synchronized = false;
+    assert!(c.quick_start(&id), "reconnect and an uncertain /model must not collapse the chooser");
+    assert!(!c.can_choose_model(&id));
+    c.epoch = Some(2);
+    assert!(!c.can_choose_model(&id), "reconcile an uncertain model control before another selection");
+    c.chats.get_mut(&id).unwrap().local.pending.clear();
+    assert!(c.can_choose_model(&id), "transcript sync is not a prerequisite for a model choice");
+    c.epoch = None;
+    c.send_prompt().unwrap();
+    assert!(!c.quick_start(&id), "the first local send ends the new-chat choice");
+    assert!(!c.can_choose_model(&id));
 }
 
 #[test]

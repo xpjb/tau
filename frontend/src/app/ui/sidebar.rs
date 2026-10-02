@@ -208,7 +208,7 @@ impl Widget for Sidebar {
             let rect = crate::render::intersect(rect, clip);
 
             let unread = cx.model.unread(session);
-            let title = if session.starter {
+            let title = if session.starter || cx.model.is_creating(&session.id) {
                 "New chat"
             } else if session.title.is_empty() {
                 "Unnamed chat"
@@ -238,8 +238,12 @@ impl Widget for Sidebar {
             let status = format!(
                 "{}{}",
                 if unread { "●  " } else { "" },
-                if cx.model.is_creating(&session.id) {
-                    "Creating…"
+                if cx.model.create_needs_retry(&session.id) {
+                    "Needs attention"
+                } else if cx.model.quick_start(&session.id)
+                    && !matches!(session.status, SessionStatus::Running | SessionStatus::Error)
+                    && !cx.model.chats.get(&session.id).is_some_and(|c| c.feed.queue.paused) {
+                    ""
                 } else {
                     match session.status {
                         SessionStatus::Running => "Working",

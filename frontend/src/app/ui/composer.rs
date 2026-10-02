@@ -260,27 +260,13 @@ impl Widget for Composer {
             .is_some_and(|c| matches!(c.status.as_str(), "waiting" | "applying"));
         let summary = cx.model.account.sessions.iter().find(|s| s.id == session).cloned();
         chrome.rect(Rect::new(b.x, composer_top, b.width, composer_h), color(0x0e141b));
-        let creating = cx.model.is_creating(&session);
-        let choosing = cx.model.chats[session].model_request.is_some();
+        let retry_create = cx.model.create_needs_retry(session);
         let status_rect =
-            Rect::new(x, composer_top + 10. * s, (width - if creating { 94. * s } else { 0. }).max(1.), 20. * s);
-        if creating || choosing {
-            cx.services.renderer.label(
-                chrome,
-                if creating {
-                    "Creating chat… Sends are saved locally."
-                } else {
-                    "Selecting model… Sends are saved locally."
-                },
-                status_rect,
-                12. * s,
-                color(0x82909f),
-                false,
-            );
-        } else {
+            Rect::new(x, composer_top + 10. * s, (width - if retry_create { 94. * s } else { 0. }).max(1.), 20. * s);
+        if summary.as_ref().is_some_and(|s| s.model.is_some()) {
             self.model_status(cx, chrome, summary.as_ref(), status_rect);
         }
-        if creating && cx.model.epoch.is_some() {
+        if retry_create {
             self.controls.button(
                 cx,
                 chrome,
@@ -486,15 +472,8 @@ impl Widget for QuickModels {
         let layer = &mut *frame.layer;
         let s = cx.ui.scale;
         let chat = &cx.model.chats[session];
-        let connected = cx.model.epoch.is_some();
-        let busy = chat.model_request.is_some();
-        let hint = if !connected {
-            "Connect to choose a model"
-        } else if busy {
-            "Selecting model… your draft is kept"
-        } else {
-            "Choose before your first message"
-        };
+        let ready = cx.model.can_choose_model(session);
+        let hint = "Optional · new chats use your last model";
         cx.services.renderer.clipped_label(
             layer,
             "Choose a model",
@@ -532,7 +511,7 @@ impl Widget for QuickModels {
             );
             let valid = selector.parse::<tau_protocol::SessionModel>().is_ok();
             let selected = current.as_deref() == Some(selector.as_str());
-            let enabled = connected && !busy && valid;
+            let enabled = ready && valid;
             let base = color(if selected { 0x303a66 } else { 0x18212b });
             layer.clipped_rounded_rect(r, 12. * s, base, clip);
             let control = &mut self.controls.place(ModelChoice::Select(session.into(), selector.clone()), r, clip, false).control;
@@ -548,14 +527,14 @@ impl Widget for QuickModels {
                 false,
                 crate::render::intersect(r, clip),
             );
-            let status = if !connected {
-                "Offline"
+            let status = if chat.model_request.as_ref().is_some_and(|(_, slug)| slug == selector) {
+                "Selecting…"
             } else if !valid {
                 "Invalid provider/model ID"
-            } else if chat.model_request.as_ref().is_some_and(|(_, slug)| slug == selector) {
-                "Selecting…"
             } else if selected {
                 "Selected"
+            } else if !ready {
+                "Available when connected"
             } else {
                 "Select"
             };

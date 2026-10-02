@@ -127,7 +127,7 @@ impl Widget for Header {
         let title = summary
             .as_ref()
             .map(|s| {
-                if s.starter {
+                if s.starter || cx.model.is_creating(&session) {
                     "New chat"
                 } else if s.title.is_empty() {
                     "Unnamed chat"
@@ -146,8 +146,10 @@ impl Widget for Header {
         );
         cx.services.renderer.label(
             chrome,
-            if cx.model.is_creating(&session) {
-                if cx.model.epoch.is_none() { "Saved locally · offline" } else { "Creating…" }
+            if cx.model.create_needs_retry(&session) {
+                "Needs attention"
+            } else if cx.model.quick_start(&session) && !failed && !running && !paused {
+                ""
             } else if cx.model.epoch.is_none() {
                 "Offline"
             } else if failed {
