@@ -68,7 +68,7 @@ async fn refreshed_filesystem_sync_sends_renames_and_removals_without_replaying_
     };
     fs::rename(cwd.join("before.rs"), cwd.join("after.rs")).unwrap();
     // Advance only this owned fixture's refresh clock, without a 10s sleep.
-    service.shared.roots.lock().unwrap().get_mut(&cwd).unwrap().refreshed = Some(Instant::now()-REFRESH);
+    service.shared.roots.lock().unwrap().get_mut(&fs::canonicalize(&cwd).unwrap()).unwrap().refreshed = Some(Instant::now()-REFRESH);
     service.shared.wake.notify_one();
     loop {
         let reply = service.request(cwd.clone(), request(None, FileOperation::Index {revision:Some(first.revision.clone())})).await.unwrap();

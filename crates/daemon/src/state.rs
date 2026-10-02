@@ -127,7 +127,7 @@ impl StateStore {
                 }
                 tx.commit()?;
             }
-            if let Some(parent) = location.parent() { std::fs::File::open(parent)?.sync_all()?; }
+            #[cfg(unix)] if let Some(parent) = location.parent() { std::fs::File::open(parent)?.sync_all()?; }
             Ok(db)
         }).await??;
         let reader_path = path.clone();

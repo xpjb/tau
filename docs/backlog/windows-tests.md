@@ -1,82 +1,57 @@
-# Windows test failures
+# Windows test follow-up
 
-Status: open. Recorded on `x86_64-pc-windows-msvc` at `4ddbf86`, using
-Rust/Cargo `1.93.0-nightly` and Nextest `0.9.140`.
+The native `x86_64-pc-windows-msvc` run at `4ddbf86` recorded four failures
+before cancellation. This cleanup investigates those failures, rather than
+increasing timeouts or deleting useful coverage. The full native Windows suite
+still needs a Windows host.
 
-`cargo check --locked --offline --workspace --all-targets` passed. The Windows
-Nextest run recorded four failures before the user cancelled it. The full suite
-remains unverified. No baseline rerun or fixes have been made.
+## Filesystem index: reproduced and fixed
 
-At that recorded run, the failing source and tests were byte-for-byte unchanged from `tau2` at
-`4495c88`. `Cargo.lock` and `.cargo/config.toml` were also unchanged. The only Rust
-edits beyond relocation updated two embedded-file paths.
+Both historical failures reproduced using Windows-target nextest under Wine:
 
-The subsequent organization cleanup passes the root workspace MSVC cross-compiler
-check, not native Windows tests. All four items remain open. The historical
-locations below now correspond to `crates/code-viewer/tests/unit/filesystem.rs`,
-`crates/frontend/tests/unit/app/code_view.rs`, and the unchanged integration-test
-path `crates/frontend/tests/remote_files.rs`. See `../cleanup.md` for the executed
-checks and limits.
+- `name_sync_prunes_dot_directories_but_keeps_dotfiles_and_explicit_browsing`
+  counted 351 visible files instead of 350. Relative index names used native
+  backslashes, but hidden-name checks and matching use `/`. Index names now use
+  wire separators; absolute daemon paths retain their native syntax.
+- `refreshed_filesystem_sync_sends_renames_and_removals_without_replaying_names`
+  looked up a noncanonical temporary path in a canonical-keyed cache and
+  poisoned its mutex. The fixture now uses the canonical key.
 
-## 1. Hidden-file index count
+`PathIndex::absolute` also preserves verbatim Windows root semantics when
+joining a wire-relative name, regardless of the client's OS. A regression covers
+Unix, drive-letter verbatim, and verbatim UNC roots.
 
-Test: `filesystem::tests::name_sync_prunes_dot_directories_but_keeps_dotfiles_and_explicit_browsing`
+All ten code-viewer tests passed under Wine after these changes. Wine leaves
+service processes alive: nextest reports two leaky test processes and the
+managed systemd envelope exits nonzero on cleanup. This is not a clean native
+Windows validation result, and the wrapper was not bypassed or modified.
 
-Location: `crates/code-viewer/src/filesystem.rs:220`.
+## Remote picker and remote files: startup causes fixed; native rerun needed
 
-Observed: 351 visible files; expected 350.
+The original 20-second timeouts concealed daemon startup errors. Both fixtures
+now race their initial readiness wait against the daemon task and report its
+actual result immediately.
 
-Investigate Windows path separators. The filesystem index exports native paths,
-while hidden-path checks and test expectations use `/`. Confirm the extra entry
-and keep indexed relative paths consistent across platforms.
+- Default settings specify `/bin/bash`, which is not an absolute Windows path.
+  These read-only loopback fixtures never execute a shell; on Windows they now
+  provide a native absolute placeholder (`current_exe`) for validation.
+- Daemon database/settings/attachment publication attempted ordinary directory
+  opens for `sync_all` on Windows. Directory sync is now Unix-only, matching the
+  existing frontend and export paths. File sync and SQLite durability remain.
 
-## 2. Rename-index refresh
+Under Wine, both fixtures now reach Iroh startup, where the platform rejects
+socket configuration with OS error 10045. They no longer report a misleading
+Tailscale/UI-wake timeout. Native Windows is required to validate these remaining
+transport cases; they are retained, not ignored or deleted.
 
-Test: `filesystem::tests::refreshed_filesystem_sync_sends_renames_and_removals_without_replaying_names`
+## Executed checks
 
-Location: `crates/code-viewer/src/filesystem.rs:257`.
+- Managed Linux nextest: 30/30 selected code-viewer, settings, attachment,
+  remote-file and remote-picker tests passed.
+- Managed xwin environment plus Windows-target nextest under Wine: both original
+  index failures reproduced; subsequently 10/10 code-viewer test bodies passed.
+- The two Windows-target daemon-backed fixtures are blocked by Wine's socket
+  implementation after the startup fixes above.
 
-Observed: `roots.get_mut(&cwd).unwrap()` received `None`. The test panic also
-poisoned the root-map lock used by the index worker.
-
-Investigate the fixture's root key. `FileSystem` stores a canonical path; the
-test looks it up using the original temporary path. Windows canonical paths can
-include a different prefix. Use consistent root identity in the fixture.
-
-## 3. Remote picker wake
-
-Test: `app::code_view::tests::remote_picker_results_wake_and_repaint_without_input_or_polling_frames`
-
-Location: `crates/frontend/src/app/code_view/tests.rs:285`.
-
-Observed: `Picker did not wake the UI: Elapsed(())` after about 20 seconds.
-
-Cause unconfirmed. Identify which wait failed, inspect the local daemon task's
-startup result, then check connection and wake delivery. Do not increase the
-timeout without finding the cause.
-
-## 4. Remote-file transport
-
-Test: `remote_files_stream_live_updates_search_parent_traversal_and_cancel_without_transcript_writes`
-
-Location: `crates/frontend/tests/remote_files.rs:9`.
-
-Observed: a 20-second timeout with `Cannot reach the daemon` and no notice.
-
-Cause unconfirmed. Inspect the daemon task's startup result and the underlying
-connection error. This test owns a loopback daemon; its generic Tailscale error
-message does not establish a Tailnet problem.
-
-## Recorded run
-
-Run from Git Bash on Windows. These temporary profile settings forced a rebuild;
-only the native Windows target was built.
-
-```sh
-CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_INCREMENTAL=false \
-  cargo nextest run --locked --offline --workspace --no-fail-fast \
-  --build-jobs 2 --test-threads 2
-```
-
-Investigate only the four named tests first. Close each item after its cause is
-confirmed and its Windows test passes. Check the full suite after the fixes.
+Use `/usr/local/bin/cargo` for host Rust work. No Clippy, built-in Cargo test
+runner, wrapper override, deployment, or credentialed/provider test was used.

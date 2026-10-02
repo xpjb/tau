@@ -16,7 +16,7 @@ async fn query(c: &mut Controller, path: Option<String>, operation: FileOperatio
 }
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn remote_files_stream_live_updates_search_parent_traversal_and_cancel_without_transcript_writes() {
-    let root=tempfile::tempdir().unwrap();let cwd=root.path().join("work");std::fs::create_dir(&cwd).unwrap();
+    let root=tempfile::tempdir().unwrap();let cwd=root.path().join("work");std::fs::create_dir(&cwd).unwrap();let cwd=std::fs::canonicalize(cwd).unwrap();
     std::fs::create_dir(cwd.join("src")).unwrap();
     let original=(0..2000u32).map(|i|format!("// line {i}: café {}\n",blake3::hash(&i.to_le_bytes()).to_hex())).collect::<String>();
     let path=cwd.join("src/main.rs");std::fs::write(&path,&original).unwrap();
@@ -26,12 +26,18 @@ async fn remote_files_stream_live_updates_search_parent_traversal_and_cancel_wit
     let udp=std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let settings_path=root.path().join("settings.json");
     let mut settings=tau_net::settings::Settings::default();settings.agent.load_agents_files=false;settings.daemon.generate_titles=false;settings.daemon.idle_timeout_seconds=0;
+    // No shell is executed, but this loopback daemon validates native absolute paths.
+    #[cfg(windows)] { settings.agent.shell_path=std::env::current_exe().unwrap(); }
     std::fs::write(&settings_path,serde_json::to_vec(&settings).unwrap()).unwrap();
     let config=taud::Config {bind:tcp,transfer_bind:match udp {std::net::SocketAddr::V4(a)=>a,_=>unreachable!()},transfer_bind_v6:None,token:Arc::from("file-fixture"),settings_path,import_pi_dir:None,codex_auth_source:None,cwd:cwd.clone(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
-    let daemon=tokio::spawn(taud::run(config));
+    let mut daemon=tokio::spawn(taud::run(config));
     let client_root=tempfile::tempdir().unwrap();let store=Store::open(client_root.path().into()).unwrap();
     store.put("","settings",&Settings {server_url:format!("http://{tcp}"),token:"file-fixture".into()}).unwrap();
-    let mut c=Controller::new(store,Arc::new(||{})).unwrap();until(&mut c,|c|c.epoch.is_some()).await;
+    let mut c=Controller::new(store,Arc::new(||{})).unwrap();
+    tokio::select! {
+        result=&mut daemon=>panic!("Fixture daemon stopped during startup: {result:?}"),
+        _=until(&mut c,|c|c.epoch.is_some())=>{},
+    }
     c.new_chat().unwrap();until(&mut c,|c|c.selected().is_some_and(|chat|chat.feed.synchronized)).await;
     let session=c.account.selected.clone().unwrap();c.draft("untouched comment draft".into()).unwrap();
     let update=query(&mut c,None,FileOperation::List {after:None}).await;

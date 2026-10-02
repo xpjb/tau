@@ -138,6 +138,8 @@ fn index_worker(shared: Arc<Shared>) {
             if wire_path(found.path()).is_err() { limited = true; continue; }
             let Ok(relative) = found.path().strip_prefix(&path) else { limited = true; continue; };
             let Ok(relative) = wire_path(relative) else { limited = true; continue; };
+            // Index names use wire separators; absolute paths retain daemon-native syntax.
+            #[cfg(windows)] let relative = relative.replace('\\', "/");
             let item = IndexedPath { path: relative, symlink: kind.is_symlink() };
             // Count escaping and framing without allocating serialized names.
             let size = item.wire_bytes();

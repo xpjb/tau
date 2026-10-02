@@ -114,8 +114,10 @@ async fn stage_attachment(root: &Path, name: &std::ffi::OsStr, source: impl toki
     file.flush().await?;
     let result = attachment_result(&path, &mut file, caption).await?;
     file.sync_all().await?;
-    fs::File::open(directory.path()).await?.sync_all().await?;
-    fs::File::open(root).await?.sync_all().await?;
+    #[cfg(unix)] {
+        fs::File::open(directory.path()).await?.sync_all().await?;
+        fs::File::open(root).await?.sync_all().await?;
+    }
     if cancel.is_cancelled() { bail!("Attachment staging cancelled"); }
     let _ = directory.keep();
     Ok(result)

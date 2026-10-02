@@ -305,8 +305,10 @@ async fn remote_picker_results_wake_and_repaint_without_input_or_polling_frames(
     let settings_path = root.path().join("settings.json");
     let mut settings = tau_net::settings::Settings::default();
     settings.agent.load_agents_files = false; settings.daemon.generate_titles = false; settings.daemon.idle_timeout_seconds = 0;
+    // This fixture never executes a shell; validation still requires a native path.
+    #[cfg(windows)] { settings.agent.shell_path = std::env::current_exe().unwrap(); }
     std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
-    let daemon = tokio::spawn(taud::run(taud::Config {
+    let mut daemon = tokio::spawn(taud::run(taud::Config {
         bind: tcp, transfer_bind: match udp { std::net::SocketAddr::V4(a) => a, _ => unreachable!() }, transfer_bind_v6: None,
         token: Arc::from("picker-wake-fixture"), settings_path, import_pi_dir: None, codex_auth_source: None, cwd,
         database_path: root.path().join("daemon.sqlite3"), telemetry_path: root.path().join("crashes.jsonl"),
@@ -321,7 +323,10 @@ async fn remote_picker_results_wake_and_repaint_without_input_or_polling_frames(
     // Suppress name warming until the picker opens, without timing races against
     // a fast loopback response. Control/session creation still runs normally.
     app.ui.window_focused = false;
-    until(&mut app, &ctx, &mut wakes, |a| a.controller.epoch.is_some() && a.controller.account.source_lineage.is_some()).await;
+    tokio::select! {
+        result = &mut daemon => panic!("Fixture daemon stopped during startup: {result:?}"),
+        _ = until(&mut app, &ctx, &mut wakes, |a| a.controller.epoch.is_some() && a.controller.account.source_lineage.is_some()) => {},
+    }
     app.controller.new_chat().unwrap();
     until(&mut app, &ctx, &mut wakes, |a| a.controller.account.selected.as_ref().is_some_and(|id| a.controller.account.sessions.iter().any(|s| &s.id == id))).await;
     assert!(app.controller.file_index.is_none());

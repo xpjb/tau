@@ -16,3 +16,13 @@ fn forgiving_paths_unordered_words_boundaries_and_extended_terms() {
     let ranges = Finder::new("cafe 🦀").highlights(path);
     assert_eq!(ranges.iter().map(|r| &path[r.clone()]).collect::<Vec<_>>(), ["café", "🦀"]);
 }
+
+#[test]
+fn wire_index_names_join_daemon_native_roots_independently_of_client_os() {
+    use tau_net::files::IndexedPath;
+    for (root, expected) in [("/work", "/work/src/a.rs"), (r"\\?\C:\work", r"\\?\C:\work\src\a.rs"),
+        (r"\\?\UNC\server\share", r"\\?\UNC\server\share\src\a.rs")] {
+        let index = PathIndex {root:root.into(),revision:String::new(),entries:vec![IndexedPath {path:"src/a.rs".into(),symlink:false}],visible:1};
+        assert_eq!(index.absolute(0),expected);
+    }
+}

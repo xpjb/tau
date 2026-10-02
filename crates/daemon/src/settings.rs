@@ -206,7 +206,7 @@ pub async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; file.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?; }
         file.write_all(&bytes)?; file.as_file().sync_all()?;
         file.persist(&path).map_err(|e| e.error)?;
-        std::fs::File::open(parent)?.sync_all()?;
+        #[cfg(unix)] std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     }).await?
 }

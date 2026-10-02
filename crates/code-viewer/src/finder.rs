@@ -78,7 +78,13 @@ impl PathIndex {
         let visible = entries.iter().filter(|p| !p.hidden()).count();
         Ok(Self { root: path.clone(), revision: revision.clone(), entries, visible })
     }
-    pub fn absolute(&self, row: usize) -> String { format!("{}/{}", self.root.trim_end_matches('/'), self.entries[row].path) }
+    pub fn absolute(&self, row: usize) -> String {
+        let path = &self.entries[row].path;
+        // Verbatim Windows roots do not accept forward-slash joins. The daemon
+        // may be Windows even when the viewer is Android/Linux.
+        if self.root.starts_with(r"\\?\") { format!("{}\\{}", self.root.trim_end_matches('\\'), path.replace('/', "\\")) }
+        else { format!("{}/{}", self.root.trim_end_matches('/'), path) }
+    }
 }
 
 use std::sync::Arc;
