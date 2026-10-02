@@ -23,16 +23,7 @@ fn key(event:&Event)->Option<String> {
         Event::HeartbeatReply {epoch,..}=>Some(format!("reply:{epoch}")),
         Event::Metrics(_)=>Some("native-metrics".into()),
         Event::Download {key,..}=>Some(format!("download:{key}")),
-        Event::Message(epoch,message)=>match message.as_ref() {
-            ServerMessage::SessionState {session_id,..}=>Some(format!("state:{epoch}:{session_id}")),
-            ServerMessage::Sessions {..}=>Some(format!("sessions:{epoch}")),
-            ServerMessage::Projects {..}=>Some(format!("projects:{epoch}")),
-            ServerMessage::Settings {..}=>Some(format!("settings:{epoch}")),
-            ServerMessage::ModelCatalog {..}=>Some(format!("model-catalog:{epoch}")),
-            ServerMessage::Commands {session_id,..}=>Some(format!("commands:{epoch}:{session_id}")),
-            ServerMessage::ResyncRequired {session_id}=>Some(format!("resync:{epoch}:{session_id:?}")),
-            _=>None,
-        },
+        Event::Message(epoch,message) => message.replication_key().map(|key|format!("{epoch}:{key}")),
         _=>None,
     }
 }

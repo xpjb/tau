@@ -249,7 +249,7 @@ async fn pings_clients_and_reaps_missing_pongs_without_waiting_for_commands() {
     healthy.flush().await.unwrap();
     healthy.close(None).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), closed_rx.recv()).await.unwrap().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), manager.commands(&id)).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), manager.session_state_message(&id)).await.unwrap().unwrap();
     manager.shutdown().await;
     server.abort();
     let _ = server.await;

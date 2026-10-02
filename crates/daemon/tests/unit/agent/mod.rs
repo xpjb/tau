@@ -882,6 +882,8 @@ async fn provider_catalog_outweighs_configured_limits_and_uses_exact_authenticat
 
 #[tokio::test]
 async fn missing_catalog_stays_nonmodal_manual_refresh_persists_and_old_file_survives_failure() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
     for api in [Api::Codex, Api::ChatCompletions] {
         let mut model = ModelServer::start(vec![if api == Api::Codex { codex("Reply", vec![]) } else { completion("Reply", vec![]) }]).await;
         let (root, manager, url, server) = fixture(&model, api).await;
@@ -918,9 +920,9 @@ async fn missing_catalog_stays_nonmodal_manual_refresh_persists_and_old_file_sur
         client.open(&id).await;
         let state = client.seen.iter().rev().find(|m| m["type"] == "session_state" && m["sessionId"] == id).unwrap();
         assert_eq!(state["contextUsage"],json!({"tokens":tokens,"contextWindow":200000}));
-        client.request(json!({"id":"commands","type":"get_commands","sessionId":id})).await;
-        assert!(client.seen.iter().rev().find(|m| m["type"] == "commands" && m["sessionId"] == id).unwrap()["commands"]
-            .as_array().unwrap().iter().any(|c| c["name"] == "model" && c["arguments"].as_array().unwrap().iter().any(|a| a["value"] == "openai-codex/gpt-6-sol")));
+        client.socket.send(Message::Text(json!({"id":"catalog","type":"get_model_catalog"}).to_string().into())).await.unwrap();
+        let catalog=client.until(|m|m["type"]=="model_catalog").await;
+        assert!(catalog["catalog"]["models"].as_array().unwrap().iter().any(|a|a["value"]=="openai-codex/gpt-6-sol"));
 
         model.set_catalog(None).await;
         let failed = client.request(json!({"id":"refresh-failed","type":"refresh_model_catalog","provider":"openai-codex"})).await;

@@ -404,27 +404,12 @@ impl Widget for Composer {
             );
             fx += fw + 6. * s;
         }
-        // Slash completion uses optional arguments advertised by the daemon.
+        // Builtins are protocol behavior; only model suggestions need daemon data.
         if self.field.editor.value.starts_with('/')
             && !self.field.editor.value.contains('\n')
             && cx.ui.focus == Some(self.field.control.target)
         {
-            let query = &self.field.editor.value[1..];
-            let mut suggestions = vec![];
-            for command in &cx.model.chats[session].commands {
-                if let Some(arg) = query.strip_prefix(&format!("{} ", command.name)) {
-                    let arguments = if command.name == "model" && command.source == tau_net::SlashCommandSource::Builtin {
-                        &cx.model.model_catalog.models
-                    } else { &command.arguments };
-                    for a in arguments {
-                        if a.value.starts_with(arg) {
-                            suggestions.push(format!("/{} {}", command.name, a.value));
-                        }
-                    }
-                } else if command.name.starts_with(query) {
-                    suggestions.push(format!("/{} ", command.name));
-                }
-            }
+            let suggestions = slash_suggestions(&self.field.editor.value[1..], &cx.model.model_catalog);
             for (i, text) in suggestions.into_iter().take(5).enumerate() {
                 self.controls.button(
                     cx,
@@ -560,3 +545,20 @@ impl Widget for QuickModels {
         self.controls.finish(cx);
     }
 }
+
+fn slash_suggestions(query: &str, catalog: &tau_net::ModelCatalog) -> Vec<String> {
+    if let Some((name, arg)) = query.split_once(' ') {
+        let values: Box<dyn Iterator<Item = &str> + '_> = match name {
+            "model" => Box::new(catalog.models.iter().map(|m| m.value.as_str())),
+            "thinking" => Box::new(tau_net::settings::LEVELS.iter().copied()),
+            "fast" => Box::new(tau_net::FAST_OPTIONS.iter().copied()),
+            _ => return vec![],
+        };
+        values.filter(|value| value.starts_with(arg)).take(5).map(|value| format!("/{name} {value}")).collect()
+    } else {
+        tau_net::BUILTIN_COMMANDS.iter().filter(|name| name.starts_with(query)).take(5).map(|name| format!("/{name} ")).collect()
+    }
+}
+#[cfg(test)]
+#[path = "../../../tests/unit/app/ui/composer.rs"]
+mod tests;

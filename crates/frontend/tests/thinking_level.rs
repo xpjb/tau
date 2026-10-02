@@ -13,13 +13,13 @@ fn composer_thinking_metadata_updates_per_chat_and_survives_offline_restart() {
         "parentId":null,"createdAtMs":1,"updatedAtMs":1});
     let a: SessionSummary = serde_json::from_value(legacy).unwrap();
     assert!(a.thinking_level.is_none());
-    c.message(ServerMessage::Sessions { sessions: vec![a.clone()] }).unwrap();
+    c.install_sessions(vec![a.clone()]).unwrap();
     c.select("a").unwrap(); c.draft("keep this offline draft".into()).unwrap();
     let mut a = a; a.thinking_level = Some("off".into());
     let mut b = a.clone(); b.id = "b".into(); b.thinking_level = Some("xhigh".into());
     // Exercise the actual camelCase wire round trip, not a settings fallback.
-    let update = serde_json::to_vec(&ServerMessage::Sessions { sessions: vec![a, b] }).unwrap();
-    c.message(serde_json::from_slice(&update).unwrap()).unwrap();
+    let update = serde_json::to_vec(&vec![a, b]).unwrap();
+    c.install_sessions(serde_json::from_slice(&update).unwrap()).unwrap();
     c.select("b").unwrap();
     assert_eq!(c.account.sessions.iter().find(|s| s.id == "b").unwrap().thinking_level.as_deref(), Some("xhigh"));
     c.select("a").unwrap();

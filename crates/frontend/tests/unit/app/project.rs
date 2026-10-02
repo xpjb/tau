@@ -130,7 +130,7 @@ fn selected_topic_stays_visible_when_its_chat_bumps_from_the_far_right() {
             chat.updated_at_ms = 2 + i;
             sessions.push(chat);
         }
-        h.app.controller.message(ServerMessage::Sessions { sessions }).unwrap();
+        h.app.controller.install_sessions(sessions).unwrap();
         h.app.with_ui(|root, cx| root.workspace.navigate_project("p24", cx)).unwrap();
         h.frame();
         assert!(h.app.root.workspace.sidebar.projects.scroll.value > 0.);
@@ -178,12 +178,12 @@ fn new_chat_tiles_select_on_the_first_offline_frame_and_ignore_late_defaults() {
         h.frame();
         let before = h.ctx.read_rgba8().unwrap();
         let chosen: SessionModel = choices[1].1.parse().unwrap();
-        h.app.controller.message(ServerMessage::Sessions { sessions: vec![SessionSummary {
+        h.app.controller.install_sessions(vec![SessionSummary {
             id: id.clone(), project_id: general_project_id(), title: "New chat".into(), starter: true,
             status: SessionStatus::Sleeping, detail: None, context_usage: None,
             model: Some("fixture/stale-default".parse().unwrap()), thinking_level: None,
             parent_id: None, created_at_ms: 1, updated_at_ms: 1,
-        }] }).unwrap();
+        }]).unwrap();
         h.app.controller.message(ServerMessage::ModelCatalog { catalog: ModelCatalog {
             revision: 9, default_model: Some("fixture/new-default".parse().unwrap()), models: vec![], unresolved_providers: vec![],
         }}).unwrap();
@@ -220,7 +220,7 @@ fn quick_model_suggestions_work_offline_without_a_selected_chat_or_commands() {
         let mut h = Harness::new(size, mobile);
         h.app.controller.account.selected = None;
         h.app.controller.message(ServerMessage::ModelCatalog { catalog: ModelCatalog {
-            revision: 1, models: vec![SlashCommandArgument { value: "fixture/cached-model".into(), description: None }],
+            revision: 1, models: vec![ModelSuggestion { value: "fixture/cached-model".into(), description: None }],
             ..Default::default()
         }}).unwrap();
         assert!(h.app.controller.selected().is_none());

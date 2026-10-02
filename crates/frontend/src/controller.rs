@@ -44,8 +44,6 @@ impl Download {
 pub struct Chat {
     pub local: LocalChat,
     pub feed: Feed,
-    pub commands: Vec<SlashCommand>,
-    pub commands_loaded: bool,
 }
 impl Chat {
     pub fn reconcile(&mut self) { self.feed.reconcile(&self.local); }
@@ -229,8 +227,6 @@ impl Controller {
                 Chat {
                     local,
                     feed: Feed::default(),
-                    commands: vec![],
-                    commands_loaded: false,
                 },
             );
             self.chats.get_mut(id).unwrap().reconcile();
@@ -287,9 +283,6 @@ impl Controller {
         self.store.put(&self.identity, "account", &self.account)?;
         if self.epoch.is_some() && !self.is_creating(id) && !self.account.missing_chats.contains(id) {
             self.open(id)?;
-            self.request(ClientCommand::GetCommands {
-                session_id: id.into(),
-            })?;
         }
         Ok(())
     }
@@ -372,7 +365,6 @@ impl Controller {
             self.ensure_chat(&chat)?;
             if self.epoch.is_some() && !self.is_creating(&chat) && !self.account.missing_chats.contains(&chat) {
                 self.open(&chat)?;
-                self.request(ClientCommand::GetCommands { session_id: chat })?;
             }
         }
         Ok(())
@@ -1242,7 +1234,7 @@ impl Controller {
         }
         self.chats.retain(|id,chat| !cold.contains(id) || chat.local.has_work());
         for (id,chat) in &mut self.chats {
-            if cold.contains(id) { chat.feed=Feed::default();chat.commands.clear();chat.commands_loaded=false; }
+            if cold.contains(id) { chat.feed=Feed::default(); }
         }
     }
     fn watch_blocks(&mut self) -> Result<()> {
@@ -1320,7 +1312,6 @@ impl Controller {
                 }
                 if let Some(id) = self.account.selected.clone().filter(|id| !self.is_creating(id) && !self.account.missing_chats.contains(id)) {
                     self.open(&id)?;self.send_waiting(&id)?;
-                    self.request(ClientCommand::GetCommands { session_id: id })?;
                 }
             }
             net::Event::Disconnected(detail) | net::Event::Fatal(detail) => {
@@ -1331,7 +1322,6 @@ impl Controller {
                 self.requests.clear();
                 self.project_deletions.clear();
                 for (session, chat) in &mut self.chats {
-                    chat.commands_loaded = false;
                     chat.feed.synchronized = false;
                     chat.feed.loading = false;
                     chat.feed.opening = false;
@@ -1417,6 +1407,82 @@ impl Controller {
         }
         Ok(())
     }
+    pub fn install_projects(&mut self, projects: Vec<Project>) -> Result<()> {
+        self.account.projects = projects;
+        self.sort_projects();
+        if !self.account.projects.iter().any(|p| p.id == self.account.selected_project) {
+            self.account.selected_project = general_project_id();
+        }
+        self.store.put(&self.identity, "account", &self.account)?;
+        Ok(())
+    }
+    pub fn install_sessions(&mut self, mut sessions: Vec<SessionSummary>) -> Result<()> {
+        self.plan_dirty.set(true);
+        // Preserve a provisional local chat across server list refreshes.
+        // Remote deletion still clears a genuinely missing selection.
+        let pending = self.account.pending_create.clone();
+        let provisional = pending.as_ref().and_then(|request| self.account.sessions.iter().find(|s| s.id == request.id)).cloned();
+        let confirmed = pending.as_ref().and_then(|request| {
+            sessions.iter().any(|s| s.id == request.id).then(|| request.id.clone())
+        });
+        let present=sessions.iter().map(|s|s.id.clone()).collect::<std::collections::HashSet<_>>();
+        self.account.missing_chats.clear();
+        for id in self.store.work_chats(&self.identity, false)? {
+            if present.contains(&id) || pending.as_ref().is_some_and(|p|p.id==id) {continue;}
+            let mut summary=self.account.sessions.iter().find(|s|s.id==id).cloned().unwrap_or_else(||Self::creating_summary(&id,GENERAL_PROJECT_ID,0));
+            summary.title=format!("Local recovery: {}",summary.title.trim_start_matches("Local recovery: "));
+            summary.project_id=GENERAL_PROJECT_ID.into();summary.starter=false;summary.status=SessionStatus::Sleeping;
+            summary.detail=Some("Source chat missing. Drafts, files and original intents are retained locally; nothing is resent.".into());
+            self.account.missing_chats.insert(id);sessions.push(summary);
+        }
+        if self.account.selected.as_ref().is_some_and(|id| !sessions.iter().any(|s| &s.id == id)
+            && !pending.as_ref().is_some_and(|request| &request.id == id)) {
+            self.account.selected = None;
+        }
+        for s in &sessions {
+            if s.starter { self.account.read_at.insert(s.id.clone(), s.updated_at_ms); }
+        }
+        for session in &mut sessions {if !self.account.missing_chats.contains(&session.id) && let Some((_,status,detail,usage))=self.state_versions.get(&session.id) {session.status=*status;session.detail=detail.clone();session.context_usage=*usage;}}
+        for summary in &sessions {
+            if let Some(chat) = self.chats.get_mut(&summary.id)
+                && !summary.starter && chat.local.model_choice.is_some()
+                && chat.local.model_choice == summary.model {
+                chat.local.model_choice = None;
+                self.store.save_chat(&self.identity, &summary.id, &chat.local)?;
+            }
+        }
+        self.account.sessions = sessions;
+        if let Some(request) = pending {
+            if let Some(confirmed) = confirmed { self.finish_create(&request.id, &confirmed)?; }
+            else {
+                let project = match &request.command {
+                    ClientCommand::CreateSession { project_id, .. } => project_id.as_str(),
+                    _ => unreachable!("pending create must be a create request"),
+                };
+                self.account.sessions.push(provisional.unwrap_or_else(|| Self::creating_summary(&request.id, project, 0)));
+                self.retry_create()?;
+            }
+        }
+        self.sort_sessions();
+        let now=crate::clock::now_ms().unwrap_or(0);
+        for s in &self.account.sessions {
+            if s.status==SessionStatus::Running {self.account.prefetch_at.insert(s.id.clone(),now);}
+        }
+        self.account.age_recent_chats(now);
+        self.account.prefetch_at.retain(|id,_| self.account.sessions.iter().any(|s| &s.id == id));
+        self.account.recent_chats.retain(|id| self.account.sessions.iter().any(|s| &s.id == id));
+        self.account.last_chat_by_project.retain(|project, chat| self.account.sessions.iter()
+            .any(|s| s.project_id == *project && s.id == *chat));
+        if let Some(id) = &self.account.selected
+            && let Some(s) = self.account.sessions.iter().find(|s| &s.id == id)
+        {
+            self.account.selected_project = s.project_id.clone();
+            self.account.last_chat_by_project.insert(s.project_id.clone(), id.clone());
+            if self.viewing_chat { self.account.read_at.insert(id.clone(), s.updated_at_ms); }
+        }
+        self.store.put(&self.identity, "account", &self.account)?;
+        Ok(())
+    }
     pub fn message(&mut self, message: ServerMessage) -> Result<()> {
         match message {
             ServerMessage::BlockConnection { .. } | ServerMessage::Data {..} => {},
@@ -1487,7 +1553,7 @@ impl Controller {
                 ensure!(catalog.sessions.len()+sessions.len()<=20000,"Session catalogue exceeds its bounded working set");
                 catalog.sessions.extend(sessions);
                 if let Some(after)=next {self.request(ClientCommand::ListPage {catalog_id,projects:false,after:Some(after),revision})?;}
-                else {catalog.sessions_done=true;let sessions=std::mem::take(&mut catalog.sessions);self.message(ServerMessage::Sessions {sessions})?;}
+                else {catalog.sessions_done=true;let sessions=std::mem::take(&mut catalog.sessions);self.install_sessions(sessions)?;}
             }
             ServerMessage::ProjectPage {catalog_id,revision,after,next,projects}=>{
                 let Some(catalog)=&mut self.catalog else {return Ok(());};
@@ -1498,81 +1564,7 @@ impl Controller {
                 ensure!(catalog.projects.len()+projects.len()<=128,"Topic catalogue exceeds its limit");
                 catalog.projects.extend(projects);
                 if let Some(after)=next {self.request(ClientCommand::ListPage {catalog_id,projects:true,after:Some(after),revision})?;}
-                else {catalog.projects_done=true;let mut projects=std::mem::take(&mut catalog.projects);projects.sort_by_key(|p|p.id!=GENERAL_PROJECT_ID);self.message(ServerMessage::Projects {projects})?;}
-            }
-            ServerMessage::Projects { projects } => {
-                self.account.projects = projects;
-                self.sort_projects();
-                if !self.account.projects.iter().any(|p| p.id == self.account.selected_project) {
-                    self.account.selected_project = general_project_id();
-                }
-                self.store.put(&self.identity, "account", &self.account)?;
-            }
-            ServerMessage::Sessions { mut sessions } => {
-                self.plan_dirty.set(true);
-                // Preserve a provisional local chat across server list refreshes.
-                // Remote deletion still clears a genuinely missing selection.
-                let pending = self.account.pending_create.clone();
-                let provisional = pending.as_ref().and_then(|request| self.account.sessions.iter().find(|s| s.id == request.id)).cloned();
-                let confirmed = pending.as_ref().and_then(|request| {
-                    sessions.iter().any(|s| s.id == request.id).then(|| request.id.clone())
-                });
-                let present=sessions.iter().map(|s|s.id.clone()).collect::<std::collections::HashSet<_>>();
-                self.account.missing_chats.clear();
-                for id in self.store.work_chats(&self.identity, false)? {
-                    if present.contains(&id) || pending.as_ref().is_some_and(|p|p.id==id) {continue;}
-                    let mut summary=self.account.sessions.iter().find(|s|s.id==id).cloned().unwrap_or_else(||Self::creating_summary(&id,GENERAL_PROJECT_ID,0));
-                    summary.title=format!("Local recovery: {}",summary.title.trim_start_matches("Local recovery: "));
-                    summary.project_id=GENERAL_PROJECT_ID.into();summary.starter=false;summary.status=SessionStatus::Sleeping;
-                    summary.detail=Some("Source chat missing. Drafts, files and original intents are retained locally; nothing is resent.".into());
-                    self.account.missing_chats.insert(id);sessions.push(summary);
-                }
-                if self.account.selected.as_ref().is_some_and(|id| !sessions.iter().any(|s| &s.id == id)
-                    && !pending.as_ref().is_some_and(|request| &request.id == id)) {
-                    self.account.selected = None;
-                }
-                for s in &sessions {
-                    if s.starter { self.account.read_at.insert(s.id.clone(), s.updated_at_ms); }
-                }
-                for session in &mut sessions {if !self.account.missing_chats.contains(&session.id) && let Some((_,status,detail,usage))=self.state_versions.get(&session.id) {session.status=*status;session.detail=detail.clone();session.context_usage=*usage;}}
-                for summary in &sessions {
-                    if let Some(chat) = self.chats.get_mut(&summary.id)
-                        && !summary.starter && chat.local.model_choice.is_some()
-                        && chat.local.model_choice == summary.model {
-                        chat.local.model_choice = None;
-                        self.store.save_chat(&self.identity, &summary.id, &chat.local)?;
-                    }
-                }
-                self.account.sessions = sessions;
-                if let Some(request) = pending {
-                    if let Some(confirmed) = confirmed { self.finish_create(&request.id, &confirmed)?; }
-                    else {
-                        let project = match &request.command {
-                            ClientCommand::CreateSession { project_id, .. } => project_id.as_str(),
-                            _ => unreachable!("pending create must be a create request"),
-                        };
-                        self.account.sessions.push(provisional.unwrap_or_else(|| Self::creating_summary(&request.id, project, 0)));
-                        self.retry_create()?;
-                    }
-                }
-                self.sort_sessions();
-                let now=crate::clock::now_ms().unwrap_or(0);
-                for s in &self.account.sessions {
-                    if s.status==SessionStatus::Running {self.account.prefetch_at.insert(s.id.clone(),now);}
-                }
-                self.account.age_recent_chats(now);
-                self.account.prefetch_at.retain(|id,_| self.account.sessions.iter().any(|s| &s.id == id));
-                self.account.recent_chats.retain(|id| self.account.sessions.iter().any(|s| &s.id == id));
-                self.account.last_chat_by_project.retain(|project, chat| self.account.sessions.iter()
-                    .any(|s| s.project_id == *project && s.id == *chat));
-                if let Some(id) = &self.account.selected
-                    && let Some(s) = self.account.sessions.iter().find(|s| &s.id == id)
-                {
-                    self.account.selected_project = s.project_id.clone();
-                    self.account.last_chat_by_project.insert(s.project_id.clone(), id.clone());
-                    if self.viewing_chat { self.account.read_at.insert(id.clone(), s.updated_at_ms); }
-                }
-                self.store.put(&self.identity, "account", &self.account)?;
+                else {catalog.projects_done=true;let mut projects=std::mem::take(&mut catalog.projects);projects.sort_by_key(|p|p.id!=GENERAL_PROJECT_ID);self.install_projects(projects)?;}
             }
             ServerMessage::SessionState {
                 session_id,revision,restore_review,
@@ -1616,15 +1608,6 @@ impl Controller {
                 self.store.put(&self.identity, "model-catalog", &catalog)?;
                 self.model_catalog_revision = Some(catalog.revision);
                 self.model_catalog = catalog;
-            }
-            ServerMessage::Commands {
-                session_id,
-                commands,
-            } => {
-                self.ensure_chat(&session_id)?;
-                let chat = self.chats.get_mut(&session_id).unwrap();
-                chat.commands = commands;
-                chat.commands_loaded = true;
             }
             ServerMessage::CodexUsage {request_id,report,error} => {
                 self.codex_usage.complete(&request_id,report,error);

@@ -701,7 +701,7 @@ fn background_plans_only_fetch_a_bounded_text_tail_and_queue_not_hidden_details_
 #[test]
 fn controller_keeps_recent_views_warm_and_reopens_evicted_scrollback_from_disk() {
     use crate::{controller::Controller,store::Store};
-    use tau_net::{ServerMessage,SessionSummary};
+    use tau_net::SessionSummary;
     let mut f=Fixture::new();
     let mut c=Controller::new(Store::open(f._root.path().join("client")).unwrap(),Arc::new(||{})).unwrap();
     f.cache=c.store.block_cache(&c.identity).unwrap();f.cache.configure(&f.lineage).unwrap();
@@ -711,7 +711,7 @@ fn controller_keeps_recent_views_warm_and_reopens_evicted_scrollback_from_disk()
     let sessions=["chat","b","c","d","e"].into_iter().map(|id| serde_json::from_value::<SessionSummary>(json!({
         "id":id,"title":id,"starter":false,"status":"idle","createdAtMs":1,"updatedAtMs":1
     })).unwrap()).collect();
-    c.message(ServerMessage::Sessions {sessions}).unwrap();c.select("chat").unwrap();
+    c.install_sessions(sessions).unwrap();c.select("chat").unwrap();
     c.viewport("chat",BTreeSet::from(["e001".into()]));
     c.viewport("chat",BTreeSet::from(["e002".into()]));
     assert_eq!(c.chats["chat"].feed.event("e001").unwrap().text,"body 1","leaving the viewport isn't eviction");

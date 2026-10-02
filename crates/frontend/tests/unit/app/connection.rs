@@ -214,7 +214,7 @@ fn finished_reply_stays_unread_in_background_until_its_chat_is_visible_and_focus
     crate::demo::populate(&mut app.controller).unwrap();
     app.resize(ctx.size(), 1., Vec2::new(0., 0.));
     app.tick(0.);
-    app.controller.message(ServerMessage::Sessions { sessions: app.controller.account.sessions.clone() }).unwrap();
+    app.controller.install_sessions(app.controller.account.sessions.clone()).unwrap();
     assert!(!app.controller.unread(&app.controller.account.sessions[0]));
 
     app.ui.window_focused = false;
@@ -222,7 +222,7 @@ fn finished_reply_stays_unread_in_background_until_its_chat_is_visible_and_focus
     let mut sessions = app.controller.account.sessions.clone();
     sessions[0].updated_at_ms += 1;
     sessions[0].status = SessionStatus::Running;
-    app.controller.message(ServerMessage::Sessions { sessions }).unwrap();
+    app.controller.install_sessions(sessions).unwrap();
     let selected = &app.controller.account.sessions[0];
     assert!(app.controller.unread(selected), "background streaming must not mark the chat read");
     app.controller.message(ServerMessage::SessionState {

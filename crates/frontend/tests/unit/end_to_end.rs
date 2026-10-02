@@ -388,8 +388,6 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
     until(&mut c, |c| c.selected().is_some_and(|chat| chat.feed.synchronized)).await;
     let starter = c.account.selected.clone().unwrap();
     c.draft("Keep my draft".into()).unwrap();
-    c.chats.get_mut(&starter).unwrap().commands.clear();
-    c.chats.get_mut(&starter).unwrap().commands_loaded = false;
     c.choose_model(&starter, "openai-codex/unlisted-exact-id").unwrap();
     c.send_prompt().unwrap();
     let waiting = c.chats[&starter].local.pending.iter().find(|p|p.text=="Keep my draft").unwrap();

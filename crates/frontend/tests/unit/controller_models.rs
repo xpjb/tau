@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 fn catalog(revision: u64, slug: &str) -> tau_net::ModelCatalog {
     tau_net::ModelCatalog { revision, default_model: Some(slug.parse().unwrap()), models: vec![
-        SlashCommandArgument { value: slug.into(), description: Some("Cached suggestion".into()) },
+        ModelSuggestion { value: slug.into(), description: Some("Cached suggestion".into()) },
     ], unresolved_providers: vec![] }
 }
 

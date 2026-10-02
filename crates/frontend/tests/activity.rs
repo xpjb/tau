@@ -14,7 +14,7 @@ fn session(id: &str, at: u64) -> SessionSummary {
     }
 }
 fn catalog(c: &mut Controller, sessions: &[SessionSummary]) {
-    c.message(ServerMessage::Sessions { sessions: sessions.to_vec() }).unwrap();
+    c.install_sessions(sessions.to_vec()).unwrap();
 }
 fn order(c: &Controller) -> Vec<&str> {
     c.account.sessions.iter().map(|s| s.id.as_str()).collect()
@@ -34,7 +34,7 @@ fn topic_activity_tracks_contained_chat_bumps_without_unpinning_general() {
     let root = tempfile::tempdir().unwrap();
     let mut c = controller(root.path());
     let projects = vec![Project::general(), project("alpha"), project("beta"), project("empty")];
-    c.message(ServerMessage::Projects { projects: projects.clone() }).unwrap();
+    c.install_projects(projects.clone()).unwrap();
     let mut sessions = vec![in_topic("alpha-old", "alpha", 10), in_topic("alpha-new", "alpha", 20),
         in_topic("beta-chat", "beta", 30), session("general-chat", 100)];
     catalog(&mut c, &sessions);
@@ -50,13 +50,13 @@ fn topic_activity_tracks_contained_chat_bumps_without_unpinning_general() {
     c.select("beta-chat").unwrap();
     c.draft("beta draft".into()).unwrap();
     assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"]);
-    c.message(ServerMessage::Projects { projects: projects.clone() }).unwrap();
+    c.install_projects(projects.clone()).unwrap();
     catalog(&mut c, &sessions);
     assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "catalogue refresh cannot undo local activity");
     drop(c);
     let mut c = controller(root.path());
     assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "saved chat activity reorders topics after restart");
-    c.message(ServerMessage::Projects { projects: projects.clone() }).unwrap();
+    c.install_projects(projects.clone()).unwrap();
     assert_eq!(topics(&c), ["general", "beta", "alpha", "empty"], "project pages can arrive before session pages");
     sessions[0].updated_at_ms = 101; // A completed remote turn in alpha, not a transient status change.
     catalog(&mut c, &sessions);
@@ -75,7 +75,7 @@ fn topic_activity_tracks_contained_chat_bumps_without_unpinning_general() {
 fn topic_activity_tracks_late_attachments_and_new_chats_without_failed_write_bumps() {
     let root = tempfile::tempdir().unwrap();
     let mut c = controller(root.path());
-    c.message(ServerMessage::Projects { projects: vec![Project::general(), project("one"), project("two")] }).unwrap();
+    c.install_projects(vec![Project::general(), project("one"), project("two")]).unwrap();
     catalog(&mut c, &[in_topic("one-chat", "one", 10), in_topic("two-chat", "two", 20)]);
     assert_eq!(topics(&c), ["general", "two", "one"]);
     let file = root.path().join("picked.txt");
@@ -279,7 +279,7 @@ fn topic_resume_persists_and_rejects_deleted_or_moved_chats() {
     for resume in [true, false] {
         let root = tempfile::tempdir().unwrap();
         let mut c = controller(root.path());
-        c.message(ServerMessage::Projects { projects: vec![Project::general(), project("work")] }).unwrap();
+        c.install_projects(vec![Project::general(), project("work")]).unwrap();
         let mut sessions = vec![session("home", 30), in_topic("latest", "work", 20), in_topic("older", "work", 10)];
         catalog(&mut c, &sessions);
         c.select("home").unwrap();

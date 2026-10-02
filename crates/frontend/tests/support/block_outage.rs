@@ -44,12 +44,14 @@ async fn control(State(peer): State<Control>, ws: WebSocketUpgrade) -> impl Into
                     let request: ClientRequest = serde_json::from_str(&text).unwrap();
                     let reply = match request.command {
                         ClientCommand::ConnectBlocks { node_id } => ServerMessage::BlockConnection { offer: peer.server.authorize(&node_id,peer.lineage.clone()).unwrap() },
-                        ClientCommand::ListSessions => ServerMessage::Sessions { sessions: ["foreground", "background"].map(|id| SessionSummary {
+                        ClientCommand::ListSessions => {
+                            send(&mut socket, ServerMessage::ProjectPage {catalog_id:request.id.clone(),revision:1,after:None,next:None,projects:vec![tau_net::Project::general()]}).await;
+                            ServerMessage::SessionPage {catalog_id:request.id.clone(),revision:1,after:None,next:None,states:Default::default(),sessions: ["foreground", "background"].map(|id| SessionSummary {
                             id: id.into(), project_id: general_project_id(), title: id.into(), starter: false, status: SessionStatus::Running,
                             detail: None, context_usage: None, model: None, thinking_level: None, parent_id: None, created_at_ms: 1, updated_at_ms: 1,
-                        }).to_vec() },
+                        }).to_vec() } },
                         ClientCommand::GetModelCatalog => ServerMessage::ModelCatalog { catalog: ModelCatalog::default() },
-                        ClientCommand::GetSession { .. } | ClientCommand::GetCommands { .. } => ServerMessage::success(request.id, None, None),
+                        ClientCommand::GetSession { .. } => ServerMessage::success(request.id, None, None),
                         ClientCommand::GetReceipts { session_id, .. } => ServerMessage::Receipts { session_id, reports: vec![] },
                         other => panic!("Read-only recovery must not execute {other:?}"),
                     };

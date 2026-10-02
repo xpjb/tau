@@ -43,7 +43,7 @@ fn offline_new_chat_and_send_are_durable_before_any_server_ack() {
     let summary = tau_net::SessionSummary { id:id.clone(), project_id:general_project_id(), title:"New chat".into(), starter:true,
         status:SessionStatus::Idle, detail:None, context_usage:None, model:None, thinking_level:None,
         parent_id:None, created_at_ms:1, updated_at_ms:1 };
-    c.message(ServerMessage::Sessions { sessions:vec![summary] }).unwrap();
+    c.install_sessions(vec![summary]).unwrap();
     assert!(c.account.pending_create.is_none());
     assert_eq!(c.selected().unwrap().local.pending[0].request.id, prompt);
     assert_eq!(c.selected().unwrap().local.pending[0].status, Delivery::WaitingForConnection,
@@ -69,12 +69,12 @@ fn new_chat_model_choice_is_local_durable_and_not_overwritten_by_late_metadata()
     let chosen: SessionModel = "openai-codex/last".parse().unwrap();
     assert_eq!(c.selected_model(&id), Some(&chosen));
     assert_eq!(c.account.last_model.as_ref(), Some(&chosen));
-    c.message(ServerMessage::Sessions { sessions: vec![SessionSummary {
+    c.install_sessions(vec![SessionSummary {
         id: id.clone(), project_id: general_project_id(), title: "New chat".into(), starter: true,
         status: SessionStatus::Sleeping, detail: None, context_usage: None,
         model: Some("openai-codex/old-default".parse().unwrap()), thinking_level: None,
         parent_id: None, created_at_ms: 1, updated_at_ms: 1,
-    }] }).unwrap();
+    }]).unwrap();
     c.message(ServerMessage::ModelCatalog { catalog: ModelCatalog {
         revision: 1, default_model: Some("openai-codex/another-default".parse().unwrap()), models: vec![], unresolved_providers: vec![],
     }}).unwrap();
@@ -108,9 +108,9 @@ fn offline_create_keeps_its_topic_across_reuse_and_late_ack_without_changing_sel
     let mut c = Controller::new(Store::open(dir.path().into()).unwrap(), Arc::new(|| {})).unwrap();
     assert_eq!(c.account.selected_project,topic);
     c.select_project(GENERAL_PROJECT_ID, true).unwrap();
-    c.message(ServerMessage::Sessions { sessions:vec![SessionSummary { id:"existing-work".into(), project_id:topic.clone(),
+    c.install_sessions(vec![SessionSummary { id:"existing-work".into(), project_id:topic.clone(),
         title:"New chat".into(),starter:true,status:SessionStatus::Idle,detail:None,context_usage:None,model:None, thinking_level:None,
-        parent_id:None,created_at_ms:1,updated_at_ms:1 }] }).unwrap();
+        parent_id:None,created_at_ms:1,updated_at_ms:1 }]).unwrap();
     assert_eq!(c.account.sessions.iter().find(|s| s.id == provisional).unwrap().project_id,topic);
     c.message(ServerMessage::success(provisional,Some("existing-work".into()),None)).unwrap();
     assert!(c.account.pending_create.is_none());
@@ -139,8 +139,8 @@ fn existing_starter_coalesces_pending_create_without_losing_draft_or_files() {
     let original = c.selected().unwrap().local.pending[0].request.id.clone();
     c.draft("Unsent second draft".into()).unwrap();
     c.attach(&source,None).unwrap();
-    c.message(ServerMessage::Sessions { sessions:vec![SessionSummary { id:"existing".into(), project_id:general_project_id(), title:"New chat".into(),starter:true,
-        status:SessionStatus::Idle,detail:None,context_usage:None,model:None, thinking_level:None,parent_id:None,created_at_ms:1,updated_at_ms:1 }] }).unwrap();
+    c.install_sessions(vec![SessionSummary { id:"existing".into(), project_id:general_project_id(), title:"New chat".into(),starter:true,
+        status:SessionStatus::Idle,detail:None,context_usage:None,model:None, thinking_level:None,parent_id:None,created_at_ms:1,updated_at_ms:1 }]).unwrap();
     assert_eq!(c.account.selected.as_deref(),Some(provisional.as_str()), "A remote starter is not proof that our create was accepted");
     c.message(serde_json::from_value(json!({"type":"response","requestId":provisional,"ok":true,
         "sessionId":"existing","uncertain":false})).unwrap()).unwrap();

@@ -4,11 +4,11 @@ use tau_net::{ClientRequest, ServerMessage, MAX_CONTROL_BYTES};
 
 #[test]
 fn retired_transcript_commands_and_messages_are_not_wire_apis() {
-    for name in ["open_session","get_history"] {
+    for name in ["open_session","get_history","get_commands"] {
         assert!(serde_json::from_value::<ClientRequest>(json!({"id":"old","type":name,"sessionId":"chat","generation":"g","before":1})).is_err());
     }
-    for name in ["transcript_snapshot","transcript_update","transcript_page"] {
-        assert!(serde_json::from_value::<ServerMessage>(json!({"type":name})).is_err());
+    for name in ["transcript_snapshot","transcript_update","transcript_page","sessions","projects","commands"] {
+        assert!(serde_json::from_value::<ServerMessage>(json!({"type":name,"sessionId":"chat","sessions":[],"projects":[],"commands":[]})).is_err());
     }
 }
 

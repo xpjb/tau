@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use crate::manager::{AgentManager, PromptOutcome, SessionContent, SessionRuntime, bounded};
 use std::collections::BTreeMap;
-use tau_net::{PromptDisposition, SlashCommand, SlashCommandArgument, SlashCommandSource};
+use tau_net::{PromptDisposition, ModelSuggestion};
 use tau_net::{ServerMessage, SessionStatus};
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, TranscriptChange};
@@ -447,19 +447,8 @@ impl AgentManager {
         tau_net::ModelCatalog {
             revision, unresolved_providers,
             default_model: Some(settings.agent.model.clone()),
-            models: models.into_iter().take(20_000).map(|(value, description)| SlashCommandArgument { value, description }).collect(),
+            models: models.into_iter().take(20_000).map(|(value, description)| ModelSuggestion { value, description }).collect(),
         }
-    }
-    pub async fn commands(&self, id: &str) -> Result<Vec<SlashCommand>> {
-        self.runtime(id).await?;
-        let models = self.model_catalog().models;
-        Ok([
-            ("compact", "Compact session context", "[instructions]", vec![]),
-            ("model", "Select the model (also the default for new chats)", "<provider/model>", models),
-            ("thinking", "Set this chat's thinking level", "<level>", crate::settings::LEVELS.iter().map(|level| SlashCommandArgument { value:(*level).into(), description:None }).collect()),
-            ("name", "Rename this chat", "<title>", vec![]),
-            ("fast", "Set Codex priority service for subsequent turns", "<on|off|status>", ["on","off","status"].into_iter().map(|v| SlashCommandArgument { value:v.into(), description:None }).collect()),
-        ].into_iter().map(|(name, description, hint, arguments)| SlashCommand { name:name.into(), description:Some(description.into()), source:SlashCommandSource::Builtin, argument_hint:Some(hint.into()), arguments }).collect())
     }
     pub(crate) async fn run_builtin_command(&self, id: &str, runtime: &Arc<SessionRuntime>, name: &str, arguments: &str) -> Result<PromptOutcome> {
         let mut content = runtime.content.lock().await;

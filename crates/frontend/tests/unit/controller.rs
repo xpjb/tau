@@ -79,7 +79,7 @@ c.message(ServerMessage::Receipts {session_id:"missing".into(),reports:vec![Oper
     id:"original".into(),accepted:false,complete:false,error:None,notice:None,
 }]}).unwrap();
 assert_eq!(c.selected().unwrap().local.pending[0].status,Delivery::Unconfirmed, "late events cannot clear the source fence");
-c.message(ServerMessage::Sessions {sessions:vec![]}).unwrap();assert!(c.account.missing_chats.contains("missing"));assert_eq!(c.account.selected.as_deref(),Some("missing"));assert_eq!(c.selected().unwrap().local.draft,"keep me");
+c.install_sessions(vec![]).unwrap();assert!(c.account.missing_chats.contains("missing"));assert_eq!(c.account.selected.as_deref(),Some("missing"));assert_eq!(c.selected().unwrap().local.draft,"keep me");
 assert!(c.send_prompt().is_err());c.copy_missing_draft("missing").unwrap();assert_eq!(c.selected().unwrap().local.draft,"keep me");assert!(c.selected().unwrap().local.pending.is_empty());assert_eq!(c.chats["missing"].local.pending[0].request.id,"original");
 }
 
@@ -108,7 +108,7 @@ let sessions=(0..20).map(|n| {
     let mut s=Controller::creating_summary(&format!("chat-{n}"),GENERAL_PROJECT_ID,n);
     s.status=SessionStatus::Idle;s.updated_at_ms=n;s
 }).collect();
-c.message(ServerMessage::Sessions {sessions}).unwrap();
+c.install_sessions(sessions).unwrap();
 for n in 0..13 {c.select(&format!("chat-{n}")).unwrap();}
 assert_eq!(c.account.recent_chats.len(),13,"recent is time-based, not eight chats");
 assert_eq!(c.sync_scopes().len(),13);

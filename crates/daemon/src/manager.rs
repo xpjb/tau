@@ -278,7 +278,7 @@ impl AgentManager {
         if let Some(rest) = text.strip_prefix('/') {
             anyhow::ensure!(model.is_none(), "Slash commands cannot carry a starting model");
             let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-            if ["compact", "model", "thinking", "name", "fast"].contains(&name) {
+            if tau_net::BUILTIN_COMMANDS.contains(&name) {
                 if name=="compact" && content.agent.as_ref().unwrap().running {bail!("Stop the current run before compacting");}
                 let receipt = Receipt { model:None, id:request_id.into(),command:Some("builtin".into()),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
                 content.commit(id,Vec::new(),None,Some(receipt.clone())).await?;

@@ -645,11 +645,6 @@ async fn dispatch(manager: &AgentManager, transfers: &tau_net::native::Server,
             session_id = Some(id);
         }
         ClientCommand::Input { .. } => anyhow::bail!("Unsupported control command"),
-        ClientCommand::GetCommands { session_id: id } => {
-            let commands = manager.commands(&id).await?;
-            if !queue_server(outbound, &ServerMessage::Commands { session_id: id.clone(), commands }).await { return Ok(None); }
-            session_id = Some(id);
-        }
         ClientCommand::Prompt { session_id, text, model, create } => {
             ensure!(text.chars().count() <= MAX_PROMPT_CHARS, "message is too large");
             if let Some(create) = create {

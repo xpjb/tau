@@ -8,12 +8,14 @@ pub mod blocks;
 mod transcript;
 pub use transcript::*;
 
-// Protocol 23 pins new-chat model intent to the first prompt and adds an account catalogue.
-pub const PROTOCOL_VERSION: u32 = 23;
+// Protocol 24 removes per-chat command catalogues and unpaged catalog snapshots.
+pub const PROTOCOL_VERSION: u32 = 24;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
 pub const MAX_TITLE_CHARS: usize = 120;
+pub const BUILTIN_COMMANDS: &[&str] = &["compact", "model", "thinking", "name", "fast"];
+pub const FAST_OPTIONS: &[&str] = &["on", "off", "status"];
 pub const GENERAL_PROJECT_ID: &str = "general";
 pub const MAX_PROJECT_NAME_CHARS: usize = 48;
 pub const MAX_PROJECT_PROMPT_CHARS: usize = 64 * 1024;
@@ -77,9 +79,6 @@ pub enum ClientCommand {
         project_id: String,
         #[serde(default)]
         keep_session_id: Option<String>,
-    },
-    GetCommands {
-        session_id: String,
     },
     Prompt {
         session_id: String,
@@ -199,17 +198,9 @@ pub enum ServerMessage {
     Settings { request_id: String, settings: Box<settings::Settings> },
     CodexUsage { request_id: String, report: Option<CodexUsage>, error: Option<String> },
     ModelCatalog { catalog: ModelCatalog },
-    Commands {
-        session_id: String,
-        commands: Vec<SlashCommand>,
-    },
     Notice { session_id: String, message: String },
     SessionPage {catalog_id:String,revision:u64,after:Option<String>,next:Option<String>,sessions:Vec<SessionSummary>,states:std::collections::BTreeMap<String,u64>},
     ProjectPage {catalog_id:String,revision:u64,after:Option<String>,next:Option<String>,projects:Vec<Project>},
-    Projects { projects: Vec<Project> },
-    Sessions {
-        sessions: Vec<SessionSummary>,
-    },
     SessionState {
         session_id: String,
         #[serde(default)] revision:u64,
@@ -230,11 +221,10 @@ impl ServerMessage {
     /// distinct delivery; their durable acceptance is not a display cursor.
     pub fn replication_key(&self) -> Option<String> {
         match self {
-            Self::Sessions {..}=>Some("sessions".into()),Self::Projects {..}=>Some("projects".into()),
             Self::SessionState {session_id,..}=>Some(format!("state:{session_id}")),
-            Self::Commands {session_id,..}=>Some(format!("commands:{session_id}")),
             Self::Settings {..}=>Some("settings".into()),
             Self::ModelCatalog {..}=>Some("model-catalog".into()),
+            Self::ResyncRequired {session_id}=>Some(format!("resync:{session_id:?}")),
             Self::Data {key,..}=>Some(key.clone()),
             _=>None,
         }
@@ -288,32 +278,11 @@ impl ServerMessage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SlashCommandSource {
-    Extension,
-    Prompt,
-    Skill,
-    Builtin,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SlashCommandArgument {
+pub struct ModelSuggestion {
     pub value: String,
     pub description: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SlashCommand {
-    pub name: String,
-    pub description: Option<String>,
-    pub source: SlashCommandSource,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub argument_hint: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub arguments: Vec<SlashCommandArgument>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -460,7 +429,7 @@ pub struct ChatCreation {
 pub struct ModelCatalog {
     #[serde(default)] pub revision: u64,
     pub default_model: Option<SessionModel>,
-    pub models: Vec<SlashCommandArgument>,
+    pub models: Vec<ModelSuggestion>,
     /// Keep last-known client suggestions for these providers until the daemon
     /// has an authenticated catalogue. This never disables selection.
     #[serde(default)] pub unresolved_providers: Vec<String>,
