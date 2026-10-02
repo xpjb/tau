@@ -103,18 +103,22 @@ All Rust commands use `/usr/local/bin/cargo`, one Cargo/Rayon job and nextest.
 
 ## Cleanup progress
 
-Deleted **48 remote refs** and **96 local refs**. The first atomic remote batch
-removed 45 refs, each guarded by its exact inspected tip; the first local
+Deleted **48 remote refs** and **97 original local refs**. The first atomic remote
+batch removed 45 refs, each guarded by its exact inspected tip; the first local
 expected-tip transaction removed 93. After source publication, the three merged
-feature refs were removed locally and remotely. Stable and Tau2 mainline refs
-were excluded. The remote now has only `master` and `tau2`, with default `master`.
+feature refs were removed locally and remotely. The last merged Android feature
+ref was removed after detaching its clean checkout at the same commit, with no
+file changes. Stable and Tau2 mainline refs were excluded. The remote now has
+only `master` and `tau2`, with default `master`.
 
 Removed the clean unused Android merge checkout, the explicitly rejected
-remove-pause checkout and the merged block-loading checkout. The Android feature
-checkout remains the working directory of the host adb server, so its local
-branch/worktree stay accounted for and intact; its tip is already integrated.
-Our rollup and detached negative-control worktrees are temporary acceptance work
-and will be removed after their evidence and merged commits are retained.
+remove-pause checkout and the merged block-loading checkout. The detached
+negative-control checkout was removed after preserving its patch, seven fixture
+files and failed-run logs in the audit archive. The Android checkout stays at
+integrated `1a8ee0c`: the host adb server still uses it as its working directory.
+Its files and running process are untouched; no obsolete feature branch remains.
+The temporary rollup ref/worktree is removed after its final documentation lands
+on `tau2-integration`.
 
 ## Complete starting branch inventory
 
@@ -155,7 +159,7 @@ Tips below are the pre-cleanup snapshot. “Ancestor” was verified against
 | `fix/stream-scroll-anchor` | `bd944a9f15d4` | — | Delete: ancestor of 396d5ba; all commits already in Tau2 |
 | `fix/tau2-accepted-message-ui` | `4b198ab0cc8e` | `4b198ab0cc8e` | Delete: exact change and revert; empty net tree diff from c1f0554 |
 | `fix/tau2-alerts` | `1b0c1447c5aa` | `1b0c1447c5aa` | Delete: ancestor of 396d5ba; all commits already in Tau2 |
-| `fix/tau2-android-startup-lock` | `1a8ee0c1e833` | `1a8ee0c1e833` | Already merged; delete remote ref, keep local ref while adb process uses its worktree |
+| `fix/tau2-android-startup-lock` | `1a8ee0c1e833` | `1a8ee0c1e833` | Already merged; both refs deleted, unchanged detached checkout retained for the running adb server |
 | `fix/tau2-block-loading-stability` | `edfb629cb456` | `edfb629cb456` | Needed: current-mainline regressions fail; source merge 64a9beb |
 | `fix/tau2-cache-ttl` | `eb7540470dde` | — | Delete: ancestor of 396d5ba; all commits already in Tau2 |
 | `fix/tau2-checkpoint-sync` | `2517e9cd0eed` | — | Delete: ancestor of 396d5ba; all commits already in Tau2 |
