@@ -7,9 +7,16 @@ Rust/Cargo `1.93.0-nightly` and Nextest `0.9.140`.
 Nextest run recorded four failures before the user cancelled it. The full suite
 remains unverified. No baseline rerun or fixes have been made.
 
-The failing source and tests are byte-for-byte unchanged from `tau2` at
-`4495c88`. `Cargo.lock` and `.cargo/config.toml` are also unchanged. The only Rust
-edits beyond relocation update two embedded-file paths.
+At that recorded run, the failing source and tests were byte-for-byte unchanged from `tau2` at
+`4495c88`. `Cargo.lock` and `.cargo/config.toml` were also unchanged. The only Rust
+edits beyond relocation updated two embedded-file paths.
+
+The subsequent organization cleanup passes the root workspace MSVC cross-compiler
+check, not native Windows tests. All four items remain open. The historical
+locations below now correspond to `crates/code-viewer/tests/unit/filesystem.rs`,
+`crates/frontend/tests/unit/app/code_view.rs`, and the unchanged integration-test
+path `crates/frontend/tests/remote_files.rs`. See `../cleanup.md` for the executed
+checks and limits.
 
 ## 1. Hidden-file index count
 
