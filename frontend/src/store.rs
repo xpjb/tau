@@ -237,6 +237,7 @@ impl Store {
         use sha2::Digest;
         let key = format!("{:x}",sha2::Sha256::digest(identity.as_bytes()));
         crate::blocks::Cache::open(&self.root.join("blocks").join(format!("{key}.sqlite3")))
+            .context("Open transcript replica")
     }
     pub fn open(root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&root)?;
@@ -246,12 +247,18 @@ impl Store {
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
         }
         let root = root.canonicalize()?;
-        let db = Connection::open(root.join("client.sqlite3"))?;
+        let mut db = Connection::open(root.join("client.sqlite3"))?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(version <= 2, "Local state needs a newer Tau client");
-        db.execute_batch("CREATE TABLE IF NOT EXISTS local (account TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(account,key)); CREATE TABLE IF NOT EXISTS chat_aliases(account TEXT NOT NULL,old TEXT NOT NULL,new TEXT NOT NULL,PRIMARY KEY(account,old)); PRAGMA user_version=2;")?;
+        // Reopening current state must be a WAL read, not a schema write that
+        // waits for a previous activity/client's writer before the first frame.
+        if version < 2 {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS local (account TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(account,key)); CREATE TABLE IF NOT EXISTS chat_aliases(account TEXT NOT NULL,old TEXT NOT NULL,new TEXT NOT NULL,PRIMARY KEY(account,old)); PRAGMA user_version=2;")?;
+            tx.commit()?;
+        }
         let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;db.pragma_update(None,"max_page_count",512u64*1024*1024/page_size)?;
         Ok(Self { db, root })
     }

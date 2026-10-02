@@ -1,3 +1,28 @@
+# Android startup lock contention — integrated source, October 2, 2026
+
+The shared startup path reproduced writer-blocked Store/replica reopens and
+selected-chat restoration, plus a replica-admin `try_lock` failure. Actual
+phone-size first-frame rendering also waited on disposable read-LRU writes.
+Fixes `dd2a831` / `b5937b2` avoid repeated current-schema initialization, make
+read recency and saved-intent body reuse nonblocking under contention, and wait
+only for the short lease/GC admin handoff.
+Real writes, live-handle protection, quotas and authored work remain intact.
+
+Feature validation: **210/210 frontend nextest cases pass**, zero skipped; native all-target,
+Android ARM64/API29, Windows MSVC and frontend rustdoc checks pass. New Android
+stage markers and full restore-error chains support device diagnosis.
+User-approved merge **`1321f65`** integrates feature `1a8ee0c` into `origin/tau2`
+from `d3de9ad`, preserving the model-catalog integration and both QA histories.
+Merged native daemon/frontend all-target compilation and **12/12 targeted
+nextest cases** pass, including the first-frame and actual-controller catalog
+regressions (`a8923dc4-52c5-4251-b184-4ff75b449ae3`). Prior platform/rustdoc gates
+are reused for identical frontend source; no full merged-suite rerun is claimed.
+**No APK/release or physical-phone acceptance:** a >1-second launch remains a
+reported symptom, not a conclusively identified phone trace. See
+[reproductions, limits and follow-up device checks](../docs/android-startup-lock.md).
+
+---
+
 # Manual Quick Model / catalog refresh — integrated source, October 2, 2026
 
 The user's manual `openai-codex/gpt-6.1-sol` entry was not the problem. The daemon

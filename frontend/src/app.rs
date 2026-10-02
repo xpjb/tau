@@ -93,6 +93,8 @@ pub struct App {
 impl App {
     pub fn new(ctx: &impl RenderContext, store: Store, wake: Wake, mobile: bool) -> Result<Self> {
         let controller = Controller::new(store, wake.clone())?;
+        #[cfg(target_os = "android")]
+        log::info!("tau-startup stage=controller-ready");
         let needs_setup = controller.settings.url().is_err();
         let root = ui::RootWidget {
             workspace: ui::Workspace::new(&controller),
@@ -463,6 +465,8 @@ mod navigation_tests;
 mod project_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod thinking_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod startup_tests;
 #[cfg(all(test, not(target_os = "android")))]
 mod tooltip_tests;
 #[cfg(all(test, not(target_os = "android")))]
