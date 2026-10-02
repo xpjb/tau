@@ -10,7 +10,7 @@ pub struct FileUpdate {
     pub generation: u64, pub session: String, pub lineage: String,
     pub response: Result<FileReply, String>, pub document: Option<Arc<tau_code_viewer::Document>>,
 }
-pub(super) async fn watch_files(client: Arc<tau_net::native::Client>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<FileUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<FileInterest>>) {
+pub(super) async fn watch_files(client: tau_net::native::Client, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<FileUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<FileInterest>>) {
     loop {
         let plan = interest.borrow_and_update().clone();
         if plan.is_none() {updates.send_replace(None);}
@@ -26,7 +26,7 @@ pub(super) async fn watch_files(client: Arc<tau_net::native::Client>, mut ready:
         }
     }
 }
-async fn refresh_files(client: Arc<tau_net::native::Client>, plan: FileInterest, lineage: String, updates: &watch::Sender<Option<Arc<FileUpdate>>>, wake: &crate::net::Wake) {
+async fn refresh_files(client: tau_net::native::Client, plan: FileInterest, lineage: String, updates: &watch::Sender<Option<Arc<FileUpdate>>>, wake: &crate::net::Wake) {
     let mut request = plan.request.clone();
     if plan.preview { tokio::time::sleep(Duration::from_millis(75)).await; }
     let mut document = plan.document.clone();
@@ -78,7 +78,7 @@ pub struct IndexUpdate {
 }
 struct Cached { session: String, root: Option<String>, lineage: String, index: Arc<PathIndex>, indexing: bool, limited: bool }
 
-pub(super) async fn watch_index(client: Arc<tau_net::native::Client>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<IndexUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<IndexInterest>>) {
+pub(super) async fn watch_index(client: tau_net::native::Client, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<IndexUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<IndexInterest>>) {
     let mut cached = None;
     loop {
         let plan = interest.borrow_and_update().clone();
@@ -96,7 +96,7 @@ pub(super) async fn watch_index(client: Arc<tau_net::native::Client>, mut ready:
         }
     }
 }
-async fn refresh_index(client: Arc<tau_net::native::Client>, plan: IndexInterest, lineage: String, cached: &mut Option<Cached>, updates: &watch::Sender<Option<Arc<IndexUpdate>>>, wake: &crate::net::Wake) {
+async fn refresh_index(client: tau_net::native::Client, plan: IndexInterest, lineage: String, cached: &mut Option<Cached>, updates: &watch::Sender<Option<Arc<IndexUpdate>>>, wake: &crate::net::Wake) {
     if cached.as_ref().is_some_and(|c| c.lineage != lineage) { *cached = None; }
     let mut previous = None;
     let mut reset = false;

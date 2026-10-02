@@ -2,14 +2,14 @@
 use super::{Event, mailbox::EventSender};
 use crate::{replica::Cache, store::LocalFile};
 use anyhow::{Context, Result, ensure};
-use std::{sync::Arc, path::{Path, PathBuf}, time::{Duration, Instant}};
-use tau_net::{blocks::*, native::{Client, Header}, TransferStatus, ClientCommand, ClientRequest, MAX_PROMPT_CHARS};
-use tokio::{sync::watch, io::{AsyncReadExt, AsyncSeekExt}};
+use std::{path::{Path, PathBuf}, time::{Duration, Instant}};
+use tau_net::{blocks::*, native::{Client, Priority, Update}, TransferStatus, ClientCommand, ClientRequest, MAX_PROMPT_CHARS};
+use tokio::{sync::watch, io::AsyncReadExt};
 
 #[derive(Clone)]
 pub(super) struct Transfers {
     pub cache: Cache,
-    pub client: Arc<Client>,
+    pub client: Client,
     pub ready: watch::Receiver<Option<String>>,
     pub events: EventSender,
 }
@@ -50,34 +50,25 @@ impl Transfers {
                 if let Some(h)=self.cache.cached_header(scope,id)? && h.sealed && h.length==request.offset {break h;}
                 let before=request.offset;
                 let result=async {
-                    let mut watcher=client.watch_bulk(BlockWatch::Block(request.clone())).await?;
-                    let mut head=None; let mut reported=Instant::now()-Duration::from_secs(1);
+                    let mut reader=client.read(BlockWatch::Block(request.clone()),Priority::Background).await?;
+                    let mut head=None;let mut reported=Instant::now()-Duration::from_secs(1);
+                    let previous_network=status.network_bytes;
                     status.transferred=request.offset;
                     loop {
-                        let (frame,n)=watcher.next().await?; status.network_bytes+=n as u64;
-                        match &frame.header {
-                            Header::Block {block} => {
-                                ensure!(block.id==id && matches!(block.kind,BlockKind::File|BlockKind::Image) && block.length<=limit,"Invalid file header or size");
+                        let update=reader.next().await;
+                        status.network_bytes=previous_network+reader.received_bytes();
+                        let Some(update)=update? else {break;};
+                        match &update {
+                            Update::Block {block,..}=>{
+                                ensure!(matches!(block.kind,BlockKind::File|BlockKind::Image) && block.length<=limit,"Invalid file header or size");
                                 if request.version!=block.version {status.transferred=0;request.version=block.version;}
-                                status.total=block.length;
-                                let (cache,scope,lineage,h)=(self.cache.clone(),scope.to_owned(),lineage.clone(),block.clone());
-                                tokio::task::spawn_blocking(move ||cache.header_at(&lineage,&scope,&h,epoch)).await??;
-                                head=Some(block.clone());
+                                status.total=block.length;head=Some(block.clone());
                             }
-                            Header::Data {version,offset,hash,..} => {
-                                let h: &BlockHeader=head.as_ref().context("File data preceded its header")?;
-                                ensure!(*version==h.version && *offset==status.transferred,"Unexpected file offset/version");
-                                let bytes=frame.decoded()?; let length=bytes.len();
-                                let range=ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes};
-                                let (cache,scope,lineage)=(self.cache.clone(),scope.to_owned(),lineage.clone());
-                                tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope,&range,epoch)).await??;
-                                status.transferred+=length as u64;
-                            }
-                            Header::End => break,
-                            Header::Error {message} => anyhow::bail!("{message}"),
-                            _ => anyhow::bail!("Unexpected file response"),
+                            Update::Range {range,..}=>status.transferred=range.offset+range.bytes.len() as u64,
+                            Update::Absent {..}=>anyhow::bail!("Source file no longer exists"),
+                            Update::Page {..}=>unreachable!(),
                         }
-                        let _=watcher.consumed(n).await;
+                        self.cache.apply(&lineage,update,epoch).await?;
                         if reported.elapsed()>=Duration::from_millis(100) {self.report(key,path,status);reported=Instant::now();}
                     }
                     let h=head.context("File response had no header")?;
@@ -118,7 +109,7 @@ impl std::fmt::Display for InvalidAttachment {
 impl std::error::Error for InvalidAttachment {}
 
 impl Transfers {
-    async fn connection(&mut self) -> Result<(Arc<Client>,String)> {
+    async fn connection(&mut self) -> Result<(Client,String)> {
         while self.ready.borrow().is_none() {self.ready.changed().await.context("Content service stopped")?;}
         let lineage = self.ready.borrow().clone().unwrap();
         let client = self.client.clone();
@@ -134,10 +125,7 @@ impl Transfers {
             ensure!(self.ready.borrow().as_ref() == Some(&lineage),"Content source changed; reconcile before retrying");
             let result = async {
                 let mut upload = client.uploader(spec.clone()).await?;
-                while upload.status.offset < spec.length {
-                    let start = upload.status.offset as usize;
-                    upload.write(&bytes[start..bytes.len().min(start+BLOCK_CHUNK_BYTES)]).await?;
-                }
+                upload.copy_from(&mut std::io::Cursor::new(&bytes)).await?;
                 upload.finish().await?;
                 Ok::<_,anyhow::Error>(())
             }.await;
@@ -167,7 +155,6 @@ impl Transfers {
                 ensure!(file.hash.as_ref().is_none_or(|expected|expected==&hash),"Local attachment failed integrity verification; original intent was not sent");
                 Ok::<_,anyhow::Error>((source, before, hash))
             }.await.context(InvalidAttachment)?;
-            let mut buffer = vec![0;BLOCK_CHUNK_BYTES];
             let spec = UploadSpec {
                 id:blake3::hash(format!("file\0{session}\0{}",file.id).as_bytes()).to_hex().to_string(),
                 length:file.size,hash,
@@ -178,12 +165,7 @@ impl Transfers {
                 ensure!(self.ready.borrow().as_ref() == Some(&lineage),"Content source changed; retry the attachment explicitly");
                 let result = async {
                     let mut upload = client.uploader(spec.clone()).await?;
-                    source.seek(std::io::SeekFrom::Start(upload.status.offset)).await?;
-                    while upload.status.offset < spec.length {
-                        let n = source.read(&mut buffer).await?;
-                        ensure!(n > 0,"Attachment was truncated");
-                        upload.write(&buffer[..n]).await?;
-                    }
+                    upload.copy_from(&mut source).await?;
                     let after=source.metadata().await?;
                     ensure!(before.len()==after.len() && before.modified()?==after.modified()?,"Attachment changed during upload");
                     upload.finish().await?.file.context("Attachment was not published")
@@ -210,28 +192,14 @@ impl Transfers {
         let epoch=self.cache.epoch();
         let mut request = self.cache.block_request(&reference.scope,&reference.id)?;
         request.follow = false;
-        let mut watcher = client.watch_descriptor(BlockWatch::Block(request)).await?;
-        let mut head = None;
-        loop {
-            let (frame,n) = watcher.next().await?;
-            match &frame.header {
-                Header::Block {block} => {
-                    ensure!(block.id == reference.id && block.length == reference.length && block.sealed && block.version == 1,"Descriptor changed");
-                    self.cache.header_at(&lineage,&reference.scope,block,epoch)?;
-                    head = Some(block.clone());
-                }
-                Header::Data {version,offset,hash,..} => {
-                    let h = head.as_ref().context("Descriptor has no header")?;
-                    ensure!(*version == h.version,"Descriptor version changed");
-                    let range = ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes:frame.decoded()?};
-                    let (cache,scope,lineage) = (self.cache.clone(),reference.scope.clone(),lineage.clone());
-                    tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope,&range,epoch)).await??;
-                }
-                Header::End => break,
-                Header::Error {message} => anyhow::bail!("{message}"),
-                _ => anyhow::bail!("Unexpected descriptor frame"),
+        let mut reader=client.read(BlockWatch::Block(request),Priority::Descriptor).await?;
+        while let Some(update)=reader.next().await? {
+            match &update {
+                Update::Block {block,..}=>ensure!(block.length==reference.length && block.sealed && block.version==1,"Descriptor changed"),
+                Update::Absent {..}=>anyhow::bail!("Descriptor no longer exists"),
+                _=>{}
             }
-            let _ = watcher.consumed(n).await;
+            self.cache.apply(&lineage,update,epoch).await?;
         }
         let cache=self.cache.clone();
         tokio::task::spawn_blocking(move || cache.descriptor(&reference,epoch)).await?

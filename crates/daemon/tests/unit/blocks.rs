@@ -50,7 +50,7 @@ fn tool_projection_keeps_raw_streamed_input_and_seals_without_replacement() {
     for prefix in [100,10000,raw.len()] {let tx=db.transaction().unwrap();event(&tx,"chat",&project(&raw[..prefix],false)).unwrap();tx.commit().unwrap();}
     let finished=project(&raw,true);let input=input_id(&finished.id);let before=tau_block_store::header(&db,"chat",&input).unwrap().unwrap();
     let tx=db.transaction().unwrap();event(&tx,"chat",&finished).unwrap();tx.commit().unwrap();
-    let range=tau_block_store::read(&db,&tau_net::blocks::BlockRequest {scope:"chat".into(),id:input,version:before.version,offset:before.length,follow:false}).unwrap();
+    let range=tau_block_store::read(&db,&tau_net::blocks::BlockRequest {scope:"chat".into(),id:input,version:before.version,offset:before.length,follow:false}).unwrap().unwrap();
     assert!(range.bytes.is_empty());assert!(range.header.sealed);assert_eq!(range.header.version,before.version);
     let card=tau_block_store::header(&db,"chat",&finished.id).unwrap().unwrap();assert_eq!(card.length,0);
     assert!(serde_json::to_vec(&card).unwrap().len()<2048);assert_eq!(tau_block_store::children(&db,"chat",Some(&card.id)).unwrap().len(),1);

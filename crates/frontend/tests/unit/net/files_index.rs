@@ -8,7 +8,7 @@ use tau_net::native::{Backend, Client, Server};
 struct Memory { reply: Mutex<FileReply>, calls: Mutex<Vec<FileRequest>>, fail: AtomicBool, hints: watch::Sender<u64> }
 impl Backend for Memory {
 fn feed(&self, _: FeedRequest) -> BoxFuture<'static, Result<FeedPage>> { async { anyhow::bail!("unused") }.boxed() }
-fn read(&self, _: BlockRequest) -> BoxFuture<'static, Result<ContentRange>> { async { anyhow::bail!("unused") }.boxed() }
+fn read(&self, _: BlockRequest) -> BoxFuture<'static, Result<Option<ContentRange>>> { async { anyhow::bail!("unused") }.boxed() }
 fn changes(&self) -> watch::Receiver<u64> { self.hints.subscribe() }
 fn files(&self, request: FileRequest) -> BoxFuture<'static, Result<FileReply>> {
     self.calls.lock().unwrap().push(request);
@@ -32,7 +32,7 @@ tokio::time::timeout(Duration::from_secs(5), async {
 async fn sync_prefetches_names_then_uses_conditional_deltas_across_chat_switches_and_suspension() {
 let backend=Arc::new(Memory {reply:Mutex::new(snapshot("a",None,&["src/a.rs","src/b.rs"],&[])),calls:Mutex::new(vec![]),fail:AtomicBool::new(false),hints:watch::channel(0).0});
 let server=Server::bind("127.0.0.1:0".parse().unwrap(),backend.clone()).await.unwrap();
-let client=Arc::new(Client::bind().await.unwrap());
+let client=Client::bind().await.unwrap();
 client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
 let (lineage,ready)=watch::channel(Some("source".into()));
 let (send,mut updates)=watch::channel(None);

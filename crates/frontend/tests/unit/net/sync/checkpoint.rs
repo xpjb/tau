@@ -23,7 +23,7 @@ impl Backend for SlowSource {
             tau_block_store::feed(&db.lock().unwrap(), &request)
         })
     }
-    fn read(&self, request: BlockRequest) -> futures_util::future::BoxFuture<'static, Result<ContentRange>> {
+    fn read(&self, request: BlockRequest) -> futures_util::future::BoxFuture<'static, Result<Option<ContentRange>>> {
         let db = self.db.clone();
         let slow = !self.slow_feed && self.reads.lock().unwrap().is_empty();
         self.reads.lock().unwrap().push(request.clone());
@@ -83,19 +83,23 @@ async fn checkpoint_scheduling_commits_a_slow_metadata_round_instead_of_restarti
     f.put("parent", None, b"");
     f.put("child", Some("parent"), b"not requested");
     let (server, client, _changes) = f.connect(true).await;
-    let (notices, _received) = mpsc::channel(32);
+    let (notices, mut received) = mpsc::channel(32);
     let wake: crate::net::Wake = Arc::new(|| {});
-    let result = tokio::time::timeout(Duration::from_secs(10), watch_once(
-        &Key::Feeds("chat".into(), vec![None, Some("parent".into())], false),
-        &client, &f.cache, &f.lineage, &notices, &wake,
-    )).await.expect("A slow but completing read must not monopolize its stream").unwrap();
-    assert!(!result, "A live feed yields; it does not become permanently complete");
-    for parent in [None, Some("parent")] {
-        assert!(tau_block_store::cached_feed(&f.replica(), "chat", parent).unwrap().is_some(),
-            "The entire bounded metadata round must commit before yielding, including later feeds");
-    }
+    let key=Key::Feeds("chat".into(), vec![None, Some("parent".into())], false);
+    let worker=watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake);
+    tokio::pin!(worker);
+    tokio::time::timeout(Duration::from_secs(10),async {
+        loop {tokio::select! {
+            result=&mut worker=>panic!("Live interest terminated: {result:?}"),
+            notice=received.recv()=>{
+                assert!(matches!(notice,Some(ReplicaNotice::Changed(_))));
+                if client.stats().streams>=2 && [None,Some("parent")].iter().all(|parent|
+                    tau_block_store::cached_feed(&f.replica(),"chat",*parent).unwrap().is_some()) {break;}
+            }
+        }}
+    }).await.expect("The entire slow metadata round must commit and renew, not starve later feeds");
     assert!(f.reads.lock().unwrap().is_empty(), "Metadata scheduling must not fetch content");
-    assert_eq!(client.stats().cancelled_streams, 0, "A cooperative yield is not a cancelled transfer");
+    assert_eq!(client.stats().cancelled_streams,0,"Cooperative renewal is not a cancelled transfer");
     client.shutdown().await;
     server.shutdown().await;
 }
@@ -109,15 +113,10 @@ async fn checkpoint_scheduling_resumes_after_a_slow_chunk_without_replaying_its_
     let (notices, _received) = mpsc::channel(32);
     let wake: crate::net::Wake = Arc::new(|| {});
     let key = Key::Block("chat".into(), "body".into(), true);
-    assert!(!tokio::time::timeout(Duration::from_secs(10), watch_once(
-        &key, &client, &f.cache, &f.lineage, &notices, &wake,
+    assert!(tokio::time::timeout(Duration::from_secs(10),watch_once(
+        &key,&client,&f.cache,&f.lineage,&notices,&wake,
     )).await.unwrap().unwrap());
-    let request = f.cache.block_request("chat", "body").unwrap();
-    assert_eq!(request.offset, BLOCK_CHUNK_BYTES as u64,
-        "The scheduling quantum may expire, but the in-flight chunk must commit before yielding");
-    assert!(tokio::time::timeout(Duration::from_secs(3), watch_once(
-        &key, &client, &f.cache, &f.lineage, &notices, &wake,
-    )).await.unwrap().unwrap());
+    assert_eq!(client.stats().streams,2,"The slow chunk must commit before the transport renews its slice");
     assert_eq!(tau_block_store::cached_content(&f.replica(), "chat", "body").unwrap(), bytes);
     assert_eq!(f.reads.lock().unwrap().iter().map(|r| r.offset).collect::<Vec<_>>(),
         [0, BLOCK_CHUNK_BYTES as u64, (BLOCK_CHUNK_BYTES * 2) as u64]);
@@ -151,4 +150,30 @@ async fn background_live_body_releases_its_slot_after_catching_up_and_resumes_ne
     assert_eq!(tau_block_store::cached_content(&f.replica(),"chat","live").unwrap(),b"prefix suffix");
     let reads=f.reads.lock().unwrap().clone();assert_eq!(reads.len(),2);assert_eq!(reads[1].offset,6);
     assert_eq!(client.stats().bulk_slots,0);client.shutdown().await;server.shutdown().await;
+}
+
+#[tokio::test]
+async fn disappearing_body_is_not_an_alert_or_an_unordered_replica_tombstone() {
+    let f=Fixture::new();f.put("queued:consumed",None,b"original text");
+    let request=f.cache.feed_request("chat",None,None).unwrap();
+    let page=tau_block_store::feed(&f.source.lock().unwrap(),&request).unwrap();
+    f.cache.page_at(&f.lineage,&request,&page,f.cache.epoch()).unwrap();
+    let before=f.cache.feed_request("chat",None,None).unwrap();
+    {
+        let mut db=f.source.lock().unwrap();let tx=db.transaction().unwrap();
+        tau_block_store::remove(&tx,"chat","queued:consumed").unwrap();tx.commit().unwrap();
+    }
+    let (server,client,_changes)=f.connect(false).await;
+    // Skip the separate slow-chunk fixture behavior in this race regression.
+    f.reads.lock().unwrap().push(BlockRequest {scope:"chat".into(),id:"setup".into(),version:0,offset:0,follow:false});
+    let (notices,mut received)=mpsc::channel(32);let wake:crate::net::Wake=Arc::new(||{});
+    assert!(watch_once(&Key::Block("chat".into(),"queued:consumed".into(),true),&client,&f.cache,&f.lineage,&notices,&wake).await.unwrap());
+    assert!(received.try_recv().is_err(),"An obsolete body interest must not produce an error or fabricate a change");
+    assert!(f.cache.cached_header("chat","queued:consumed").unwrap().is_some(),"Absence does not certify a directory deletion");
+    assert_eq!(f.cache.feed_request("chat",None,None).unwrap().cursor,before.cursor);
+    let mut reader=client.read(BlockWatch::Feed(before),Priority::Foreground).await.unwrap();
+    let update=reader.next().await.unwrap().unwrap();
+    f.cache.apply(&f.lineage,update,f.cache.epoch()).await.unwrap();
+    assert!(f.cache.cached_header("chat","queued:consumed").unwrap().is_none(),"The ordered directory tombstone owns deletion");
+    client.shutdown().await;server.shutdown().await;
 }

@@ -3,7 +3,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value,json};
 use tau_net::blocks::*;
-use tau_net::native::{Client as DataClient, Header};
+use tau_net::native::{Client as DataClient, Priority, Update};
 use tokio_tungstenite::{connect_async,tungstenite::{Message,client::IntoClientRequest}};
 
 pub struct Client {
@@ -64,7 +64,7 @@ impl Client {
             let hash=blake3::hash(&bytes).to_hex().to_string();
             let spec=UploadSpec {id:hash.clone(),length:bytes.len() as u64,hash:hash.clone(),purpose:UploadPurpose::Command};
             let mut upload=self.data.uploader(spec).await.unwrap();
-            for chunk in bytes[upload.status.offset as usize..].chunks(BLOCK_CHUNK_BYTES) {upload.write(chunk).await.unwrap();}
+            upload.copy_from(&mut std::io::Cursor::new(&bytes)).await.unwrap();
             upload.finish().await.unwrap();
             json!({"id":id,"type":"input","content":ContentRef {lineage:self.lineage.clone(),scope:UPLOAD_SCOPE.into(),id:hash.clone(),length:bytes.len() as u64,hash}})
         } else {value};
@@ -72,25 +72,16 @@ impl Client {
         self.until(|m|m["type"]=="response" && m["requestId"]==id).await
     }
     pub async fn body(&self,scope:&str,id:&str)->Vec<u8> {
-        let mut watch=self.data.watch(BlockWatch::Block(BlockRequest {scope:scope.into(),id:id.into(),version:0,offset:0,follow:false})).await.unwrap();
+        let mut reader=self.data.read(BlockWatch::Block(BlockRequest {scope:scope.into(),id:id.into(),version:0,offset:0,follow:false}),Priority::Foreground).await.unwrap();
         let mut bytes=vec![];
-        loop {let (frame,n)=watch.next().await.unwrap();match &frame.header {
-            Header::Data {offset,..}=>{assert_eq!(*offset,bytes.len() as u64);bytes.extend(frame.decoded().unwrap());}
-            Header::End=>return bytes,
-            Header::Error {message}=>panic!("{message}"),
-            Header::Block {..}=>{},
-            other=>panic!("Unexpected body frame {other:?}"),
-        }let _=watch.consumed(n).await;}
+        while let Some(update)=reader.next().await.unwrap() {match update {
+            Update::Range {range,..}=>{assert_eq!(range.offset,bytes.len() as u64);bytes.extend(range.bytes);}
+            Update::Block {..}=>{},other=>panic!("Unexpected body update {other:?}"),
+        }}bytes
     }
     async fn directory(&self,scope:&str,parent:Option<String>,before:Option<FeedPosition>)->FeedPage {
-        let mut watch=self.data.watch(BlockWatch::Feed(FeedRequest {scope:scope.into(),parent,cursor:None,floor:0,before})).await.unwrap();
-        let mut records=vec![];
-        loop {let (frame,n)=watch.next().await.unwrap();match frame.header {
-            Header::Record {record,..}=>records.push(record),
-            Header::Page {reset,cursor,floor,before,more,..}=>return FeedPage {reset,cursor,floor,before,more,records},
-            Header::Error {message}=>panic!("{message}"),
-            other=>panic!("Unexpected directory frame {other:?}"),
-        }let _=watch.consumed(n).await;}
+        let mut reader=self.data.read(BlockWatch::Feed(FeedRequest {scope:scope.into(),parent,cursor:None,floor:0,before}),Priority::Foreground).await.unwrap();
+        let Some(Update::Page {page,..})=reader.next().await.unwrap() else {panic!("Expected directory page");};page
     }
     pub async fn page(&self,id:&str,before:Option<FeedPosition>)->Value {
         let page=self.directory(id,None,before).await;

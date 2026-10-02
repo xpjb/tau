@@ -11,7 +11,10 @@ use crate::{blocks::*, files::*};
 use std::sync::atomic::{AtomicU64,Ordering};
 use tokio::{sync::{Semaphore, watch}, task::JoinSet};
 
-pub const ALPN: &[u8] = b"tau/blocks/2";
+mod read;
+pub use read::{Priority, Reader, Update};
+
+const ALPN: &[u8] = b"tau/blocks/3";
 const MAX_WIRE_HEADER: usize = MAX_BLOCK_HEADER_BYTES + 1024;
 const LEASE: Duration = Duration::from_secs(3600);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,7 +60,9 @@ impl Counters {
 
 pub trait Backend: Send + Sync + 'static {
     fn feed(&self, request: FeedRequest) -> BoxFuture<'static, Result<FeedPage>>;
-    fn read(&self, request: BlockRequest) -> BoxFuture<'static, Result<ContentRange>>;
+    /// None means the requested identity is absent. Missing/corrupt bytes of an
+    /// existing identity are errors, never successful absence.
+    fn read(&self, request: BlockRequest) -> BoxFuture<'static, Result<Option<ContentRange>>>;
     /// Hints only: lag/coalescing cannot lose data, which is read by durable cursor.
     fn changes(&self) -> watch::Receiver<u64>;
     fn files(&self, _request: crate::files::FileRequest) -> BoxFuture<'static, Result<crate::files::FileReply>> {
@@ -76,14 +81,14 @@ pub trait Backend: Send + Sync + 'static {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Codec { Raw, Zstd }
+enum Codec { Raw, Zstd }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
-pub enum Header {
+enum Header {
     Browse { request: crate::files::FileRequest, credit: u32 },
     Browsed { length: u64, hash: String },
-    Watch { request: BlockWatch, credit: u32, #[serde(default)] priority:i32, #[serde(default)] scheduled:bool },
+    Watch { request: BlockWatch, credit: u32, priority:i32 },
     Upload { spec: UploadSpec },
     Uploaded { status: UploadStatus },
     Credit { bytes: u32 },
@@ -91,6 +96,7 @@ pub enum Header {
     Page { watch:usize, reset: bool, cursor: FeedCursor, floor: u64, before: Option<FeedPosition>, more: bool },
     Block { block: BlockHeader },
     Data { version: u64, offset: u64, hash: String, length: u32, codec: Codec },
+    Absent,
     End,
     /// A scheduled watch relinquishes its stream at a resumable checkpoint.
     /// Unlike End, this does not mean its requested interest is complete.
@@ -99,7 +105,7 @@ pub enum Header {
 }
 
 #[derive(Debug)]
-pub struct Frame { pub header: Header, pub data: Vec<u8> }
+struct Frame { pub header: Header, pub data: Vec<u8> }
 impl Frame {
     pub fn metadata(header: Header) -> Self { Self { header, data:vec![] } }
     fn data(version: u64, offset: u64, hash: String, bytes: &[u8]) -> Result<Self> {
@@ -284,7 +290,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
     if let Header::Upload { spec } = frame.header {
         return serve_upload(send, recv, backend, grants, node, spec).await;
     }
-    let Header::Watch { mut request, mut credit, priority, scheduled } = frame.header else { bail!("Expected block watch or upload"); };
+    let Header::Watch { mut request, mut credit, priority } = frame.header else { bail!("Expected block watch or upload"); };
     ensure!(credit == BLOCK_WINDOW_BYTES,"Invalid initial block window");
     ensure!((-10..=10).contains(&priority),"Invalid stream priority");
     send.set_priority(priority)?;
@@ -319,6 +325,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
                     _ = send.stopped() => return Ok(()),
                     range = backend.read(req.clone()) => range?,
                 };
+                let Some(range)=range else {return send_credited(send,recv,&mut credit,Frame::metadata(Header::Absent),None).await;};
                 if sent_revision != Some(range.header.revision) {
                     send.set_priority(if matches!(range.header.kind,BlockKind::File | BlockKind::Image) { -10 } else { priority.min(5) })?;
                     send_credited(send,recv,&mut credit,Frame::metadata(Header::Block { block:range.header.clone() }),None).await?;
@@ -338,7 +345,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
         // seeing Yield, then re-enters the existing fair class semaphore queue.
         // Do not yield between feeds: a slow first page must not starve the
         // later members of a batched interest on every renewal.
-        if scheduled && tokio::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return send_credited(send,recv,&mut credit,Frame::metadata(Header::Yield),None).await;
         }
         if more { continue; }
@@ -346,7 +353,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
         // coalescing never determines the next sequence or byte offset.
         tokio::select! {
             _ = send.stopped() => return Ok(()),
-            _ = tokio::time::sleep_until(deadline), if scheduled => {
+            _ = tokio::time::sleep_until(deadline) => {
                 return send_credited(send,recv,&mut credit,Frame::metadata(Header::Yield),None).await;
             }
             result = changes.changed() => {
@@ -413,7 +420,21 @@ pub struct Uploader {
     _permit:tokio::sync::OwnedSemaphorePermit, _bulk:tokio::sync::OwnedSemaphorePermit,
 }
 impl Uploader {
-    pub async fn write(&mut self, bytes:&[u8]) -> Result<()> {
+    /// Copy from the durable remote prefix. The caller may validate its local
+    /// source once more before explicitly publishing with finish().
+    pub async fn copy_from<R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin>(&mut self, source:&mut R) -> Result<()> {
+        use tokio::io::{AsyncReadExt,AsyncSeekExt};
+        source.seek(std::io::SeekFrom::Start(self.status.offset)).await?;
+        let mut buffer=vec![0;BLOCK_CHUNK_BYTES];
+        while self.status.offset<self.spec.length {
+            let remaining=(self.spec.length-self.status.offset).min(buffer.len() as u64) as usize;
+            let n=source.read(&mut buffer[..remaining]).await?;
+            ensure!(n>0,"Upload source was truncated");self.write(&buffer[..n]).await?;
+        }
+        Ok(())
+    }
+
+    async fn write(&mut self, bytes:&[u8]) -> Result<()> {
         ensure!(!self.status.sealed && !bytes.is_empty() && bytes.len() <= BLOCK_CHUNK_BYTES && self.status.offset.saturating_add(bytes.len() as u64) <= self.spec.length, "Invalid upload write");
         let frame = Frame::data(1,self.status.offset,blake3::hash(bytes).to_hex().to_string(),bytes)?;
         let encoded=encode(&frame)?.len() as u64;
@@ -440,11 +461,12 @@ impl Drop for Uploader {
 }
 
 /// Reused for every stream/file in this client/daemon context.
+#[derive(Clone)]
 pub struct Client {
     stats:Arc<Counters>,
     endpoint: Endpoint,
-    peer: tokio::sync::Mutex<Option<NodeAddr>>,
-    connection: tokio::sync::Mutex<Option<Connection>>,
+    peer: Arc<tokio::sync::Mutex<Option<(NodeAddr,String)>>>,
+    connection: Arc<tokio::sync::Mutex<Option<Connection>>>,
     streams: Arc<Semaphore>,
     bulk: Arc<Semaphore>,
     metadata: Arc<Semaphore>,
@@ -458,7 +480,7 @@ impl Client {
         // five-second idle limit instead of retaining a silent connection.
         let endpoint = Endpoint::builder().bind_addr_v6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED,0,0,0))
             .relay_mode(RelayMode::Disabled).transport_config(config(IO_TIMEOUT)).bind().await.context(ConnectionIssue)?;
-        Ok(Self { stats:Arc::new(Counters::default()),endpoint,peer:tokio::sync::Mutex::new(None),connection:tokio::sync::Mutex::new(None),streams:Arc::new(Semaphore::new(MAX_STREAMS-2)),bulk:Arc::new(Semaphore::new(6)),metadata:Arc::new(Semaphore::new(2)),foreground:Arc::new(Semaphore::new(4)),descriptors:Arc::new(Semaphore::new(2)) })
+        Ok(Self { stats:Arc::new(Counters::default()),endpoint,peer:Arc::new(tokio::sync::Mutex::new(None)),connection:Arc::new(tokio::sync::Mutex::new(None)),streams:Arc::new(Semaphore::new(MAX_STREAMS-2)),bulk:Arc::new(Semaphore::new(6)),metadata:Arc::new(Semaphore::new(2)),foreground:Arc::new(Semaphore::new(4)),descriptors:Arc::new(Semaphore::new(2)) })
     }
     pub fn node_id(&self) -> String { self.endpoint.node_id().to_string() }
     pub async fn configure(&self, offer: &BulkOffer, host: &str) -> Result<()> {
@@ -472,9 +494,9 @@ impl Client {
         // Same peer/grant renewal preserves the connection and all active streams.
         let mut connection = self.connection.lock().await;
         let mut peer = self.peer.lock().await;
-        if peer.as_ref().is_some_and(|old| old.node_id != address.node_id)
+        if peer.as_ref().is_some_and(|old| old.0.node_id != address.node_id || old.1 != offer.lineage)
             && let Some(old) = connection.take() { old.close(0u32.into(),b"Block peer changed"); }
-        *peer = Some(address);
+        *peer = Some((address,offer.lineage.clone()));
         Ok(())
     }
     async fn connection(&self) -> Result<Connection> {
@@ -482,17 +504,9 @@ impl Client {
         if let Some(conn) = slot.as_ref().filter(|c|c.close_reason().is_none()) { return Ok(conn.clone()); }
         let peer = self.peer.lock().await.clone().context("Block connection not authorized yet")?;
         self.stats.attempts.fetch_add(1,Ordering::Relaxed);
-        let connection = tokio::time::timeout(IO_TIMEOUT,self.endpoint.connect(peer,ALPN)).await?.context(ConnectionIssue)?;
+        let connection = tokio::time::timeout(IO_TIMEOUT,self.endpoint.connect(peer.0,ALPN)).await?.context(ConnectionIssue)?;
         self.stats.connections.fetch_add(1,Ordering::Relaxed);
         *slot = Some(connection.clone()); Ok(connection)
-    }
-    pub async fn watch(&self, request: BlockWatch) -> Result<Watcher> {
-        let class = if matches!(request,BlockWatch::Feed(_) | BlockWatch::Feeds {..}) { &self.metadata } else { &self.foreground };
-        let priority=if matches!(request,BlockWatch::Feed(_)|BlockWatch::Feeds {..}) {10} else {5};
-        self.open_watch(request,Some(class.clone().acquire_owned().await?),priority,false).await
-    }
-    pub async fn watch_descriptor(&self, request: BlockWatch) -> Result<Watcher> {
-        self.open_watch(request,Some(self.descriptors.clone().acquire_owned().await?),8,false).await
     }
     pub async fn uploader(&self, spec: UploadSpec) -> Result<Uploader> {
         spec.validate()?;
@@ -509,31 +523,6 @@ impl Client {
         self.stats.opened();self.stats.resumed.fetch_add(status.offset,Ordering::Relaxed);
         Ok(Uploader { stats:self.stats.clone(),complete:status.sealed,send,recv,status,spec,credit:BLOCK_WINDOW_BYTES,_permit:permit,_bulk:bulk })
     }
-    pub async fn watch_bulk(&self, request: BlockWatch) -> Result<Watcher> {
-        let bulk=self.bulk.clone().acquire_owned().await?;
-        self.open_watch(request,Some(bulk),-10,false).await
-    }
-    /// Shared UI scheduling: server-terminated slices, never client-side
-    /// cancellation of partially received pages/chunks. Reopen from committed
-    /// cursors/prefixes after Yield; End still means the interest is complete.
-    pub async fn watch_scheduled(&self, request: BlockWatch, bulk:bool) -> Result<Watcher> {
-        // Background feeds share bulk admission: they cannot occupy either of
-        // the selected chat's metadata slots or its foreground body slots.
-        let (class,priority) = if bulk { (&self.bulk,-10) }
-        else if matches!(request,BlockWatch::Feed(_) | BlockWatch::Feeds {..}) { (&self.metadata,10) }
-        else { (&self.foreground,5) };
-        self.open_watch(request,Some(class.clone().acquire_owned().await?),priority,true).await
-    }
-    async fn open_watch(&self, request: BlockWatch, bulk:Option<tokio::sync::OwnedSemaphorePermit>,priority:i32,scheduled:bool) -> Result<Watcher> {
-        let permit = self.streams.clone().acquire_owned().await?;
-        let connection = self.connection().await?;
-        let (mut send,recv) = connection.open_bi().await?;
-        let offset=if let BlockWatch::Block(block)=&request {block.offset} else {0};
-        let bytes=encode(&Frame::metadata(Header::Watch { request,credit:BLOCK_WINDOW_BYTES,priority,scheduled }))?;
-        send.write_all(&bytes).await?;self.stats.tx.fetch_add(bytes.len() as u64,Ordering::Relaxed);
-        self.stats.opened();self.stats.resumed.fetch_add(offset,Ordering::Relaxed);
-        Ok(Watcher { stats:self.stats.clone(),complete:false,send,recv,_permit:permit,_bulk:bulk })
-    }
     pub fn stats(&self)->Stats {
         let c=&self.stats;
         let mut stats=Stats {connection_attempts:c.attempts.load(Ordering::Relaxed),connections:c.connections.load(Ordering::Relaxed),streams:c.streams.load(Ordering::Relaxed),active_streams:c.active.load(Ordering::Relaxed),frame_tx_bytes:c.tx.load(Ordering::Relaxed),frame_rx_bytes:c.rx.load(Ordering::Relaxed),content_tx_bytes:c.content_tx.load(Ordering::Relaxed),content_rx_bytes:c.content_rx.load(Ordering::Relaxed),resumed_bytes:c.resumed.load(Ordering::Relaxed),cancelled_streams:c.cancelled.load(Ordering::Relaxed),integrity_failures:c.integrity.load(Ordering::Relaxed),metadata_slots:2-self.metadata.available_permits(),foreground_slots:4-self.foreground.available_permits(),bulk_slots:6-self.bulk.available_permits(),descriptor_slots:2-self.descriptors.available_permits(),..Default::default()};
@@ -544,15 +533,11 @@ impl Client {
     pub async fn shutdown(&self) { self.endpoint.close().await; }
 }
 
-pub struct Watcher { stats:Arc<Counters>,complete:bool,send: SendStream, recv: RecvStream, _permit:tokio::sync::OwnedSemaphorePermit, _bulk:Option<tokio::sync::OwnedSemaphorePermit> }
+struct Watcher { stats:Arc<Counters>,complete:bool,send: SendStream, recv: RecvStream, _permit:tokio::sync::OwnedSemaphorePermit, _class:tokio::sync::OwnedSemaphorePermit }
 impl Watcher {
     pub async fn next(&mut self) -> Result<(Frame,u32)> {
         let (frame,bytes)=receive(&mut self.recv).await?;self.stats.rx.fetch_add(bytes as u64,Ordering::Relaxed);
-        if let Header::Data {length,..}=frame.header {
-            if let Err(error)=frame.decoded() {self.stats.integrity.fetch_add(1,Ordering::Relaxed);return Err(error);}
-            self.stats.content_rx.fetch_add(length as u64,Ordering::Relaxed);
-        }
-        if matches!(frame.header,Header::End | Header::Yield) {self.complete=true;}Ok((frame,bytes))
+        if matches!(frame.header,Header::End | Header::Yield | Header::Absent) {self.complete=true;}Ok((frame,bytes))
     }
     /// Return credit only after consuming/persisting the preceding bounded frame.
     pub async fn consumed(&mut self, bytes: u32) -> Result<()> {
@@ -568,6 +553,7 @@ impl Drop for Watcher {
 #[cfg(test)]
 #[path = "../tests/unit/native.rs"]
 mod tests;
+
 
 async fn serve_files(send: &mut SendStream, recv: &mut RecvStream, backend: Arc<dyn Backend>, grants: &Grants, node: NodeId, request: FileRequest, mut credit: u32) -> Result<()> {
     ensure!(credit == BLOCK_WINDOW_BYTES, "Invalid filesystem byte credit");
@@ -602,7 +588,7 @@ impl Client {
         send.write_all(&bytes).await?;
         self.stats.tx.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         self.stats.opened();
-        let mut stream = Watcher { stats: self.stats.clone(), complete: false, send, recv, _permit: permit, _bulk: Some(class) };
+        let mut stream = Watcher { stats: self.stats.clone(), complete: false, send, recv, _permit: permit, _class: class };
         let mut expected = None; let mut body = Vec::new();
         loop {
             let (frame, wire_bytes) = tokio::time::timeout(IO_TIMEOUT, stream.next()).await??;
@@ -613,7 +599,7 @@ impl Client {
                 }
                 Header::Data { version, offset, .. } => {
                     let (length, _) = expected.as_ref().context("Filesystem data without header")?;
-                    let bytes = frame.decoded()?;
+                    let bytes = read::decode(&frame,&self.stats)?;
                     ensure!(*version == 1 && *offset == body.len() as u64 && body.len() as u64+bytes.len() as u64 <= *length, "Invalid filesystem range");
                     body.extend(bytes);
                 }

@@ -231,9 +231,9 @@ pub fn feed(db: &Connection, request: &FeedRequest) -> Result<FeedPage> {
 
 
 /// A range never crosses a chunk boundary and is always hard byte-bounded.
-pub fn read(db: &Connection, request: &BlockRequest) -> Result<ContentRange> {
+pub fn read(db: &Connection, request: &BlockRequest) -> Result<Option<ContentRange>> {
     scope_ok(&request.scope)?;
-    let h = header(db,&request.scope,&request.id)?.context("Unknown block")?;
+    let Some(h) = header(db,&request.scope,&request.id)? else {return Ok(None);};
     let offset = if request.version == h.version { request.offset } else { 0 };
     ensure!(offset <= h.length, "Block offset is beyond the durable head");
     let bytes = if offset == h.length { vec![] } else {
@@ -243,7 +243,7 @@ pub fn read(db: &Connection, request: &BlockRequest) -> Result<ContentRange> {
         bytes.get((offset-start) as usize..).context("Source content has a gap")?.to_vec()
     };
     ensure!(offset + bytes.len() as u64 <= h.length && bytes.len() <= BLOCK_CHUNK_BYTES, "Source content exceeds its head");
-    Ok(ContentRange { header:h, offset, hash:blake3::hash(&bytes).to_hex().to_string(), bytes })
+    Ok(Some(ContentRange { header:h, offset, hash:blake3::hash(&bytes).to_hex().to_string(), bytes }))
 }
 
 // Client cache operations. The source journal cursor and verified content prefix
@@ -467,7 +467,7 @@ pub fn write_upload(db: &Connection, spec: &UploadSpec, offset: u64, bytes: &[u8
         ensure!(offset + bytes.len() as u64 <= current.offset, "Upload overlap crosses its durable prefix");
         let mut at = offset;
         while at < offset + bytes.len() as u64 {
-            let range = read(db, &BlockRequest { scope:UPLOAD_SCOPE.into(),id:spec.id.clone(),version:1,offset:at,follow:false })?;
+            let range = read(db, &BlockRequest { scope:UPLOAD_SCOPE.into(),id:spec.id.clone(),version:1,offset:at,follow:false })?.context("Upload block disappeared")?;
             let start = (at-offset) as usize;
             let n = range.bytes.len().min(bytes.len()-start);
             ensure!(n > 0 && range.bytes[..n] == bytes[start..start+n], "Conflicting upload bytes");

@@ -113,3 +113,55 @@ No Clippy or Cargo built-in test runner was used.
 - Network framing, cancellation, retry, credit and durability state machines
   remain distinct where their failure semantics differ. Fewer lines alone would
   not justify merging those meanings or weakening their tests.
+
+## Subsequent checkpoints
+
+The audit above describes merge `53d9a67`, not later work. Through `b9c024d`,
+small follow-ups were committed directly to `tau2-refactor`: Windows path and
+fixture fixes; removal of per-chat command catalogues and synthetic snapshot
+messages; direct ownership of the initialized native client; retirement of
+obsolete queue capability metadata; one retained control collection instead of
+parallel form/button owners. The Windows runtime findings are recorded in
+`backlog/windows-tests.md`; Wine's unsupported Iroh socket operation still
+prevents claiming native Windows behavioral validation.
+
+### Verified transport boundary
+
+- `Client::read(request, priority)` now returns verified pages, block headers,
+  ranges or explicit absence. Frame parsing, decompression, integrity checking,
+  credit and fair stream renewal are private to `tau-net`. The old public watch
+  variants, raw frame/header/codec types and manual credit API are gone, including
+  their use in integration-test clients. There is no compatibility/test facade.
+- Replication, downloads and descriptors enter the replica through one async
+  `Cache::apply` path. The existing source/window transaction fences and the
+  bounded UI notification channel remain intact.
+- Reads renew on their original connection. Changing the configured node or
+  lineage retires that connection; renewing a grant for the same source keeps
+  it. Reconnection still resumes from the owner's persisted checkpoint.
+- Uploads use one resumable `copy_from` implementation. Publication remains an
+  explicit `finish`, allowing local attachment validation before publication.
+- A missing source identity is `None`/`Absent`, not a generic integrity error.
+  An obsolete subscription ends quietly, but absence cannot delete replica
+  state: only the ordered directory tombstone can. Explicit downloads still
+  fail when their file disappears. Missing/corrupt bytes of an existing block
+  remain errors and are not retried as connection loss.
+- Control/data independence, durable request fingerprints, authored inputs,
+  stream budgets and cancellation semantics remain. Control protocol is now
+  **25**, native ALPN **`tau/blocks/3`**; deploy matching client/daemon versions.
+  No deployment was performed.
+
+Validation used the managed Cargo wrapper, never Clippy or Cargo's built-in
+runner. One full nextest batch ran **412 tests: 411 passed, one failed**. That
+failure was a stale expected diagnostic string in the controller fixture after
+moving malformed-codec coverage to its actual owner. The corrected assertion
+and transport/replica boundary regressions subsequently passed **29/29**.
+The full batch's real blackhole/pressure test passed, including its no-unexpected-
+alerts and no-duplicate-effects assertions. Compiler checks passed for all
+workspace targets, protocol-only `tau-net`, Android and Windows; rustdoc passed
+with warnings denied. No test was disabled or deleted.
+
+This checkpoint adds **50 non-test Rust lines and 31 test lines** relative to
+`b9c024d`; it is an ownership/API simplification, **not a net LOC reduction**.
+Across all follow-ups since `53d9a67`, non-test Rust is 31,231 → 31,176 (-55),
+and all Rust is 46,700 → 46,749 (+49). Moving responsibility or adding regression
+coverage is not counted as progress toward a 10k-line deletion target.

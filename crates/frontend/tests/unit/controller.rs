@@ -21,12 +21,10 @@ c.notice=None;c.report_sync_error(anyhow::anyhow!("Block content integrity check
 assert_eq!(c.notice.as_deref(),Some("Block content integrity check failed"));
 c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context("Write replica"));
 assert!(c.notice.as_deref().unwrap().starts_with("Write replica:"),"A storage IO error is not connection loss");
-let broken=tau_net::native::Frame {
-    header:tau_net::native::Header::Data {version:1,offset:0,hash:String::new(),length:32,codec:tau_net::native::Codec::Zstd},
-    data:b"not a zstd frame".to_vec(),
-};
-c.notice=None;c.report_sync_error(broken.decoded().unwrap_err().context("Content sync"));
-assert!(c.notice.as_deref().unwrap().starts_with("Content sync: Invalid compressed block chunk:"),"Decompression's IO error must not be mistaken for a network error");
+// A decoder's InvalidData IO error must remain a content failure. The native
+// transport tests exercise actual malformed compressed frames at that boundary.
+c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"invalid decoder payload")).context("Content sync"));
+assert_eq!(c.notice.as_deref(),Some("Content sync: invalid decoder payload"),"A decoder IO error must not be mistaken for a network error");
 }
 
 #[test]

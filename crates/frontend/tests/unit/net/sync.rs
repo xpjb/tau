@@ -26,7 +26,7 @@ async fn native_watch_fetches_unknown_body_but_never_downloads_locally_known_inp
         fn feed(&self, req: FeedRequest) -> futures_util::future::BoxFuture<'static, Result<FeedPage>> {
             let db=self.db.clone(); Box::pin(async move { tau_block_store::feed(&db.lock().unwrap(),&req) })
         }
-        fn read(&self, req: BlockRequest) -> futures_util::future::BoxFuture<'static, Result<ContentRange>> {
+        fn read(&self, req: BlockRequest) -> futures_util::future::BoxFuture<'static, Result<Option<ContentRange>>> {
             let db=self.db.clone();let known=self.known_reads.clone();let unknown=self.unknown_reads.clone();
             Box::pin(async move {
                 if req.id=="saved" {known.fetch_add(1,Ordering::SeqCst);}
@@ -76,7 +76,7 @@ async fn a_delayed_plan_does_not_refetch_known_text_after_queue_consumption() {
         fn feed(&self, req:FeedRequest)->futures_util::future::BoxFuture<'static,Result<FeedPage>> {
             let db=self.db.clone();Box::pin(async move {tau_block_store::feed(&db.lock().unwrap(),&req)})
         }
-        fn read(&self, req:BlockRequest)->futures_util::future::BoxFuture<'static,Result<ContentRange>> {
+        fn read(&self, req:BlockRequest)->futures_util::future::BoxFuture<'static,Result<Option<ContentRange>>> {
             let db=self.db.clone();let reads=self.reads.clone();Box::pin(async move {
                 reads.lock().unwrap().push(req.id.clone());tau_block_store::read(&db.lock().unwrap(),&req)
             })
