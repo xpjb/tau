@@ -1,3 +1,22 @@
+# Android startup lock contention — unreleased branch, October 2, 2026
+
+The shared startup path reproduced writer-blocked Store/replica reopens and
+selected-chat restoration, plus a replica-admin `try_lock` failure. Actual
+phone-size first-frame rendering also waited on disposable read-LRU writes.
+Fixes `dd2a831` / `b5937b2` avoid repeated current-schema initialization, make
+read recency and saved-intent body reuse nonblocking under contention, and wait
+only for the short lease/GC admin handoff.
+Real writes, live-handle protection, quotas and authored work remain intact.
+
+**210/210 frontend nextest cases pass**, zero skipped; native all-target,
+Android ARM64/API29, Windows MSVC and frontend rustdoc checks pass. New Android
+stage markers and full restore-error chains support device diagnosis.
+**No APK/release or physical-phone acceptance:** a >1-second launch remains a
+reported symptom, not a conclusively identified phone trace. See
+[reproductions, limits and follow-up device checks](../docs/android-startup-lock.md).
+
+---
+
 # Stop/Play queue-control recovery — October 1, 2026
 
 The immediate lockout fix `6422e27` makes Stop retire deferred controls and Play
