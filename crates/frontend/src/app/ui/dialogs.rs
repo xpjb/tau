@@ -1,4 +1,4 @@
-use super::controls::{ButtonStyle, Form, TextField};
+use super::controls::{ButtonStyle, Controls, TextField};
 use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{editor::Editor, render::color, store::Settings};
 use anyhow::Result;
@@ -110,10 +110,10 @@ impl Dialog {
     pub fn buttons(&self) -> Vec<(&str, Rect)> {
         match self {
             Self::Connection(d) => {
-                d.form.buttons.iter().filter_map(|(_, b)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
+                d.form.items.iter().filter_map(|(_, b, _)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
             }
             Self::Topic(d) => {
-                d.form.buttons.iter().filter_map(|(_, b)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
+                d.form.items.iter().filter_map(|(_, b, _)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
             }
             Self::Models(d) => d.buttons(),
             Self::Daemon(d) => d.buttons(),
@@ -181,7 +181,7 @@ enum ConnectionChoice {
     Outbox,
 }
 pub(in crate::app) struct ConnectionDialog {
-    form: Form<ConnectionChoice>,
+    form: Controls<ConnectionChoice>,
     url: TextField,
     token: TextField,
     attempt: Option<String>,
@@ -199,7 +199,7 @@ impl ConnectionDialog {
         token.size = 16.;
         cx.ui.focus = Some(url.control.target);
         Self {
-            form: Form::new(
+            form: Controls::declared(
                 id,
                 &[
                     (ConnectionChoice::Connect, "Connect"),
@@ -274,8 +274,8 @@ impl Widget for ConnectionDialog {
             Event::Key { key: "Enter", shift: false, .. } if !composing && !self.tools => {
                 Some(ConnectionChoice::Connect)
             }
-            _ if self.tools => self.form.event(event, std::iter::empty(), cx).1,
-            _ => self.form.event(event, [&mut self.url, &mut self.token].into_iter(), cx).1,
+            _ if self.tools => self.form.event_fields(event, std::iter::empty(), cx).1,
+            _ => self.form.event_fields(event, [&mut self.url, &mut self.token].into_iter(), cx).1,
         };
         match choice {
             Some(ConnectionChoice::Connect) => {
@@ -285,7 +285,7 @@ impl Widget for ConnectionDialog {
             Some(ConnectionChoice::Cancel) => cx.ui.requests.push_back(Request::Close(self.form.id)),
             Some(ConnectionChoice::Tools | ConnectionChoice::Main) => {
                 self.tools = !self.tools;
-                self.form.begin_frame();
+                self.form.begin();
                 self.url.control.rect = None;
                 self.token.control.rect = None;
                 cx.ui.focus = if self.tools { None } else { Some(self.url.control.target) };
@@ -320,7 +320,7 @@ impl Widget for ConnectionDialog {
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let b = frame.bounds;
         let s = cx.ui.scale;
-        self.form.begin_frame();
+        self.form.begin();
         if self.tools {
             self.url.control.rect = None;
             self.token.control.rect = None;
@@ -357,7 +357,7 @@ impl Widget for ConnectionDialog {
                 field.labeled(Rect::new(x, y - 20. * s, w, h + 20. * s), frame, cx);
             }
             let y = b.y + b.height - 38. * s;
-            self.form.buttons.iter_mut().find(|(c, _)| *c == ConnectionChoice::Connect).unwrap().1.control.enabled =
+            self.form.items.iter_mut().find(|(_, _, c)| *c == ConnectionChoice::Connect).unwrap().1.control.enabled =
                 self.attempt.is_none();
             self.form.row(
                 &[(ConnectionChoice::Cancel, ButtonStyle::Tonal), (ConnectionChoice::Connect, ButtonStyle::Primary)],
@@ -367,7 +367,7 @@ impl Widget for ConnectionDialog {
             );
             return;
         }
-        self.form.buttons.iter_mut().find(|(c, _)| *c == ConnectionChoice::Connect).unwrap().1.control.enabled =
+        self.form.items.iter_mut().find(|(_, _, c)| *c == ConnectionChoice::Connect).unwrap().1.control.enabled =
             self.attempt.is_none();
         let connected = cx.model.epoch.is_some()
             && self.url.editor.value.trim().trim_end_matches('/') == cx.model.settings.server_url
@@ -420,7 +420,7 @@ impl Widget for ConnectionDialog {
         }
         let y = field_y + 158. * s;
         if self.attempt.is_none() || cx.model.connection != "Connecting…" {
-            self.form.button(
+            self.form.paint(
                 ConnectionChoice::Connect,
                 Rect::new(x + inner_w - 104. * s, y, 104. * s, 40. * s),
                 ButtonStyle::Primary,
@@ -437,7 +437,7 @@ impl Widget for ConnectionDialog {
                 false,
             );
         }
-        self.form.button(
+        self.form.paint(
             ConnectionChoice::Cancel,
             Rect::new(x + inner_w - 204. * s, y, 88. * s, 40. * s),
             ButtonStyle::Tonal,
@@ -445,14 +445,14 @@ impl Widget for ConnectionDialog {
             cx,
         );
         let mut y = y + 60. * s;
-        self.form.button(
+        self.form.paint(
             ConnectionChoice::Models,
             Rect::new(x, y, inner_w - 80. * s, 32. * s),
             ButtonStyle::Tonal,
             frame,
             cx,
         );
-        self.form.button(
+        self.form.paint(
             ConnectionChoice::Tools,
             Rect::new(x + inner_w - 72. * s, y, 72. * s, 32. * s),
             ButtonStyle::Tonal,
@@ -520,7 +520,7 @@ enum TopicKind {
     Choice(Project),
 }
 pub(in crate::app) struct TopicDialog {
-    form: Form<TopicChoice>,
+    form: Controls<TopicChoice>,
     kind: TopicKind,
     name: Option<TextField>,
     prompt: Option<TextField>,
@@ -565,7 +565,7 @@ impl TopicDialog {
         let prompt = prompt.map(|text| TextField::new(id, label, Editor::new(text)));
         cx.ui.focus = name.as_ref().or(prompt.as_ref()).map(|f| f.control.target);
         Ok(Self {
-            form: Form::new(
+            form: Controls::declared(
                 id,
                 &[
                     (TopicChoice::Save, "Save"),
@@ -610,7 +610,7 @@ impl TopicDialog {
             },
             TopicKind::Delete(p) => {
                 self.kind = TopicKind::Choice(p.clone());
-                self.form.begin_frame();
+                self.form.begin();
                 cx.ui.focus = None;
                 return Ok(());
             }
@@ -701,7 +701,7 @@ impl Widget for TopicDialog {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(TopicChoice::Cancel),
             _ => {
                 let fields = self.name.iter_mut().chain(self.prompt.iter_mut());
-                self.form.event(event, fields, cx).1
+                self.form.event_fields(event, fields, cx).1
             }
         };
         match choice {
@@ -735,7 +735,7 @@ impl Widget for TopicDialog {
             ][..],
             _ => &[(TopicChoice::Save, ButtonStyle::Primary), (TopicChoice::Cancel, ButtonStyle::Tonal)][..],
         };
-        self.form.begin_frame();
+        self.form.begin();
         frame.layer.rect(b, sanscale::Color([0., 0., 0., 0.8]));
         let width = (b.width - 24. * s).min(620. * s).max(1.);
         let height = ((if prompt { 550. } else { 340. }) * s).min((b.height - 24. * s).max(1.));
@@ -793,7 +793,7 @@ impl Widget for TopicDialog {
             field.labeled(Rect::new(x, y, w, h + 20. * s), frame, cx);
             y += h + if compact { 28. } else { 30. } * s;
         }
-        for (choice, button) in &mut self.form.buttons {
+        for (_, button, choice) in &mut self.form.items {
             button.control.enabled = !busy || *choice == TopicChoice::Cancel;
         }
         if compact {

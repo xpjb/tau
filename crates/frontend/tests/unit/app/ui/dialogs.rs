@@ -235,10 +235,10 @@ fn shared_control_clip_governs_hover_press_and_paint_with_the_same_bounds() {
         assert!(button.handle_event(&Event::Down { pointer: 2, point: Vec2::new(50., 40.), touch: false }, cx));
         assert!(button.handle_event(&Event::Up { pointer: 2, point: Vec2::new(150., 40.) }, cx));
         assert!(!button.control.take_click(), "Release outside the clip must not activate its hidden control");
-        let mut form = super::super::controls::Form::new(Id::new(), &[(0, "Disabled foreground")]);
-        form.button(0, bounds, ButtonStyle::Tonal, &mut Frame { layer: &mut layer, bounds, clip }, cx);
-        form.buttons[0].1.control.enabled = false;
-        let (consumed, action) = form.event(&Event::Down { pointer: 3, point: Vec2::new(50., 40.), touch: false }, std::iter::empty(), cx);
+        let mut form = super::super::controls::Controls::declared(Id::new(), &[(0, "Disabled foreground")]);
+        form.paint(0, bounds, ButtonStyle::Tonal, &mut Frame { layer: &mut layer, bounds, clip }, cx);
+        form.items[0].1.control.enabled = false;
+        let (consumed, action) = form.event_fields(&Event::Down { pointer: 3, point: Vec2::new(50., 40.), touch: false }, std::iter::empty(), cx);
         assert!(consumed && action.is_none() && cx.ui.capture.is_none(), "Disabled foreground must not fall through");
     });
 }

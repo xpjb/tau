@@ -1,6 +1,6 @@
 //! Short, instance-bound forms. The field and each choice live on the dialog;
 //! submission uses the captured destination, never a current-chat field index.
-use super::controls::{ButtonStyle, Form, TextField};
+use super::controls::{ButtonStyle, Controls, TextField};
 use super::{Context, Controller, DialogSpec, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{editor::Editor, render::color};
 use anyhow::Result;
@@ -35,7 +35,7 @@ pub(in crate::app) struct OperationDialog {
     pub id: Id,
     pub title: String,
     pub value: Option<TextField>,
-    form: Form<Choice>,
+    form: Controls<Choice>,
     operation: Operation,
     identity: String,
     lineage: Option<String>,
@@ -125,7 +125,7 @@ impl OperationDialog {
             Choice::Close,
             if matches!(operation, Operation::Outbox(_) | Operation::Inspect(_)) { "Close" } else { "Cancel" }.into(),
         ));
-        let form = Form::new(id, &buttons.iter().map(|(a, s)| (a.clone(), s.as_str())).collect::<Vec<_>>());
+        let form = Controls::declared(id, &buttons.iter().map(|(a, s)| (a.clone(), s.as_str())).collect::<Vec<_>>());
         let value = field.map(|(label, e)| TextField::new(id, label, e));
         cx.ui.focus = value.as_ref().map(|f| f.control.target);
         Ok(Self {
@@ -193,7 +193,7 @@ impl OperationDialog {
         Ok(())
     }
     pub fn buttons(&self) -> Vec<(&str, Rect)> {
-        self.form.buttons.iter().filter_map(|(_, b)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
+        self.form.items.iter().filter_map(|(_, b, _)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
     }
 }
 impl Widget for OperationDialog {
@@ -219,7 +219,7 @@ impl Widget for OperationDialog {
             {
                 Some(Choice::Submit)
             }
-            _ => self.form.event(event, self.value.iter_mut(), cx).1,
+            _ => self.form.event_fields(event, self.value.iter_mut(), cx).1,
         };
         let result = match choice {
             Some(Choice::Close) => {
@@ -266,12 +266,12 @@ impl Widget for OperationDialog {
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let b = frame.bounds;
         let s = cx.ui.scale;
-        self.form.begin_frame();
+        self.form.begin();
         frame.layer.rect(b, sanscale::Color([0., 0., 0., 0.8]));
         let w = (b.width - 24. * s).min(620. * s).max(1.);
         let x = b.x + (b.width - w) / 2.;
         let title_h = cx.services.renderer.label_height(&self.title, w - 40. * s, 17. * s, true).max(36. * s);
-        let count = self.form.buttons.len();
+        let count = self.form.items.len();
         let feedback = cx.model.notice.as_ref().filter(|n| n.download.is_none()).map(|n| n.to_string());
         let feedback_h = feedback.as_ref().map_or(0., |text| {
             (cx.services.renderer.label_height(text, w - 40. * s, 13. * s, false) + 12. * s).min(100. * s)
@@ -310,7 +310,7 @@ impl Widget for OperationDialog {
         }
         frame.feedback(Rect::new(x + 20. * s, footer - feedback_h, w - 40. * s, feedback_h), "", cx);
         // These are the fixed owned choices; don't build a list to look them up again.
-        for (i, (choice, button)) in self.form.buttons.iter_mut().enumerate() {
+        for (i, (_, button, choice)) in self.form.items.iter_mut().enumerate() {
             button.style = if *choice == Choice::Submit { ButtonStyle::Primary } else { ButtonStyle::Tonal };
             frame.visit(
                 Rect::new(x + 20. * s, footer + i as f32 * (button_h + 6. * s), w - 40. * s, button_h),

@@ -1,6 +1,6 @@
 //! Settings widgets own staged edits and completion lifetimes. Settings schema,
 //! parsing and validation remain in daemon_settings / models, not in the UI tree.
-use super::controls::{ButtonStyle, Controls, Form, TextField};
+use super::controls::{ButtonStyle, Controls, TextField};
 use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     daemon_settings::{Draft, Kind, SECTIONS, fields},
@@ -21,7 +21,7 @@ pub(in crate::app) struct ModelsDialog {
     pub id: Id,
     pub models: TextField,
     pub search: TextField,
-    form: Form<ModelChoice>,
+    form: Controls<ModelChoice>,
     suggestions: Controls<String>,
     identity: String,
 }
@@ -43,7 +43,7 @@ impl ModelsDialog {
             id,
             models,
             search,
-            form: Form::new(
+            form: Controls::declared(
                 id,
                 &[(ModelChoice::Save, "Save"), (ModelChoice::Presets, "Presets"), (ModelChoice::Close, "Cancel")],
             ),
@@ -53,9 +53,9 @@ impl ModelsDialog {
     }
     pub fn buttons(&self) -> Vec<(&str, Rect)> {
         self.form
-            .buttons
+            .items
             .iter()
-            .map(|(_, b)| b)
+            .map(|(_, b, _)| b)
             .chain(self.suggestions.items.iter().map(|(_, b, _)| b))
             .filter_map(|b| b.control.rect.map(|r| (b.label.as_str(), r)))
             .collect()
@@ -102,7 +102,7 @@ impl Widget for ModelsDialog {
                     return true;
                 }
                 self.form
-                    .event(event, std::iter::once(&mut self.models).chain(visible.then_some(&mut self.search)), cx)
+                    .event_fields(event, std::iter::once(&mut self.models).chain(visible.then_some(&mut self.search)), cx)
                     .1
             }
         };
@@ -209,7 +209,7 @@ pub(in crate::app) struct DaemonDialog {
     pub id: Id,
     pub value: Option<TextField>,
     pub draft: Option<Draft>,
-    form: Form<SettingChoice>,
+    form: Controls<SettingChoice>,
     waiting: bool,
     saving: Option<String>,
     identity: String,
@@ -235,7 +235,7 @@ impl DaemonDialog {
             id,
             value: None,
             draft: None,
-            form: Form::new(id, &buttons),
+            form: Controls::declared(id, &buttons),
             waiting: false,
             saving: None,
             identity: cx.model.identity.clone(),
@@ -340,7 +340,7 @@ impl DaemonDialog {
         Ok(())
     }
     pub fn buttons(&self) -> Vec<(&str, Rect)> {
-        self.form.buttons.iter().filter_map(|(_, b)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
+        self.form.items.iter().filter_map(|(_, b, _)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
     }
 }
 impl Widget for DaemonDialog {
@@ -391,7 +391,7 @@ impl Widget for DaemonDialog {
             Event::Back | Event::Key { key: "Escape", .. } if !composing => Some(SettingChoice::Close),
             _ => {
                 let visible = self.field_visible();
-                self.form.event(event, self.value.iter_mut().filter(|_| visible), cx).1
+                self.form.event_fields(event, self.value.iter_mut().filter(|_| visible), cx).1
             }
         };
         if let Some(choice) = choice {
@@ -423,7 +423,7 @@ impl Widget for DaemonDialog {
             },
             cx,
         );
-        for (choice, button) in &mut self.form.buttons {
+        for (_, button, choice) in &mut self.form.items {
             button.control.enabled = !busy || *choice == SettingChoice::Close;
         }
         if let Some(draft) = &self.draft {
@@ -432,7 +432,7 @@ impl Widget for DaemonDialog {
                 let columns = if w / s >= 600. { SECTIONS.len() } else { 3 };
                 let tw = (w - 8. * s * (columns - 1) as f32) / columns as f32;
                 for (i, _) in SECTIONS.iter().enumerate() {
-                    self.form.button(
+                    self.form.paint(
                         SettingChoice::Section(i),
                         Rect::new(
                             x + (i % columns) as f32 * (tw + 8. * s),
@@ -450,14 +450,14 @@ impl Widget for DaemonDialog {
             let definition = draft.definition();
             let count = fields(draft.section).len();
             if count > 1 {
-                self.form.button(
+                self.form.paint(
                     SettingChoice::Previous,
                     Rect::new(x, y, 36. * s, 32. * s),
                     ButtonStyle::Tonal,
                     frame,
                     cx,
                 );
-                self.form.button(
+                self.form.paint(
                     SettingChoice::Next,
                     Rect::new(x + w - 36. * s, y, 36. * s, 32. * s),
                     ButtonStyle::Tonal,
@@ -502,9 +502,9 @@ impl Widget for DaemonDialog {
                     } else {
                         "Model override — switch to inherited default"
                     };
-                    self.form.buttons.iter_mut().find(|(a, _)| *a == SettingChoice::Toggle).unwrap().1.label =
+                    self.form.items.iter_mut().find(|(_, _, a)| *a == SettingChoice::Toggle).unwrap().1.label =
                         label.into();
-                    self.form.button(SettingChoice::Toggle, Rect::new(x, y, w, 32. * s), ButtonStyle::Tonal, frame, cx);
+                    self.form.paint(SettingChoice::Toggle, Rect::new(x, y, w, 32. * s), ButtonStyle::Tonal, frame, cx);
                     y += 40. * s;
                 }
                 if definition.kind != Kind::Bool {
@@ -515,7 +515,7 @@ impl Widget for DaemonDialog {
                 }
             }
             if !compact {
-                self.form.button(
+                self.form.paint(
                     SettingChoice::Reset,
                     Rect::new(x, footer - 80. * s, 120. * s, 28. * s),
                     ButtonStyle::Tonal,

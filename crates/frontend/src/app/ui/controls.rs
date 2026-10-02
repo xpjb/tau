@@ -371,7 +371,6 @@ impl Widget for TextField {
                 return true;
             }
 
-
             Event::Preedit(text, cursor) if focused => {
                 self.editor.preedit(text.into(), cursor);
                 cx.ui.dirty = true;
@@ -451,13 +450,9 @@ impl Widget for TextField {
     }
 }
 
-/// A small shared form controller; dialog fields remain named/typed on their owner.
-/// This is not a schema engine and knows nothing about model commands.
-pub(in crate::app) struct Form<A> {
-    pub id: Id,
-    pub buttons: Vec<(A, Button)>,
-}
-impl<A: Clone + PartialEq> Form<A> {
+// Form navigation and chrome use the same retained button owner as dynamic
+// controls. Dialog fields remain named and typed on their widget.
+impl<A: Clone + PartialEq> Controls<A> {
     /// A deliberate form action needs inline feedback even for an offline error.
     /// Background transport errors still use Controller's quieter health path.
     pub fn report(&self, result: anyhow::Result<()>, cx: &mut Context<'_>) {
@@ -467,14 +462,10 @@ impl<A: Clone + PartialEq> Form<A> {
         cx.ui.dirty = true;
     }
 
-    pub fn owns(&self, target: Target) -> bool {
-        self.buttons.iter().any(|(_, b)| b.control.target == target && b.control.rect.is_some())
+    pub fn declared(id: Id, buttons: &[(A, &str)]) -> Self {
+        Self { id, items: buttons.iter().map(|(action, label)| (None, Button::new(id, label), action.clone())).collect() }
     }
-
-    pub fn new(id: Id, buttons: &[(A, &str)]) -> Self {
-        Self { id, buttons: buttons.iter().map(|(action, label)| (action.clone(), Button::new(id, label))).collect() }
-    }
-    pub fn event<'a>(
+    pub fn event_fields<'a>(
         &mut self,
         event: &Event<'_>,
         fields: impl DoubleEndedIterator<Item = &'a mut TextField>,
@@ -505,21 +496,14 @@ impl<A: Clone + PartialEq> Form<A> {
         }
         // Controls and fields are painted in this same stacking order. No field
         // list is reconstructed from last frame's semantic hit registrations.
-        for (action, button) in self.buttons.iter_mut().rev() {
-            let handled = button.handle_event(event, cx);
-            if button.control.take_click() {
-                return (true, Some(action.clone()));
-            }
-            if handled {
-                return (true, None);
-            }
-        }
+        let (handled, action) = self.event(event, cx);
+        if handled { return (true, action); }
         let handled = super::dispatch_children(fields.map(|f| f as &mut dyn Widget), event, cx);
         (handled, None)
     }
     /// Full-page settings chrome. The returned column ends at the footer row.
     pub fn page(&mut self, width: f32, title: &str, frame: &mut Frame<'_>, cx: &mut Context<'_>) -> Rect {
-        self.begin_frame();
+        self.begin();
         let b = frame.bounds;
         let s = cx.ui.scale;
         let width = (b.width - 32. * s).min(width * s).max(1.);
@@ -539,7 +523,7 @@ impl<A: Clone + PartialEq> Form<A> {
         let gap = 8. * cx.ui.scale;
         let width = (rect.width - gap * choices.len().saturating_sub(1) as f32) / choices.len().max(1) as f32;
         for (i, (choice, style)) in choices.iter().enumerate() {
-            self.button(
+            self.paint(
                 choice.clone(),
                 Rect::new(rect.x + i as f32 * (width + gap), rect.y, width, rect.height),
                 *style,
@@ -551,7 +535,7 @@ impl<A: Clone + PartialEq> Form<A> {
     pub fn stack(&mut self, choices: &[(A, ButtonStyle)], rect: Rect, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let step = rect.height / choices.len().max(1) as f32;
         for (i, (choice, style)) in choices.iter().enumerate() {
-            self.button(
+            self.paint(
                 choice.clone(),
                 Rect::new(rect.x, rect.y + i as f32 * step, rect.width, (step - 6. * cx.ui.scale).max(1.)),
                 *style,
@@ -560,13 +544,9 @@ impl<A: Clone + PartialEq> Form<A> {
             );
         }
     }
-    pub fn begin_frame(&mut self) {
-        for (_, button) in &mut self.buttons {
-            button.control.rect = None;
-        }
-    }
-    pub fn button(&mut self, action: A, rect: Rect, style: ButtonStyle, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
-        let button = &mut self.buttons.iter_mut().find(|(a, _)| *a == action).expect("declared form button").1;
+
+    pub fn paint(&mut self, action: A, rect: Rect, style: ButtonStyle, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
+        let button = &mut self.items.iter_mut().find(|(_, _, a)| *a == action).expect("declared form button").1;
         button.style = style;
         frame.visit(rect, button, cx);
     }

@@ -1,4 +1,4 @@
-use super::controls::{ButtonStyle, Form};
+use super::controls::{ButtonStyle, Controls};
 use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Widget};
 use crate::{
     notice::DownloadTarget,
@@ -23,7 +23,7 @@ enum Choice {
 pub(in crate::app) struct ImageViewer {
     pub id: Id,
     spec: ImageSpec,
-    form: Form<Choice>,
+    form: Controls<Choice>,
     pub zoom: f32,
     pub pan: Vec2,
     pub image: Option<Rect>,
@@ -38,7 +38,7 @@ impl ImageViewer {
         Self {
             id,
             spec,
-            form: Form::new(
+            form: Controls::declared(
                 id,
                 &[
                     (Choice::Back, "Back"),
@@ -57,7 +57,7 @@ impl ImageViewer {
     }
     #[cfg(test)]
     pub fn button(&self, name: &str) -> Rect {
-        self.form.buttons.iter().find(|(_, b)| b.label == name).unwrap().1.control.rect.unwrap()
+        self.form.items.iter().find(|(_, b, _)| b.label == name).unwrap().1.control.rect.unwrap()
     }
 }
 impl Widget for ImageViewer {
@@ -78,7 +78,7 @@ impl Widget for ImageViewer {
         }
         let (handled, choice) = match event {
             Event::Back | Event::Key { key: "Escape", .. } => (true, Some(Choice::Back)),
-            _ if self.pointer.is_none() => self.form.event(event, std::iter::empty(), cx),
+            _ if self.pointer.is_none() => self.form.event_fields(event, std::iter::empty(), cx),
             _ => (false, None),
         };
         if let Some(choice) = choice {
@@ -165,7 +165,7 @@ impl Widget for ImageViewer {
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         let b = frame.bounds;
         let s = cx.ui.scale;
-        self.form.begin_frame();
+        self.form.begin();
         self.image = None;
         frame.layer.above();
         frame.layer.rect(b, color(0x06090d));
@@ -199,7 +199,7 @@ impl Widget for ImageViewer {
         for (i, choice) in
             [Choice::Back, Choice::Smaller, Choice::Fit, Choice::Larger, Choice::Save].into_iter().enumerate()
         {
-            self.form.button(
+            self.form.paint(
                 choice,
                 Rect::new(b.x + (12. + i as f32 * 66.) * s, b.y + 8. * s, 60. * s, 38. * s),
                 ButtonStyle::Tonal,

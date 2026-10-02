@@ -359,7 +359,7 @@ pub(in crate::app) struct AttachmentBrowser {
     pub side: bool,
     pub scroll: super::scroll::ScrollState,
     pub cards: HashMap<String, AttachmentCard>,
-    form: super::controls::Form<BrowserChoice>,
+    form: super::controls::Controls<BrowserChoice>,
     bounds: Rect,
     binding: Option<(String, Option<String>, String)>,
     history_attempt: Option<(String, String, u64, u64)>,
@@ -373,7 +373,7 @@ impl AttachmentBrowser {
             side: false,
             scroll: super::scroll::ScrollState::new(id, false),
             cards: HashMap::new(),
-            form: super::controls::Form::new(
+            form: super::controls::Controls::declared(
                 id,
                 &[(BrowserChoice::Close, "Back"), (BrowserChoice::History, "Load older files")],
             ),
@@ -398,7 +398,7 @@ impl AttachmentBrowser {
         for card in self.cards.values_mut() {
             card.hide();
         }
-        self.form.begin_frame();
+        self.form.begin();
         self.interests.clear();
     }
     fn bound(&self, model: &Controller) -> bool {
@@ -453,7 +453,7 @@ impl Widget for AttachmentBrowser {
         if self.scroll.bar_event(event, cx) {
             return true;
         }
-        let (handled, choice) = self.form.event(event, std::iter::empty(), cx);
+        let (handled, choice) = self.form.event_fields(event, std::iter::empty(), cx);
         if let Some(choice) = choice {
             match choice {
                 BrowserChoice::Close => cx.ui.requests.push_back(Request::Attachments(false)),
@@ -530,8 +530,8 @@ impl Widget for AttachmentBrowser {
             color(0x82909f),
             false,
         );
-        self.form.buttons[0].1.label = if self.side { "×" } else { "Back" }.into();
-        self.form.button(
+        self.form.items[0].1.label = if self.side { "×" } else { "Back" }.into();
+        self.form.paint(
             BrowserChoice::Close,
             Rect::new(
                 if self.side { b.x + b.width - 48. * s } else { b.x + 8. * s },
@@ -603,7 +603,7 @@ impl Widget for AttachmentBrowser {
                     viewport,
                 );
             } else {
-                self.form.button(
+                self.form.paint(
                     BrowserChoice::History,
                     r,
                     ButtonStyle::Tonal,
