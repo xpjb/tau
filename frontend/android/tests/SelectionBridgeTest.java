@@ -41,11 +41,19 @@ public final class SelectionBridgeTest extends Instrumentation {
                 activity.syncInput(state(1,false)); input = (EditText)field("input");
                 oldConnection = input.onCreateInputConnection(new EditorInfo());
             } catch (Exception e) { throw new RuntimeException(e); } });
-            waitForIdleSync();
+            waitForIdleSync(); SystemClock.sleep(300);
+            android.graphics.Bitmap beforeMenu = getUiAutomation().takeScreenshot();
             runOnMainSync(activity::inputMenu);
             waitForIdleSync(); SystemClock.sleep(400);
             ActionMode menu = (ActionMode)field("inputMenu");
             check(menu != null && menu.getType() == ActionMode.TYPE_FLOATING, "Floating clipboard toolbar did not open");
+            android.graphics.Bitmap shownMenu = getUiAutomation().takeScreenshot();
+            int changed = 0;
+            for (int y=beforeMenu.getHeight()/4; y<beforeMenu.getHeight()*3/4; y++)
+                for (int x=0; x<beforeMenu.getWidth(); x++)
+                    if (beforeMenu.getPixel(x,y)!=shownMenu.getPixel(x,y)) changed++;
+            check(changed>500, "Toolbar exists but is not visibly painted over the NativeActivity surface");
+            beforeMenu.recycle(); shownMenu.recycle();
             int before = touches(); long now = SystemClock.uptimeMillis();
             sendPointerSync(MotionEvent.obtain(now,now,MotionEvent.ACTION_DOWN,60,100,0));
             sendPointerSync(MotionEvent.obtain(now,now+30,MotionEvent.ACTION_UP,60,100,0));

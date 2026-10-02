@@ -726,3 +726,23 @@ preserved. Only HANDOFF/QA prepends conflicted; both histories are retained.
   credential access, stable/master change or version/protocol/schema bump.
   The user's exact physical-phone recurrence remains unconfirmed; no device was
   attached. No Clippy or built-in Cargo test runner. Other QA/release holds remain.
+
+
+## File viewer retention / Android selection — October 2, 2026
+
+User-requested source fixes for `tau2-integration` / `origin/tau2`, prepared from
+`6dbcf02` in the required independent worktree. `fb74424` retains recent per-chat
+file buffers and Find/Browse reading position; `173e88e` adds mobile selection
+handles, hold-and-drag/autoscroll and a nonmodal Android clipboard toolbar.
+Account/source/editor generation boundaries, drafts and unchanged desktop mouse
+editing remain protected. See [exact behavior and evidence](docs/viewer-and-touch-selection.md).
+
+Frontend all-target and Android/Windows library checks pass, frontend library plus
+real native remote-file nextest **181/181 pass**, and final strengthened-fixture
+focus **8/8 passes**. An isolated Android 36 emulator runs the production Java
+bridge with a minimal native window/input stub: visible toolbar pixels, first
+touch pass-through, Copy/Select All, stale callbacks, password protection and
+detach cleanup pass. This is not full Android client or physical-phone acceptance.
+
+No release installers, service restart/deployment, production data write, stable
+change, or version/protocol/schema bump. Installed 0.7.11 clients are unchanged.

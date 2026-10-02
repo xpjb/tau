@@ -1,3 +1,31 @@
+# Viewer retention and Android selection — source fixes, October 2, 2026
+
+The user requested fixes on `tau2-integration` / `origin/tau2`. Source commits
+`fb74424` and `173e88e` were developed/pushed in the required isolated
+`fix/tau2-viewer-android-selection` worktree, based on `6dbcf02`, for a clean
+fast-forward into the requested integration branch.
+
+- Files restores the last opened buffer, selection and reading position for each
+  recent chat. Find/Browse preserves the underlying reading position. Four closed
+  same-source views are retained in memory, without live file interests or picker
+  payloads; source/account changes and deleted chats discard them.
+- Mobile shared text inputs now have draggable selection endpoints, hold-and-drag,
+  crossing/shrinking and stationary edge autoscroll. Android's floating clipboard
+  toolbar passes the first drag through and uses Rust's real selection geometry.
+  Selection does not write drafts; stale IME and secret-field protections remain.
+- Frontend all-target plus Android ARM64/API29 and Windows MSVC library checks
+  pass. Frontend library/real remote-file nextest **181/181 pass**, followed by
+  **8/8 focused cases** after strengthening the reopen fixtures. The isolated
+  Android 36 bridge test also passes visible-toolbar pixels, real native-window
+  touch pass-through, clipboard actions, stale IME and secret/detach fences.
+- **Source only:** no beta deployment, release installers, service restart,
+  version/protocol/schema or stable change. The separate test APK was installed
+  only in a disposable emulator and uninstalled. Full Android Rust/GPU and
+  physical-phone/IME acceptance remain open; a client release is still needed.
+  [Contract, exact evidence and reproduction](docs/viewer-and-touch-selection.md).
+
+---
+
 # Beta 0.7.11 released — October 2, 2026
 
 Matched daemon, Windows x64 installer and Android ARM64 APK are built from
