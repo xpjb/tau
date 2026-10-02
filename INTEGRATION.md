@@ -1,3 +1,42 @@
+# Beta 0.7.11 released — October 2, 2026
+
+Matched daemon, Windows x64 installer and Android ARM64 APK are built from
+`4c9a289` (native discovery correction `d9fae28`), published to `origin/tau2`,
+and verified. Protocol remains **22**, Android versionCode **16**. Later branch
+cleanup/release documentation commits do not change the built source inputs.
+
+- **Beta deployed at 20:23 AEST:** `tau2-beta.service` PID `3209092`; health reports
+  `0.7.11 / 22`, and the running executable matches the verified release binary.
+  The authenticated pre-deploy status check found 94 sessions, none running
+  (93 sleeping, 1 idle); after restart all 94 are sleeping. No agent work was
+  active when deployment began. The existing beta URL/ports remain unchanged.
+- **Stable untouched:** `master` remains `3818579`; stable PID `474496`, original
+  start time and executable SHA-256 are unchanged. No live-data restore or manual
+  DB edit, route takeover, transport replacement or paid operation was performed.
+- Native transfer/link/pressure **26/26**, slow reads **2/2**, and final workspace/
+  all-target compiler check pass. The new cold-discovery test fails before the
+  correction, then passes with one attempt and a five-second established-peer
+  timeout. [Exact evidence](docs/native-discovery-timeout.md).
+- Sequential release completed with Windows embedded-payload checks and Android
+  version/package/native-payload/alignment/pinned-signature checks. One Windows
+  installer build-lock timeout was retained; resuming the existing script reused
+  the daemon receipt and cached Windows app. No lock bypass or other job was killed.
+- Windows then Android were submitted with `send_file`; both bridge calls returned
+  **queued for chat delivery**. This is not confirmation of download, installation
+  or physical-device acceptance. Artifacts and checksums are in `dist/`; resumable
+  receipts/logs are in `dist/releases/0.7.11/`. Audit logs and starting Git bundle:
+  `/root/tau-branch-rollup-20261002/`.
+- **97 original local and 48 remote refs removed.** Only stable and Tau2 mainlines
+  remain from the initial inventory. The clean, already-integrated Android
+  checkout is detached at `1a8ee0c` and retained solely because the live adb server
+  uses that directory. The temporary review worktree/ref is removed after this
+  record lands. [Every original branch](docs/branch-rollup-20261002.md) is accounted for.
+- Mog received only an adoption-gap note, `/root/mog/docs/TAU.md`, local commit
+  `af01924`. Separate bugs 013/014/045 and physical-device QA remain open; passing
+  these fixtures does not close the old seed-73 per-file finding.
+
+---
+
 # October 2 branch rollup — source integration and release preparation
 
 The user requested accounting for every Tau/Tau2 branch, removing obsolete refs,
