@@ -466,7 +466,7 @@ fn a_consumed_long_press_tick_does_not_starve_sibling_motion() {
 fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
     use tau_net::{EventKind, EventRole, EventPhase};
     let mut h = Harness::new(false);
-    let mut source = crate::blocks::tests::Fixture::new();
+    let mut source = crate::replica::tests::Fixture::new();
     let mut tool = h.app.controller.chats["demo"].feed.events.values().next().unwrap().clone();
     tool.id = "native-tool".into(); tool.entry_id = tool.id.clone();
     tool.role = EventRole::Assistant; tool.kind = EventKind::Tool; tool.phase = EventPhase::Saved;
@@ -507,7 +507,7 @@ fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
 #[test]
 fn native_handoff_keeps_the_actual_message_control_and_authored_text() {
     let mut h = Harness::new(false);
-    let mut source = crate::blocks::tests::Fixture::new();
+    let mut source = crate::replica::tests::Fixture::new();
     let mut session = h.app.controller.account.sessions[0].clone(); session.id = "chat".into();
     h.app.controller.account.sessions.push(session); h.app.controller.select("chat").unwrap();
     h.app.controller.account.source_lineage = Some(source.lineage.clone());

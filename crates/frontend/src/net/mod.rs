@@ -1,7 +1,6 @@
 //! Bounded authenticated WebSocket control + one shared native data connection. Requests carry a
 //! connection epoch: commands queued for a dead socket can never run on its successor.
 use crate::{
-    connection::{CONNECT_TIMEOUT, MIN_CONNECT_INTERVAL, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
     store::{LocalFile, Settings},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -13,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tau_net::*;
+use health::{CONNECT_TIMEOUT, MIN_CONNECT_INTERVAL, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async_with_config,
@@ -31,7 +31,6 @@ impl std::error::Error for ConnectionUnavailable {}
 
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 pub enum Command {
-    Blocks(crate::blocks::Command),
     Request {
         epoch: u64,
         request: ClientRequest,
@@ -60,7 +59,6 @@ pub enum Event {
     HeartbeatSent { epoch: u64, at: Instant },
     HeartbeatReply { epoch: u64, at: Instant, rtt: Duration },
     Message(u64, Box<ServerMessage>),
-    SizedMessage(u64,Box<ServerMessage>,usize),
     Metrics(tau_net::native::Stats),
     Disconnected(String),
     Fatal(String),
@@ -77,26 +75,32 @@ pub enum Event {
         path: PathBuf,
     },
 }
-#[path = "transport_events.rs"]
-mod event_queue;
-use event_queue::Events;
-pub use event_queue::EventReceiver;
+pub mod health;
+pub mod files;
+mod mailbox;
+mod sync;
+mod transfers;
+use mailbox::EventSender;
+pub use mailbox::EventReceiver;
+pub use sync::ReplicaNotice;
 pub struct Network {
     tx: mpsc::Sender<Command>,
+    subscriptions: sync::Subscriptions,
     pub events: EventReceiver,
-    pub blocks: mpsc::Receiver<crate::blocks::Notice>,
-    pub file_index: tokio::sync::watch::Receiver<Option<Arc<crate::file_index::Update>>>,
-    pub files: tokio::sync::watch::Receiver<Option<Arc<crate::file_client::Update>>>,
+    pub replicas: mpsc::Receiver<ReplicaNotice>,
+    pub file_index: tokio::sync::watch::Receiver<Option<Arc<crate::net::files::IndexUpdate>>>,
+    pub files: tokio::sync::watch::Receiver<Option<Arc<crate::net::files::FileUpdate>>>,
 }
 impl Network {
     pub fn start(settings: Settings, wake: Wake) -> Self { Self::start_inner(settings,wake,None) }
-    pub fn start_cached(settings: Settings, wake: Wake, cache: crate::blocks::Cache) -> Self { Self::start_inner(settings,wake,Some(cache)) }
-    fn start_inner(settings: Settings, wake: Wake, cache: Option<crate::blocks::Cache>) -> Self {
-        let (block_notices,blocks) = mpsc::channel(32);
+    pub fn start_cached(settings: Settings, wake: Wake, cache: crate::replica::Cache) -> Self { Self::start_inner(settings,wake,Some(cache)) }
+    fn start_inner(settings: Settings, wake: Wake, cache: Option<crate::replica::Cache>) -> Self {
+        let (block_notices,replicas) = mpsc::channel(32);
         let (file_updates,files) = tokio::sync::watch::channel(None);
         let (index_updates,file_index) = tokio::sync::watch::channel(None);
         let (tx, rx) = mpsc::channel(64);
-        let (sink, incoming) = event_queue::channel(wake);
+        let (sink, incoming) = mailbox::channel(wake);
+        let (subscriptions, interests) = sync::subscriptions();
         std::thread::Builder::new()
             .name("tau-network".into())
             .spawn(move || {
@@ -105,17 +109,17 @@ impl Network {
                     .enable_all()
                     .build()
                 {
-                    Ok(rt) => rt.block_on(run(settings, rx, sink, cache, block_notices, file_updates, index_updates)),
+                    Ok(rt) => rt.block_on(run(settings, rx, sink, cache, block_notices, file_updates, index_updates, interests)),
                     Err(_) => {
-                        sink.send_now(Event::Fatal("Cannot start network runtime".into()));
+                        sink.send(Event::Fatal("Cannot start network runtime".into()));
                     }
                 }
             })
             .expect("start network thread");
         Self {
-            tx,
+            tx, subscriptions,
             events: incoming,
-            blocks, files, file_index,
+            replicas, files, file_index,
         }
     }
     pub fn send(&self, command: Command) -> Result<()> {
@@ -123,6 +127,23 @@ impl Network {
             .try_send(command)
             .map_err(|_| ConnectionUnavailable.into())
     }
+    pub fn plan(&self, plan: Vec<crate::replica::Plan>) -> Result<()> {
+        self.subscriptions.plans.send(plan).map_err(|_| ConnectionUnavailable.into())
+    }
+    pub fn view_files(&self, interest: Option<files::FileInterest>) -> Result<()> {
+        self.subscriptions.files.send(interest).map_err(|_| ConnectionUnavailable.into())
+    }
+    pub fn index_files(&self, interest: Option<files::IndexInterest>) -> Result<()> {
+        self.subscriptions.index.send(interest).map_err(|_| ConnectionUnavailable.into())
+    }
+    pub fn reset_replica(&self) -> Result<()> {
+        self.subscriptions.requests.try_send(sync::Request::Reset).map_err(|_| ConnectionUnavailable.into())
+    }
+    pub fn history(&self, scope: String, before: blocks::FeedPosition) -> Result<()> {
+        self.subscriptions.requests.try_send(sync::Request::History {scope,before})
+            .map_err(|_| anyhow::anyhow!("History queue is unavailable or busy; try again"))
+    }
+
 }
 
 pub fn endpoint(settings: &Settings, parts: &[&str]) -> Result<url::Url> {
@@ -142,9 +163,9 @@ impl std::fmt::Display for HeartbeatTimeout {
 }
 impl std::error::Error for HeartbeatTimeout {}
 
-async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: Events, cache: Option<crate::blocks::Cache>, block_notices:mpsc::Sender<crate::blocks::Notice>, file_updates:tokio::sync::watch::Sender<Option<Arc<crate::file_client::Update>>>, index_updates:tokio::sync::watch::Sender<Option<Arc<crate::file_index::Update>>>) {
-    let block_service = cache.map(|cache|crate::blocks::Service::start_with_files(cache,events.wake.clone(),block_notices,file_updates,index_updates));
-    let mut block_identity = block_service.as_ref().map(|s|s.node.clone());
+async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: EventSender, cache: Option<crate::replica::Cache>, block_notices:mpsc::Sender<ReplicaNotice>, file_updates:tokio::sync::watch::Sender<Option<Arc<crate::net::files::FileUpdate>>>, index_updates:tokio::sync::watch::Sender<Option<Arc<crate::net::files::IndexUpdate>>>, interests: sync::Interests) {
+    let content_service = cache.map(|cache|sync::Content::start(cache,events.clone(),block_notices,file_updates,index_updates,interests));
+    let mut block_identity = content_service.as_ref().map(|s|s.node.clone());
     let setup = (|| -> Result<_> {
         let mut url = endpoint(&settings, &["v1", "ws"])?;
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
@@ -161,8 +182,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         Ok(setup) => setup,
         Err(_) => {
             events
-                .send(Event::Fatal("Invalid connection settings".into()))
-                .await;
+                .send(Event::Fatal("Invalid connection settings".into()));
             return;
         }
     };
@@ -177,7 +197,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
     loop {
         attempt += 1;
         let attempt_at = Instant::now();
-        if !events.send(Event::Connecting { attempt, at: attempt_at }).await { break; }
+        if !events.send(Event::Connecting { attempt, at: attempt_at }) { break; }
         // One acquisition deadline includes DNS/TCP/TLS/upgrade AND Tau hello.
         // No hidden second timeout after the WebSocket upgrade.
         let connection = tokio::time::timeout(CONNECT_TIMEOUT, async {
@@ -195,12 +215,11 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                 result = &mut connection => break result,
                 command = commands.recv() => match command {
                     None => return,
-                    Some(Command::Blocks(command)) => { if let Some(service) = &block_service { service.send(command); } }
                     Some(Command::CancelDownload(key)) => { if let Some(cancel) = downloads.remove(&key) { cancel.send_replace(true); } }
                     Some(Command::Download { key,session,entry,target,limit }) => {
-                        start_download(&mut jobs,&mut downloads,block_service.as_ref(),key,session,entry,target,limit,&events).await;
+                        start_download(&mut jobs,&mut downloads,content_service.as_ref(),key,session,entry,target,limit,&events);
                     }
-                    Some(command) => { reject_offline(command, &events).await; }
+                    Some(command) => { reject_offline(command, &events); }
                 },
                 _ = jobs.join_next(), if !jobs.is_empty() => {},
             }
@@ -208,7 +227,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         let outcome: Result<()> = async {
             let (socket, protocol_version, lineage) = socket.context("Connection timed out")??;
             if protocol_version != PROTOCOL_VERSION {
-                events.send(Event::Fatal(format!("Protocol {protocol_version} requires a matching client (this client uses {PROTOCOL_VERSION})"))).await;
+                events.send(Event::Fatal(format!("Protocol {protocol_version} requires a matching client (this client uses {PROTOCOL_VERSION})")));
                 commands.close();
                 return Ok(());
             }
@@ -230,8 +249,8 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             epoch += 1;
             generations.clear();
             let connected_at=Instant::now();
-            if !events.send(Event::Source(epoch,lineage.context("Missing source lineage")?)).await {return Ok(());}
-            if !events.send(Event::Ready { epoch, at: connected_at }).await { return Ok(()); }
+            if !events.send(Event::Source(epoch,lineage.context("Missing source lineage")?)) {return Ok(());}
+            if !events.send(Event::Ready { epoch, at: connected_at }) { return Ok(()); }
             let mut next_ping = connected_at + HEARTBEAT_INTERVAL;
             let mut waiting: Option<(Vec<u8>, Instant)> = None;
             let mut metrics=tokio::time::interval_at(tokio::time::Instant::now()+Duration::from_secs(5),Duration::from_secs(5));
@@ -245,12 +264,12 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                         if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; }
                         else { std::future::pending::<()>().await; }
                     } => return Err(HeartbeatTimeout.into()),
-                    _=metrics.tick()=>{if let Some(service)=&block_service {if let Some(stats)=service.stats() {if !events.send(Event::Metrics(stats)).await {return Ok(());}}}}
+                    _=metrics.tick()=>{if let Some(service)=&content_service {if let Some(stats)=service.stats() {if !events.send(Event::Metrics(stats)) {return Ok(());}}}}
                     Some((requested,key,serial,result,_budget,bytes)) = resolved_rx.recv() => {
                         if requested==epoch && generations.get(&key)==Some(&serial) {
                             match result {
-                                Ok(message)=>{if !events.send(Event::SizedMessage(epoch,Box::new(message),bytes)).await {return Ok(());}}
-                                Err(_)=>{events.send(Event::Message(epoch,Box::new(ServerMessage::ResyncRequired {session_id:None}))).await;}
+                                Ok(message)=>{if !events.send_sized(Event::Message(epoch,Box::new(message)),bytes) {return Ok(());}}
+                                Err(_)=>{events.send(Event::Message(epoch,Box::new(ServerMessage::ResyncRequired {session_id:None})));}
                             }
                             if key.starts_with("receipt:") {generations.remove(&key);}
                         }
@@ -260,23 +279,22 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             Ok(request) if requested == epoch => {
                                 let encoded=serde_json::to_string(&request)?;
                                 ensure!(encoded.len()<=MAX_CONTROL_BYTES,"Input reference exceeds the control limit");
-                                if outgoing.try_send(Message::Text(encoded.into())).is_err() {events.send(Event::NotSent(request.id,"Control writer is full; intent was not sent".into())).await;}
+                                if outgoing.try_send(Message::Text(encoded.into())).is_err() {events.send(Event::NotSent(request.id,"Control writer is full; intent was not sent".into()));}
                             }
-                            Ok(request) => {events.send(Event::NotSent(request.id,"Connection changed before input submission; command was not sent".into())).await;}
-                            Err((id,error)) => {events.send(Event::NotSent(id,error)).await;}
+                            Ok(request) => {events.send(Event::NotSent(request.id,"Connection changed before input submission; command was not sent".into()));}
+                            Err((id,error)) => {events.send(Event::NotSent(id,error));}
                         }
                     }
                     command = commands.recv() => match command {
                         None => return Ok(()),
-                        Some(Command::Blocks(command)) => { if let Some(service) = &block_service { service.send(command); } }
                         Some(Command::Request { epoch: requested, request }) => {
-                            if requested != epoch { events.send(Event::NotSent(request.id, "Connection changed; not sent".into())).await; continue; }
+                            if requested != epoch { events.send(Event::NotSent(request.id, "Connection changed; not sent".into())); continue; }
                             let encoded = serde_json::to_string(&request)?;
                             if encoded.len() > MAX_CONTROL_BYTES {
-                                let Some(service) = block_service.as_ref().filter(|_| jobs.len() < 8) else {
-                                    events.send(Event::NotSent(request.id,"Content service is unavailable or busy".into())).await;continue;
+                                let Some(service) = content_service.as_ref().filter(|_| jobs.len() < 8) else {
+                                    events.send(Event::NotSent(request.id,"Content service is unavailable or busy".into()));continue;
                                 };
-                                let data = service.downloads(); let tx = prepared_tx.clone();
+                                let data = service.transfers(); let tx = prepared_tx.clone();
                                 jobs.spawn(async move {
                                     let id = request.id.clone();
                                     let result = data.input(request).await.map_err(|e|(id,format!("Input upload failed; command was not sent: {e}")));
@@ -284,23 +302,23 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                 });
                                 continue;
                             }
-                            if outgoing.try_send(Message::Text(encoded.into())).is_err() {events.send(Event::NotSent(request.id,"Control writer is full; intent was not sent".into())).await;}
+                            if outgoing.try_send(Message::Text(encoded.into())).is_err() {events.send(Event::NotSent(request.id,"Control writer is full; intent was not sent".into()));}
                         }
                         Some(Command::Upload { epoch: requested, id, session, text, files }) => {
-                            if requested != epoch { events.send(Event::NotSent(id, "Connection changed before upload".into())).await; continue; }
-                            if jobs.len() >= 4 { events.send(Event::NotSent(id, "Too many transfers; try again".into())).await; continue; }
-                            let Some(service) = &block_service else {events.send(Event::NotSent(id,"Content service unavailable".into())).await;continue;};
-                            let data=service.downloads();let events=events.clone();
+                            if requested != epoch { events.send(Event::NotSent(id, "Connection changed before upload".into())); continue; }
+                            if jobs.len() >= 4 { events.send(Event::NotSent(id, "Too many transfers; try again".into())); continue; }
+                            let Some(service) = &content_service else {events.send(Event::NotSent(id,"Content service unavailable".into()));continue;};
+                            let data=service.transfers();let events=events.clone();
                             jobs.spawn(async move {
                                 let result = data.upload(session, text, files).await;
-                                let retryable = result.as_ref().err().is_none_or(|e| !e.is::<crate::blocks::InvalidAttachment>());
+                                let retryable = result.as_ref().err().is_none_or(|e| !e.is::<transfers::InvalidAttachment>());
                                 let result = result.map_err(|e| format!("Attachment upload failed; prompt was not sent: {e:#}"));
-                                events.send(Event::Prepared { epoch: requested, id, result, retryable }).await;
+                                events.send(Event::Prepared { epoch: requested, id, result, retryable });
                             });
                         }
                     Some(Command::CancelDownload(key)) => { if let Some(cancel) = downloads.remove(&key) { cancel.send_replace(true); } }
                         Some(Command::Download { key, session, entry, target, limit }) => {
-                            start_download(&mut jobs,&mut downloads,block_service.as_ref(),key,session,entry,target,limit,&events).await;
+                            start_download(&mut jobs,&mut downloads,content_service.as_ref(),key,session,entry,target,limit,&events);
                         }
                     },
                     identity_changed = async {
@@ -319,9 +337,9 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                 ensure!(text.len() <= MAX_CONTROL_BYTES, "Tau control frame is too large");
                                 let message: ServerMessage = serde_json::from_str(&text).context("Invalid Tau message")?;
                                 if let ServerMessage::BlockConnection { offer } = message {
-                                    if let Some(service) = &block_service {
+                                    if let Some(service) = &content_service {
                                         let host = settings.url()?.host_str().context("Missing host")?.to_owned();
-                                        service.send(crate::blocks::Command::Configure(offer,host));
+                                        service.configure(offer,host);
                                     }
                                     continue;
                                 }
@@ -329,15 +347,15 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                 if let Some(key)=message.replication_key() {generations.insert(key,generation);}
                                 if let ServerMessage::Data {content,key,session_id,reports,operation_id,route} = message {
                                     if let Some(operation_id)=operation_id {
-                                        if !events.send(Event::Message(epoch,Box::new(ServerMessage::Operation {operation_id,registered:true,response:None}))).await {return Ok(());}
+                                        if !events.send(Event::Message(epoch,Box::new(ServerMessage::Operation {operation_id,registered:true,response:None}))) {return Ok(());}
                                     }
                                     if let Some(session_id) = session_id && !reports.is_empty() {
-                                        if !events.send(Event::Message(epoch,Box::new(ServerMessage::Receipts {session_id,reports}))).await {return Ok(());}
+                                        if !events.send(Event::Message(epoch,Box::new(ServerMessage::Receipts {session_id,reports}))) {return Ok(());}
                                     }
-                                    let service=block_service.as_ref().context("Native descriptor without content service")?;
+                                    let service=content_service.as_ref().context("Native descriptor without content service")?;
                                     // Descriptor fetches run away from the WebSocket reader/heartbeat.
                                     ensure!(jobs.len() < 64,"Too many unresolved descriptors");
-                                    let data=service.downloads();let tx=resolved_tx.clone();let serial=generation;let budget=descriptor_budget.clone();
+                                    let data=service.transfers();let tx=resolved_tx.clone();let serial=generation;let budget=descriptor_budget.clone();
                                     jobs.spawn(async move {
                                         let Ok(permit)=budget.acquire_many_owned(content.length.min(tau_net::blocks::MAX_BLOCK_BYTES).max(1) as u32).await else {return;};
                                         let length=content.length as usize;
@@ -348,14 +366,14 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                                     });
                                     continue;
                                 }
-                                if !events.send(Event::Message(epoch, Box::new(message))).await { return Ok(()); }
+                                if !events.send(Event::Message(epoch, Box::new(message))) { return Ok(()); }
                             }
                             Message::Ping(payload) => {health.try_send(Message::Pong(payload)).context("Control health writer is full")?;}
                             Message::Pong(payload) => {
                                 if waiting.as_ref().is_some_and(|(bytes, _)| bytes.as_slice() == payload.as_ref()) {
                                     let (_, sent) = waiting.take().unwrap();
                                     let at = Instant::now();
-                                    if !events.send(Event::HeartbeatReply { epoch, at, rtt: at.duration_since(sent) }).await { return Ok(()); }
+                                    if !events.send(Event::HeartbeatReply { epoch, at, rtt: at.duration_since(sent) }) { return Ok(()); }
                                 }
                             }
                             Message::Close(_) => bail!("Connection closed"),
@@ -368,7 +386,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                         let sent = Instant::now();
                         next_ping = sent + HEARTBEAT_INTERVAL;
                         waiting = Some((payload, sent));
-                        if !events.send(Event::HeartbeatSent { epoch, at: sent }).await { return Ok(()); }
+                        if !events.send(Event::HeartbeatSent { epoch, at: sent }) { return Ok(()); }
                         if sent>=renew_blocks {
                             if let Some(identity)=&block_identity && let Some(node_id)=identity.borrow().clone() {
                                 let request=ClientRequest {id:"block-connection".into(),command:ClientCommand::ConnectBlocks {node_id}};
@@ -416,12 +434,12 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         } else {
             "The server did not return a valid Tau response. Check the URL and server version."
         };
-        if !events.send(Event::Disconnected(detail.into())).await {
+        if !events.send(Event::Disconnected(detail.into())) {
             break;
         }
         let retry_at = next_attempt(attempt_at, Instant::now());
         if retry_at <= Instant::now() { continue; }
-        if !events.send(Event::RetryScheduled { at: retry_at }).await { break; }
+        if !events.send(Event::RetryScheduled { at: retry_at }) { break; }
         let wait = tokio::time::sleep_until(tokio::time::Instant::from_std(retry_at));
         tokio::pin!(wait);
         loop {
@@ -429,12 +447,11 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                 _ = &mut wait => break,
                 command = commands.recv() => match command {
                     None => return,
-                    Some(Command::Blocks(command)) => { if let Some(service) = &block_service { service.send(command); } }
                     Some(Command::CancelDownload(key)) => { if let Some(cancel) = downloads.remove(&key) { cancel.send_replace(true); } }
                     Some(Command::Download { key,session,entry,target,limit }) => {
-                        start_download(&mut jobs,&mut downloads,block_service.as_ref(),key,session,entry,target,limit,&events).await;
+                        start_download(&mut jobs,&mut downloads,content_service.as_ref(),key,session,entry,target,limit,&events);
                     }
-                    Some(command) => { reject_offline(command, &events).await; }
+                    Some(command) => { reject_offline(command, &events); }
                 },
                 _ = jobs.join_next(), if !jobs.is_empty() => {},
             }
@@ -442,35 +459,33 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
     }
     for cancel in downloads.values() { cancel.send_replace(true); }
 }
-async fn start_download(jobs:&mut tokio::task::JoinSet<()>, downloads:&mut HashMap<String,tokio::sync::watch::Sender<bool>>, service:Option<&crate::blocks::Service>, key:String, session:String, entry:String, target:PathBuf, limit:u64, events:&Events) {
+fn start_download(jobs:&mut tokio::task::JoinSet<()>, downloads:&mut HashMap<String,tokio::sync::watch::Sender<bool>>, service:Option<&sync::Content>, key:String, session:String, entry:String, target:PathBuf, limit:u64, events:&EventSender) {
     downloads.retain(|_,cancel|cancel.receiver_count()>0);
     if downloads.contains_key(&key) {return;}
     let Some(service)=service.filter(|_|downloads.len()<2) else {
         events.send(Event::Download {key,path:target,status:tau_net::TransferStatus {transferred:0,total:0,network_bytes:0,done:true,
-            failure:Some("Content service unavailable or two downloads are already active".into())}}).await;
+            failure:Some("Content service unavailable or two downloads are already active".into())}});
         return;
     };
     let (cancel,cancellation)=tokio::sync::watch::channel(false); downloads.insert(key.clone(),cancel);
-    let context=service.downloads();
+    let context=service.transfers();
     jobs.spawn(context.run(key,session,format!("file:{entry}"),target,limit,cancellation));
 }
-async fn reject_offline(command: Command, events: &Events) {
+fn reject_offline(command: Command, events: &EventSender) {
     match command {
         Command::Request { request, .. } => {
             events
                 .send(Event::NotSent(
                     request.id,
                     "Not connected; request was not sent".into(),
-                ))
-                .await;
+                ));
         }
         Command::Upload { id, .. } => {
             events
                 .send(Event::NotSent(
                     id,
                     "Not connected; prompt was not sent".into(),
-                ))
-                .await;
+                ));
         }
         Command::Download { key, target, .. } => {
             events
@@ -484,10 +499,9 @@ async fn reject_offline(command: Command, events: &Events) {
                         done: true,
                         failure: Some("Connect to download this file".into()),
                     },
-                })
-                .await;
+                });
         }
-        Command::CancelDownload(_) | Command::Blocks(_) => {}
+        Command::CancelDownload(_) => {}
     }
 }
 

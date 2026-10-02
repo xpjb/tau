@@ -8,7 +8,7 @@ async fn until(c: &mut Controller, test: impl Fn(&Controller)->bool) {
     let deadline=Instant::now()+Duration::from_secs(20);
     loop {c.poll();if test(c){return;}assert!(Instant::now()<deadline,"remote files stalled: {} {:?}",c.connection,c.notice);tokio::time::sleep(Duration::from_millis(10)).await;}
 }
-async fn query(c: &mut Controller, path: Option<String>, operation: FileOperation) -> Arc<tau_frontend::file_client::Update> {
+async fn query(c: &mut Controller, path: Option<String>, operation: FileOperation) -> Arc<tau_frontend::net::files::FileUpdate> {
     let request=FileRequest {session_id:c.account.selected.clone().unwrap(),path,operation};
     let generation=c.view_files(Some(request)).unwrap();
     until(c,|c|c.file_update.as_ref().is_some_and(|u|u.generation==generation)).await;

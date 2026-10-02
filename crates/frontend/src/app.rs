@@ -1,5 +1,5 @@
 use crate::{
-    connection::{COUNTER_REFRESH, CounterTicker},
+    net::health::{COUNTER_REFRESH, CounterTicker},
     controller::Controller,
     editor::Editor,
     icons::Icon,
@@ -7,7 +7,7 @@ use crate::{
     scroll::Autoscroll,
     store::Store,
     tooltip::Content,
-    transport::Wake,
+    net::Wake,
 };
 use anyhow::Result;
 use chad::{RenderContext, wgpu};
@@ -268,7 +268,7 @@ impl App {
     pub fn preview_connection(&mut self, preview: ConnectionPreview) {
         use std::time::Duration;
         let now = Instant::now();
-        self.controller.health = crate::connection::Health::default();
+        self.controller.health = crate::net::health::Health::default();
         if !matches!(preview, ConnectionPreview::Unconfigured) {
             self.controller.health.connected();
             for (ms, ago) in [(420, 8000), (123, 6000)] {

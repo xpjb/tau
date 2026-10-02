@@ -237,10 +237,10 @@ pub struct Store {
     pub root: PathBuf,
 }
 impl Store {
-    pub fn block_cache(&self, identity: &str) -> Result<crate::blocks::Cache> {
+    pub fn block_cache(&self, identity: &str) -> Result<crate::replica::Cache> {
         use sha2::Digest;
         let key = format!("{:x}",sha2::Sha256::digest(identity.as_bytes()));
-        crate::blocks::Cache::open(&self.root.join("blocks").join(format!("{key}.sqlite3")))
+        crate::replica::Cache::open(&self.root.join("blocks").join(format!("{key}.sqlite3")))
             .context("Open transcript replica")
     }
     pub fn open(root: PathBuf) -> Result<Self> {

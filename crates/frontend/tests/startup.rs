@@ -2,7 +2,7 @@
 //! Keep a real WAL writer alive until startup finishes: sleeps cannot hide the race.
 use rusqlite::Connection;
 use std::{path::Path, sync::{Arc, mpsc}, thread, time::{Duration, Instant}};
-use tau_frontend::{blocks::Cache, controller::Controller, store::{Settings, Store, hash}};
+use tau_frontend::{replica::Cache, controller::Controller, store::{Settings, Store, hash}};
 use tau_net::*;
 
 fn while_writing<T: Send + 'static>(path: &Path, open: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> T {

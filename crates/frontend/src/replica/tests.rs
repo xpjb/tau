@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 
-pub(crate) struct Fixture {source:Connection,pub(crate) cache:Cache,_root:tempfile::TempDir,pub(crate) lineage:String}
+pub(crate) struct Fixture {pub(crate) source:Connection,pub(crate) cache:Cache,pub(crate) _root:tempfile::TempDir,pub(crate) lineage:String}
 impl Fixture {
     pub(crate) fn new()->Self {
         let source=Connection::open_in_memory().unwrap();source.execute_batch("PRAGMA foreign_keys=ON").unwrap();tau_block_store::initialize(&source).unwrap();
@@ -398,13 +398,13 @@ fn authored_message_has_one_model_identity_across_receipt_queue_and_history() {
     assert!(matches!(feed.messages[&id].body, MessageBody::Remote(_)));
 }
 
-fn local_prompt(id: &str, text: &str) -> LocalChat {
+pub(crate) fn local_prompt(id: &str, text: &str) -> LocalChat {
     use crate::store::{Delivery, Pending};
     LocalChat { pending: vec![Pending { request: tau_net::ClientRequest { id: id.into(),
         command: tau_net::ClientCommand::Prompt { session_id: "chat".into(), text: text.into(), model: None, create: None } },
         text: text.into(), files: vec![], status: Delivery::Accepted, started_at_ms: None, detail: None }], ..Default::default() }
 }
-fn user_body(id: &str, request: &str, text: &str) -> serde_json::Value {
+pub(crate) fn user_body(id: &str, request: &str, text: &str) -> serde_json::Value {
     let mut meta = event(id, 1, "text");
     meta["event"]["role"] = json!("user");
     meta["event"]["origin"] = json!({"requestId":request});
@@ -513,66 +513,7 @@ fn accepted_queue_header_does_not_retire_local_input_before_its_body_arrives() {
     assert!(local.pending.is_empty());
 }
 
-#[tokio::test(flavor="multi_thread", worker_threads=2)]
-async fn native_watch_fetches_unknown_body_but_never_downloads_locally_known_input() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tau_net::native::Backend;
-    struct Source {
-        db: Arc<Mutex<Connection>>,
-        known_reads: Arc<AtomicUsize>,
-        unknown_reads: Arc<AtomicUsize>,
-        changes: watch::Receiver<u64>,
-    }
-    impl Backend for Source {
-        fn feed(&self, req: FeedRequest) -> futures_util::future::BoxFuture<'static, Result<FeedPage>> {
-            let db=self.db.clone(); Box::pin(async move { tau_block_store::feed(&db.lock().unwrap(),&req) })
-        }
-        fn read(&self, req: BlockRequest) -> futures_util::future::BoxFuture<'static, Result<ContentRange>> {
-            let db=self.db.clone();let known=self.known_reads.clone();let unknown=self.unknown_reads.clone();
-            Box::pin(async move {
-                if req.id=="saved" {known.fetch_add(1,Ordering::SeqCst);}
-                if req.id=="unknown" {unknown.fetch_add(1,Ordering::SeqCst);}
-                tau_block_store::read(&db.lock().unwrap(),&req)
-            })
-        }
-        fn changes(&self) -> watch::Receiver<u64> {self.changes.clone()}
-    }
-    let mut f=Fixture::new();
-    let text="authored café 😀".repeat(4096);
-    let local=local_prompt("request",&text);
-    f.cache.remember_local("chat",&local,&f.lineage).unwrap();
-    f.put(QUEUE,None,100,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
-    f.put("saved",None,1,BlockKind::Text,user_body("saved","request",&text),text.as_bytes());
-    f.put("unknown",None,2,BlockKind::Text,user_body("unknown","another-client","remote text"),b"remote text");
-    let known=Arc::new(AtomicUsize::new(0));let unknown=Arc::new(AtomicUsize::new(0));
-    let (_changes,changed)=watch::channel(0);
-    let server=tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
-        db:Arc::new(Mutex::new(f.source)),known_reads:known.clone(),unknown_reads:unknown.clone(),changes:changed,
-    })).await.unwrap();
-    let (notices,mut received)=mpsc::channel(32);
-    let service=Service::start(f.cache.clone(),Arc::new(||{}),notices);
-    let mut identity=service.node.clone();
-    tokio::time::timeout(Duration::from_secs(5),async {
-        while identity.borrow().is_none() {identity.changed().await.unwrap();}
-    }).await.unwrap();
-    let offer=server.authorize(identity.borrow().as_ref().unwrap(),f.lineage.clone()).unwrap();
-    service.send(Command::Configure(offer,"127.0.0.1".into()));
-    service.send(Command::Plan(vec![f.cache.plan("chat",&local,&[]).unwrap()]));
-    tokio::time::timeout(Duration::from_secs(5),async {
-        loop {
-            let notice=received.recv().await.unwrap();assert!(notice.error.is_none(),"{:?}",notice.error);
-            service.send(Command::Plan(vec![f.cache.plan("chat",&local,&[]).unwrap()]));
-            let db=f.cache.db.lock().unwrap();
-            if tau_block_store::cached_content(&db,"chat","unknown").unwrap()==b"remote text" {
-                assert_eq!(tau_block_store::cached_content(&db,"chat","saved").unwrap(),text.as_bytes());
-                break;
-            }
-        }
-    }).await.unwrap();
-    assert!(unknown.load(Ordering::SeqCst)>0,"the test must actually run the production body scheduler");
-    assert_eq!(known.load(Ordering::SeqCst),0,"no read request at all for our already-known input");
-    drop(service);server.shutdown().await;
-}
+
 
 #[test]
 fn queue_removal_before_history_header_keeps_a_display_copy_until_root_catches_up() {
@@ -646,65 +587,7 @@ fn body_reuse_is_bounded_disposable_and_does_not_accept_corrupt_cached_candidate
     assert_eq!(f.cache.db.lock().unwrap().query_row("SELECT count(*) FROM local_echoes",[],|r|r.get::<_,u64>(0)).unwrap(),0);
 }
 
-#[tokio::test(flavor="multi_thread", worker_threads=2)]
-async fn a_delayed_plan_does_not_refetch_known_text_after_queue_consumption() {
-    use tau_net::native::Backend;
-    struct Source { db:Arc<Mutex<Connection>>, reads:Arc<Mutex<Vec<String>>>, changes:watch::Receiver<u64> }
-    impl Backend for Source {
-        fn feed(&self, req:FeedRequest)->futures_util::future::BoxFuture<'static,Result<FeedPage>> {
-            let db=self.db.clone();Box::pin(async move {tau_block_store::feed(&db.lock().unwrap(),&req)})
-        }
-        fn read(&self, req:BlockRequest)->futures_util::future::BoxFuture<'static,Result<ContentRange>> {
-            let db=self.db.clone();let reads=self.reads.clone();Box::pin(async move {
-                reads.lock().unwrap().push(req.id.clone());tau_block_store::read(&db.lock().unwrap(),&req)
-            })
-        }
-        fn changes(&self)->watch::Receiver<u64> {self.changes.clone()}
-    }
-    let mut f=Fixture::new();let text="already held text café 😀";let local=local_prompt("request",text);
-    f.cache.remember_local("chat",&local,&f.lineage).unwrap();
-    f.put(QUEUE,None,100,BlockKind::Queue,json!({}),&serde_json::to_vec(&QueueState::native()).unwrap());
-    f.put("queued:request",Some(QUEUE),0,BlockKind::Text,
-        json!({"request":{"requestId":"request","revision":0,"kind":"steer","text":"","images":0},
-            "bodyHash":blake3::hash(text.as_bytes()).to_hex().to_string()}),text.as_bytes());
-    f.page(None,None);f.page(Some(QUEUE),None);f.body(QUEUE);
-    let pending_plan=f.cache.plan("chat",&local,&[]).unwrap();
-    assert!(pending_plan.blocks.iter().any(|(id,head)|id=="queued:request" && head.is_some_and(|(_,len,sealed,stored)|sealed && len==stored)));
-    // The UI has built its plan, but hasn't handed it to the service yet.
-    // Meanwhile the existing body-reuse fix correctly completes the merge.
-    let tx=f.source.transaction().unwrap();tau_block_store::remove(&tx,"chat","queued:request").unwrap();tx.commit().unwrap();
-    f.put("saved",None,1,BlockKind::Text,user_body("saved","request",text),text.as_bytes());
-    f.page(Some(QUEUE),None);f.page(None,None);
-    assert_eq!(f.cache.copy_ready("chat",&["saved".into()]).unwrap().unwrap(),text);
-    let merged_plan=f.cache.plan("chat",&local,&[]).unwrap();
-    let reads=Arc::new(Mutex::new(vec![]));let (_changes,changed)=watch::channel(0);
-    let server=tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {
-        db:Arc::new(Mutex::new(f.source)),reads:reads.clone(),changes:changed,
-    })).await.unwrap();
-    let (notices,mut received)=mpsc::channel(32);let service=Service::start(f.cache.clone(),Arc::new(||{}),notices);
-    let mut identity=service.node.clone();
-    tokio::time::timeout(Duration::from_secs(5),async {
-        while identity.borrow().is_none() {identity.changed().await.unwrap();}
-    }).await.unwrap();
-    service.send(Command::Configure(server.authorize(identity.borrow().as_ref().unwrap(),f.lineage.clone()).unwrap(),"127.0.0.1".into()));
-    service.send(Command::Plan(vec![pending_plan]));
-    let first=tokio::time::timeout(Duration::from_secs(5),received.recv()).await.unwrap().unwrap();
-    assert!(first.error.is_none(),"The content was already present: {:?}",first.error);
-    for plan in [None,Some(merged_plan)] {
-        if let Some(plan)=plan {service.send(Command::Plan(vec![plan]));}
-        let until=tokio::time::Instant::now()+Duration::from_millis(250);
-        loop {
-            tokio::select! {
-                _=tokio::time::sleep_until(until)=>break,
-                notice=received.recv()=>assert!(notice.unwrap().error.is_none(),"A stale plan must not cause a content error"),
-            }
-        }
-    }
-    let reads=reads.lock().unwrap().clone();
-    assert!(reads.is_empty(),"Neither the old queue ID nor the merged body needs a read: {reads:?}");
-    assert_eq!(f.cache.copy_ready("chat",&["saved".into()]).unwrap().unwrap(),text);
-    drop(service);server.shutdown().await;
-}
+
 
 #[test]
 fn warm_scrollback_survives_viewport_and_history_changes_without_stale_replacements() {
@@ -893,21 +776,7 @@ fn live_projection_does_not_add_a_ui_thread_recency_write_per_chunk() {
     assert!(clock()>before,"an actual visit refreshes eviction recency");
 }
 
-#[test]
-fn background_feed_batches_cover_every_chat_with_bounded_wire_requests() {
-    let f=Fixture::new();
-    let feeds=(0..37).flat_map(|n| [None,Some(QUEUE.into())].map(|parent|(format!("chat-{n:03}"),parent))).collect::<BTreeSet<_>>();
-    let keys=background_batches(&f.cache,feeds.clone()).unwrap();
-    assert_eq!(keys.len(),5,"seventy-four feeds should not occupy thirty-seven streams");
-    let mut seen=BTreeSet::new();
-    for key in keys {
-        let Key::BackgroundFeeds(feeds)=key else {panic!("not a background batch");};
-        let requests=feeds.iter().map(|(scope,parent)|f.cache.feed_request(scope,parent.as_deref(),None).unwrap()).collect::<Vec<_>>();
-        assert!(requests.len()<=16);assert!(serde_json::to_vec(&BlockWatch::Feeds {requests}).unwrap().len()<=MAX_BLOCK_HEADER_BYTES);
-        for key in feeds {assert!(seen.insert(key));}
-    }
-    assert_eq!(seen,feeds);
-}
+
 
 #[test]
 fn prefetched_bodies_do_not_thrash_after_eviction_but_replacements_and_viewing_still_fetch() {
@@ -922,50 +791,4 @@ fn prefetched_bodies_do_not_thrash_after_eviction_but_replacements_and_viewing_s
     f.body("text");f.cache.plan_background("chat").unwrap();
     f.cache.clear().unwrap();f.page(None,None);
     assert!(f.cache.plan_background("chat").unwrap().blocks.iter().any(|(id,_)|id=="text"),"explicit cache clearing resets prefetch completion");
-}
-
-#[tokio::test(flavor="multi_thread", worker_threads=2)]
-async fn file_reconnect_does_not_retry_missing_or_corrupt_content() {
-    use std::sync::atomic::{AtomicUsize,Ordering};
-    use tau_net::native::Backend;
-    struct Broken {
-        db:Arc<Mutex<Connection>>, reads:Arc<AtomicUsize>, changed:watch::Receiver<u64>, corrupt:bool,
-    }
-    impl Backend for Broken {
-        fn feed(&self,_:FeedRequest)->futures_util::future::BoxFuture<'static,Result<FeedPage>> {
-            Box::pin(async {anyhow::bail!("Unexpected metadata request")})
-        }
-        fn read(&self,request:BlockRequest)->futures_util::future::BoxFuture<'static,Result<ContentRange>> {
-            self.reads.fetch_add(1,Ordering::SeqCst);
-            let db=self.db.clone();let corrupt=self.corrupt;
-            Box::pin(async move {
-                ensure!(corrupt,"Source content is missing");
-                let mut range=tau_block_store::read(&db.lock().unwrap(),&request)?;
-                range.hash="0".repeat(64);Ok(range)
-            })
-        }
-        fn changes(&self)->watch::Receiver<u64> {self.changed.clone()}
-    }
-    for corrupt in [false,true] {
-        let mut f=Fixture::new();f.put("file",None,0,BlockKind::File,json!({}),b"file bytes");
-        let reads=Arc::new(AtomicUsize::new(0));let (_changes,changed)=watch::channel(0);
-        let server=tau_net::native::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Broken {
-            db:Arc::new(Mutex::new(f.source)),reads:reads.clone(),changed,corrupt,
-        })).await.unwrap();
-        let client=Arc::new(Client::bind().await.unwrap());
-        client.configure(&server.authorize(&client.node_id(),f.lineage.clone()).unwrap(),"127.0.0.1").await.unwrap();
-        let (_endpoint,endpoint)=watch::channel(Some(client.clone()));let (_ready,ready)=watch::channel(Some(f.lineage));
-        let (notices,mut received)=mpsc::channel(32);let (_cancel,cancel)=watch::channel(false);
-        let path=f._root.path().join("download.bin");
-        let transfer=files::Downloads {cache:f.cache.clone(),client:endpoint,ready,notices,wake:Arc::new(||{})};
-        tokio::time::timeout(Duration::from_secs(5),transfer.run("file".into(),"chat".into(),"file".into(),path.clone(),MAX_BLOCK_BYTES,cancel)).await.unwrap();
-        let failure=loop {
-            let (_,_,status)=received.recv().await.unwrap().transfer.unwrap();
-            if status.done {break status.failure.unwrap();}
-        };
-        assert!(failure.contains(if corrupt {"integrity"} else {"missing"}),"{failure}");
-        assert_eq!(reads.load(Ordering::SeqCst),1,"Content failure is not a connection retry");
-        assert!(!path.exists());assert_eq!(f.cache.block_request("chat","file").unwrap().offset,0);
-        client.shutdown().await;server.shutdown().await;
-    }
 }

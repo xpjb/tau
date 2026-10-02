@@ -1,5 +1,7 @@
 //! Exercise the production watch consumer and QUIC server, not a timer model.
 use super::*;
+use std::sync::Mutex;
+use rusqlite::Connection;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tau_net::native::{Backend, Server};
 
@@ -41,6 +43,9 @@ struct Fixture {
     _root: tempfile::TempDir,
 }
 impl Fixture {
+    fn replica(&self) -> Connection {
+        Connection::open_with_flags(self._root.path().join("cache.db"),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
+    }
     fn new() -> Self {
         let source = Connection::open_in_memory().unwrap();
         source.execute_batch("PRAGMA foreign_keys=ON").unwrap();
@@ -79,14 +84,14 @@ async fn checkpoint_scheduling_commits_a_slow_metadata_round_instead_of_restarti
     f.put("child", Some("parent"), b"not requested");
     let (server, client, _changes) = f.connect(true).await;
     let (notices, _received) = mpsc::channel(32);
-    let wake: crate::transport::Wake = Arc::new(|| {});
+    let wake: crate::net::Wake = Arc::new(|| {});
     let result = tokio::time::timeout(Duration::from_secs(10), watch_once(
         &Key::Feeds("chat".into(), vec![None, Some("parent".into())], false),
         &client, &f.cache, &f.lineage, &notices, &wake,
     )).await.expect("A slow but completing read must not monopolize its stream").unwrap();
     assert!(!result, "A live feed yields; it does not become permanently complete");
     for parent in [None, Some("parent")] {
-        assert!(tau_block_store::cached_feed(&f.cache.db.lock().unwrap(), "chat", parent).unwrap().is_some(),
+        assert!(tau_block_store::cached_feed(&f.replica(), "chat", parent).unwrap().is_some(),
             "The entire bounded metadata round must commit before yielding, including later feeds");
     }
     assert!(f.reads.lock().unwrap().is_empty(), "Metadata scheduling must not fetch content");
@@ -102,7 +107,7 @@ async fn checkpoint_scheduling_resumes_after_a_slow_chunk_without_replaying_its_
     f.put("body", None, &bytes);
     let (server, client, _changes) = f.connect(false).await;
     let (notices, _received) = mpsc::channel(32);
-    let wake: crate::transport::Wake = Arc::new(|| {});
+    let wake: crate::net::Wake = Arc::new(|| {});
     let key = Key::Block("chat".into(), "body".into(), true);
     assert!(!tokio::time::timeout(Duration::from_secs(10), watch_once(
         &key, &client, &f.cache, &f.lineage, &notices, &wake,
@@ -113,7 +118,7 @@ async fn checkpoint_scheduling_resumes_after_a_slow_chunk_without_replaying_its_
     assert!(tokio::time::timeout(Duration::from_secs(3), watch_once(
         &key, &client, &f.cache, &f.lineage, &notices, &wake,
     )).await.unwrap().unwrap());
-    assert_eq!(tau_block_store::cached_content(&f.cache.db.lock().unwrap(), "chat", "body").unwrap(), bytes);
+    assert_eq!(tau_block_store::cached_content(&f.replica(), "chat", "body").unwrap(), bytes);
     assert_eq!(f.reads.lock().unwrap().iter().map(|r| r.offset).collect::<Vec<_>>(),
         [0, BLOCK_CHUNK_BYTES as u64, (BLOCK_CHUNK_BYTES * 2) as u64]);
     assert_eq!(client.stats().connections, 1, "Yielding must reuse the native connection");
@@ -132,7 +137,7 @@ async fn background_live_body_releases_its_slot_after_catching_up_and_resumes_ne
         tau_block_store::put(&tx,"chat",h,b"prefix").unwrap();tx.commit().unwrap();
     }
     let (server,client,_changes)=f.connect(true).await; // Only the unused feed path is slow.
-    let (notices,_received)=mpsc::channel(32);let wake:crate::transport::Wake=Arc::new(||{});
+    let (notices,_received)=mpsc::channel(32);let wake:crate::net::Wake=Arc::new(||{});
     let key=Key::BackgroundBlock("chat".into(),"live".into());
     assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake)).await.unwrap().unwrap(),
         "a background catch-up must End, not wait five seconds for more live bytes");
@@ -143,7 +148,7 @@ async fn background_live_body_releases_its_slot_after_catching_up_and_resumes_ne
         tau_block_store::append(&tx,"chat","live",h.version,h.length,b" suffix",false).unwrap();tx.commit().unwrap();
     }
     assert!(tokio::time::timeout(Duration::from_secs(2),watch_once(&key,&client,&f.cache,&f.lineage,&notices,&wake)).await.unwrap().unwrap());
-    assert_eq!(tau_block_store::cached_content(&f.cache.db.lock().unwrap(),"chat","live").unwrap(),b"prefix suffix");
+    assert_eq!(tau_block_store::cached_content(&f.replica(),"chat","live").unwrap(),b"prefix suffix");
     let reads=f.reads.lock().unwrap().clone();assert_eq!(reads.len(),2);assert_eq!(reads[1].offset,6);
     assert_eq!(client.stats().bulk_slots,0);client.shutdown().await;server.shutdown().await;
 }

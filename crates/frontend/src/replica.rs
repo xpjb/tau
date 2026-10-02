@@ -1,17 +1,13 @@
-//! Persistent block cache and explicit watch ownership, independent of the UI and
-//! the control socket. A collapsed tool never causes a content watch.
-mod files;
-mod echoes;
-mod uploads;
-pub(crate) use uploads::InvalidAttachment;
+//! Verified SQLite replica and display projection. Network workers only commit
+//! validated headers/ranges here; local outbox intent remains in `store`.
 use anyhow::{Context, Result, ensure};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{collections::{BTreeSet, HashMap}, path::Path, sync::{Arc, Mutex}, time::Duration};
 use tau_net::blocks::*;
-use tau_net::{Event, EventKind, QueueState};
-use tau_net::native::{Client, Header};
-use tokio::sync::{mpsc, watch};
+use tau_net::{ClientCommand, Event, EventKind, QueueOperation, QueueState};
 use crate::store::LocalChat;
+use std::io::{Read, Write};
+use tokio::sync::watch;
 
 pub const QUEUE: &str = "@queue";
 const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,6 +35,28 @@ struct Prefetched {
 #[derive(Clone)]
 pub struct Cache { prefetched:Arc<Mutex<Prefetched>>,exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
 impl Cache {
+    pub(crate) fn needs_body(&self, scope: &str, id: &str, background: bool) -> bool {
+        let db = self.db.lock().unwrap();
+        tau_block_store::header(&db,scope,id).ok().flatten().is_none_or(|h|
+            if background {tau_block_store::cache_budget::stored_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length)}
+            else {!h.sealed || tau_block_store::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length)})
+    }
+    pub(crate) fn body_checkpoint(&self, scope: &str, id: &str) -> Option<((u64,u64,bool),u64)> {
+        let db = self.db.lock().ok()?;
+        let h = tau_block_store::header(&db,scope,id).ok()??;
+        Some(((h.version,h.length,h.sealed),tau_block_store::cached_prefix(&db,scope,id).ok()?))
+    }
+    pub(crate) fn descriptor(&self, reference: &ContentRef, epoch: u64) -> Result<tau_net::ServerMessage> {
+        let db = self.db.lock().unwrap();
+        ensure!(replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==reference.lineage,"Descriptor source changed");
+        let bytes = tau_block_store::cached_content(&db,&reference.scope,&reference.id)?;
+        drop(db);
+        ensure!(bytes.len() as u64==reference.length && blake3::hash(&bytes).to_hex().as_str()==reference.hash,"Descriptor integrity check failed");
+        let message=serde_json::from_slice(&bytes)?;
+        ensure!(!matches!(message,tau_net::ServerMessage::Data {..}|tau_net::ServerMessage::BlockConnection {..}),"Recursive descriptor");
+        Ok(message)
+    }
+
     #[cfg(not(target_os = "android"))]
     pub(crate) fn seed_preview(&self, scope: &str, events: Vec<Event>, mut queue: QueueState, before: Option<u64>) -> Result<View> {
         let ids = events.iter().map(|e| e.id.clone()).collect::<BTreeSet<_>>();
@@ -109,7 +127,7 @@ impl Cache {
         if version < 2 || !echoes_ready {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tau_block_store::initialize(&tx)?;
-            echoes::initialize(&tx)?;
+            initialize_echoes(&tx)?;
             tx.execute_batch("UPDATE block_limits SET headers=100000,bytes=134217728; CREATE TABLE IF NOT EXISTS replica_epoch(singleton INTEGER PRIMARY KEY,epoch INTEGER NOT NULL); INSERT OR IGNORE INTO replica_epoch VALUES(1,0); PRAGMA user_version=2")?;
             tx.commit()?;
         }
@@ -145,7 +163,7 @@ impl Cache {
             }(ids.into_iter().collect::<Vec<_>>(),queue)};
         self.snapshot_inner(scope,visible,retained,true,Some(&ids),queue,dirty.viewing)
     }
-    fn epoch(&self)->u64 {replica_epoch(&self.db.lock().unwrap()).unwrap_or(u64::MAX)}
+    pub(crate) fn epoch(&self)->u64 {replica_epoch(&self.db.lock().unwrap()).unwrap_or(u64::MAX)}
     pub fn clear(&self)->Result<()> {
         let mut db=self.db.lock().unwrap();let tx=db.transaction()?;
         tx.execute_batch("DELETE FROM local_echoes; DELETE FROM blocks; DELETE FROM block_cache_feeds; DELETE FROM block_cache_tombstones; UPDATE replica_epoch SET epoch=epoch+1;")?;tx.commit()?;Ok(())
@@ -158,20 +176,20 @@ impl Cache {
     pub fn has_file(&self, scope:&str, id:&str) -> bool {
         tau_block_store::header(&self.db.lock().unwrap(),scope,id).ok().flatten().is_some_and(|h|matches!(h.kind,BlockKind::File|BlockKind::Image))
     }
-    fn feed_request(&self, scope: &str, parent: Option<&str>, before: Option<FeedPosition>) -> Result<FeedRequest> {
+    pub(crate) fn feed_request(&self, scope: &str, parent: Option<&str>, before: Option<FeedPosition>) -> Result<FeedRequest> {
         let db = self.db.lock().unwrap();
         let saved = tau_block_store::cached_feed(&db,scope,parent)?;
         Ok(FeedRequest { scope:scope.into(),parent:parent.map(str::to_owned),
             cursor:if before.is_some() {None} else {saved.as_ref().map(|p|p.cursor.clone())},
             floor:saved.map_or(0,|p|p.floor),before })
     }
-    fn block_request(&self, scope: &str, id: &str) -> Result<BlockRequest> {
+    pub(crate) fn block_request(&self, scope: &str, id: &str) -> Result<BlockRequest> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         let h = tau_block_store::header(&tx,scope,id)?;
         let offset = tau_block_store::cached_prefix(&tx,scope,id)?; tx.commit()?;
         Ok(BlockRequest { scope:scope.into(),id:id.into(),version:h.map_or(0,|h|h.version),offset,follow:true })
     }
-    fn configure(&self, lineage: &str) -> Result<()> {
+    pub(crate) fn configure(&self, lineage: &str) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         if tau_block_store::cursor(&tx)?.lineage != lineage { tx.execute("DELETE FROM local_echoes", [])?; }
         tau_block_store::cache_lineage(&tx,lineage)?; tx.commit()?;
@@ -179,7 +197,7 @@ impl Cache {
     }
     #[cfg(test)]
     fn page(&self,lineage:&str,request:&FeedRequest,page:&FeedPage)->Result<()> {self.page_at(lineage,request,page,self.epoch())}
-    fn page_at(&self,lineage:&str,request:&FeedRequest,page:&FeedPage,epoch:u64) -> Result<()> {
+    pub(crate) fn page_at(&self,lineage:&str,request:&FeedRequest,page:&FeedPage,epoch:u64) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
         ensure!(page.cursor.lineage == lineage && tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
@@ -189,7 +207,7 @@ impl Cache {
         for record in &page.records {
             if let BlockRecord::Put { block } = record
                 && let Some(current) = tau_block_store::header(&tx, &request.scope, &block.id)? {
-                echoes::adopt(&tx, &request.scope, &current)?;
+                adopt_echo(&tx, &request.scope, &current)?;
             }
         }
         if reset {tx.execute("UPDATE replica_epoch SET epoch=epoch+1",[])?;}
@@ -201,7 +219,7 @@ impl Cache {
     }
     #[cfg(test)]
     fn range(&self,lineage:&str,scope:&str,range:&ContentRange)->Result<()> {self.range_at(lineage,scope,range,self.epoch())}
-    fn range_at(&self,lineage:&str,scope:&str,range:&ContentRange,epoch:u64) -> Result<()> {
+    pub(crate) fn range_at(&self,lineage:&str,scope:&str,range:&ContentRange,epoch:u64) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
         ensure!(tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
@@ -211,12 +229,12 @@ impl Cache {
     }
     #[cfg(test)]
     fn header(&self,lineage:&str,scope:&str,header:&BlockHeader)->Result<()> {self.header_at(lineage,scope,header,self.epoch())}
-    fn header_at(&self,lineage:&str,scope:&str,header:&BlockHeader,epoch:u64) -> Result<()> {
+    pub(crate) fn header_at(&self,lineage:&str,scope:&str,header:&BlockHeader,epoch:u64) -> Result<()> {
         let mut db = self.db.lock().unwrap(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
         ensure!(tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
         tau_block_store::cache_header(&tx,scope,header)?;
-        if let Some(current) = tau_block_store::header(&tx,scope,&header.id)? { echoes::adopt(&tx,scope,&current)?; }
+        if let Some(current) = tau_block_store::header(&tx,scope,&header.id)? { adopt_echo(&tx,scope,&current)?; }
         tx.commit()?;self.changed(scope,&header.id,false); Ok(())
     }
     #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,&BTreeSet::new(),false,None,true,true)}
@@ -635,273 +653,129 @@ fn text_prefix(bytes: &[u8]) -> Result<String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan { pub background: bool, pub scope: String, pub parents: BTreeSet<Option<String>>, pub blocks: Vec<(String,Option<(u64,u64,bool,u64)>)>, pub older:Vec<(String,FeedPosition)>, pub foreground:BTreeSet<String> }
-pub enum Command { FileIndex(Option<crate::file_index::Interest>), Files(Option<crate::file_client::Interest>), Reset, Configure(BulkOffer,String), Plan(Vec<Plan>), History { scope:String,before:FeedPosition } }
-pub struct Notice { pub scope: String, pub error: Option<anyhow::Error>, pub transfer:Option<(String,std::path::PathBuf,tau_net::TransferStatus)> }
-pub struct Service { file_index:crate::file_index::Service, viewer:crate::file_client::Service, tx: mpsc::Sender<Command>, plans:watch::Sender<Vec<Plan>>, configuration:watch::Sender<Option<(BulkOffer,String)>>, pub node:watch::Receiver<Option<String>>, downloads:files::Downloads, task:tokio::task::JoinHandle<()> }
-impl Service {
-    pub fn start(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>) -> Self {
-        Self::start_with_files(cache, wake, notices, watch::channel(None).0, watch::channel(None).0)
-    }
-    pub fn start_with_files(cache: Cache, wake: crate::transport::Wake, notices:mpsc::Sender<Notice>, updates:watch::Sender<Option<Arc<crate::file_client::Update>>>, index_updates:watch::Sender<Option<Arc<crate::file_index::Update>>>) -> Self {
-        // Only coalesced plans/configuration and explicit history requests enter
-        // this queue; content never passes through it or the control event queue.
-        let (tx,rx) = mpsc::channel(8);
-        let (plans,plan_rx)=watch::channel(vec![]);let (configuration,config_rx)=watch::channel(None);
-        let (node,identity) = watch::channel(None);
-        let (endpoint,client)=watch::channel(None); let (ready,lineage)=watch::channel(None);
-        let file_index=crate::file_index::Service::start(client.clone(),lineage.clone(),index_updates,wake.clone());
-        let viewer=crate::file_client::Service::start(client.clone(),lineage.clone(),updates,wake.clone());
-        let downloads=files::Downloads {cache:cache.clone(),client,ready:lineage,notices:notices.clone(),wake:wake.clone()};
-        let task = tokio::spawn(run(cache,wake,rx,plan_rx,config_rx,notices,node,endpoint,ready));
-        Self { file_index,viewer,tx,plans,configuration,node:identity,downloads,task }
-    }
-    pub fn stats(&self)->Option<tau_net::native::Stats> {self.downloads.client.borrow().as_ref().map(|client|client.stats())}
-    pub(crate) fn downloads(&self) -> files::Downloads { self.downloads.clone() }
-    pub fn send(&self, command: Command) {
-        match command {
-            Command::FileIndex(interest)=>self.file_index.set(interest),
-            Command::Files(interest)=>self.viewer.set(interest),
-            Command::Plan(plan)=>{self.plans.send_replace(plan);}
-            Command::Configure(offer,host)=>{self.configuration.send_replace(Some((offer,host)));}
-            history@(Command::History {..}|Command::Reset)=>{
-                if let Err(error)=self.tx.try_send(history) && let Command::History {scope,..}=error.into_inner() {
-                    let _=self.downloads.notices.try_send(Notice {scope,error:Some(anyhow::anyhow!("History queue is busy; try again")),transfer:None});(self.downloads.wake)();
-                }
-            }
-        }
-    }
-}
-impl Drop for Service { fn drop(&mut self) { self.task.abort(); } }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Key { Feeds(String,Vec<Option<String>>,bool), BackgroundFeeds(Vec<(String,Option<String>)>), BackgroundBlock(String,String), Block(String,String,bool), History(String,Option<String>,FeedPosition,bool) }
-
-fn background_batches(cache:&Cache, feeds:BTreeSet<(String,Option<String>)>) -> Result<Vec<Key>> {
-    let mut batches=Vec::new();let mut keys=Vec::new();let mut requests=Vec::new();
-    for (scope,parent) in feeds {
-        let request=cache.feed_request(&scope,parent.as_deref(),None)?;
-        let mut proposed=requests.clone();proposed.push(request.clone());
-        if proposed.len()>16 || serde_json::to_vec(&BlockWatch::Feeds {requests:proposed})?.len()>MAX_BLOCK_HEADER_BYTES {
-            ensure!(!keys.is_empty(),"Background feed exceeds request budget");
-            batches.push(Key::BackgroundFeeds(std::mem::take(&mut keys)));requests.clear();
-        }
-        keys.push((scope,parent));requests.push(request);
+impl Cache {
+    pub fn lineage(&self) -> Result<String> { Ok(tau_block_store::cursor(&self.db.lock().unwrap())?.lineage) }
+    pub(crate) fn cached_header(&self, scope:&str, id:&str) -> Result<Option<BlockHeader>> { tau_block_store::header(&self.db.lock().unwrap(),scope,id) }
+    pub fn file_ready(&self, scope:&str, id:&str, path:&Path, limit:u64) -> Result<bool> {
+        let Some(h)=self.cached_header(scope,id)? else {return Ok(false);};
+        let Some(expected)=h.meta.get("sha256").and_then(|v|v.as_str()) else {return Ok(false);};
+        if !h.sealed || h.length>limit || !path.metadata().is_ok_and(|m|m.is_file() && m.len()==h.length) {return Ok(false);}
+        use sha2::Digest;
+        let mut file=std::fs::File::open(path)?; let mut buffer=[0;BLOCK_CHUNK_BYTES]; let mut hash=sha2::Sha256::new();
+        loop {let n=file.read(&mut buffer)?;if n==0 {break;} hash.update(&buffer[..n]);}
+        let valid=format!("{:x}",hash.finalize())==expected;
+        if valid && self.exports.as_ref().is_some_and(|root|path.starts_with(root)) && let Ok(file)=std::fs::OpenOptions::new().write(true).open(path) {let _=file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()));}
+        Ok(valid)
     }
-    if !keys.is_empty() {batches.push(Key::BackgroundFeeds(keys));}
-    Ok(batches)
-}
-struct Watches(HashMap<Key,tokio::task::JoinHandle<()>>);
-impl std::ops::Deref for Watches { type Target = HashMap<Key,tokio::task::JoinHandle<()>>; fn deref(&self) -> &Self::Target { &self.0 } }
-impl std::ops::DerefMut for Watches { fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 } }
-impl Drop for Watches { fn drop(&mut self) { for task in self.0.values() { task.abort(); } } }
-async fn run(cache: Cache, wake: crate::transport::Wake, mut commands:mpsc::Receiver<Command>, mut plans:watch::Receiver<Vec<Plan>>, mut configuration:watch::Receiver<Option<(BulkOffer,String)>>, notices:mpsc::Sender<Notice>, identity:watch::Sender<Option<String>>, endpoint:watch::Sender<Option<Arc<Client>>>, ready:watch::Sender<Option<String>>) {
-    let client = match Client::bind().await { Ok(client) => Arc::new(client), Err(error) => {
-        let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)(); return;
-    }};
-    endpoint.send_replace(Some(client.clone()));
-    identity.send_replace(Some(client.node_id())); (wake)();
-    let mut jobs = Watches(HashMap::new());
-    let mut plan = Vec::<Plan>::new();
-    loop {
-        let command=tokio::select! {
-            command=commands.recv()=>{let Some(command)=command else {break;};command}
-            result=plans.changed()=>{if result.is_err() {break;}Command::Plan(plans.borrow_and_update().clone())}
-            result=configuration.changed()=>{if result.is_err() {break;}let Some((offer,host))=configuration.borrow_and_update().clone() else {continue;};Command::Configure(offer,host)}
-        };
-        match command {
-            Command::Files(_) | Command::FileIndex(_) => unreachable!("viewer has its own coalesced interest"),
-            // Reset and the coalesced plan wake may be observed in either order.
-            // Restart the current interests; never erase a just-received plan.
-            Command::Reset=>{for job in jobs.values() {job.abort();}jobs.clear();}
-            Command::Configure(offer,host) => {
-                if let Err(error) = client.configure(&offer,&host).await {
-                    let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)();
-                } else if let Err(error) = cache.configure(&offer.lineage) {
-                    let _ = notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await; (wake)();
-                } else {
-                    if ready.borrow().as_ref().is_some_and(|old|old != &offer.lineage) { for task in jobs.values() {task.abort();} jobs.clear(); }
-                    ready.send_if_modified(|current| { if current.as_ref()==Some(&offer.lineage) {false} else {*current=Some(offer.lineage);true} });
-                }
-            }
-            Command::Plan(next) => { plan = next; }
-            Command::History { scope,before } => {
-                let key = Key::History(scope,None,before,false);
-                if jobs.get(&key).is_some_and(|task|task.is_finished()) {jobs.remove(&key);}
-                if !jobs.contains_key(&key) { jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone())); }
-            }
-        }
-        let mut desired=std::collections::HashSet::new();
-        let mut background_feeds=BTreeSet::new();
-        for p in &plan {
-            // Batch headers, with a hard encoded request budget. Many expanded
-            // cards must not consume every stream and starve their own bytes.
-            let mut parents=vec![]; let mut requests=vec![];
-            for parent in &p.parents {
-                if p.background {background_feeds.insert((p.scope.clone(),parent.clone()));continue;}
-                let Ok(request)=cache.feed_request(&p.scope,parent.as_deref(),None) else {continue;};
-                let mut proposed=requests.clone();proposed.push(request.clone());
-                if proposed.len()>16 || serde_json::to_vec(&BlockWatch::Feeds {requests:proposed}).map_or(true,|b|b.len()>MAX_BLOCK_HEADER_BYTES) {
-                    desired.insert(Key::Feeds(p.scope.clone(),std::mem::take(&mut parents),p.background));requests.clear();
-                }
-                parents.push(parent.clone());requests.push(request);
-            }
-            if !parents.is_empty() {desired.insert(Key::Feeds(p.scope.clone(),parents,p.background));}
-            for (id,head) in &p.blocks {
-                // A complete body is not a download interest. In particular, a
-                // delayed plan must not turn already-held text into a fetch of
-                // its former queue ID after consumption. A changed/evicted
-                // body gets a fresh plan from its metadata/cache update.
-                if head.is_some_and(|(_,length,sealed,stored)|(p.background || sealed) && length==stored) {continue;}
-                desired.insert(if p.background {Key::BackgroundBlock(p.scope.clone(),id.clone())}
-                    else {Key::Block(p.scope.clone(),id.clone(),p.foreground.contains(id))});
-            }
-            for (parent,before) in &p.older {desired.insert(Key::History(p.scope.clone(),Some(parent.clone()),before.clone(),p.background));}
-        }
-        // Root/queue subscriptions are cheap. Batch them across chats instead
-        // of occupying one long-lived stream per chat before any body can run.
-        match background_batches(&cache,background_feeds) {
-            Ok(batches)=>desired.extend(batches),
-            Err(error)=>{let _=notices.send(Notice {transfer:None,scope:String::new(),error:Some(error)}).await;(wake)();}
-        }
-        jobs.retain(|key,task| {
-            let keep=if let Key::History(scope,None,_,_)=key {!task.is_finished() && plan.iter().any(|p|!p.background && &p.scope==scope)} else {desired.contains(key)};
-            if !keep {task.abort();}keep
-        });
-        for key in desired {
-            let completed=jobs.get(&key).is_some_and(|t|t.is_finished());
-            let needed=match &key {
-                Key::Block(scope,id,_)=>{
-                    let db=cache.db.lock().unwrap();
-                    tau_block_store::header(&db,scope,id).ok().flatten().is_none_or(|h|!h.sealed ||
-                        tau_block_store::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length))
-                }
-                Key::BackgroundBlock(scope,id)=>{
-                    let db=cache.db.lock().unwrap();
-                    tau_block_store::header(&db,scope,id).ok().flatten().is_none_or(|h|
-                        tau_block_store::cache_budget::stored_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length))
-                }
-                _=>true,
+    pub(crate) fn export(&self, lineage:&str, scope:&str, header:&BlockHeader, target:&Path, cancel:&watch::Receiver<bool>) -> Result<()> {
+        use sha2::Digest;
+        let epoch=self.epoch();
+        let parent=target.parent().context("Invalid cache path")?;
+        std::fs::create_dir_all(parent)?;
+        let mut temp=tempfile::NamedTempFile::new_in(parent)?;
+        let mut hash=sha2::Sha256::new(); let mut offset=0;
+        while offset<header.length {
+            ensure!(!*cancel.borrow(),"Download cancelled");
+            let range={
+                let db=self.db.lock().unwrap();
+                ensure!(replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==lineage,"Data source changed");
+                tau_block_store::read(&db,&BlockRequest {scope:scope.into(),id:header.id.clone(),version:header.version,offset,follow:false})?
             };
-            if (!jobs.contains_key(&key) || completed) && needed {
-                jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone()));
-            }
+            ensure!(range.header.version==header.version && range.offset==offset && !range.bytes.is_empty(),"Cached file changed or is incomplete");
+            temp.write_all(&range.bytes)?; hash.update(&range.bytes); offset+=range.bytes.len() as u64;
         }
+        if let Some(expected)=header.meta.get("sha256").and_then(|v|v.as_str()) {
+            ensure!(format!("{:x}",hash.finalize())==expected,"Cached file checksum mismatch");
+        }
+        temp.as_file().sync_all()?;
+        static EXPORT_GATE:std::sync::Mutex<()>=std::sync::Mutex::new(());
+        let _gate=EXPORT_GATE.lock().unwrap();
+        if let Some(root)=&self.exports && target.starts_with(root) {crate::disk::collect_downloads(root,target,header.length,1024*1024*1024)?;}
+        // Hold the cache fence through the final rename: clear/reset cannot be
+        // followed by late publication from a previously verified generation.
+        let db=self.db.lock().unwrap();
+        ensure!(!*cancel.borrow() && replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==lineage,"Download cancelled or data source changed");
+        temp.persist(target)?;
+        #[cfg(unix)] std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
     }
-    for task in jobs.values() { task.abort(); }
-    client.shutdown().await;
+}
+const MAX_ECHO_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ECHO_ENTRIES: usize = 256;
+
+fn initialize_echoes(db: &Connection) -> Result<()> {
+    db.execute_batch("CREATE TABLE IF NOT EXISTS local_echoes (
+        seq INTEGER PRIMARY KEY, scope TEXT NOT NULL, request TEXT NOT NULL,
+        hash TEXT NOT NULL, body BLOB NOT NULL, UNIQUE(scope,request,hash));
+        CREATE INDEX IF NOT EXISTS block_body_hash ON blocks(scope,json_extract(header,'$.meta.bodyHash'))
+        WHERE json_extract(header,'$.meta.bodyHash') IS NOT NULL;")?;
+    Ok(())
 }
 
-fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Receiver<Option<String>>, notices:mpsc::Sender<Notice>, wake:crate::transport::Wake) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let scope = match &key {
-            Key::Feeds(scope,_,_) | Key::Block(scope,_,_) | Key::BackgroundBlock(scope,_) | Key::History(scope,_,_,_) => scope.clone(),
-            Key::BackgroundFeeds(_)=>String::new(),
-        };
-        while ready.borrow().is_none() { if ready.changed().await.is_err() { return; } }
-        let mut delay = 100;
+impl Cache {
+    pub(crate) fn remember_local(&self, scope: &str, local: &LocalChat, lineage: &str) -> Result<()> {
+        if local.pending.is_empty() { return Ok(()); }
+        let db = self.db.lock().unwrap();
+        // Saved intent remains in the authored store. Optional replica reuse
+        // must not turn startup/viewport contention into a lock error popup.
+        let Some(tx) = try_replica_maintenance(&db)? else { return Ok(()); };
+        // Never lend bytes or retire authored work across a source restore.
+        if tau_block_store::cursor(&tx)?.lineage != lineage { return Ok(()); }
+        for pending in &local.pending {
+            let (request, text) = match &pending.request.command {
+                ClientCommand::Prompt { text, .. } => (&pending.request.id, text),
+                ClientCommand::QueueControl { operation: QueueOperation::Edit { request_id, text, .. }, .. } => (request_id, text),
+                _ => continue,
+            };
+            if text.len() > MAX_ECHO_BYTES { continue; }
+            tx.execute("INSERT OR IGNORE INTO local_echoes(scope,request,hash,body) VALUES(?1,?2,?3,?4)",
+                params![scope, request, blake3::hash(text.as_bytes()).to_hex().as_str(), text.as_bytes()])?;
+        }
         loop {
-            let lineage = ready.borrow().clone().unwrap();
-            let result = watch_once(&key,&client,&cache,&lineage,&notices,&wake).await;
-            match result {
-                Ok(true) => return,
-                Ok(false) => continue, // Yield the class permit to queued interests.
-                Err(error) => {
-                    // Opt-in local context for lifecycle races; keep IDs out of
-                    // the popup and never log message bodies or credentials.
-                    if log::log_enabled!(target:"tau::content",log::Level::Debug) {
-                        let state=if let Key::Block(scope,id,_)=&key {cache.db.lock().ok().map(|db| {
-                            let head=tau_block_store::header(&db,scope,id).ok().flatten().map(|h|(h.version,h.length,h.sealed));
-                            let prefix=tau_block_store::cached_prefix(&db,scope,id).ok();
-                            (head,prefix)
-                        })} else {None};
-                        log::debug!(target:"tau::content","Content sync job {key:?}, current (header, cached prefix) {state:?}: {error:#}");
-                    }
-                    if notices.send(Notice {transfer:None,scope:scope.clone(),error:Some(error.context("Content sync"))}).await.is_err() { return; }
-                    (wake)();
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                    delay = (delay*2).min(5000);
-                }
-            }
+            let (count, bytes): (usize, usize) = tx.query_row("SELECT count(*),coalesce(sum(length(body)),0) FROM local_echoes", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if count <= MAX_ECHO_ENTRIES && bytes <= MAX_ECHO_BYTES { break; }
+            tx.execute("DELETE FROM local_echoes WHERE seq=(SELECT min(seq) FROM local_echoes)", [])?;
         }
-    })
+        // Header-first and input-first arrival are both valid. This indexed
+        // join touches only locally authored candidates, not every old body.
+        let headers = tx.prepare("SELECT b.header FROM blocks b JOIN local_echoes e
+            ON b.scope=e.scope AND json_extract(b.header,'$.meta.bodyHash')=e.hash
+                AND coalesce(json_extract(b.header,'$.meta.request.requestId'),json_extract(b.header,'$.meta.event.origin.requestId'))=e.request
+            WHERE b.scope=?1 AND json_extract(b.header,'$.meta.bodyHash') IS NOT NULL")?.query_map([scope], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut changed = Vec::new();
+        for raw in headers {
+            let h: BlockHeader = serde_json::from_str(&raw)?;
+            if adopt_echo(&tx, scope, &h)? { changed.push(h.id); }
+        }
+        tx.commit()?;
+        drop(db);
+        for id in changed { self.changed(scope, &id, false); }
+        Ok(())
+    }
 }
 
-async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, notices: &mpsc::Sender<Notice>, wake: &crate::transport::Wake) -> Result<bool> {
-    let epoch=cache.epoch();
-    let (scope,request) = match key {
-        Key::Feeds(scope,parents,_) => (scope.clone(),BlockWatch::Feeds {requests:parents.iter().map(|parent|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
-        Key::BackgroundFeeds(feeds)=>(String::new(),BlockWatch::Feeds {requests:feeds.iter().map(|(scope,parent)|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
-        Key::History(scope,parent,before,_) => (scope.clone(),BlockWatch::Feed(cache.feed_request(scope,parent.as_deref(),Some(before.clone()))?)),
-        Key::Block(scope,id,_) => (scope.clone(),BlockWatch::Block(cache.block_request(scope,id)?)),
-        Key::BackgroundBlock(scope,id)=>{
-            let mut request=cache.block_request(scope,id)?;
-            // Catch up and release the slot, even for a live body. The shared
-            // metadata feed announces further appends. Quiet background chats
-            // must not hoard bulk slots waiting out a five-second watch slice.
-            request.follow=false;
-            (scope.clone(),BlockWatch::Block(request))
-        }
-    };
-    let feeds=match &request {BlockWatch::Feed(req)=>vec![req.clone()],BlockWatch::Feeds {requests}=>requests.clone(),BlockWatch::Block(_)=>vec![]};
-    let bulk=matches!(key,Key::Block(_,_,false) | Key::Feeds(_,_,true) | Key::History(_,_,_,true) | Key::BackgroundFeeds(_) | Key::BackgroundBlock(..));
-    log::trace!(target: "tau_native_watch", "acquire begin key={key:?} epoch={epoch}");
-    let mut watcher = client.watch_scheduled(request.clone(),bulk).await?;
-    log::trace!(target: "tau_native_watch", "acquire complete key={key:?}");
-    let mut records = vec![vec![];feeds.len()]; let mut head = None;
-    loop {
-        log::trace!(target: "tau_native_watch", "receive begin key={key:?}");
-        let (frame,wire_bytes) = watcher.next().await?;
-        let kind=match &frame.header {Header::Record {..}=>"record",Header::Page {..}=>"page",Header::Block {..}=>"head",Header::Data {..}=>"data",Header::End=>"end",Header::Yield=>"yield",Header::Error {..}=>"error",_=>"other"};
-        log::trace!(target: "tau_native_watch", "receive complete key={key:?} kind={kind}");
-        match &frame.header {
-            Header::Record { watch,record } => {
-                let records=records.get_mut(*watch).context("Unrequested feed")?;
-                ensure!(records.len()<MAX_FEED_PAGE,"Unexpected feed record");records.push(record.clone());
-            }
-            Header::Page {watch,reset,cursor,floor,before,more} => {
-                let req=feeds.get(*watch).context("Unrequested feed")?;
-                let page = FeedPage {reset:*reset,records:std::mem::take(&mut records[*watch]),cursor:cursor.clone(),floor:*floor,before:before.clone(),more:*more};
-                let notice_scope=req.scope.clone();
-                let cache = cache.clone(); let req = req.clone(); let lineage = lineage.to_owned();
-                tokio::task::spawn_blocking(move ||cache.page_at(&lineage,&req,&page,epoch)).await??;
-                notices.send(Notice {transfer:None,scope:notice_scope,error:None}).await?; (wake)();
-            }
-            Header::Block {block} => {
-                let BlockWatch::Block(req) = &request else { anyhow::bail!("Unexpected block header"); };
-                ensure!(block.id == req.id,"Peer sent an unrequested block");
-                let cache = cache.clone(); let scope2 = scope.clone(); let h = block.clone(); let lineage = lineage.to_owned();
-                tokio::task::spawn_blocking(move ||cache.header_at(&lineage,&scope2,&h,epoch)).await??;
-                head = Some(block.clone());
-                notices.send(Notice {transfer:None,scope:scope.clone(),error:None}).await?; (wake)();
-            }
-            Header::Data {version,offset,hash,..} => {
-                let h: &BlockHeader = head.as_ref().context("Content without a requested header")?;
-                ensure!(h.version == *version,"Unexpected content version");
-                let range = ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes:frame.decoded()?};
-                let cache = cache.clone(); let scope2 = scope.clone(); let lineage = lineage.to_owned();
-                log::trace!(target: "tau_native_watch", "cache range begin key={key:?} offset={offset}");
-                tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope2,&range,epoch)).await??;
-                log::trace!(target: "tau_native_watch", "cache range complete key={key:?} offset={offset}");
-                notices.send(Notice {transfer:None,scope:scope.clone(),error:None}).await?; (wake)();
-            }
-            Header::End | Header::Yield => {
-                ensure!(records.iter().all(Vec::is_empty),"Watch ended before its metadata checkpoint");
-                return Ok(matches!(frame.header,Header::End));
-            }
-            Header::Error {message} => anyhow::bail!("{message}"),
-            _ => anyhow::bail!("Unexpected block response"),
-        }
-        // A peer may finish its credit half while the final bounded response is
-        // still being consumed. Read-side errors/End determine stream completion.
-        log::trace!(target: "tau_native_watch", "credit begin key={key:?}");
-        let _ = watcher.consumed(wire_bytes).await;
-        log::trace!(target: "tau_native_watch", "credit complete key={key:?}");
-        if cache.epoch()!=epoch {return Ok(false);}
+fn adopt_echo(db: &Connection, scope: &str, h: &BlockHeader) -> Result<bool> {
+    if !h.sealed || h.kind != BlockKind::Text || h.length > MAX_ECHO_BYTES as u64 { return Ok(false); }
+    let request = if h.parent.as_deref() == Some(QUEUE) {
+        h.meta.pointer("/request/requestId").and_then(|v| v.as_str())
+    } else if h.meta.pointer("/event/role").and_then(|v| v.as_str()) == Some("user") {
+        h.meta.pointer("/event/origin/requestId").and_then(|v| v.as_str())
+    } else { None };
+    let (Some(request), Some(hash)) = (request, h.meta.get("bodyHash").and_then(|v| v.as_str())) else { return Ok(false); };
+    if tau_block_store::cache_budget::stored_bytes(db, scope, &h.id)? == h.length { return Ok(false); }
+    let bytes: Option<Vec<u8>> = db.query_row("SELECT body FROM local_echoes WHERE scope=?1 AND request=?2 AND hash=?3",
+        params![scope, request, hash], |r| r.get(0)).optional()?;
+    let Some(bytes) = bytes else { return Ok(false); };
+    if bytes.len() as u64 != h.length || blake3::hash(&bytes).to_hex().as_str() != hash { return Ok(false); }
+    for (i, bytes) in bytes.chunks(BLOCK_CHUNK_BYTES).enumerate() {
+        tau_block_store::cache_range(db, scope, &ContentRange { header: h.clone(), offset: (i * BLOCK_CHUNK_BYTES) as u64,
+            hash: blake3::hash(bytes).to_hex().to_string(), bytes: bytes.to_vec() })?;
     }
+    tau_block_store::cache_budget::enforce(db, scope, &h.id, tau_block_store::cache_budget::DEFAULT_CACHE_BYTES)?;
+    Ok(true)
 }
 
 #[cfg(test)]
 pub(crate) mod tests;
-
-#[cfg(test)]
-mod checkpoint_tests;

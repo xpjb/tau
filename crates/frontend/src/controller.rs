@@ -2,7 +2,7 @@ use crate::{
     codex_usage::UsageView,
     feed::Feed,
     store::*,
-    transport::{self, Command, Network, Wake},
+    net::{self, Command, Network, Wake},
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -74,22 +74,22 @@ pub struct Controller {
     pub settings_result: Option<(String, bool)>,
     pub daemon_settings: Option<tau_net::settings::Settings>,
     pub connection: String,
-    pub health: crate::connection::Health,
+    pub health: crate::net::health::Health,
     pub native_metrics:tau_net::native::Stats,
     pub epoch: Option<u64>,
     pub notice: Option<crate::notice::Notice>,
     pub transport_error: Option<String>,
     pub codex_usage: UsageView,
-    remote: crate::blocks::Cache,
-    block_plan: Vec<crate::blocks::Plan>,
+    remote: crate::replica::Cache,
+    block_plan: Vec<crate::replica::Plan>,
     background_dirty: std::collections::HashSet<String>,
     plan_dirty:std::cell::Cell<bool>,
     viewport:Option<(String,std::collections::BTreeSet<String>)>,
     copy:Option<(String,Vec<String>)>,
     pub copied:Option<String>,
-    pub file_update:Option<std::sync::Arc<crate::file_client::Update>>,
+    pub file_update:Option<std::sync::Arc<crate::net::files::FileUpdate>>,
     file_generation:u64,
-    pub file_index:Option<std::sync::Arc<crate::file_index::Update>>,
+    pub file_index:Option<std::sync::Arc<crate::net::files::IndexUpdate>>,
     index_generation:u64,
     index_plan:Option<(String,Option<String>)>,
     network: Option<Network>,
@@ -131,7 +131,7 @@ impl Controller {
             settings_result: None,
             daemon_settings: None,
             connection: "Not connected".into(),
-            health: crate::connection::Health::default(),native_metrics:Default::default(),
+            health: crate::net::health::Health::default(),native_metrics:Default::default(),
             epoch: None,
             notice: None,
             transport_error: None,
@@ -170,7 +170,7 @@ impl Controller {
         self.transport_error = None;
         self.epoch = None;
         self.connection = "Connecting…".into();
-        self.health = crate::connection::Health::connecting();
+        self.health = crate::net::health::Health::connecting();
         self.block_plan.clear();self.plan_dirty.set(true);
         self.requests.clear();
         self.project_deletions.clear();
@@ -532,7 +532,7 @@ impl Controller {
         // don't mark a failed submission as installed (the next tick retries).
         if plan.is_some() { self.file_index = None; }
         if let Some(network) = &self.network {
-            if let Err(error) = network.send(Command::Blocks(crate::blocks::Command::FileIndex(plan.clone().map(|(session, path)| crate::file_index::Interest { generation: self.index_generation, session, path })))) {
+            if let Err(error) = network.index_files(plan.clone().map(|(session, path)| crate::net::files::IndexInterest { generation: self.index_generation, session, path })) {
                 return Err(error);
             }
         }
@@ -551,12 +551,12 @@ impl Controller {
         self.file_generation += 1;
         self.file_update = None;
         if let Some(network)=&self.network {
-            network.send(Command::Blocks(crate::blocks::Command::Files(request.map(|request|crate::file_client::Interest {preview,generation:self.file_generation,request,document}))))?;
+            network.view_files(request.map(|request|crate::net::files::FileInterest {preview,generation:self.file_generation,request,document}))?;
         } else if request.is_some() { anyhow::bail!("Connect to browse remote files"); }
         Ok(self.file_generation)
     }
     pub fn request(&mut self, command: ClientCommand) -> Result<String> {
-        let epoch=self.epoch.ok_or_else(||anyhow::Error::from(transport::ConnectionUnavailable))?;
+        let epoch=self.epoch.ok_or_else(||anyhow::Error::from(net::ConnectionUnavailable))?;
         if matches!(command,ClientCommand::ListSessions) && let Some(catalog)=&mut self.catalog && !(catalog.sessions_done && catalog.projects_done) {catalog.refresh=true;return Ok(catalog.id.clone());}
         let durable=command.journalled_control();
         let encoded=serde_json::to_vec(&command)?;
@@ -592,7 +592,7 @@ impl Controller {
         }
     }
     pub fn report_error(&mut self, error: anyhow::Error) {
-        if error.is::<transport::ConnectionUnavailable>() { self.transport_error = Some(error.to_string()); }
+        if error.is::<net::ConnectionUnavailable>() { self.transport_error = Some(error.to_string()); }
         else { self.notice = Some(error.to_string().into()); }
     }
     fn report_sync_error(&mut self, error: anyhow::Error) {
@@ -607,7 +607,7 @@ impl Controller {
     }
     pub fn clear_replica(&mut self)->Result<()> {
         self.remote.clear()?;self.block_plan.clear();self.plan_dirty.set(true);self.copy=None;
-        if let Some(network)=&self.network {network.send(Command::Blocks(crate::blocks::Command::Reset))?;}
+        if let Some(network)=&self.network {network.reset_replica()?;}
         for chat in self.chats.values_mut() {chat.feed=Feed::default();chat.reconcile();}
         self.watch_blocks()?;Ok(())
     }
@@ -636,7 +636,7 @@ impl Controller {
     }
     pub fn control(&mut self,command:ClientCommand)->Result<()> {self.control_id(command).map(|_|())}
     fn control_id(&mut self, command: ClientCommand) -> Result<String> {
-        let epoch = self.epoch.ok_or_else(|| anyhow::Error::from(transport::ConnectionUnavailable))?;
+        let epoch = self.epoch.ok_or_else(|| anyhow::Error::from(net::ConnectionUnavailable))?;
         let session = match &command {
             ClientCommand::Prompt { session_id, text, .. } if text.starts_with('/') => {
                 session_id.clone()
@@ -994,7 +994,7 @@ impl Controller {
             return Ok(());
         }
         if let Some(before) = self.remote.history_cursor(&id)? {
-            self.network.as_ref().ok_or_else(||anyhow::Error::from(transport::ConnectionUnavailable))?.send(transport::Command::Blocks(crate::blocks::Command::History { scope:id.clone(),before }))?;
+            self.network.as_ref().ok_or_else(||anyhow::Error::from(net::ConnectionUnavailable))?.history(id.clone(),before)?;
             self.chats.get_mut(&id).unwrap().feed.loading = true;
         }
         Ok(())
@@ -1049,7 +1049,7 @@ impl Controller {
             return Ok(path);
         }
         if !(self.network.is_some() && (self.remote.authorized() || self.remote.has_file(session,&format!("file:{entry}")))) {
-            return Err(anyhow::Error::from(transport::ConnectionUnavailable).context("Content connection is not authorized yet"));
+            return Err(anyhow::Error::from(net::ConnectionUnavailable).context("Content connection is not authorized yet"));
         }
         let key = Self::download_key(session, entry);
         if self.downloads.get(&key).is_some_and(|d| !d.status.done) {
@@ -1077,7 +1077,7 @@ impl Controller {
     pub fn cancel_download(&self, key: &str) -> Result<()> {
         self.network
             .as_ref()
-            .ok_or_else(|| anyhow::Error::from(transport::ConnectionUnavailable))?
+            .ok_or_else(|| anyhow::Error::from(net::ConnectionUnavailable))?
             .send(Command::CancelDownload(key.into()))
     }
     fn not_sent(&mut self, id: &str, detail: &str, retryable: bool) -> Result<()> {
@@ -1135,17 +1135,19 @@ impl Controller {
         }
         let mut scopes = std::collections::HashSet::new();
         for _ in 0..256 {
-            let Some(notice) = self.network.as_mut().and_then(|n|n.blocks.try_recv().ok()) else { break; };
-            if let Some((key,path,status))=notice.transfer {
-                changed=true;
-                if let Err(error)=self.network_event(transport::Event::Download {key,path,status}) {self.report_error(error);}
-            } else if let Some(error) = notice.error {
-                changed=true;if let Some(chat)=self.chats.get_mut(&notice.scope) {chat.feed.loading=false;} self.report_sync_error(error);
-            } else {
-                // An unselected transcript chunk is disk work, not a reason to
-                // redraw the current conversation for every background token.
-                changed |= self.transport_error.take().is_some() || self.account.selected.as_ref()==Some(&notice.scope);
-                scopes.insert(notice.scope);
+            let Some(notice) = self.network.as_mut().and_then(|n|n.replicas.try_recv().ok()) else { break; };
+            match notice {
+                net::ReplicaNotice::Failed {scope,error} => {
+                    changed=true;
+                    if let Some(chat)=self.chats.get_mut(&scope) {chat.feed.loading=false;}
+                    self.report_sync_error(error);
+                }
+                net::ReplicaNotice::Changed(scope) => {
+                    // Background chunks advance interests without redrawing the
+                    // foreground conversation for every unselected token.
+                    changed |= self.transport_error.take().is_some() || self.account.selected.as_ref()==Some(&scope);
+                    scopes.insert(scope);
+                }
             }
         }
         for scope in scopes {
@@ -1277,7 +1279,7 @@ impl Controller {
             next.push(plan);
         }
         if next != self.block_plan && let Some(network) = &self.network {
-            if let Err(error)=network.send(transport::Command::Blocks(crate::blocks::Command::Plan(next.clone()))) {
+            if let Err(error)=network.plan(next.clone()) {
                 self.plan_dirty.set(true);return Err(error);
             }
             self.block_plan = next;
@@ -1285,12 +1287,12 @@ impl Controller {
         self.background_dirty.clear();
         Ok(())
     }
-    fn network_event(&mut self, event: transport::Event) -> Result<()> {
-        let fatal = matches!(&event, transport::Event::Fatal(_));
+    fn network_event(&mut self, event: net::Event) -> Result<()> {
+        let fatal = matches!(&event, net::Event::Fatal(_));
         match event {
-            transport::Event::Connecting { attempt, at } => self.health.attempt(attempt, at),
-            transport::Event::RetryScheduled { at } => self.health.retry_scheduled(at),
-            transport::Event::Source(epoch,lineage)=>{
+            net::Event::Connecting { attempt, at } => self.health.attempt(attempt, at),
+            net::Event::RetryScheduled { at } => self.health.retry_scheduled(at),
+            net::Event::Source(epoch,lineage)=>{
                 self.source_guard=Some((epoch,false));
                 if self.store.bind_source(&self.identity,&lineage)? {
                     self.saved_downloads.clear();
@@ -1303,7 +1305,7 @@ impl Controller {
                 } else {self.account.source_lineage=Some(lineage);}
                 self.source_guard=Some((epoch,true));
             }
-            transport::Event::Ready { epoch, at } => {
+            net::Event::Ready { epoch, at } => {
                 ensure!(self.source_guard==Some((epoch,true)),"Source identity was not durably recorded; automatic submission is disabled. Repair local storage and reconnect.");
                 self.state_versions.clear();self.catalog=None;self.receipt_queue.clear();self.receipt_inflight=None;
                 self.epoch = Some(epoch);
@@ -1327,7 +1329,7 @@ impl Controller {
                     self.request(ClientCommand::GetCommands { session_id: id })?;
                 }
             }
-            transport::Event::Disconnected(detail) | transport::Event::Fatal(detail) => {
+            net::Event::Disconnected(detail) | net::Event::Fatal(detail) => {
                 self.epoch = None;
                 self.codex_usage.offline();
                 self.connection = detail;
@@ -1349,19 +1351,19 @@ impl Controller {
                     chat.reconcile();self.store.save_chat(&self.identity, session, &chat.local)?;
                 }
             }
-            transport::Event::HeartbeatSent { epoch, at } if self.epoch == Some(epoch) => {
+            net::Event::HeartbeatSent { epoch, at } if self.epoch == Some(epoch) => {
                 self.health.sent(at)
             }
-            transport::Event::HeartbeatReply { epoch, at, rtt } if self.epoch == Some(epoch) => {
+            net::Event::HeartbeatReply { epoch, at, rtt } if self.epoch == Some(epoch) => {
                 self.health.reply(rtt, at)
             }
-            transport::Event::NotSent(id, detail) => {
+            net::Event::NotSent(id, detail) => {
                 if self.is_creating(&id) {
                     self.requests.remove(&id);
                     self.transport_error = Some(detail);
                 } else { self.not_sent(&id, &detail, true)?; }
             },
-            transport::Event::Prepared { epoch, id, result, retryable } => {
+            net::Event::Prepared { epoch, id, result, retryable } => {
                 let session = self
                     .chats
                     .iter()
@@ -1404,17 +1406,17 @@ impl Controller {
                     }
                 }
             }
-            transport::Event::Download { key, status, path } => {
+            net::Event::Download { key, status, path } => {
                 if let Some(download) = self.downloads.get_mut(&key) {
                     download.update(status, path);
                 } else {
                     self.downloads.insert(key, Download::new(status, path));
                 }
             }
-            transport::Event::Metrics(stats)=>{
+            net::Event::Metrics(stats)=>{
                 self.native_metrics=stats;
             },
-            transport::Event::Message(epoch, message)|transport::Event::SizedMessage(epoch,message,_) if self.epoch == Some(epoch) => {
+            net::Event::Message(epoch, message) if self.epoch == Some(epoch) => {
                 self.message(*message)?
             }
             _ => {}
@@ -1809,12 +1811,12 @@ impl Controller {
 mod safety_tests {
 use super::*;
 use std::sync::Arc;
-use crate::transport::Event as NetworkEvent;
+use crate::net::Event as NetworkEvent;
 #[tokio::test]
 async fn connection_status_does_not_popup_but_real_content_and_storage_failures_still_do() {
     let root=tempfile::tempdir().unwrap();
     let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-    c.report_error(transport::ConnectionUnavailable.into());
+    c.report_error(net::ConnectionUnavailable.into());
     assert!(c.notice.is_none());assert!(c.transport_error.is_some());
     c.not_sent("background-read","Connection changed",true).unwrap();assert!(c.notice.is_none());
     let timeout=tokio::time::timeout(std::time::Duration::ZERO,std::future::pending::<()>()).await.unwrap_err();

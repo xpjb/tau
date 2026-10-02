@@ -11,9 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tau_frontend::{
-    connection::{CONNECT_TIMEOUT, MIN_CONNECT_INTERVAL, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
+    net::health::{CONNECT_TIMEOUT, MIN_CONNECT_INTERVAL, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT},
     store::Settings,
-    transport::{Event, Network},
+    net::{Event, Network},
 };
 use tau_net::{PROTOCOL_VERSION, ServerMessage};
 

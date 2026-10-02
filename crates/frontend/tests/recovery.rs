@@ -16,7 +16,7 @@ use std::{
 use tau_frontend::{
     controller::Controller,
     store::{Delivery, Settings, Store},
-    transport::{Command, Event as NetworkEvent, Network},
+    net::{Command, Event as NetworkEvent, Network},
 };
 use tau_net::*;
 

@@ -47,7 +47,7 @@ pub struct Feed {
     previews:std::collections::VecDeque<(String,Vec<String>,usize)>,
     pub queue: QueueState,
     pub queue_transitions: HashMap<String,u64>, // Display-only rows awaiting the root cursor.
-    pub bodies: HashMap<String,crate::blocks::Body>,
+    pub bodies: HashMap<String,crate::replica::Body>,
     pub incomplete: HashSet<String>,
     pub block_states: HashMap<String,blocks::ToolState>,
     pub parents: HashMap<String,String>,
@@ -148,7 +148,7 @@ impl Feed {
             }
         }
     }
-    pub(crate) fn native_view(&mut self,mut view:crate::blocks::View)->Result<Vec<String>> {
+    pub(crate) fn native_view(&mut self,mut view:crate::replica::View)->Result<Vec<String>> {
         let mut ids = HashSet::new(); let mut orders = HashSet::new();
         ensure!(view.events.iter().all(|e| !e.id.is_empty() && ids.insert(&e.id) && orders.insert(e.order)), "Duplicate native event identity/order");
         if self.generation == view.generation {

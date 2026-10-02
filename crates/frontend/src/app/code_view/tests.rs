@@ -23,7 +23,7 @@ impl Harness {
     }
     fn update(&mut self,reply:FileReply,document:Option<Arc<Document>>) {
         let view=self.app.root.workspace.chat.code.view.as_ref().unwrap();
-        self.app.controller.file_update=Some(Arc::new(crate::file_client::Update {generation:view.generation,session:view.session.clone(),lineage:view.lineage.clone().unwrap_or_default(),response:Ok(reply),document}));self.frame();
+        self.app.controller.file_update=Some(Arc::new(crate::net::files::FileUpdate {generation:view.generation,session:view.session.clone(),lineage:view.lineage.clone().unwrap_or_default(),response:Ok(reply),document}));self.frame();
     }
     fn text(&mut self,text:&str) {
         let old=self.app.root.workspace.chat.code.view.as_ref().unwrap().document.clone();
@@ -34,7 +34,7 @@ impl Harness {
         let reply = FileReply::Index { path: "/workspace".into(), revision: "a".repeat(64), base: None,
             entries: paths.iter().map(|p| IndexedPath { path: (*p).into(), symlink: false }).collect(), removed: vec![], indexing: false, limited };
         let index = Arc::new(tau_code_viewer::finder::PathIndex::apply(None, &reply).unwrap());
-        self.app.controller.file_index = Some(Arc::new(crate::file_index::Update { generation:0,
+        self.app.controller.file_index = Some(Arc::new(crate::net::files::IndexUpdate { generation:0,
             session: self.app.controller.account.selected.clone().unwrap(), lineage: self.app.controller.account.source_lineage.clone().unwrap_or_default(),
             index: Some(index), indexing:false,limited,error:None }));
         self.frame();
@@ -128,7 +128,7 @@ fn telescope_reuses_real_editor_and_cancels_without_losing_code_selection() {
     // Rendering the same actual code frame does not reshape source paragraphs.
     sanscale::profiling::reset_work_counters();h.frame();
     assert_eq!(sanscale::profiling::work_counters().source_reads,0);
-    h.app.controller.file_update=Some(Arc::new(crate::file_client::Update {generation:99_999,session:"other".into(),lineage:"other".into(),response:Err("old response".into()),document:None}));h.frame();
+    h.app.controller.file_update=Some(Arc::new(crate::net::files::FileUpdate {generation:99_999,session:"other".into(),lineage:"other".into(),response:Err("old response".into()),document:None}));h.frame();
     assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().error.is_none());
 }
 

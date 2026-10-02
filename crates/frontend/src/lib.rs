@@ -1,9 +1,7 @@
-pub mod blocks;
+pub mod replica;
 pub mod feed;
-pub mod file_client;
-pub mod file_index;
 pub mod store;
-pub mod transport;
+pub mod net;
 
 #[cfg(target_os = "android")]
 mod android;
@@ -11,7 +9,6 @@ mod app;
 mod cache_ttl;
 mod clock;
 mod codex_usage;
-pub mod connection;
 pub mod controller;
 #[cfg(not(target_os = "android"))]
 mod demo;

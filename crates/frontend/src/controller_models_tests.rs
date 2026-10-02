@@ -32,7 +32,7 @@ fn model_choice_and_remembered_default_commit_together_or_neither_changes() {
 fn model_catalog_is_account_cached_restartable_ordered_and_source_fenced() {
     let root = tempfile::tempdir().unwrap();
     let mut c = Controller::new(Store::open(root.path().into()).unwrap(), Arc::new(|| {})).unwrap();
-    c.network_event(transport::Event::Source(1, "source-a".into())).unwrap();
+    c.network_event(net::Event::Source(1, "source-a".into())).unwrap();
     c.message(ServerMessage::ModelCatalog { catalog: catalog(20, "fixture/new") }).unwrap();
     c.message(ServerMessage::ModelCatalog { catalog: catalog(3, "fixture/late") }).unwrap();
     assert_eq!(c.model_catalog.models[0].value, "fixture/new");
@@ -49,7 +49,7 @@ fn model_catalog_is_account_cached_restartable_ordered_and_source_fenced() {
     c.choose_model(&id, "fixture/manual-missing-from-catalog").unwrap();
     c.message(ServerMessage::ModelCatalog { catalog: catalog(2, "fixture/refreshed") }).unwrap();
     assert_eq!(c.selected_model(&id), Some(&"fixture/manual-missing-from-catalog".parse().unwrap()));
-    c.network_event(transport::Event::Source(2, "source-b".into())).unwrap();
+    c.network_event(net::Event::Source(2, "source-b".into())).unwrap();
     assert!(c.model_catalog.models.is_empty());
     assert!(c.store.get::<tau_net::ModelCatalog>(&c.identity, "model-catalog").unwrap().models.is_empty());
     assert!(c.account.create_blocked, "Source changes still fence automatic work");
