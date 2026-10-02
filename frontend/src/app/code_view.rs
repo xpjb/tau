@@ -34,6 +34,7 @@ pub(super) struct View {
     highlighter: tau_code_viewer::finder::Finder,
     show_hidden: bool,
     search_from_chat: bool,
+    browse_scroll: Option<(f32, f32)>,
     preview: Option<Arc<Document>>,
     preview_target: Option<String>,
     preview_error: Option<String>,
@@ -92,6 +93,7 @@ impl View {
             highlighter: tau_code_viewer::finder::Finder::new(""),
             show_hidden: false,
             search_from_chat: false,
+            browse_scroll: None,
             preview: None,
             preview_target: None,
             preview_error: None,
@@ -122,6 +124,18 @@ impl View {
             status: String::new(),
             paints: HashMap::new(),
         }
+    }
+    fn leave_search(&mut self) -> bool {
+        if self.search.take().is_none() { return false; }
+        self.path = self.document.as_ref().map(|d| d.path.clone()).or_else(|| self.directory.clone());
+        if let Some((vertical, horizontal)) = self.browse_scroll.take() {
+            self.scroll.value = vertical;
+            self.horizontal.value = horizontal;
+        }
+        self.preview = None;
+        self.preview_target = None;
+        self.match_generation = self.matcher.cancel();
+        true
     }
     fn len(&self) -> usize {
         if self.search.is_some() { self.matches.as_ref().filter(|m| m.generation == self.match_generation).map_or(0, |m| m.rows.len()) }
@@ -205,6 +219,9 @@ pub(in crate::app) enum Choice {
 }
 pub(in crate::app) struct CodeBrowser {
     pub view: Option<View>,
+    // A small same-source MRU, not live background viewers. Hidden buffers keep
+    // reading/selection state but release paint, picker payloads and interests.
+    remembered: std::collections::VecDeque<View>,
     pub controls: Controls<Choice>,
     surface: ui::controls::Control,
     pub pointer: Option<Pointer>,
@@ -215,6 +232,7 @@ impl CodeBrowser {
         let id = ui::Id::new();
         Self {
             view: None,
+            remembered: Default::default(),
             controls: Controls::new(id),
             surface: ui::controls::Control::new(id, false),
             pointer: None,
@@ -241,6 +259,11 @@ impl CodeBrowser {
         cx.report(result);
     }
 
+    fn prune_remembered(&mut self, model: &Controller) {
+        self.remembered.retain(|view| view.identity == model.identity
+            && view.lineage == model.account.source_lineage
+            && model.account.sessions.iter().any(|s| s.id == view.session));
+    }
     pub(super) fn close_code(&mut self, cx: &mut Context<'_>) {
         if self.view.is_some() {
             self.cancel_pointer(cx);
@@ -253,7 +276,17 @@ impl CodeBrowser {
             view.clear_paint(&mut cx.services.renderer);
             let _ = cx.model.view_files(None);
             cx.ui.focus = None;
+            view.leave_search();
+            view.subscribed = false;
+            view.seen = None;
+            view.previews.clear();
+            view.matches = None;
+            view.index_seen = None;
+            self.remembered.retain(|old| old.session != view.session);
+            self.remembered.push_front(view);
+            self.remembered.truncate(4);
         }
+        self.prune_remembered(cx.model);
     }
     fn code_request(&mut self, cx: &mut Context<'_>) {
         let Some(code) = &mut self.view else {
@@ -298,7 +331,10 @@ impl CodeBrowser {
                 cx.model.save_chat(&session)?;
                 self.cancel_pointer(cx);
                 cx.ui.focus = None;
-                self.view = Some(View::new(cx.model, session));
+                self.prune_remembered(cx.model);
+                self.view = self.remembered.iter().position(|view| view.session == session)
+                    .and_then(|at| self.remembered.remove(at))
+                    .or_else(|| Some(View::new(cx.model, session)));
                 self.code_request(cx);
             }
             Choice::FileClose | Choice::FileChat => {
@@ -343,6 +379,7 @@ impl CodeBrowser {
                     FileOperation::Open { revision: None }
                 };
                 code.search = None;
+                code.browse_scroll = None;
                 code.match_generation = code.matcher.cancel();
                 code.document = if directory { None } else { cached };
                 code.preview = None;
@@ -387,6 +424,7 @@ impl CodeBrowser {
                 let Some(code) = &mut self.view else { return Ok(()); };
                 if code.search.is_some() { code.search_from_chat = false; self.code_back(cx); return Ok(()); }
                 code.search_from_chat = from_chat;
+                code.browse_scroll = Some((code.scroll.value, code.horizontal.value));
                 code.clear_paint(&mut cx.services.renderer);
                 code.search = Some(TextField::new(code.id, "", Editor::line(String::new())));
                 let field = code.search.as_mut().unwrap();
@@ -452,14 +490,11 @@ impl CodeBrowser {
             self.close_code(cx); return;
         }
         if let Some(code) = &mut self.view
-            && code.search.take().is_some()
+            && code.leave_search()
         {
             cx.ui.detach(code.id);
             cx.ui.search = None;
-            code.preview = None; code.preview_target = None;
-            code.match_generation = code.matcher.cancel();
             code.clear_paint(&mut cx.services.renderer);
-            code.path = code.document.as_ref().map(|d| d.path.clone()).or_else(|| code.directory.clone());
             code.operation = if code.document.is_some() {
                 FileOperation::Open { revision: None }
             } else {
@@ -468,7 +503,6 @@ impl CodeBrowser {
             code.entries.clear();
             code.pages = vec![None];
             code.next = None;
-            code.scroll.value = 0.;
             code.row = 0;
             cx.ui.focus = None;
             self.code_request(cx);
@@ -568,6 +602,7 @@ impl CodeBrowser {
         }
     }
     pub(super) fn code_tick(&mut self, dt: f32, cx: &mut Context<'_>) {
+        self.prune_remembered(cx.model);
         let active = cx.ui.window_focused && cx.ui.visible && !cx.ui.covered;
         let plan = if active {
             cx.model.account.selected.clone().map(|session| (session, self.view.as_ref().and_then(|c| c.index_root.clone())))

@@ -338,3 +338,64 @@ async fn remote_picker_results_wake_and_repaint_without_input_or_polling_frames(
     assert!(code.paints.values().any(|(spans, _)| !spans.is_empty()), "Results actually painted after the background wake");
     drop(app); daemon.abort(); let _ = daemon.await;
 }
+
+#[test]
+fn reopening_files_restores_each_chats_buffer_and_reading_position() {
+    for mobile in [false, true] {
+        let mut h = Harness::new(if mobile { (360,720) } else { (1000,800) }, 1., mobile);
+        h.files(); h.text(&source());
+        let point = h.line(3, true);
+        h.app.press(3, point, mobile); h.app.release(3, point); h.frame();
+        h.app.root.workspace.chat.code.view.as_mut().unwrap().scroll.value = 240.;
+        h.frame();
+        let original = h.app.root.workspace.chat.code.view.as_ref().unwrap().document.clone().unwrap();
+        let scroll = h.app.root.workspace.chat.code.view.as_ref().unwrap().scroll.value;
+        let draft = h.app.controller.selected().unwrap().local.draft.clone();
+        for exit in [Choice::FileChat, Choice::FileClose] {
+            let generation = h.app.controller.viewer_generation();
+            h.click(|a| a == &exit);
+            assert!(h.app.root.workspace.chat.code.view.is_none());
+            assert!(h.app.controller.viewer_generation() > generation, "Hidden buffers do not keep a live file interest");
+            h.files();
+            let view = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+            assert_eq!(view.path.as_deref(), Some("/workspace/src/main.rs"));
+            assert!(Arc::ptr_eq(view.document.as_ref().unwrap(), &original), "Reopening is immediate, not a blank directory reload");
+            assert_eq!(view.scroll.value, scroll);
+            assert_eq!(view.selection.as_ref().unwrap().range(&original), Some(3..4));
+            assert_eq!(h.app.controller.selected().unwrap().local.draft, draft);
+        }
+        h.app.with_ui(|root, cx| root.workspace.navigate_chat("two", cx)).unwrap(); h.frame();
+        h.files();
+        assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().document.is_none(), "Another chat must not inherit this buffer");
+        h.app.with_ui(|root, cx| root.workspace.navigate_chat("demo", cx)).unwrap(); h.frame();
+        h.files();
+        assert!(Arc::ptr_eq(h.app.root.workspace.chat.code.view.as_ref().unwrap().document.as_ref().unwrap(), &original));
+        // A reset source must not recover an old source's file contents or line selection.
+        h.app.controller.account.source_lineage = Some("replacement-source".into()); h.frame();
+        assert!(h.app.root.workspace.chat.code.view.is_none());
+        h.files();
+        assert!(h.app.root.workspace.chat.code.view.as_ref().unwrap().document.is_none());
+    }
+}
+
+#[test]
+fn closing_the_picker_keeps_the_open_file_not_its_preview_and_restores_scroll() {
+    let mut h = Harness::new((1000,800), 1., false);
+    h.files(); h.text(&source());
+    h.app.root.workspace.chat.code.view.as_mut().unwrap().scroll.value = 300.; h.frame();
+    let scroll = h.app.root.workspace.chat.code.view.as_ref().unwrap().scroll.value;
+    for close_browser in [false, true] {
+        h.click(|a| matches!(a, Choice::FileFind));
+        h.index(&["other.rs"], false); h.matched(); h.preview("not the opened file\n");
+        if close_browser {
+            h.click(|a| matches!(a, Choice::FileChat)); h.files();
+        } else {
+            h.click(|a| matches!(a, Choice::FileFind));
+        }
+        let code = h.app.root.workspace.chat.code.view.as_ref().unwrap();
+        assert!(code.search.is_none());
+        assert_eq!(code.path.as_deref(), Some("/workspace/src/main.rs"));
+        assert_eq!(code.document.as_ref().unwrap().text, source());
+        assert_eq!(code.scroll.value, scroll);
+    }
+}

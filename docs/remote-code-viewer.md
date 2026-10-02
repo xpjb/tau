@@ -32,7 +32,10 @@ it. There are no filesystem write/save, rename, delete or execute actions.
   The preview is separate from the opened buffer, selection and saved chat draft.
 - **Browse** returns to the directory/code surface. Escape returns directly to chat
   when the picker was opened from chat, or to the prior browser otherwise. **Chat**
-  and **X** have distinct retained control identities and both close the browser.
+  and **X** have distinct retained control identities and both return to chat.
+  Reopening Files restores that chat's last buffer, line selection and scroll
+  position. Find/Browse also preserves the opened buffer's reading position;
+  previews never replace it until explicitly opened.
 - Desktop: click/drag lines; Shift+arrows extend a selection, `v` starts one, and
   Ctrl+C / Copy copies the original selected text. Horizontal wheel/arrows pan.
 - Android: gutter tap/drag selects, or hold code for a haptic acknowledgement then
@@ -87,8 +90,12 @@ it. There are no filesystem write/save, rename, delete or execute actions.
 - The frontend owns independent coalesced name-sync and viewer interests with
   bounded result mailboxes. Chat, account/source lineage and request generations
   fence stale results. Navigation cancels old interests; backgrounding/occlusion
-  and modals suspend them. Closing the browser releases preview payloads while
-  ordinary foreground-chat name warming continues. Reopening needs no query RPC.
+  and modals suspend them. Closing the browser releases preview/index payloads,
+  GPU paint and live file interests while ordinary foreground-chat name warming
+  continues. Up to four closed same-source chat buffers are retained in memory
+  (each subject to the existing file limits), not persisted across app restarts.
+  Reopening paints the retained buffer immediately and renews its revision-checked
+  interest; account/source changes and deleted chats discard retained state.
 - Open files/directories refresh once per second after completion of a read. Files
   are published to the UI only as complete verified snapshots; unchanged files send
   no body. Equal source lines keep their Sanscale paragraph identities even across
