@@ -1,7 +1,11 @@
 # Model catalog / manually entered GPT-6.1 Sol — October 2, 2026
 
-Status: **fixed on `fix/tau2-model-catalog-refresh`, source only**. Not merged,
-packaged or deployed. Worktree: `/root/tau2-model-catalog-refresh`.
+Status: **merged and pushed to `origin/tau2`, source only** on October 2.
+User-approved merge **`d528e56`** integrates feature **`59c87a2`** from freshly
+fetched `8cceeb8`, in `/root/tau2-model-catalog-refresh-merge` on branch
+`merge/tau2-model-catalog-refresh`. Its tree exactly matches the validated feature
+tree; checks/tests below are reused, without a new merged-tree test claim.
+The feature branch/worktree remain preserved. **Not packaged or deployed.**
 
 The user manually entered `openai-codex/gpt-6.1-sol` in Quick Model and reported
 that its token/context display still had not acquired catalog metadata. Manual
@@ -79,5 +83,5 @@ No beta/stable restart, production cache/settings/auth write, credential
 copy/refresh, live completion request, client packaging, version/protocol/database
 schema bump or physical Windows/Android acceptance. Live diagnosis used only the
 read-only catalog/release requests above. Existing beta **0.7.10 / protocol 22**
-is unchanged. This daemon fix must be integrated and deployed before the user's
-running beta gains the new behavior; existing matched clients can consume it.
+is unchanged. This daemon fix is integrated but must be deployed before the
+user's running beta gains the new behavior; existing matched clients can consume it.

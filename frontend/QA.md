@@ -1,4 +1,4 @@
-# Manual Quick Model / catalog refresh — source only, October 2, 2026
+# Manual Quick Model / catalog refresh — integrated source, October 2, 2026
 
 The user's manual `openai-codex/gpt-6.1-sol` entry was not the problem. The daemon
 kept an indefinitely fresh September 25 cache, used a Codex client-version gate
@@ -12,7 +12,10 @@ catalog GET completes, then observes the new capacity without another turn or
 manual refresh. It passes with one GET and one scripted local completion.
 Native daemon/frontend all-target check passed; 13 distinct targeted nextest
 cases pass across the documented runs. This is not physical-device acceptance
-or a full-suite claim. **No merge, deployment, restart or client packaging.**
+or a full-suite claim. User-approved merge **`d528e56`** integrates feature
+`59c87a2` into `origin/tau2` from `8cceeb8`. Its tree exactly matches the accepted
+feature tree; prior checks/tests are reused, not repeated.
+**No deployment, restart or client packaging.**
 See [diagnosis, policy and validation](../docs/model-catalog-refresh.md).
 
 ---

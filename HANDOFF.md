@@ -1,4 +1,4 @@
-# Manually entered GPT-6.1 Sol / model catalog — source fix, October 2, 2026
+# Manually entered GPT-6.1 Sol / model catalog — integrated source, October 2, 2026
 
 The user's Quick Model entry was valid. The beta cache is dated September 25;
 Tau treated it as fresh indefinitely, and the old Codex catalog client version
@@ -16,7 +16,13 @@ check passed; 13 distinct targeted cases pass across the documented runs,
 including the actual controller's manually saved quick model and gated local
 catalog. See [evidence and exact run accounting](docs/model-catalog-refresh.md).
 
-**Not merged or deployed.** No service restart, packages, production data/auth
+At the user's request, implementation `59c87a2` was merged and pushed to
+`origin/tau2` as **`d528e56`**, from freshly fetched `8cceeb8`, in the separate
+`merge/tau2-model-catalog-refresh` worktree. The merge tree exactly matches the
+validated feature tree; reuse the checks/tests above without rerunning them.
+Only integration documentation follows; no new merged-tree test run is claimed.
+
+**Merged, not deployed.** No service restart, packages, production data/auth
 write, billed model turn, version/protocol/database-schema bump or device QA.
 Existing running beta and unrelated QA/release holds remain unchanged.
 

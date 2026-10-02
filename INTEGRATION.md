@@ -592,3 +592,30 @@ preserved. Original feature history/worktrees remain available.
   explicit limits, merged-tree evidence and remaining diagnosis.
 - **Source only:** no deployment, service restart, release packages, production
   data writes, stable/master change in Tau, or version/protocol/schema bump.
+
+
+## Model catalog / manually entered GPT-6.1 Sol — source integration, October 2, 2026
+
+At the user's request, merged `fix/tau2-model-catalog-refresh` (`59c87a2`) into
+`origin/tau2` as **`d528e56`**, from freshly fetched `8cceeb8`, in the independent
+`/root/tau2-model-catalog-refresh-merge` worktree. The merge is conflict-free and
+its tree exactly matches the tested feature tree. Existing feature history and
+worktree are preserved.
+
+- The user's manually entered quick model remains a direct exact-ID selection.
+  Updated Codex catalog compatibility gating discovers GPT-6.1 Sol; cache age,
+  missing IDs and old client-version stamps trigger bounded asynchronous
+  revalidation on use without expiring last-good same-identity limits.
+- Refreshed capacities propagate to retained warm/sleeping token usage with new
+  revisions, preserving token counts, run state and idle deadlines. Cold chats
+  are not warmed, and catalog GETs never execute a model turn.
+- Reused the feature's managed native daemon/frontend all-target compiler check
+  and **13 distinct passing targeted cases** across the documented runs. Both
+  original regressions fail before the fix; the actual-controller manual-model
+  case passes with a gated local catalog. No tests/builds were rerun for this
+  identical-tree merge and no new merged-tree test result is claimed. Diff and
+  new documentation links pass. See [exact evidence](docs/model-catalog-refresh.md).
+- **Source only:** no deployment, service restart, packages, production
+  cache/settings/auth write, live completion request, stable/master change or
+  package-version/protocol/database-schema bump. Beta remains **0.7.10 / 22**;
+  physical Windows/Android acceptance and existing rollout holds are unchanged.
