@@ -37,7 +37,7 @@ impl AgentManager {
                 let settings = self.inner.settings.get();
                 let level = settings.agent.model_thinking_levels.get(arguments).unwrap_or(&settings.agent.thinking_level).clone();
                 content.append(id,json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":level})).await?;
-                self.schedule_catalog(&model.provider);
+                self.schedule_catalog(&model);
                 let usage = self.context_usage(&settings, &model, None);
                 self.set_runtime_state(id, runtime, SessionStatus::Idle, None, Some(usage));
                 format!("Model set to {arguments}. New chats will use it too.")

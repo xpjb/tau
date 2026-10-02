@@ -82,14 +82,14 @@ impl AgentManager {
         let context_window = self.inner.catalog.capacity(settings, model);
         (tokens.is_some() || context_window.is_some()).then_some(ContextUsage { tokens, context_window })
     }
-    pub(crate) fn schedule_catalog(&self, provider: &str) {
+    pub(crate) fn schedule_catalog(&self, model: &SessionModel) {
         if self.inner.shutting_down.load(Ordering::Acquire) { return; }
         let settings = self.inner.settings.get();
-        let Some(config) = settings.providers.get(provider) else { return; };
-        if !self.inner.catalog.begin(provider, config, false) { return; }
-        let config = config.clone(); let provider = provider.to_owned(); let manager = self.clone();
+        let Some(config) = settings.providers.get(&model.provider) else { return; };
+        if !self.inner.catalog.begin(&model.provider, config, Some(&model.model_id), false) { return; }
+        let config = config.clone(); let provider = model.provider.clone(); let model_id = model.model_id.clone(); let manager = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = manager.resolve_catalog(&provider, &config, false).await {
+            if let Err(error) = manager.resolve_catalog(&provider, &config, Some(&model_id), false).await {
                 warn!(%provider, reason = %error.root_cause(), "model catalog unavailable");
                 let message = format!("Could not load {provider} model catalog: {error}. Refresh from daemon settings after checking provider access.");
                 let _ = manager.inner.events.send(ServerMessage::Notice { session_id:String::new(), message:bounded(&message, 320) });
@@ -97,12 +97,12 @@ impl AgentManager {
             manager.broadcast_sessions().await;
         });
     }
-    async fn resolve_catalog(&self, provider: &str, config: &crate::settings::ProviderSettings, force: bool) -> Result<usize> {
+    async fn resolve_catalog(&self, provider: &str, config: &crate::settings::ProviderSettings, model_id: Option<&str>, force: bool) -> Result<usize> {
         let _permit = self.inner.catalog_requests.acquire().await?;
         if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
         let result: Result<usize> = async {
             let (key, account, identity) = crate::catalog::authorize(&self.inner.auth, provider, config).await?;
-            let cached = self.inner.catalog.restore(provider, config, &identity);
+            let cached = self.inner.catalog.restore(provider, config, &identity, model_id);
             if cached && !force {
                 self.inner.catalog.restored(provider);
                 return Ok(self.inner.catalog.models(&self.inner.settings.get(), provider).len());
@@ -111,13 +111,38 @@ impl AgentManager {
             self.inner.catalog.save(provider, config, identity, windows).await
         }.await;
         if result.is_err() { self.inner.catalog.failed(provider); }
+        self.refresh_catalog_usage(provider).await;
         result
+    }
+    /// Metadata refresh neither wakes cold chats nor resets a live run/idle timer.
+    /// Stamp changed usage so delayed pages cannot overwrite the refreshed limit.
+    async fn refresh_catalog_usage(&self, provider: &str) {
+        self.inner.state_clock.fetch_add(1, Ordering::AcqRel);
+        let runtimes = self.inner.runtimes.lock().await.iter().map(|(id, runtime)| (id.clone(), runtime.clone())).collect::<Vec<_>>();
+        for (id, runtime) in runtimes {
+            let content = runtime.content.lock().await;
+            let (model, tokens) = if let Some(agent) = &content.agent {
+                (agent.model.clone(), agent.tokens)
+            } else if let Ok(Some(stored)) = self.inner.state.get(&id).await {
+                (stored.model, stored.tokens)
+            } else { continue; };
+            if model.provider != provider { continue; }
+            let usage = self.context_usage(&self.inner.settings.get(), &model, tokens);
+            let mut state = runtime.state.write().unwrap_or_else(|e| e.into_inner());
+            if state.context_usage == usage { continue; }
+            state.context_usage = usage;
+            state.revision = self.inner.state_clock.fetch_add(1, Ordering::AcqRel) + 1;
+            let message = ServerMessage::SessionState { revision:state.revision, restore_review:None, session_id:id,
+                status:state.status, detail:state.detail.clone(), context_usage:usage };
+            drop(state);
+            let _ = self.inner.events.send(message);
+        }
     }
     pub async fn refresh_model_catalog(&self, provider: &str) -> Result<String> {
         let settings = self.inner.settings.get();
         let config = settings.providers.get(provider).context("Configure this provider in daemon settings first")?.clone();
-        if !self.inner.catalog.begin(provider, &config, true) { bail!("Model catalog refresh is already in progress"); }
-        let count = self.resolve_catalog(provider, &config, true).await?;
+        if !self.inner.catalog.begin(provider, &config, None, true) { bail!("Model catalog refresh is already in progress"); }
+        let count = self.resolve_catalog(provider, &config, None, true).await?;
         self.broadcast_sessions().await;
         Ok(format!("Refreshed {provider} model catalog: {count} models"))
     }
@@ -166,6 +191,7 @@ impl AgentManager {
     /// Viewing persisted state never loads an agent or waits for a provider.
     pub async fn session_state_message(&self, id: &str) -> Result<ServerMessage> {
         let stored = self.inner.state.get(id).await?.context("Unknown session")?;
+        self.schedule_catalog(&stored.model);
         let restore_review=self.inner.state.restore_review(id).await?;
         let (state,revision)={let runtimes=self.inner.runtimes.lock().await;let state=runtimes.get(id).map(|runtime|runtime.snapshot());
             let revision=state.as_ref().map_or_else(||self.inner.state_clock.load(Ordering::Acquire),|s|s.revision);(state,revision)};

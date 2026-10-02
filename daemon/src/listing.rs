@@ -32,12 +32,15 @@ impl AgentManager {
             let mut sessions=Vec::new();let mut states=std::collections::BTreeMap::new();
             for (id,data) in rows.into_iter().take(limit) {
                 let stored:StoredSession=serde_json::from_str(&data)?;
-                if providers.len()<8 && providers.insert(stored.model.provider.clone()) {self.schedule_catalog(&stored.model.provider);}
+                if providers.contains(&stored.model.provider) || providers.len()<8 {
+                    providers.insert(stored.model.provider.clone()); self.schedule_catalog(&stored.model);
+                }
                 let state=runtimes.get(&id).map(|runtime|runtime.snapshot());
                 states.insert(id.clone(),state.as_ref().map_or(cold_revision,|s|s.revision));
+                let tokens=state.as_ref().filter(|s|s.status!=SessionStatus::Sleeping).and_then(|s|s.context_usage).and_then(|u|u.tokens).or(stored.tokens);
                 sessions.push(SessionSummary {id,title:stored.title,project_id:stored.project_id,starter:stored.starter,parent_id:stored.parent_id,model:Some(stored.model.clone()),thinking_level:Some(stored.thinking),
                     status:state.as_ref().map(|s|s.status).unwrap_or(SessionStatus::Sleeping),detail:state.as_ref().and_then(|s|s.detail.clone()),
-                    context_usage:state.as_ref().and_then(|s|s.context_usage.clone()).or_else(||self.context_usage(&settings,&stored.model,stored.tokens)),created_at_ms:stored.created_at_ms,updated_at_ms:stored.updated_at_ms});
+                    context_usage:self.context_usage(&settings,&stored.model,tokens),created_at_ms:stored.created_at_ms,updated_at_ms:stored.updated_at_ms});
             }
             Ok(ServerMessage::SessionPage {catalog_id,revision,after,next,sessions,states})
         }

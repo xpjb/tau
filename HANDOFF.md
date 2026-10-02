@@ -1,3 +1,27 @@
+# Manually entered GPT-6.1 Sol / model catalog — source fix, October 2, 2026
+
+The user's Quick Model entry was valid. The beta cache is dated September 25;
+Tau treated it as fresh indefinitely, and the old Codex catalog client version
+0.156.1 excludes GPT-6.1 Sol. Read-only authenticated GETs verified that current
+0.160.0 includes the exact ID with 272,000 context tokens. No production cache or
+credential was changed by diagnosis.
+
+`fix/tau2-model-catalog-refresh` / `/root/tau2-model-catalog-refresh` now updates
+the catalog compatibility pin, revalidates aged/missing-ID/version-stamp caches
+on use with bounded cooldown/coalescing, and propagates refreshed limits to
+retained usage with new revisions without clearing tokens or resetting idle/run
+state. Valid old metadata survives transient errors; cold chats are not warmed.
+Both original reproductions fail before the fix. Native daemon/frontend all-target
+check passed; 13 distinct targeted cases pass across the documented runs,
+including the actual controller's manually saved quick model and gated local
+catalog. See [evidence and exact run accounting](docs/model-catalog-refresh.md).
+
+**Not merged or deployed.** No service restart, packages, production data/auth
+write, billed model turn, version/protocol/database-schema bump or device QA.
+Existing running beta and unrelated QA/release holds remain unchanged.
+
+---
+
 # Stop/Play lockout — integrated source, not deployed, October 1, 2026
 
 User requested fixing the stuck run-through → Stop → Play flow, then recording
