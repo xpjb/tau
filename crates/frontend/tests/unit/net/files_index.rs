@@ -8,7 +8,7 @@ use tau_net::native::{Backend, Client, Server};
 struct Memory { reply: Mutex<FileReply>, calls: Mutex<Vec<FileRequest>>, fail: AtomicBool, hints: watch::Sender<u64> }
 impl Backend for Memory {
 fn feed(&self, _: FeedRequest) -> BoxFuture<'static, Result<FeedPage>> { async { anyhow::bail!("unused") }.boxed() }
-fn read(&self, _: BlockRequest) -> BoxFuture<'static, Result<ContentRange>> { async { anyhow::bail!("unused") }.boxed() }
+fn read(&self, _: BlockRequest) -> BoxFuture<'static, Result<Option<ContentRange>>> { async { anyhow::bail!("unused") }.boxed() }
 fn changes(&self) -> watch::Receiver<u64> { self.hints.subscribe() }
 fn files(&self, request: FileRequest) -> BoxFuture<'static, Result<FileReply>> {
     self.calls.lock().unwrap().push(request);
@@ -32,13 +32,13 @@ tokio::time::timeout(Duration::from_secs(5), async {
 async fn sync_prefetches_names_then_uses_conditional_deltas_across_chat_switches_and_suspension() {
 let backend=Arc::new(Memory {reply:Mutex::new(snapshot("a",None,&["src/a.rs","src/b.rs"],&[])),calls:Mutex::new(vec![]),fail:AtomicBool::new(false),hints:watch::channel(0).0});
 let server=Server::bind("127.0.0.1:0".parse().unwrap(),backend.clone()).await.unwrap();
-let client=Arc::new(Client::bind().await.unwrap());
-client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
-let (lineage,ready)=watch::channel(Some("source".into()));
+let client=Client::bind().await.unwrap();
+let peer=client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
+let (lineage,ready)=watch::channel(Some(peer));
 let (send,mut updates)=watch::channel(None);
 let (wake,mut wakes)=tokio::sync::mpsc::unbounded_channel();
 let (plans,interest)=watch::channel(None);
-let service=tokio::spawn(watch_index(client.clone(),ready,send,Arc::new(move || {let _=wake.send(());}),interest));
+let service=tokio::spawn(watch_index(ready,send,Arc::new(move || {let _=wake.send(());}),interest));
 let plan=|generation,session:&str|Some(IndexInterest {generation,session:session.into(),path:None});
 plans.send_replace(plan(1,"chat"));
 let first=update(&mut updates,1).await;assert_eq!(first.index.as_ref().unwrap().entries.len(),2);
@@ -73,7 +73,8 @@ tokio::time::timeout(Duration::from_secs(5),async {
 }).await.unwrap();
 assert!(matches!(&backend.calls.lock().unwrap().last().unwrap().operation,FileOperation::Index {revision:None}));
 *backend.reply.lock().unwrap()=snapshot("d",None,&["fresh.rs"],&[]);
-lineage.send_replace(Some("new-source".into()));
+let replacement=client.configure(&server.authorize(&client.node_id(),"new-source".into()).unwrap(),"127.0.0.1").await.unwrap();
+lineage.send_replace(Some(replacement));
 tokio::time::timeout(Duration::from_secs(5),async {
     loop {updates.changed().await.unwrap();if updates.borrow().as_ref().is_some_and(|u|u.lineage=="new-source"){break;}}
 }).await.unwrap();

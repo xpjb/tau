@@ -219,10 +219,10 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     let before=manager.inner.state.access(move |db|Ok(tau_block_store::header(db,&scope,&file_id)?.unwrap())).await.unwrap();
     assert!(!before.sealed);assert_eq!(before.length,0);
     use tau_net::native::Backend;
-    let range=manager.read(tau_net::blocks::BlockRequest {scope:id.clone(),id:native_file.clone(),version:0,offset:0,follow:false}).await.unwrap();
+    let range=manager.read(tau_net::blocks::BlockRequest {scope:id.clone(),id:native_file.clone(),version:0,offset:0,follow:false}).await.unwrap().unwrap();
     assert_eq!(range.bytes,b"beta\n");assert!(range.header.sealed);assert_eq!(range.header.version,before.version);
     assert!(range.header.meta["sha256"].is_string());
-    let end=manager.read(tau_net::blocks::BlockRequest {scope:id.clone(),id:native_file,version:range.header.version,offset:5,follow:false}).await.unwrap();
+    let end=manager.read(tau_net::blocks::BlockRequest {scope:id.clone(),id:native_file,version:range.header.version,offset:5,follow:false}).await.unwrap().unwrap();
     assert!(end.bytes.is_empty());
     let staged = events.iter().find(|event| event["attachment"]["fileName"] == "outside.txt").unwrap();
     assert_eq!(staged["attachment"]["caption"], "Report");

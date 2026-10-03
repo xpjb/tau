@@ -7,7 +7,7 @@ use tau_net::native::{Backend, Client, Server};
 struct Memory { calls: Mutex<Vec<String>>, hints: watch::Sender<u64> }
 impl Backend for Memory {
     fn feed(&self, _: FeedRequest) -> BoxFuture<'static, Result<FeedPage>> { async { anyhow::bail!("unused") }.boxed() }
-    fn read(&self, _: BlockRequest) -> BoxFuture<'static, Result<ContentRange>> { async { anyhow::bail!("unused") }.boxed() }
+    fn read(&self, _: BlockRequest) -> BoxFuture<'static, Result<Option<ContentRange>>> { async { anyhow::bail!("unused") }.boxed() }
     fn changes(&self) -> watch::Receiver<u64> { self.hints.subscribe() }
     fn files(&self, request: FileRequest) -> BoxFuture<'static, Result<FileReply>> {
         let path=request.path.unwrap();self.calls.lock().unwrap().push(path.clone());
@@ -25,12 +25,12 @@ async fn until(mut ready: impl FnMut()->bool) {
 async fn previews_coalesce_rapid_selection_and_cancel_stale_native_reads() {
     let backend=Arc::new(Memory {calls:Mutex::new(vec![]),hints:watch::channel(0).0});
     let server=Server::bind("127.0.0.1:0".parse().unwrap(),backend.clone()).await.unwrap();
-    let client=Arc::new(Client::bind().await.unwrap());
-    client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
-    let (_lineage,ready)=watch::channel(Some("source".into()));
+    let client=Client::bind().await.unwrap();
+    let peer=client.configure(&server.authorize(&client.node_id(),"source".into()).unwrap(),"127.0.0.1").await.unwrap();
+    let (_lineage,ready)=watch::channel(Some(peer));
     let (send,updates)=watch::channel(None);
     let (plans,interest)=watch::channel(None);
-    let service=tokio::spawn(watch_files(client.clone(),ready,send,Arc::new(||{}),interest));
+    let service=tokio::spawn(watch_files(ready,send,Arc::new(||{}),interest));
     let plan=|generation,path:String|Some(FileInterest {preview:true,generation,request:FileRequest {session_id:"chat".into(),path:Some(path),operation:FileOperation::Open {revision:None}},document:None});
     for generation in 0..20 {plans.send_replace(plan(generation,format!("/file{generation}.rs")));}
     until(||updates.borrow().as_ref().is_some_and(|u|u.generation==19)).await;

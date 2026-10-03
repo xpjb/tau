@@ -426,7 +426,7 @@ async fn files_share_native_blocks_authorization_and_verified_offline_cache() {
         fn feed(&self, req:FeedRequest) -> futures_util::future::BoxFuture<'static,anyhow::Result<FeedPage>> {
             let db=self.db.clone(); async move {tau_block_store::feed(&db.lock().unwrap(),&req)}.boxed()
         }
-        fn read(&self, req:BlockRequest) -> futures_util::future::BoxFuture<'static,anyhow::Result<ContentRange>> {
+        fn read(&self, req:BlockRequest) -> futures_util::future::BoxFuture<'static,anyhow::Result<Option<ContentRange>>> {
             self.reads.fetch_add(1,Ordering::SeqCst);
             let db=self.db.clone(); async move {tau_block_store::read(&db.lock().unwrap(),&req)}.boxed()
         }

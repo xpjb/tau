@@ -21,12 +21,10 @@ c.notice=None;c.report_sync_error(anyhow::anyhow!("Block content integrity check
 assert_eq!(c.notice.as_deref(),Some("Block content integrity check failed"));
 c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context("Write replica"));
 assert!(c.notice.as_deref().unwrap().starts_with("Write replica:"),"A storage IO error is not connection loss");
-let broken=tau_net::native::Frame {
-    header:tau_net::native::Header::Data {version:1,offset:0,hash:String::new(),length:32,codec:tau_net::native::Codec::Zstd},
-    data:b"not a zstd frame".to_vec(),
-};
-c.notice=None;c.report_sync_error(broken.decoded().unwrap_err().context("Content sync"));
-assert!(c.notice.as_deref().unwrap().starts_with("Content sync: Invalid compressed block chunk:"),"Decompression's IO error must not be mistaken for a network error");
+// A decoder's InvalidData IO error must remain a content failure. The native
+// transport tests exercise actual malformed compressed frames at that boundary.
+c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"invalid decoder payload")).context("Content sync"));
+assert_eq!(c.notice.as_deref(),Some("Content sync: invalid decoder payload"),"A decoder IO error must not be mistaken for a network error");
 }
 
 #[test]
@@ -69,10 +67,12 @@ c.store.bind_source(&c.identity,"before").unwrap();c.account=c.store.get(&c.iden
 let local=LocalChat {draft:"keep me".into(),pending:vec![Pending {request:ClientRequest {id:"original".into(),command:ClientCommand::Prompt {session_id:"missing".into(),text:"possibly paid".into(), model: None, create: None }},text:"possibly paid".into(),files:vec![],status:Delivery::WaitingForConnection,started_at_ms:None,detail:None}],..Default::default()};
 c.store.save_chat(&c.identity,"missing",&local).unwrap();
 let db=rusqlite::Connection::open(root.path().join("client.sqlite3")).unwrap();db.execute_batch("CREATE TRIGGER fail_fence BEFORE UPDATE ON local WHEN NEW.key='account' BEGIN SELECT RAISE(ABORT,'fence full');END").unwrap();
-assert!(c.network_event(NetworkEvent::Source(1,"after".into())).is_err());assert!(c.network_event(NetworkEvent::Ready { epoch: 1, at: std::time::Instant::now() }).is_err());assert!(c.epoch.is_none());
+c.epoch=Some(99);
+assert!(c.network_event(NetworkEvent::Ready {epoch:1,lineage:"after".into(),at:std::time::Instant::now()}).is_err());
+assert!(c.epoch.is_none(),"Source persistence must revoke the previous epoch before any fallible write");
 assert_eq!(c.store.load_chat(&c.identity,"missing").unwrap().pending[0].status,Delivery::WaitingForConnection);
 assert_eq!(c.store.get::<crate::store::Account>(&c.identity,"account").unwrap().source_lineage.as_deref(),Some("before"));
-db.execute_batch("DROP TRIGGER fail_fence").unwrap();c.network_event(NetworkEvent::Source(1,"after".into())).unwrap();
+db.execute_batch("DROP TRIGGER fail_fence").unwrap();c.bind_source("after".into()).unwrap();
 assert_eq!(c.selected().unwrap().local.pending[0].status,Delivery::Unconfirmed);
 c.network_event(NetworkEvent::NotSent("original".into(), "late old-connection callback".into())).unwrap();
 c.message(ServerMessage::Receipts {session_id:"missing".into(),reports:vec![OperationReceipt {

@@ -28,7 +28,7 @@ fn download(source: &Connection, cache: &mut Connection, id: &str) -> usize {
     let mut req = BlockRequest { scope:"chat".into(),id:id.into(),version:h.version,offset,follow:false };
     let mut bytes = 0;
     while req.offset < h.length {
-        let range = read(source,&req).unwrap();
+        let range = read(source,&req).unwrap().unwrap();
         assert!(range.bytes.len() <= BLOCK_CHUNK_BYTES);
         req.offset += range.bytes.len() as u64; bytes += range.bytes.len();
         let tx = cache.transaction().unwrap(); cache_range(&tx,"chat",&range).unwrap(); tx.commit().unwrap();
@@ -134,7 +134,7 @@ fn late_data_cannot_resurrect_a_deleted_block() {
     let mut source = db(); let mut cache = db();
     save(&mut source,block("a",None,0,BlockKind::Text),b"secret old content");
     let page = feed(&source,&root()).unwrap(); apply(&mut cache,&root(),&page);
-    let range = read(&source,&BlockRequest {scope:"chat".into(),id:"a".into(),version:1,offset:0,follow:false}).unwrap();
+    let range = read(&source,&BlockRequest {scope:"chat".into(),id:"a".into(),version:1,offset:0,follow:false}).unwrap().unwrap();
     let tx = source.transaction().unwrap(); remove(&tx,"chat","a").unwrap(); tx.commit().unwrap();
     let req = FeedRequest { cursor:Some(page.cursor),..root() };
     apply(&mut cache,&req,&feed(&source,&req).unwrap());
@@ -161,7 +161,7 @@ fn bad_hash_does_not_cache_bytes_or_advance_verified_offset() {
     let mut source = db(); let mut cache = db();
     save(&mut source,block("a",None,0,BlockKind::Text),b"good");
     apply(&mut cache,&root(),&feed(&source,&root()).unwrap());
-    let mut range = read(&source,&BlockRequest {scope:"chat".into(),id:"a".into(),version:1,offset:0,follow:false}).unwrap();
+    let mut range = read(&source,&BlockRequest {scope:"chat".into(),id:"a".into(),version:1,offset:0,follow:false}).unwrap().unwrap();
     range.bytes[0] = b'x';
     let tx = cache.transaction().unwrap();
     assert!(cache_range(&tx,"chat",&range).is_err());

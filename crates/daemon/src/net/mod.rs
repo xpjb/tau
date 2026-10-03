@@ -532,16 +532,16 @@ impl tau_net::native::Backend for AgentManager {
             }).await
         }.boxed()
     }
-    fn read(&self, request: tau_net::blocks::BlockRequest) -> futures_util::future::BoxFuture<'static,Result<tau_net::blocks::ContentRange>> {
+    fn read(&self, request: tau_net::blocks::BlockRequest) -> futures_util::future::BoxFuture<'static,Result<Option<tau_net::blocks::ContentRange>>> {
         let manager = self.clone();
         async move {
             let req=request.clone();
             let ready=manager.inner.state.read(move |db| {
-                ensure!(req.scope == tau_net::blocks::CONTROL_SCOPE || db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))?,"Chat no longer exists");
-                let h=tau_block_store::header(db,&req.scope,&req.id)?.context("Unknown block")?;
-                if h.meta.get("materialized")==Some(&json!(false)) {Ok(None)} else {tau_block_store::read(db,&req).map(Some)}
+                if req.scope != tau_net::blocks::CONTROL_SCOPE && !db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",[&req.scope],|r|r.get::<_,bool>(0))? {return Ok((None,false));}
+                let Some(h)=tau_block_store::header(db,&req.scope,&req.id)? else {return Ok((None,false));};
+                if h.meta.get("materialized")==Some(&json!(false)) {Ok((None,true))} else {Ok((tau_block_store::read(db,&req)?,false))}
             }).await?;
-            if let Some(range)=ready {return Ok(range);}
+            if !ready.1 {return Ok(ready.0);}
             manager.materialize_file(&request.scope,&request.id).await?;
             manager.inner.state.read(move |db| tau_block_store::read(db,&request)).await
         }.boxed()

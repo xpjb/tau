@@ -9,7 +9,7 @@ mod transcript;
 pub use transcript::*;
 
 // Protocol 24 removes per-chat command catalogues and unpaged catalog snapshots.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;

@@ -99,7 +99,7 @@ pub struct Controller {
     control_cursor:usize,
     catalog:Option<Catalog>,state_versions:HashMap<String,(u64,SessionStatus,Option<String>,Option<ContextUsage>)>,
     receipt_queue:std::collections::VecDeque<(String,Vec<String>)>,receipt_inflight:Option<(String,String,Vec<String>,std::time::Instant)>,
-    source_guard:Option<(u64,bool)>, pub restore_reviews:std::collections::HashSet<String>,
+    pub restore_reviews:std::collections::HashSet<String>,
     wake: Wake,
 }
 impl Controller {
@@ -143,7 +143,7 @@ impl Controller {
             project_deletions: HashMap::new(),
             create_failed_epoch: None,
             retry_after: None,
-            receipt_queue:Default::default(),receipt_inflight:None,control_check:None,control_cursor:0,catalog:None,state_versions:HashMap::new(),source_guard:None,restore_reviews:Default::default(),
+            receipt_queue:Default::default(),receipt_inflight:None,control_check:None,control_cursor:0,catalog:None,state_versions:HashMap::new(),restore_reviews:Default::default(),
             wake,
         };
         c.local_activity = c.store.chat_activity(&c.identity)?;
@@ -1273,26 +1273,28 @@ impl Controller {
         self.background_dirty.clear();
         Ok(())
     }
+    /// Source persistence and control admission are one transition. A failed
+    /// fence cannot leave the previous socket epoch enabled for saved actions.
+    fn bind_source(&mut self,lineage:String)->Result<()> {
+        self.epoch=None;
+        if self.store.bind_source(&self.identity,&lineage)? {
+            self.saved_downloads.clear();
+            self.model_catalog = Default::default();
+            self.model_catalog_revision = None;
+            self.account=self.store.get(&self.identity,"account")?;
+            self.sort_sessions();
+            for (id,chat) in &mut self.chats {chat.local=self.store.load_chat(&self.identity,id)?;chat.feed=Feed::default();chat.reconcile();}
+            self.notice=Some("Source lineage changed. Saved work was preserved, but old intents will not be automatically executed. Review any effects after the restored snapshot before retrying.".into());
+        } else {self.account.source_lineage=Some(lineage);}
+        Ok(())
+    }
     fn network_event(&mut self, event: net::Event) -> Result<()> {
         let fatal = matches!(&event, net::Event::Fatal(_));
         match event {
             net::Event::Connecting { attempt, at } => self.health.attempt(attempt, at),
             net::Event::RetryScheduled { at } => self.health.retry_scheduled(at),
-            net::Event::Source(epoch,lineage)=>{
-                self.source_guard=Some((epoch,false));
-                if self.store.bind_source(&self.identity,&lineage)? {
-                    self.saved_downloads.clear();
-                    self.model_catalog = Default::default();
-                    self.model_catalog_revision = None;
-                    self.account=self.store.get(&self.identity,"account")?;
-                    self.sort_sessions();
-                    for (id,chat) in &mut self.chats {chat.local=self.store.load_chat(&self.identity,id)?;chat.feed=Feed::default();chat.reconcile();}
-                    self.notice=Some("Source lineage changed. Saved work was preserved, but old intents will not be automatically executed. Review any effects after the restored snapshot before retrying.".into());
-                } else {self.account.source_lineage=Some(lineage);}
-                self.source_guard=Some((epoch,true));
-            }
-            net::Event::Ready { epoch, at } => {
-                ensure!(self.source_guard==Some((epoch,true)),"Source identity was not durably recorded; automatic submission is disabled. Repair local storage and reconnect.");
+            net::Event::Ready {epoch,lineage,at}=>{
+                self.bind_source(lineage)?;
                 self.state_versions.clear();self.catalog=None;self.receipt_queue.clear();self.receipt_inflight=None;
                 self.epoch = Some(epoch);
                 self.model_catalog_revision = None;

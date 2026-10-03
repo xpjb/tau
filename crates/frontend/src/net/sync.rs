@@ -2,9 +2,9 @@
 //! the replica before credit is returned; these workers never own user intent.
 use super::{ mailbox::EventSender, files, transfers::Transfers};
 use crate::replica::{Cache, Plan};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use std::{collections::{BTreeSet, HashMap}, sync::Arc, time::Duration};
-use tau_net::{blocks::*, native::{Client, Header}};
+use tau_net::{blocks::*, native::{Client, Peer, Priority}};
 use tokio::{sync::{mpsc, watch}, task::JoinSet};
 
 #[derive(Debug)]
@@ -38,26 +38,27 @@ pub(super) fn subscriptions() -> (Subscriptions, Interests) {
 
 pub(super) struct Content {
     configuration: watch::Sender<Option<(BulkOffer,String)>>,
+    client:Client,
     transfers: Transfers,
     _tasks: JoinSet<()>,
 }
 impl Content {
     pub async fn start(cache: Cache, events: EventSender, notices: mpsc::Sender<ReplicaNotice>,
         updates: watch::Sender<Option<Arc<files::FileUpdate>>>, index_updates: watch::Sender<Option<Arc<files::IndexUpdate>>>, interests: Interests) -> Result<Self> {
-        let client=Arc::new(Client::bind().await?);
+        let client=Client::bind().await?;
         let wake=events.wake.clone();
         let (configuration,config_rx)=watch::channel(None);
         let (ready,lineage)=watch::channel(None);
         let mut tasks=JoinSet::new();
-        tasks.spawn(files::watch_files(client.clone(),lineage.clone(),updates,wake.clone(),interests.files));
-        tasks.spawn(files::watch_index(client.clone(),lineage.clone(),index_updates,wake.clone(),interests.index));
-        let transfers=Transfers {cache:cache.clone(),client:client.clone(),ready:lineage,events};
-        tasks.spawn(run(cache,client,wake,interests.requests,interests.plans,config_rx,notices,ready));
-        Ok(Self {configuration,transfers,_tasks:tasks})
+        tasks.spawn(files::watch_files(lineage.clone(),updates,wake.clone(),interests.files));
+        tasks.spawn(files::watch_index(lineage.clone(),index_updates,wake.clone(),interests.index));
+        let transfers=Transfers {cache:cache.clone(),ready:lineage,events};
+        tasks.spawn(run(cache,client.clone(),wake,interests.requests,interests.plans,config_rx,notices,ready));
+        Ok(Self {configuration,client,transfers,_tasks:tasks})
     }
     pub fn configure(&self, offer: BulkOffer, host: String) { self.configuration.send_replace(Some((offer,host))); }
-    pub fn node_id(&self) -> String { self.transfers.client.node_id() }
-    pub fn stats(&self) -> tau_net::native::Stats { self.transfers.client.stats() }
+    pub fn node_id(&self) -> String { self.client.node_id() }
+    pub fn stats(&self) -> tau_net::native::Stats { self.client.stats() }
     pub fn transfers(&self) -> Transfers { self.transfers.clone() }
 }
 
@@ -82,7 +83,7 @@ struct Watches(HashMap<Key,tokio::task::JoinHandle<()>>);
 impl std::ops::Deref for Watches { type Target = HashMap<Key,tokio::task::JoinHandle<()>>; fn deref(&self) -> &Self::Target { &self.0 } }
 impl std::ops::DerefMut for Watches { fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 } }
 impl Drop for Watches { fn drop(&mut self) { for task in self.0.values() { task.abort(); } } }
-async fn run(cache: Cache, client:Arc<Client>, wake: crate::net::Wake, mut commands:mpsc::Receiver<Request>, mut plans:watch::Receiver<Vec<Plan>>, mut configuration:watch::Receiver<Option<(BulkOffer,String)>>, notices:mpsc::Sender<ReplicaNotice>, ready:watch::Sender<Option<String>>) {
+async fn run(cache: Cache, client:Client, wake: crate::net::Wake, mut commands:mpsc::Receiver<Request>, mut plans:watch::Receiver<Vec<Plan>>, mut configuration:watch::Receiver<Option<(BulkOffer,String)>>, notices:mpsc::Sender<ReplicaNotice>, ready:watch::Sender<Option<Peer>>) {
     let mut jobs = Watches(HashMap::new());
     let mut plan = Vec::<Plan>::new();
     loop {
@@ -94,20 +95,23 @@ async fn run(cache: Cache, client:Arc<Client>, wake: crate::net::Wake, mut comma
                 Some(Request::History {scope,before})=>{
                     let key = Key::History(scope,None,before,false);
                     if jobs.get(&key).is_some_and(|task|task.is_finished()) {jobs.remove(&key);}
-                    if !jobs.contains_key(&key) { jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone())); }
+                    if !jobs.contains_key(&key) { jobs.insert(key.clone(),spawn_watch(key,cache.clone(),ready.subscribe(),notices.clone(),wake.clone())); }
                 }
             },
             result=plans.changed()=>{if result.is_err() {break;}plan=plans.borrow_and_update().clone();}
             result=configuration.changed()=>{
                 if result.is_err() {break;}
                 let Some((offer,host))=configuration.borrow_and_update().clone() else {continue;};
-                if let Err(error) = client.configure(&offer,&host).await {
-                    let _ = notices.send(ReplicaNotice::Failed {scope:String::new(),error}).await; (wake)();
-                } else if let Err(error) = cache.configure(&offer.lineage) {
-                    let _ = notices.send(ReplicaNotice::Failed {scope:String::new(),error}).await; (wake)();
-                } else {
-                    if ready.borrow().as_ref().is_some_and(|old|old != &offer.lineage) { for task in jobs.values() {task.abort();} jobs.clear(); }
-                    ready.send_if_modified(|current| { if current.as_ref()==Some(&offer.lineage) {false} else {*current=Some(offer.lineage);true} });
+                let configured=async {
+                    let peer=client.configure(&offer,&host).await?;
+                    cache.configure(peer.lineage())?;Ok::<_,anyhow::Error>(peer)
+                }.await;
+                match configured {
+                    Err(error)=>{let _=notices.send(ReplicaNotice::Failed {scope:String::new(),error}).await;(wake)();}
+                    Ok(peer)=>{
+                        if ready.borrow().as_ref().is_some_and(|old|old.lineage()!=peer.lineage()) {for task in jobs.values() {task.abort();}jobs.clear();}
+                        ready.send_if_modified(|current| {if current.as_ref()==Some(&peer) {false} else {*current=Some(peer);true}});
+                    }
                 }
             }
         }
@@ -160,7 +164,7 @@ async fn run(cache: Cache, client:Arc<Client>, wake: crate::net::Wake, mut comma
                 _=>true,
             };
             if (!jobs.contains_key(&key) || completed) && needed {
-                jobs.insert(key.clone(),spawn_watch(key,client.clone(),cache.clone(),ready.subscribe(),notices.clone(),wake.clone()));
+                jobs.insert(key.clone(),spawn_watch(key,cache.clone(),ready.subscribe(),notices.clone(),wake.clone()));
             }
         }
     }
@@ -168,7 +172,7 @@ async fn run(cache: Cache, client:Arc<Client>, wake: crate::net::Wake, mut comma
     client.shutdown().await;
 }
 
-fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Receiver<Option<String>>, notices:mpsc::Sender<ReplicaNotice>, wake:crate::net::Wake) -> tokio::task::JoinHandle<()> {
+fn spawn_watch(key: Key, cache: Cache, mut ready: watch::Receiver<Option<Peer>>, notices:mpsc::Sender<ReplicaNotice>, wake:crate::net::Wake) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let scope = match &key {
             Key::Feeds(scope,_,_) | Key::Block(scope,_,_) | Key::BackgroundBlock(scope,_) | Key::History(scope,_,_,_) => scope.clone(),
@@ -177,11 +181,11 @@ fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Re
         while ready.borrow().is_none() { if ready.changed().await.is_err() { return; } }
         let mut delay = 100;
         loop {
-            let lineage = ready.borrow().clone().unwrap();
-            let result = watch_once(&key,&client,&cache,&lineage,&notices,&wake).await;
+            let peer=ready.borrow().clone().unwrap();
+            let result=watch_once(&key,&peer,&cache,&notices,&wake).await;
             match result {
                 Ok(true) => return,
-                Ok(false) => continue, // Yield the class permit to queued interests.
+                Ok(false) => continue, // Replica reset: rebuild interests from the new checkpoint.
                 Err(error) => {
                     // Opt-in local context for lifecycle races; keep IDs out of
                     // the popup and never log message bodies or credentials.
@@ -199,78 +203,27 @@ fn spawn_watch(key: Key, client: Arc<Client>, cache: Cache, mut ready: watch::Re
     })
 }
 
-async fn watch_once(key: &Key, client: &Client, cache: &Cache, lineage:&str, notices: &mpsc::Sender<ReplicaNotice>, wake: &crate::net::Wake) -> Result<bool> {
+async fn watch_once(key: &Key, peer: &Peer, cache: &Cache, notices: &mpsc::Sender<ReplicaNotice>, wake: &crate::net::Wake) -> Result<bool> {
     let epoch=cache.epoch();
-    let (scope,request) = match key {
-        Key::Feeds(scope,parents,_) => (scope.clone(),BlockWatch::Feeds {requests:parents.iter().map(|parent|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
-        Key::BackgroundFeeds(feeds)=>(String::new(),BlockWatch::Feeds {requests:feeds.iter().map(|(scope,parent)|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?}),
-        Key::History(scope,parent,before,_) => (scope.clone(),BlockWatch::Feed(cache.feed_request(scope,parent.as_deref(),Some(before.clone()))?)),
-        Key::Block(scope,id,_) => (scope.clone(),BlockWatch::Block(cache.block_request(scope,id)?)),
+    let request = match key {
+        Key::Feeds(scope,parents,_) => BlockWatch::Feeds {requests:parents.iter().map(|parent|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?},
+        Key::BackgroundFeeds(feeds)=>BlockWatch::Feeds {requests:feeds.iter().map(|(scope,parent)|cache.feed_request(scope,parent.as_deref(),None)).collect::<Result<_>>()?},
+        Key::History(scope,parent,before,_) => BlockWatch::Feed(cache.feed_request(scope,parent.as_deref(),Some(before.clone()))?),
+        Key::Block(scope,id,_) => BlockWatch::Block(cache.block_request(scope,id)?),
         Key::BackgroundBlock(scope,id)=>{
             let mut request=cache.block_request(scope,id)?;
-            // Catch up and release the slot, even for a live body. The shared
-            // metadata feed announces further appends. Quiet background chats
-            // must not hoard bulk slots waiting out a five-second watch slice.
-            request.follow=false;
-            (scope.clone(),BlockWatch::Block(request))
+            // Catch up, then release the slot. Metadata announces later appends.
+            request.follow=false;BlockWatch::Block(request)
         }
     };
-    let feeds=match &request {BlockWatch::Feed(req)=>vec![req.clone()],BlockWatch::Feeds {requests}=>requests.clone(),BlockWatch::Block(_)=>vec![]};
-    let bulk=matches!(key,Key::Block(_,_,false) | Key::Feeds(_,_,true) | Key::History(_,_,_,true) | Key::BackgroundFeeds(_) | Key::BackgroundBlock(..));
-    log::trace!(target: "tau_native_watch", "acquire begin key={key:?} epoch={epoch}");
-    let mut watcher = client.watch_scheduled(request.clone(),bulk).await?;
-    log::trace!(target: "tau_native_watch", "acquire complete key={key:?}");
-    let mut records = vec![vec![];feeds.len()]; let mut head = None;
-    loop {
-        log::trace!(target: "tau_native_watch", "receive begin key={key:?}");
-        let (frame,wire_bytes) = watcher.next().await?;
-        let kind=match &frame.header {Header::Record {..}=>"record",Header::Page {..}=>"page",Header::Block {..}=>"head",Header::Data {..}=>"data",Header::End=>"end",Header::Yield=>"yield",Header::Error {..}=>"error",_=>"other"};
-        log::trace!(target: "tau_native_watch", "receive complete key={key:?} kind={kind}");
-        match &frame.header {
-            Header::Record { watch,record } => {
-                let records=records.get_mut(*watch).context("Unrequested feed")?;
-                ensure!(records.len()<MAX_FEED_PAGE,"Unexpected feed record");records.push(record.clone());
-            }
-            Header::Page {watch,reset,cursor,floor,before,more} => {
-                let req=feeds.get(*watch).context("Unrequested feed")?;
-                let page = FeedPage {reset:*reset,records:std::mem::take(&mut records[*watch]),cursor:cursor.clone(),floor:*floor,before:before.clone(),more:*more};
-                let notice_scope=req.scope.clone();
-                let cache = cache.clone(); let req = req.clone(); let lineage = lineage.to_owned();
-                tokio::task::spawn_blocking(move ||cache.page_at(&lineage,&req,&page,epoch)).await??;
-                notices.send(ReplicaNotice::Changed(notice_scope)).await?; (wake)();
-            }
-            Header::Block {block} => {
-                let BlockWatch::Block(req) = &request else { anyhow::bail!("Unexpected block header"); };
-                ensure!(block.id == req.id,"Peer sent an unrequested block");
-                let cache = cache.clone(); let scope2 = scope.clone(); let h = block.clone(); let lineage = lineage.to_owned();
-                tokio::task::spawn_blocking(move ||cache.header_at(&lineage,&scope2,&h,epoch)).await??;
-                head = Some(block.clone());
-                notices.send(ReplicaNotice::Changed(scope.clone())).await?; (wake)();
-            }
-            Header::Data {version,offset,hash,..} => {
-                let h: &BlockHeader = head.as_ref().context("Content without a requested header")?;
-                ensure!(h.version == *version,"Unexpected content version");
-                let range = ContentRange {header:h.clone(),offset:*offset,hash:hash.clone(),bytes:frame.decoded()?};
-                let cache = cache.clone(); let scope2 = scope.clone(); let lineage = lineage.to_owned();
-                log::trace!(target: "tau_native_watch", "cache range begin key={key:?} offset={offset}");
-                tokio::task::spawn_blocking(move ||cache.range_at(&lineage,&scope2,&range,epoch)).await??;
-                log::trace!(target: "tau_native_watch", "cache range complete key={key:?} offset={offset}");
-                notices.send(ReplicaNotice::Changed(scope.clone())).await?; (wake)();
-            }
-            Header::End | Header::Yield => {
-                ensure!(records.iter().all(Vec::is_empty),"Watch ended before its metadata checkpoint");
-                return Ok(matches!(frame.header,Header::End));
-            }
-            Header::Error {message} => anyhow::bail!("{message}"),
-            _ => anyhow::bail!("Unexpected block response"),
-        }
-        // A peer may finish its credit half while the final bounded response is
-        // still being consumed. Read-side errors/End determine stream completion.
-        log::trace!(target: "tau_native_watch", "credit begin key={key:?}");
-        let _ = watcher.consumed(wire_bytes).await;
-        log::trace!(target: "tau_native_watch", "credit complete key={key:?}");
+    let background=matches!(key,Key::Block(_,_,false) | Key::Feeds(_,_,true) | Key::History(_,_,_,true) | Key::BackgroundFeeds(_) | Key::BackgroundBlock(..));
+    let mut reader=peer.read(request,if background {Priority::Background} else {Priority::Foreground}).await?;
+    while let Some(update)=reader.next().await? {
+        let Some(scope)=cache.apply(peer.lineage(),update,epoch).await? else {return Ok(true);};
+        notices.send(ReplicaNotice::Changed(scope)).await?;(wake)();
         if cache.epoch()!=epoch {return Ok(false);}
     }
+    Ok(true)
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! One coalesced viewer interest per UI. No filesystem bodies enter the replica
 //! or control queues. Dropping/changing interest cancels its native stream.
 use std::{sync::Arc, time::Duration};
-use tau_net::files::*;
+use tau_net::{files::*,native::Peer};
 use tokio::sync::watch;
 
 #[derive(Clone)]
@@ -10,14 +10,14 @@ pub struct FileUpdate {
     pub generation: u64, pub session: String, pub lineage: String,
     pub response: Result<FileReply, String>, pub document: Option<Arc<tau_code_viewer::Document>>,
 }
-pub(super) async fn watch_files(client: Arc<tau_net::native::Client>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<FileUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<FileInterest>>) {
+pub(super) async fn watch_files(mut ready: watch::Receiver<Option<Peer>>, updates: watch::Sender<Option<Arc<FileUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<FileInterest>>) {
     loop {
         let plan = interest.borrow_and_update().clone();
         if plan.is_none() {updates.send_replace(None);}
-        let lineage = ready.borrow_and_update().clone();
+        let peer = ready.borrow_and_update().clone();
         let read = async {
-            let (Some(plan), Some(lineage)) = (plan, lineage) else { return std::future::pending::<()>().await; };
-            refresh_files(client.clone(), plan, lineage, &updates, &wake).await;
+            let (Some(plan), Some(peer)) = (plan, peer) else { return std::future::pending::<()>().await; };
+            refresh_files(peer, plan, &updates, &wake).await;
         };
         tokio::select! {
             _ = read => {},
@@ -26,13 +26,13 @@ pub(super) async fn watch_files(client: Arc<tau_net::native::Client>, mut ready:
         }
     }
 }
-async fn refresh_files(client: Arc<tau_net::native::Client>, plan: FileInterest, lineage: String, updates: &watch::Sender<Option<Arc<FileUpdate>>>, wake: &crate::net::Wake) {
+async fn refresh_files(peer: Peer, plan: FileInterest, updates: &watch::Sender<Option<Arc<FileUpdate>>>, wake: &crate::net::Wake) {
     let mut request = plan.request.clone();
     if plan.preview { tokio::time::sleep(Duration::from_millis(75)).await; }
     let mut document = plan.document.clone();
     let mut previous = None;
     loop {
-        let result = client.files(request.clone()).await;
+        let result = peer.files(request.clone()).await;
         let response = match result {
             Ok(FileReply::Text {text,..}) if text.len()>MAX_FILE_BYTES || text.bytes().filter(|&b|b==b'\n').count()>MAX_FILE_LINES => Err("File exceeds code preview limits".into()),
             Ok(FileReply::Text {ref revision,ref text,..}) if blake3::hash(text.as_bytes()).to_hex().as_str()!=revision => Err("File revision integrity check failed".into()),
@@ -55,7 +55,7 @@ async fn refresh_files(client: Arc<tau_net::native::Client>, plan: FileInterest,
         let unchanged = matches!(response, Ok(FileReply::Unchanged {..})) && previous.as_ref().is_some_and(Result::is_ok);
         if !unchanged && previous.as_ref() != Some(&response) {
             previous = Some(response.clone());
-            updates.send_replace(Some(Arc::new(FileUpdate { generation: plan.generation, session: request.session_id.clone(), lineage: lineage.clone(), response, document: document.clone() })));
+            updates.send_replace(Some(Arc::new(FileUpdate { generation: plan.generation, session: request.session_id.clone(), lineage: peer.lineage().to_owned(), response, document: document.clone() })));
             (wake)();
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -78,16 +78,16 @@ pub struct IndexUpdate {
 }
 struct Cached { session: String, root: Option<String>, lineage: String, index: Arc<PathIndex>, indexing: bool, limited: bool }
 
-pub(super) async fn watch_index(client: Arc<tau_net::native::Client>, mut ready: watch::Receiver<Option<String>>, updates: watch::Sender<Option<Arc<IndexUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<IndexInterest>>) {
+pub(super) async fn watch_index(mut ready: watch::Receiver<Option<Peer>>, updates: watch::Sender<Option<Arc<IndexUpdate>>>, wake: crate::net::Wake, mut interest: watch::Receiver<Option<IndexInterest>>) {
     let mut cached = None;
     loop {
         let plan = interest.borrow_and_update().clone();
-        let lineage = ready.borrow_and_update().clone();
+        let peer = ready.borrow_and_update().clone();
         if plan.is_none() { updates.send_replace(None); }
-        if cached.as_ref().is_some_and(|c: &Cached| lineage.as_ref().is_some_and(|l| l != &c.lineage)) { cached = None; }
+        if cached.as_ref().is_some_and(|c: &Cached| peer.as_ref().is_some_and(|p| p.lineage() != c.lineage)) { cached = None; }
         let read = async {
-            let (Some(plan), Some(lineage)) = (plan, lineage) else { return std::future::pending::<()>().await; };
-            refresh_index(client.clone(), plan, lineage, &mut cached, &updates, &wake).await;
+            let (Some(plan), Some(peer)) = (plan, peer) else { return std::future::pending::<()>().await; };
+            refresh_index(peer, plan, &mut cached, &updates, &wake).await;
         };
         tokio::select! {
             _ = read => {},
@@ -96,13 +96,13 @@ pub(super) async fn watch_index(client: Arc<tau_net::native::Client>, mut ready:
         }
     }
 }
-async fn refresh_index(client: Arc<tau_net::native::Client>, plan: IndexInterest, lineage: String, cached: &mut Option<Cached>, updates: &watch::Sender<Option<Arc<IndexUpdate>>>, wake: &crate::net::Wake) {
-    if cached.as_ref().is_some_and(|c| c.lineage != lineage) { *cached = None; }
+async fn refresh_index(peer: Peer, plan: IndexInterest, cached: &mut Option<Cached>, updates: &watch::Sender<Option<Arc<IndexUpdate>>>, wake: &crate::net::Wake) {
+    if cached.as_ref().is_some_and(|c| c.lineage != peer.lineage()) { *cached = None; }
     let mut previous = None;
     let mut reset = false;
     loop {
         let revision = (!reset).then(|| cached.as_ref().map(|c| c.index.revision.clone())).flatten();
-        let result = client.files(FileRequest { session_id: plan.session.clone(), path: plan.path.clone(), operation: FileOperation::Index { revision } }).await;
+        let result = peer.files(FileRequest { session_id: plan.session.clone(), path: plan.path.clone(), operation: FileOperation::Index { revision } }).await;
         let received_reply = result.is_ok();
         let result = async {
             let reply = result?;
@@ -113,7 +113,7 @@ async fn refresh_index(client: Arc<tau_net::native::Client>, plan: IndexInterest
             let index = if unchanged { old.unwrap() } else {
                 tokio::task::spawn_blocking(move || PathIndex::apply(old.as_deref(), &reply).map(Arc::new)).await??
             };
-            *cached = Some(Cached { session: plan.session.clone(), root: plan.path.clone(), lineage: lineage.clone(), index, indexing, limited });
+            *cached = Some(Cached { session: plan.session.clone(), root: plan.path.clone(), lineage: peer.lineage().to_owned(), index, indexing, limited });
             Ok::<_, anyhow::Error>(())
         }.await;
         // Connection loss does not invalidate verified names. Only a bad
@@ -128,7 +128,7 @@ async fn refresh_index(client: Arc<tau_net::native::Client>, plan: IndexInterest
         let state = (visible.map(|c| c.index.revision.clone()), indexing, limited, error.clone());
         if previous.as_ref() != Some(&state) {
             previous = Some(state);
-            updates.send_replace(Some(Arc::new(IndexUpdate { generation: plan.generation, session: plan.session.clone(), lineage: lineage.clone(), index: visible.map(|c| c.index.clone()), indexing, limited, error: error.clone() })));
+            updates.send_replace(Some(Arc::new(IndexUpdate { generation: plan.generation, session: plan.session.clone(), lineage: peer.lineage().to_owned(), index: visible.map(|c| c.index.clone()), indexing, limited, error: error.clone() })));
             (wake)();
         }
         tokio::time::sleep(if indexing || error.is_some() { Duration::from_secs(1) } else { Duration::from_secs(10) }).await;

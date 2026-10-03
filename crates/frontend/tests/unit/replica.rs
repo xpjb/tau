@@ -17,7 +17,7 @@ impl Fixture {
         let req=self.cache.feed_request("chat",parent,before).unwrap();let page=tau_block_store::feed(&self.source,&req).unwrap();self.cache.page(&self.lineage,&req,&page).unwrap();
     }
     pub(crate) fn chunk(&self,id:&str)->bool {
-        let req=self.cache.block_request("chat",id).unwrap();let range=tau_block_store::read(&self.source,&req).unwrap();
+        let req=self.cache.block_request("chat",id).unwrap();let range=tau_block_store::read(&self.source,&req).unwrap().unwrap();
         self.cache.header(&self.lineage,"chat",&range.header).unwrap();
         if range.bytes.is_empty() {return false;}
         self.cache.range(&self.lineage,"chat",&range).unwrap();true
@@ -102,7 +102,7 @@ fn disclosure_interests_are_per_group_and_large_input_is_explicit() {
 fn text_prefix_handles_split_utf8_and_old_connections_cannot_pollute_new_cache() {
     let mut f=Fixture::new();let text=format!("{}😀","x".repeat(BLOCK_CHUNK_BYTES-1));
     f.put("text",None,0,BlockKind::Text,event("text",0,"text"),text.as_bytes());f.page(None,None);
-    let range=tau_block_store::read(&f.source,&f.cache.block_request("chat","text").unwrap()).unwrap();
+    let range=tau_block_store::read(&f.source,&f.cache.block_request("chat","text").unwrap()).unwrap().unwrap();
     f.cache.range(&f.lineage,"chat",&range).unwrap();let view=f.cache.snapshot("chat").unwrap().unwrap();
     assert_eq!(view.events[0].text.len(),BLOCK_CHUNK_BYTES-1);assert!(view.incomplete.contains("text"));
     f.body("text");let view=f.cache.snapshot("chat").unwrap().unwrap();assert_eq!(view.events[0].text,text);assert!(view.incomplete.is_empty());
@@ -188,7 +188,7 @@ fn copy_interest_advances_in_bounded_cohorts_instead_of_starving_after_thirty_ca
 #[test]
 fn sqlite_full_and_cross_handle_reset_never_advance_a_verified_prefix() {
     let mut f=Fixture::new();f.put("body",None,0,BlockKind::Text,event("body",0,"text"),&vec![7;BLOCK_CHUNK_BYTES*2]);f.page(None,None);
-    let req=f.cache.block_request("chat","body").unwrap();let range=tau_block_store::read(&f.source,&req).unwrap();
+    let req=f.cache.block_request("chat","body").unwrap();let range=tau_block_store::read(&f.source,&req).unwrap().unwrap();
     {let db=f.cache.db.lock().unwrap();let pages:u64=db.query_row("PRAGMA page_count",[],|r|r.get(0)).unwrap();db.pragma_update(None,"max_page_count",pages).unwrap();}
     let error=f.cache.range(&f.lineage,"chat",&range).unwrap_err();assert!(error.to_string().contains("full"),"{error:#}");
     assert_eq!(f.cache.block_request("chat","body").unwrap().offset,0);
@@ -236,7 +236,7 @@ fn giant_previews_stop_prefetching_and_copy_can_target_a_closed_child() {
     f.page(None,None);f.page(Some("tool"),None);
     let plan=f.cache.plan_visible("chat",&LocalChat::default(),&["result".into()],Some(&BTreeSet::new())).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="result"));
     let mut local=LocalChat {details_default:true,..Default::default()};local.expansion.insert("tool:tool".into(),true);local.expansion.insert("tool:tool:Output".into(),true);
-    for _ in 0..16 {let req=f.cache.block_request("chat","result").unwrap();let range=tau_block_store::read(&f.source,&req).unwrap();f.cache.range(&f.lineage,"chat",&range).unwrap();}
+    for _ in 0..16 {let req=f.cache.block_request("chat","result").unwrap();let range=tau_block_store::read(&f.source,&req).unwrap().unwrap();f.cache.range(&f.lineage,"chat",&range).unwrap();}
     let plan=f.cache.plan("chat",&local,&[]).unwrap();assert!(!plan.blocks.iter().any(|(id,_)|id=="result"));
     let plan=f.cache.plan("chat",&local,&["result".into()]).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="result"));f.body("result");let text=f.cache.copy_ready("chat",&["result".into()]).unwrap().unwrap();assert_eq!(text.bytes().filter(|b|*b==b'x').count(),bytes.len());assert!(!text.contains("Preview limited"));
 }

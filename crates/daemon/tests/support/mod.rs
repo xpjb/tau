@@ -3,14 +3,14 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value,json};
 use tau_net::blocks::*;
-use tau_net::native::{Client as DataClient, Header};
+use tau_net::native::{Client as DataClient, Peer, Priority, Update};
 use tokio_tungstenite::{connect_async,tungstenite::{Message,client::IntoClientRequest}};
 
 pub struct Client {
     pub socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     pub seen: Vec<Value>,
     pub data: DataClient,
-    pub lineage: String,
+    pub peer: Option<Peer>,
 }
 impl Client {
     #[allow(dead_code)]
@@ -19,7 +19,7 @@ impl Client {
         let mut request=url.into_client_request().unwrap();
         request.headers_mut().insert("authorization",format!("Bearer {token}").parse().unwrap());
         let (socket,_)=connect_async(request).await.unwrap();
-        let mut client=Self {socket,seen:vec![],data:DataClient::bind().await.unwrap(),lineage:String::new()};
+        let mut client=Self {socket,seen:vec![],data:DataClient::bind().await.unwrap(),peer:None};
         let hello=client.until(|m|m["type"]=="hello").await;
         assert_eq!(hello["protocolVersion"],tau_net::PROTOCOL_VERSION);
         client.request(json!({"id":"data","type":"connect_blocks","nodeId":client.data.node_id()})).await;
@@ -36,11 +36,11 @@ impl Client {
                         assert!(!matches!(value["type"].as_str(),Some("transcript_update"|"transcript_snapshot"|"transcript_page")));
                         if value["type"]=="block_connection" {
                             let offer:BulkOffer=serde_json::from_value(value["offer"].clone()).unwrap();
-                            self.lineage=offer.lineage.clone();self.data.configure(&offer,"127.0.0.1").await.unwrap();
+                            self.peer=Some(self.data.configure(&offer,"127.0.0.1").await.unwrap());
                         }
                         if value["type"]=="data" {
                             let reference:ContentRef=serde_json::from_value(value["content"].clone()).unwrap();
-                            assert_eq!(reference.lineage,self.lineage);
+                            assert_eq!(reference.lineage,self.peer.as_ref().unwrap().lineage());
                             let bytes=self.body(&reference.scope,&reference.id).await;
                             assert_eq!(blake3::hash(&bytes).to_hex().as_str(),reference.hash);
                             value=serde_json::from_slice(&bytes).unwrap();
@@ -63,34 +63,25 @@ impl Client {
         let value=if bytes.len()>tau_net::MAX_CONTROL_BYTES {
             let hash=blake3::hash(&bytes).to_hex().to_string();
             let spec=UploadSpec {id:hash.clone(),length:bytes.len() as u64,hash:hash.clone(),purpose:UploadPurpose::Command};
-            let mut upload=self.data.uploader(spec).await.unwrap();
-            for chunk in bytes[upload.status.offset as usize..].chunks(BLOCK_CHUNK_BYTES) {upload.write(chunk).await.unwrap();}
+            let mut upload=self.peer.as_ref().unwrap().uploader(spec).await.unwrap();
+            upload.copy_from(&mut std::io::Cursor::new(&bytes)).await.unwrap();
             upload.finish().await.unwrap();
-            json!({"id":id,"type":"input","content":ContentRef {lineage:self.lineage.clone(),scope:UPLOAD_SCOPE.into(),id:hash.clone(),length:bytes.len() as u64,hash}})
+            json!({"id":id,"type":"input","content":ContentRef {lineage:self.peer.as_ref().unwrap().lineage().to_owned(),scope:UPLOAD_SCOPE.into(),id:hash.clone(),length:bytes.len() as u64,hash}})
         } else {value};
         self.socket.send(Message::Text(value.to_string().into())).await.unwrap();
         self.until(|m|m["type"]=="response" && m["requestId"]==id).await
     }
     pub async fn body(&self,scope:&str,id:&str)->Vec<u8> {
-        let mut watch=self.data.watch(BlockWatch::Block(BlockRequest {scope:scope.into(),id:id.into(),version:0,offset:0,follow:false})).await.unwrap();
+        let mut reader=self.peer.as_ref().unwrap().read(BlockWatch::Block(BlockRequest {scope:scope.into(),id:id.into(),version:0,offset:0,follow:false}),Priority::Foreground).await.unwrap();
         let mut bytes=vec![];
-        loop {let (frame,n)=watch.next().await.unwrap();match &frame.header {
-            Header::Data {offset,..}=>{assert_eq!(*offset,bytes.len() as u64);bytes.extend(frame.decoded().unwrap());}
-            Header::End=>return bytes,
-            Header::Error {message}=>panic!("{message}"),
-            Header::Block {..}=>{},
-            other=>panic!("Unexpected body frame {other:?}"),
-        }let _=watch.consumed(n).await;}
+        while let Some(update)=reader.next().await.unwrap() {match update {
+            Update::Range {range,..}=>{assert_eq!(range.offset,bytes.len() as u64);bytes.extend(range.bytes);}
+            Update::Block {..}=>{},other=>panic!("Unexpected body update {other:?}"),
+        }}bytes
     }
     async fn directory(&self,scope:&str,parent:Option<String>,before:Option<FeedPosition>)->FeedPage {
-        let mut watch=self.data.watch(BlockWatch::Feed(FeedRequest {scope:scope.into(),parent,cursor:None,floor:0,before})).await.unwrap();
-        let mut records=vec![];
-        loop {let (frame,n)=watch.next().await.unwrap();match frame.header {
-            Header::Record {record,..}=>records.push(record),
-            Header::Page {reset,cursor,floor,before,more,..}=>return FeedPage {reset,cursor,floor,before,more,records},
-            Header::Error {message}=>panic!("{message}"),
-            other=>panic!("Unexpected directory frame {other:?}"),
-        }let _=watch.consumed(n).await;}
+        let mut reader=self.peer.as_ref().unwrap().read(BlockWatch::Feed(FeedRequest {scope:scope.into(),parent,cursor:None,floor:0,before}),Priority::Foreground).await.unwrap();
+        let Some(Update::Page {page,..})=reader.next().await.unwrap() else {panic!("Expected directory page");};page
     }
     pub async fn page(&self,id:&str,before:Option<FeedPosition>)->Value {
         let page=self.directory(id,None,before).await;

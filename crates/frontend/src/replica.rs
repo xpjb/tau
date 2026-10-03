@@ -35,6 +35,19 @@ struct Prefetched {
 #[derive(Clone)]
 pub struct Cache { prefetched:Arc<Mutex<Prefetched>>,exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
 impl Cache {
+    /// Persist one verified transport update. This is the single async ingress;
+    /// the existing transaction guards reject stale source/window writers.
+    pub(crate) async fn apply(&self, lineage:&str, update:tau_net::native::Update, epoch:u64) -> Result<Option<String>> {
+        use tau_net::native::Update;
+        let cache=self.clone();let lineage=lineage.to_owned();
+        tokio::task::spawn_blocking(move || Ok(match update {
+            Update::Page {request,page}=>{cache.page_at(&lineage,&request,&page,epoch)?;Some(request.scope)}
+            Update::Block {scope,block}=>{cache.header_at(&lineage,&scope,&block,epoch)?;Some(scope)}
+            Update::Range {scope,range}=>{cache.range_at(&lineage,&scope,&range,epoch)?;Some(scope)}
+            Update::Absent {..}=>None, // Only an ordered directory tombstone can delete cached state.
+        })).await?
+    }
+
     pub(crate) fn needs_body(&self, scope: &str, id: &str, background: bool) -> bool {
         let db = self.db.lock().unwrap();
         tau_block_store::header(&db,scope,id).ok().flatten().is_none_or(|h|
@@ -679,7 +692,7 @@ impl Cache {
             let range={
                 let db=self.db.lock().unwrap();
                 ensure!(replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==lineage,"Data source changed");
-                tau_block_store::read(&db,&BlockRequest {scope:scope.into(),id:header.id.clone(),version:header.version,offset,follow:false})?
+                tau_block_store::read(&db,&BlockRequest {scope:scope.into(),id:header.id.clone(),version:header.version,offset,follow:false})?.context("Cached file no longer exists")?
             };
             ensure!(range.header.version==header.version && range.offset==offset && !range.bytes.is_empty(),"Cached file changed or is incomplete");
             temp.write_all(&range.bytes)?; hash.update(&range.bytes); offset+=range.bytes.len() as u64;

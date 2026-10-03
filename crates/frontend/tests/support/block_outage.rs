@@ -22,7 +22,7 @@ impl Backend for Source {
             Ok(page)
         }.boxed()
     }
-    fn read(&self, request: BlockRequest) -> BoxFuture<'static, anyhow::Result<ContentRange>> {
+    fn read(&self, request: BlockRequest) -> BoxFuture<'static, anyhow::Result<Option<ContentRange>>> {
         native_trace::event(&format!("source read scope={} offset={}",request.scope,request.offset));
         self.reads.lock().unwrap().push(request.clone());
         let db = self.db.clone(); async move { tau_block_store::read(&db.lock().unwrap(), &request) }.boxed()

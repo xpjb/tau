@@ -13,3 +13,10 @@ fn compression_is_chunk_local_bounded_and_verified_after_decompression() {
     if let Header::Data { length,hash,.. } = &mut frame.header { *length = BLOCK_CHUNK_BYTES as u32; *hash = "bad".into(); }
     assert!(frame.decoded().is_err());
 }
+
+#[test]
+fn malformed_compression_is_not_connection_loss() {
+    let broken=Frame {header:Header::Data {version:1,offset:0,hash:String::new(),length:32,codec:Codec::Zstd},data:b"not a zstd frame".to_vec()};
+    let error=broken.decoded().unwrap_err();assert!(error.is::<std::io::Error>());
+    assert!(!is_connection_error(&error),"Decompression IO errors remain genuine content failures");
+}
