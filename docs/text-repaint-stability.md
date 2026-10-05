@@ -155,7 +155,7 @@ Tau now pins Sanscale `15ad1f03e17a368e2ff4f1b269f60bad13483638`, which contains
 `4325844` and additionally renders tabs as four-space advances without changing
 source bytes/caret indexes. The small `WordBoundaries` API rename is migrated.
 The extracted Markdown crate is now Barkdown, full Git revision
-`f8dccb1b2ca6af5c8d0a91caf037bce85fb72ad7`, shared with Compendium. Tau's duplicate
+`9bc7163193c5e1764e5c20a7119b5318673aa6b9`, shared with Compendium. Tau's duplicate
 `markdown/` implementation is removed. Release fingerprinting follows Cargo.lock.
 
 Barkdown adds shared bounded syntax paint, a native display-math subset (including
@@ -170,7 +170,7 @@ including cache pressure, queued repaints, editing and a real-renderer math/code
 fixture. The fixture's repeated frame is pixel-identical; tabs match four spaces.
 Run `f2dbbc5d-4a1b-4d27-824f-635e5b20fbdb`; logs
 `/tmp/tau2-barkdown-final-{check,lib-tests}.log`; inspected image
-`/tmp/barkdown-preview.png`. Barkdown passes 36 tests; Sanscale passes all 8 public
+`/tmp/barkdown-preview.png`. Barkdown passes 37 tests; Sanscale passes all 8 public
 service-lifecycle cases, including normally ignored GPU tests.
 
 Broad integration testing is not fully green. Two UDP-outage fixtures reject
@@ -188,3 +188,9 @@ from fingerprint paths; Cargo.toml/Cargo.lock remain fingerprinted inputs.
 
 Source-only integration: no version/protocol/schema bump, packages, deployments,
 service restarts or live-data changes. Stable Tau is untouched.
+
+Final pin follow-up: Barkdown's adjacent-unfinished-math streaming guard was
+added and all 37 library tests passed (`af29a3aa-8c91-474c-8fd3-28715ea14642`).
+Tau's workspace/all-target check and all three real-renderer repaint/math/tab cases
+were rerun on that exact Git pin: `31402ef4-7c49-4878-9bd6-69e0eb79810f`,
+`/tmp/tau2-barkdown-pin-{check,tests}.log`.
