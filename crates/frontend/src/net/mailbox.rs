@@ -1,0 +1,79 @@
+//! Nonblocking, bounded handoff to the UI. Superseded health and replicated
+//! state are coalesced; the WebSocket reader never awaits an idle UI consumer.
+use super::{Event,Wake};
+use std::{collections::VecDeque,sync::{Arc,Mutex}};
+use tau_net::ServerMessage;
+use tokio::sync::Notify;
+
+struct Queue {events:VecDeque<(Event,usize)>,bytes:usize,closed:bool}
+struct Shared {queue:Mutex<Queue>,notify:Notify,senders:std::sync::atomic::AtomicUsize}
+pub(super) struct EventSender {shared:Arc<Shared>,pub wake:Wake}
+pub struct EventReceiver {shared:Arc<Shared>}
+
+pub(super) fn channel(wake:Wake)->(EventSender,EventReceiver) {
+    let shared=Arc::new(Shared {queue:Mutex::new(Queue {events:VecDeque::new(),bytes:0,closed:false}),notify:Notify::new(),senders:std::sync::atomic::AtomicUsize::new(1)});
+    (EventSender {shared:shared.clone(),wake},EventReceiver {shared})
+}
+fn key(event:&Event)->Option<String> {
+    match event {
+        Event::Connecting { .. }=>Some("acquiring".into()),
+        Event::RetryScheduled { .. }=>Some("acquisition-retry".into()),
+        Event::Disconnected(_)=>Some("acquisition-failure".into()),
+        Event::HeartbeatSent {epoch,..}=>Some(format!("sent:{epoch}")),
+        Event::HeartbeatReply {epoch,..}=>Some(format!("reply:{epoch}")),
+        Event::Metrics(_)=>Some("native-metrics".into()),
+        Event::Download {key,..}=>Some(format!("download:{key}")),
+        Event::Message(epoch,message) => message.replication_key().map(|key|format!("{epoch}:{key}")),
+        _=>None,
+    }
+}
+impl EventSender {
+    pub fn send(&self,event:Event)->bool {
+        let bytes=match &event {Event::Prepared {result,..}=>match result {Ok(text)=>text.len(),Err(error)=>error.len()},Event::Message(_,message)=>serde_json::to_vec(message).map_or(4096,|v|v.len()),_=>1024};
+        self.send_sized(event,bytes)
+    }
+    // Descriptor size is mailbox accounting, not another kind of public event.
+    pub(super) fn send_sized(&self,event:Event,bytes:usize)->bool {
+        let mut queue=self.shared.queue.lock().unwrap();
+        if queue.closed {return false;}
+        // Fast refusal retries must not fill the mailbox while a phone's UI
+        // sleeps. Coalesce acquisition progress only within one no-socket
+        // episode: retaining the disconnect before each new Ready is essential
+        // to fencing in-flight intents and checking their receipts on recovery.
+        let after = if matches!(event, Event::Connecting { .. } | Event::RetryScheduled { .. } | Event::Disconnected(_)) {
+            queue.events.iter().rposition(|(event,_)| matches!(event, Event::Ready { .. } | Event::Fatal(_))).map_or(0,|at|at+1)
+        } else {0};
+        if let Some(key)=key(&event) && let Some(at)=queue.events.iter().enumerate().skip(after)
+            .find_map(|(at,(old,_))|(self::key(old).as_ref()==Some(&key)).then_some(at)) {
+            let revision=|event:&Event|match event {Event::Message(_,message)=>match message.as_ref() {ServerMessage::SessionState {revision,..}=>*revision,ServerMessage::ModelCatalog {catalog}=>catalog.revision,_=>0},_=>0};
+            if revision(&queue.events[at].0)>revision(&event) {return true;}
+            let (_,bytes)=queue.events.remove(at).unwrap();queue.bytes-=bytes;
+        }
+        // An overflowing durable lane fails closed instead of blocking probes.
+        // Its receipts remain in the daemon journal for explicit reconciliation.
+        if queue.events.len()>=512 || queue.bytes.saturating_add(bytes)>128*1024*1024 {
+            let fatal=Event::Fatal("UI event backlog exceeded its limit. Reconnect to reconcile durable operations.".into());
+            queue.events.push_back((fatal,0));queue.closed=true;drop(queue);self.shared.notify.notify_one();(self.wake)();return false;
+        }
+        queue.bytes+=bytes;queue.events.push_back((event,bytes));drop(queue);
+        self.shared.notify.notify_one();(self.wake)();true
+    }
+}
+impl EventReceiver {
+    pub fn try_recv(&mut self)->Result<Event,tokio::sync::mpsc::error::TryRecvError> {
+        let mut queue=self.shared.queue.lock().unwrap();
+        if let Some((event,bytes))=queue.events.pop_front() {queue.bytes-=bytes;Ok(event)} else {Err(if queue.closed {tokio::sync::mpsc::error::TryRecvError::Disconnected} else {tokio::sync::mpsc::error::TryRecvError::Empty})}
+    }
+    pub async fn recv(&mut self)->Option<Event> {
+        loop {let shared=self.shared.clone();let notified=shared.notify.notified();if let Ok(event)=self.try_recv() {return Some(event);}if self.shared.queue.lock().unwrap().closed {return None;}notified.await;}
+    }
+}
+impl Drop for EventReceiver {fn drop(&mut self) {self.shared.queue.lock().unwrap().closed=true;}}
+
+impl Clone for EventSender {fn clone(&self)->Self {self.shared.senders.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Self {shared:self.shared.clone(),wake:self.wake.clone()}}}
+impl Drop for EventSender {fn drop(&mut self) {if self.shared.senders.fetch_sub(1,std::sync::atomic::Ordering::AcqRel)==1 {self.shared.queue.lock().unwrap().closed=true;self.shared.notify.notify_one();}}}
+
+
+#[cfg(test)]
+#[path = "../../tests/unit/net/mailbox.rs"]
+mod tests;

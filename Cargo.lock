@@ -5347,14 +5347,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
-name = "tau-blocks"
+name = "tau-block-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
  "rusqlite",
  "serde_json",
- "tau-protocol",
+ "tau-net",
  "tempfile",
  "uuid",
 ]
@@ -5370,7 +5370,7 @@ dependencies = [
  "nucleo-matcher",
  "serde_json",
  "similar",
- "tau-protocol",
+ "tau-net",
  "tempfile",
  "tokio",
  "tree-sitter-highlight",
@@ -5408,10 +5408,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tau-blocks",
+ "tau-block-store",
  "tau-code-viewer",
- "tau-protocol",
- "tau-transfer",
+ "tau-net",
  "taud",
  "tempfile",
  "tiny-skia",
@@ -5428,15 +5427,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "tau-transfer"
+name = "tau-net"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -5447,8 +5438,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "tau-blocks",
- "tau-protocol",
+ "tau-block-store",
  "tempfile",
  "tokio",
  "zstd",
@@ -5470,10 +5460,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tau-blocks",
+ "tau-block-store",
  "tau-code-viewer",
- "tau-protocol",
- "tau-transfer",
+ "tau-net",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

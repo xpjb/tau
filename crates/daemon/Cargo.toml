@@ -1,0 +1,32 @@
+[package]
+name = "taud"
+version = "0.7.12"
+edition = "2024"
+
+[dependencies]
+tau-code-viewer = { path = "../code-viewer", features = ["filesystem"] }
+tau-block-store = { path = "../block-store" }
+tau-net = { path = "../net", features = ["native"] }
+anyhow = "1"
+blake3 = "1.8"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+libc = "0.2"
+rusqlite = { version = "0.37", features = ["bundled", "blob"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tempfile = "3"
+axum = { version = "0.8", features = ["json", "ws"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.6", features = ["limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+tokio-tungstenite = "0.29"

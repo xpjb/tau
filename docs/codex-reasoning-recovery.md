@@ -44,6 +44,8 @@ response validation; interrupted calls do not execute.
 
 ## Implementation
 
+Paths below are relative to `crates/daemon/src/`.
+
 - `agent/provider/recovery.rs`: eligibility, provenance, deduplication, capture,
   rejection markers and safe-continuation state.
 - `agent/provider/codex.rs`: capture at item completion, separate from display.
@@ -53,7 +55,8 @@ response validation; interrupted calls do not execute.
 
 ## Regression evidence
 
-The daemon nextest suite passed **84/84** tests. New cases cover repeated failures
+The initial isolated hotfix passed **84/84** daemon nextest tests. Its regression
+cases live under `crates/daemon/tests/unit/agent/` in the consolidated tree and cover repeated failures
 with progress, bounded no-progress retries, exact-once local tool effects, abort,
 backoff cancellation, restart, cloning, new steering, model/account/provider/API/
 endpoint changes, durable rejection, native compaction and same-chunk errors.
@@ -67,7 +70,8 @@ Scratch evidence and fixture scripts live under `/tmp/tau2-astra-recovery-invest
 
 ## Compatibility
 
-The hotfix is based on deployed source `4c9a289` (beta 0.7.11, protocol 22), so
-existing clients remain compatible. The additive private history field requires
-no database-schema or wire-protocol change. The same source fix is carried into
-Tau2 integration for subsequent releases.
+The initial reproduction used deployed source `4c9a289` (beta 0.7.11, protocol 22).
+Checkpoint recovery itself is an additive private history field and requires no
+database-schema change. The consolidated `tau2` release also includes the native
+network refactor and Codex sign-in: it uses protocol 26 and requires matching
+Windows/Android clients. Deliver those packages before the approved service restart.

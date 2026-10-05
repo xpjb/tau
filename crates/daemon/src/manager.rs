@@ -1,0 +1,557 @@
+use crate::settings::SettingsExt;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
+use anyhow::{Context, Result, bail};
+use serde_json::json;
+use tokio::sync::{Mutex, Semaphore, broadcast};
+use tracing::warn;
+
+use crate::agent::{AgentSession, auth::AuthStore};
+use crate::config::Config;
+use crate::catalog::ModelCatalog;
+use tau_net::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
+use crate::settings::{SettingsStore, Settings};
+use crate::state::{StateStore, Receipt, SessionModel};
+use crate::transcript::{QueuedRequest, QueueControl, Transcript};
+use crate::usage::{UsageReader, UsageResult};
+
+const EVENT_BUFFER: usize = 64;
+
+pub struct PromptOutcome { pub disposition: PromptDisposition, pub notice: Option<String> }
+#[derive(Clone)]
+pub struct AgentManager { pub(crate) inner: Arc<ManagerInner> }
+pub(crate) struct ManagerInner {
+    pub config: Config,
+    pub files: Arc<tau_code_viewer::filesystem::FileSystem>,
+    pub state: StateStore,
+    pub settings: SettingsStore,
+    pub http: reqwest::Client,
+    pub auth: AuthStore,
+    pub projects: Mutex<()>,
+    pub catalog: ModelCatalog,
+    pub usage: UsageReader,
+    pub catalog_requests: Semaphore,
+    pub agent_runs:Semaphore,
+    pub title_requests:Semaphore,
+    pub block_imports: Arc<Semaphore>,
+    pub upload_finishes:Mutex<HashMap<String,std::sync::Weak<Mutex<()>>>>,
+    pub upload_publication:Mutex<()>,
+    pub runtimes: Mutex<HashMap<String, Arc<SessionRuntime>>>,
+    pub events: broadcast::Sender<ServerMessage>,
+    pub shutting_down: AtomicBool,
+    pub state_clock:std::sync::atomic::AtomicU64,
+    #[cfg(test)] pub settle_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub deleting:std::sync::Mutex<HashSet<String>>,
+}
+pub(crate) struct SessionRuntime {
+    pub operation: Mutex<()>,
+    pub content: Mutex<SessionContent>,
+    pub state: StdRwLock<RuntimeState>,
+}
+pub(crate) struct SessionContent {
+    pub agent: Option<AgentSession>,
+    pub transcript: Option<Transcript>,
+}
+impl Default for SessionContent {
+    fn default() -> Self { Self { agent: None, transcript: None } }
+}
+#[derive(Clone, Default)]
+pub(crate) struct RuntimeState { pub revision:u64, pub status: SessionStatus, pub detail: Option<String>, pub idle_since: Option<Instant>, pub context_usage: Option<ContextUsage> }
+impl SessionRuntime {
+    fn new() -> Self { Self { operation: Mutex::new(()), content: Mutex::new(SessionContent::default()), state: StdRwLock::new(RuntimeState::default()) } }
+    pub fn snapshot(&self) -> RuntimeState { self.state.read().unwrap_or_else(|e| e.into_inner()).clone() }
+}
+impl AgentManager {
+    pub async fn new(config: Config, state: StateStore) -> Result<Self> {
+        state.recover_blocks().await?;
+        state.recover_operations().await?;
+        let settings = SettingsStore::load(&config, crate::state::DEFAULT_TITLE_PROMPT.into()).await?;
+        let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
+        let auth = AuthStore::new(config.settings_path.with_file_name("auth.json"), http.clone()).shared_codex(config.codex_auth_source.clone());
+        let catalog = ModelCatalog::load(config.settings_path.with_file_name("model-catalog.json")).await;
+        let files = Arc::new(tau_code_viewer::filesystem::FileSystem::new(config.cwd.clone()));
+        Ok(Self { inner: Arc::new(ManagerInner { files, config, state, settings, http, auth,
+            projects: Mutex::new(()), catalog, usage:UsageReader::default(), catalog_requests: Semaphore::new(2), agent_runs:Semaphore::new(8), title_requests:Semaphore::new(2), block_imports: Arc::new(Semaphore::new(2)), upload_finishes:Mutex::new(HashMap::new()),upload_publication:Mutex::new(()),
+            runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false),state_clock:std::sync::atomic::AtomicU64::new(0),#[cfg(test)] settle_gate:std::sync::Mutex::new(None),deleting:std::sync::Mutex::new(HashSet::new()) }) })
+    }
+    pub(crate) fn context_window(&self, settings: &Settings, model: &SessionModel) -> Option<u64> {
+        self.inner.catalog.capacity(settings, model)
+    }
+    pub(crate) fn context_usage(&self, settings: &Settings, model: &SessionModel, tokens: Option<u64>) -> Option<ContextUsage> {
+        let context_window = self.inner.catalog.capacity(settings, model);
+        (tokens.is_some() || context_window.is_some()).then_some(ContextUsage { tokens, context_window })
+    }
+    pub(crate) fn schedule_model_catalog(&self) {
+        let settings = self.inner.settings.get();
+        for provider in settings.providers.keys() {
+            self.schedule_catalog_for(provider, None);
+        }
+    }
+    pub(crate) fn schedule_catalog(&self, model: &SessionModel) {
+        self.schedule_catalog_for(&model.provider, Some(&model.model_id));
+    }
+    fn schedule_catalog_for(&self, provider: &str, model_id: Option<&str>) {
+        if self.inner.shutting_down.load(Ordering::Acquire) { return; }
+        let settings = self.inner.settings.get();
+        let Some(config) = settings.providers.get(provider) else { return; };
+        if !self.inner.catalog.begin(provider, config, model_id, false) { return; }
+        let config = config.clone(); let provider = provider.to_owned(); let model_id = model_id.map(str::to_owned); let manager = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = manager.resolve_catalog(&provider, &config, model_id.as_deref(), false).await {
+                warn!(%provider, reason = %error.root_cause(), "model catalog unavailable");
+            }
+            manager.broadcast_sessions().await;
+        });
+    }
+    async fn resolve_catalog(&self, provider: &str, config: &crate::settings::ProviderSettings, model_id: Option<&str>, force: bool) -> Result<usize> {
+        let _permit = self.inner.catalog_requests.acquire().await?;
+        if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        let result: Result<usize> = async {
+            let (key, account, identity) = crate::catalog::authorize(&self.inner.auth, provider, config).await?;
+            let cached = self.inner.catalog.restore(provider, config, &identity, model_id);
+            if cached && !force {
+                self.inner.catalog.restored(provider);
+                return Ok(self.inner.catalog.models(&self.inner.settings.get(), provider).len());
+            }
+            let windows = crate::catalog::fetch(&self.inner.http, config, &key, account.as_deref()).await?;
+            self.inner.catalog.save(provider, config, identity, windows).await
+        }.await;
+        if result.is_err() { self.inner.catalog.failed(provider); }
+        let _ = self.inner.events.send(ServerMessage::ModelCatalog { catalog: self.model_catalog() });
+        self.refresh_catalog_usage(provider).await;
+        result
+    }
+    /// Metadata refresh neither wakes cold chats nor resets a live run/idle timer.
+    /// Stamp changed usage so delayed pages cannot overwrite the refreshed limit.
+    async fn refresh_catalog_usage(&self, provider: &str) {
+        self.inner.state_clock.fetch_add(1, Ordering::AcqRel);
+        let runtimes = self.inner.runtimes.lock().await.iter().map(|(id, runtime)| (id.clone(), runtime.clone())).collect::<Vec<_>>();
+        for (id, runtime) in runtimes {
+            let content = runtime.content.lock().await;
+            let (model, tokens) = if let Some(agent) = &content.agent {
+                (agent.model.clone(), agent.tokens)
+            } else if let Ok(Some(stored)) = self.inner.state.get(&id).await {
+                (stored.model, stored.tokens)
+            } else { continue; };
+            if model.provider != provider { continue; }
+            let usage = self.context_usage(&self.inner.settings.get(), &model, tokens);
+            let mut state = runtime.state.write().unwrap_or_else(|e| e.into_inner());
+            if state.context_usage == usage { continue; }
+            state.context_usage = usage;
+            state.revision = self.inner.state_clock.fetch_add(1, Ordering::AcqRel) + 1;
+            let message = ServerMessage::SessionState { revision:state.revision, restore_review:None, session_id:id,
+                status:state.status, detail:state.detail.clone(), context_usage:usage };
+            drop(state);
+            let _ = self.inner.events.send(message);
+        }
+    }
+    pub async fn refresh_model_catalog(&self, provider: &str) -> Result<String> {
+        let settings = self.inner.settings.get();
+        let config = settings.providers.get(provider).context("Configure this provider in daemon settings first")?.clone();
+        if !self.inner.catalog.begin(provider, &config, None, true) { bail!("Model catalog refresh is already in progress"); }
+        let count = self.resolve_catalog(provider, &config, None, true).await?;
+        self.broadcast_sessions().await;
+        Ok(format!("Refreshed {provider} model catalog: {count} models"))
+    }
+    pub async fn codex_usage(&self, force: bool) -> UsageResult {
+        let settings=self.inner.settings.get();
+        let Some(provider)=settings.providers.get("openai-codex").filter(|provider|provider.api==crate::settings::Api::Codex) else {
+            return UsageResult {report:None,error:Some("Codex account quota unavailable for this provider configuration".into())};
+        };
+        self.inner.usage.read(&self.inner.auth, &self.inner.http, provider.api_key_env.as_deref(), force).await
+    }
+    pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> { self.inner.events.subscribe() }
+    #[cfg(test)]
+    pub async fn create_session(&self, keep_session_id: Option<&str>, project_id: &str) -> Result<String> {
+        self.create_session_requested(keep_session_id, project_id, None).await
+    }
+    #[cfg(test)]
+    pub async fn create_session_requested(&self, keep_session_id: Option<&str>, project_id: &str, requested_id: Option<&str>) -> Result<String> {
+        let _gate = self.inner.projects.lock().await;
+        self.create_session_inner(keep_session_id, project_id, requested_id).await
+    }
+    /// Both standalone and pipelined creates own the same immutable journal
+    /// entry under the topic gate. A delayed create cannot reset a used chat,
+    /// and retrying after deletion/restart cannot recreate it or repeat a turn.
+    pub async fn create_session_operation(&self, request_id: &str, creation: &tau_net::ChatCreation) -> Result<String> {
+        let _gate = self.inner.projects.lock().await;
+        let request = tau_net::ClientRequest { id: request_id.into(), command: tau_net::ClientCommand::CreateSession {
+            project_id: creation.project_id.clone(), keep_session_id: creation.keep_session_id.clone(),
+        }};
+        if let Some(response) = self.inner.state.reserve_operation(&request).await? {
+            match response {
+                ServerMessage::Response { ok: true, uncertain: false, session_id: Some(id), .. } => {
+                    anyhow::ensure!(self.inner.state.get(&id).await?.is_some(), "Created chat was deleted; nothing was resent");
+                    return Ok(id);
+                }
+                ServerMessage::Response { uncertain: true, error, .. } => return Err(crate::state::UncertainOutcome(
+                    error.unwrap_or_else(|| "Chat creation interrupted; reconcile the saved creation before sending".into())).into()),
+                ServerMessage::Response { error, .. } => bail!("{}", error.unwrap_or_else(|| "Chat creation failed".into())),
+                _ => bail!("Invalid creation receipt"),
+            }
+        }
+        let result = self.create_session_inner(creation.keep_session_id.as_deref(), &creation.project_id,
+            uuid::Uuid::parse_str(request_id).ok().as_ref().map(|_| request_id)).await;
+        let response = match &result {
+            Ok(id) => ServerMessage::success(request_id.into(), Some(id.clone()), None),
+            Err(error) => ServerMessage::failure(request_id.into(), error.to_string()),
+        };
+        self.inner.state.finish_operation(request_id.into(), &response).await
+            .map_err(|error| crate::state::UncertainOutcome(format!("Creation outcome could not be saved: {error}")))?;
+        result
+    }
+    async fn create_session_inner(&self, keep_session_id: Option<&str>, project_id: &str, requested_id: Option<&str>) -> Result<String> {
+        if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        if let Some(request) = requested_id
+            && let Some(id) = self.inner.state.created_session(request, keep_session_id, project_id).await? {
+            // Reconcile both client-named chats and reused starters without changing
+            // their model or topic after an acknowledgement was lost.
+            return Ok(id);
+        }
+        let settings = self.inner.settings.get(); let model = settings.agent.model.clone();
+        let thinking = settings.agent.model_thinking_levels.get(&format!("{}/{}",model.provider,model.model_id)).unwrap_or(&settings.agent.thinking_level).clone();
+        let mut keep=keep_session_id.map(str::to_owned);
+        loop {
+            let id = self.inner.state.create_requested(model.clone(),thinking.clone(),keep.take(),project_id.into(),requested_id.map(str::to_owned)).await?;
+            let runtime = self.runtime(&id).await?; let _guard = runtime.operation.lock().await;
+            let mut content=runtime.content.lock().await;
+            self.ensure_loaded(&id,&runtime,&mut content).await?;
+            if !self.inner.state.get(&id).await?.is_some_and(|s|s.starter) {
+                if let Some(request) = requested_id
+                    && self.inner.state.receipt(&id,request).await?.is_some_and(|r| r.command.as_deref() == Some("create_session")) {
+                    return Ok(id);
+                }
+                continue;
+            }
+            if content.agent.as_ref().is_some_and(|agent|agent.model != model || agent.thinking != thinking) {
+                content.append(&id,json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":thinking})).await?;
+            }
+            drop(content); self.broadcast_sessions().await; return Ok(id);
+        }
+    }
+    /// Viewing persisted state never loads an agent or waits for a provider.
+    pub async fn session_state_message(&self, id: &str) -> Result<ServerMessage> {
+        let stored = self.inner.state.get(id).await?.context("Unknown session")?;
+        self.schedule_catalog(&stored.model);
+        let restore_review=self.inner.state.restore_review(id).await?;
+        let (state,revision)={let runtimes=self.inner.runtimes.lock().await;let state=runtimes.get(id).map(|runtime|runtime.snapshot());
+            let revision=state.as_ref().map_or_else(||self.inner.state_clock.load(Ordering::Acquire),|s|s.revision);(state,revision)};
+        let tokens=state.as_ref().filter(|s|s.status!=SessionStatus::Sleeping).and_then(|s|s.context_usage).and_then(|u|u.tokens).or(stored.tokens);
+        let usage = self.context_usage(&self.inner.settings.get(),&stored.model,tokens);
+        Ok(ServerMessage::SessionState { revision,restore_review:Some(restore_review),session_id:id.into(),status:state.as_ref().map_or(SessionStatus::Sleeping,|s|s.status),
+            detail:if restore_review {Some("Restored history: review external effects before execution".into())} else {state.as_ref().and_then(|s|s.detail.clone())},context_usage:usage })
+    }
+    pub async fn receipt_message(&self, id: &str, requests: &[String]) -> Result<ServerMessage> {
+        anyhow::ensure!(requests.len() <= 4,"Receipt requests are limited to four IDs");
+        anyhow::ensure!(id.len()<=128 && id.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_')),"Invalid receipt scope");
+        let mut reports = vec![];
+        for request in requests {
+            anyhow::ensure!(!request.is_empty() && request.len() <= 128,"Invalid request ID");
+            let receipt = self.inner.state.receipt(id,request).await?;
+            if receipt.is_none() && let Some(report)=self.inner.state.operation_receipt(request).await? {reports.push(report);continue;}
+            reports.push(tau_net::OperationReceipt { id:request.clone(),accepted:receipt.is_some(),complete:receipt.as_ref().is_some_and(|r|r.finished),
+                error:receipt.as_ref().and_then(|r|r.error.clone()),notice:receipt.and_then(|r|r.notice) });
+        }
+        Ok(ServerMessage::Receipts { session_id:id.into(),reports })
+    }
+    #[cfg(test)]
+    pub async fn prompt(&self, id: &str, text: &str, request_id: &str) -> Result<PromptOutcome> {
+        self.prompt_with_model(id, text, request_id, None).await
+    }
+    pub async fn prompt_with_model(&self, id: &str, text: &str, request_id: &str, model: Option<&SessionModel>) -> Result<PromptOutcome> {
+        if text.trim().is_empty() || text.chars().count() > MAX_PROMPT_CHARS { bail!("Message must contain 1–{MAX_PROMPT_CHARS} characters"); }
+        if request_id.is_empty() || request_id.len() > 128 { bail!("Invalid request ID"); }
+        let runtime = self.runtime(id).await?;
+        let _guard = runtime.operation.lock().await;
+        let mut content = runtime.content.lock().await;
+        self.ensure_loaded(id, &runtime, &mut content).await?;
+        if let Some(receipt) = self.inner.state.receipt(id,request_id).await? {
+            if receipt.command.as_deref().is_some_and(|kind|kind != "builtin") { bail!("Request ID was already used for another operation"); }
+            if receipt.text != text || receipt.model.as_ref() != model { bail!("Request ID was already used for different prompt intent"); }
+            if !receipt.finished { return Ok(PromptOutcome {disposition:PromptDisposition::Accepted,notice:Some("Command is already accepted; awaiting outcome".into())}); }
+            if let Some(error) = receipt.error { bail!("{error}"); }
+            return Ok(PromptOutcome { disposition:receipt.disposition,notice:receipt.notice });
+        }
+        self.inner.state.require_execution(id).await?;
+        if let Some(rest) = text.strip_prefix('/') {
+            anyhow::ensure!(model.is_none(), "Slash commands cannot carry a starting model");
+            let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            if tau_net::BUILTIN_COMMANDS.contains(&name) {
+                if name=="compact" && content.agent.as_ref().unwrap().running {bail!("Stop the current run before compacting");}
+                let receipt = Receipt { model:None, id:request_id.into(),command:Some("builtin".into()),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
+                content.commit(id,Vec::new(),None,Some(receipt.clone())).await?;
+                self.broadcast_sessions().await;
+                if name=="compact" {
+                    let agent=content.agent.as_mut().unwrap();agent.running=true;agent.cancel=tokio_util::sync::CancellationToken::new();
+                    let manager=self.clone();let session=id.to_owned();let rt=runtime.clone();let arguments=args.trim().to_owned();
+                    self.set_runtime_state(id,&runtime,SessionStatus::Running,Some("Compacting context".into()),None);
+                    let cancel=agent.cancel.clone();
+                    agent.task=Some(tokio::spawn(async move {
+                        let admission=tokio::select! {_=cancel.cancelled()=>None,p=manager.inner.agent_runs.acquire()=>p.ok()};
+                        let result=if admission.is_none() {Err(anyhow::anyhow!("Compaction cancelled before execution"))} else {manager.compact(&session,&rt,&arguments).await.map(|()|PromptOutcome {disposition:PromptDisposition::Handled,notice:Some("Context compacted.".into())})};
+                        let mut content=rt.content.lock().await;
+                        if let Some(agent)=&mut content.agent {agent.running=false;}
+                        if let Err(error)=manager.inner.state.finish_command(&session,receipt.clone(),&result).await {warn!(%error,"Could not persist compaction outcome");}
+                        if let Ok(report)=manager.receipt_message(&session,&[receipt.id]).await {let _=manager.inner.events.send(report);}
+                        manager.set_runtime_state(&session,&rt,SessionStatus::Idle,result.as_ref().err().map(|e|e.to_string()),Some(None));
+                        if result.is_ok() {manager.start_run(&session,&rt,&mut content);}
+                    }));
+                    return Ok(PromptOutcome {disposition:PromptDisposition::Accepted,notice:Some("Compaction accepted".into())});
+                }
+                drop(content);
+                let result = self.run_builtin_command(id, &runtime, name, args.trim()).await;
+                self.inner.state.finish_command(id,receipt,&result).await?;
+                if let Ok(report) = self.receipt_message(id,&[request_id.into()]).await { let _ = self.inner.events.send(report); }
+                return result;
+            }
+            if ["settings", "login", "logout", "reload", "tau-fork-at", "tree", "new", "resume", "fork", "clone", "scoped-models", "export", "import", "share", "copy", "session", "changelog", "hotkeys", "trust", "quit"].contains(&name) {
+                bail!("Use Tau's menu for /{name}; Pi terminal extensions are not loaded");
+            }
+        }
+        let mut model_change = Vec::new();
+        if let Some(model) = model {
+            let settings = self.inner.settings.get();
+            settings.model(model)?;
+            let stored = self.inner.state.get(id).await?.context("Unknown session")?;
+            if stored.model != *model {
+                anyhow::ensure!(stored.starter && !content.agent.as_ref().unwrap().running
+                    && content.transcript.as_ref().unwrap().queue.requests.is_empty(), "Starting model can only be changed before the first message");
+                let slug = format!("{}/{}", model.provider, model.model_id);
+                let thinking = settings.agent.model_thinking_levels.get(&slug).unwrap_or(&settings.agent.thinking_level);
+                model_change.push(json!({"type":"model_change","provider":model.provider,"modelId":model.model_id,"thinkingLevel":thinking}));
+            }
+        }
+        let disposition = if content.agent.as_ref().unwrap().running || content.transcript.as_ref().unwrap().queue.paused { PromptDisposition::Queued } else { PromptDisposition::Submitted };
+        let mut queue = content.transcript.as_ref().unwrap().queue.clone();
+        if queue.requests.len() >= 256 { bail!("Queue is full (256 messages)"); }
+        queue.requests.push(QueuedRequest { request_id:request_id.into(), revision:0, text:text.into(), timestamp_ms:Some(crate::agent::now_ms()) });
+        content.commit(id,model_change,Some(queue),Some(Receipt { model:model.cloned(), id:request_id.into(),command:None,text:text.into(),disposition,finished:true,notice:None,error:None })).await?;
+        if let Some(model) = model { self.schedule_catalog(model); }
+        // Queue, receipt and retained session metadata commit together before acknowledgement.
+        let paused = content.transcript.as_ref().unwrap().queue.paused && !content.agent.as_ref().unwrap().running;
+        self.start_run(id, &runtime, &mut content);
+        if paused {
+            // A newly accepted send must not leave the UI displaying an old
+            // provider error while the durable queue waits for explicit Resume.
+            self.set_runtime_state(id, &runtime, SessionStatus::Idle,
+                Some("Pending work is paused; resume when ready".into()), None);
+        }
+        drop(content);
+        // Publish accepted-send activity without waiting for optional title generation.
+        self.broadcast_sessions().await;
+        let manager = self.clone(); let session = id.to_owned(); let text = text.to_owned();
+        tokio::spawn(async move { manager.title_after_prompt(&session, &text).await; });
+        Ok(PromptOutcome { disposition, notice:None })
+    }
+    pub async fn queue_control(&self, id: &str, generation: &str, command_id: &str, operation: QueueOperation) -> Result<String> {
+        let runtime = self.runtime(id).await?; let _guard = runtime.operation.lock().await;
+        let mut content = runtime.content.lock().await;
+        self.ensure_loaded(id, &runtime, &mut content).await?;
+        let payload=json!({"generation":generation,"operation":operation}).to_string();
+        if let Some(receipt)=self.inner.state.receipt(id,command_id).await? {
+            if receipt.command.as_deref() != Some("queue_control") || receipt.text != payload { bail!("Request ID was already used for another control"); }
+            return Ok("accepted".into());
+        }
+        if matches!(operation,QueueOperation::Resume {..} | QueueOperation::Prefix {..}) {self.inner.state.require_execution(id).await?;}
+        let transcript = content.transcript.as_ref().unwrap();
+        if transcript.generation != generation { bail!("Queue changed; reopen this chat"); }
+        let mut queue = transcript.queue.clone();
+        // Explicit transport controls supersede the previous boundary intent.
+        // Never make Play depend on a separate Cancel action, including old
+        // paused chats whose waiting control outlived its run.
+        let stopping = content.agent.as_ref().is_some_and(|agent| agent.running && agent.cancel.is_cancelled());
+        let continuation = match &operation {
+            QueueOperation::Resume { .. } | QueueOperation::Prefix { .. } => Some(stopping),
+            QueueOperation::Pause { .. } => Some(false),
+            _ => None,
+        };
+        match operation {
+            QueueOperation::Edit { request_id, revision, text } => {
+                if text.trim().is_empty() || text.chars().count() > MAX_PROMPT_CHARS { bail!("Invalid queue text"); }
+                let request = queue.requests.iter_mut().find(|r| r.request_id == request_id && r.revision == revision).context("Queued message changed")?;
+                request.text = text; request.revision = revision.checked_add(1).context("Queue revision exhausted")?;
+            }
+            QueueOperation::Delete { request_id, revision } => {
+                let index = queue.requests.iter().position(|r| r.request_id == request_id && r.revision == revision).context("Queued message changed")?;
+                queue.requests.remove(index);
+            }
+            QueueOperation::Pause { run_id, boundary } | QueueOperation::Prefix { run_id, boundary, requests: _ } if boundary != "turn" || run_id != queue.run_id => {
+                bail!("Unsupported boundary or stale run ID");
+            }
+            QueueOperation::Pause { run_id, .. } => {
+                queue.control = Some(QueueControl { command_id:command_id.into(), run_id, action:"pause".into(), requests:vec![], status:"waiting".into(), detail:None });
+                if !content.agent.as_ref().unwrap().running || stopping { queue.paused = true; queue.control.as_mut().unwrap().status = "applied".into(); }
+            }
+            QueueOperation::Prefix { run_id, requests, .. } => {
+                if requests.is_empty() || requests.len() > queue.requests.len() || requests.iter().zip(&queue.requests).any(|(a,b)| a.request_id != b.request_id || a.revision != b.revision) { bail!("Queue prefix changed"); }
+                queue.control = Some(QueueControl { command_id:command_id.into(), run_id, action:"prefix".into(), requests, status:"waiting".into(), detail:None });
+                queue.paused = false;
+            }
+            QueueOperation::Resume { run_id } => {
+                // Stop may settle between the client painting Play and sending
+                // it. An ended run cannot conflict; a different live run can.
+                if queue.run_id.is_some() && run_id != queue.run_id { bail!("Run changed"); }
+                queue.paused = false; queue.control = None;
+            }
+            QueueOperation::Cancel { control_id } => {
+                if !queue.control.as_ref().is_some_and(|control| control.command_id == control_id && control.status == "waiting") { bail!("Control is no longer pending"); }
+                queue.control = None;
+            }
+        }
+        if let Some(control) = &queue.control && control.action == "prefix" && control.status == "waiting"
+            && (control.requests.len() > queue.requests.len() || control.requests.iter().zip(&queue.requests).any(|(a,b)| a.request_id != b.request_id || a.revision != b.revision)) {
+            bail!("Cancel the pending prefix before editing its messages");
+        }
+        content.save_queue(id, queue, Some(Receipt { model:None, id:command_id.into(),command:Some("queue_control".into()),text:payload,disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
+        if let Some(continuation) = continuation { content.agent.as_mut().unwrap().resume_after_stop = continuation; }
+        self.start_run(id, &runtime, &mut content);
+        Ok("accepted".into())
+    }
+    pub async fn abort(&self, id: &str, request_id: &str) -> Result<()> {
+        let runtime = self.runtime(id).await?;
+        let mut content = runtime.content.lock().await;
+        self.ensure_loaded(id,&runtime,&mut content).await?;
+        if let Some(receipt)=self.inner.state.receipt(id,request_id).await? {
+            if receipt.command.as_deref() != Some("abort") { bail!("Request ID was already used for another operation"); }
+            return Ok(());
+        }
+        let mut queue=content.transcript.as_ref().unwrap().queue.clone();
+        // Stop cancels the active work AND its deferred run limit/pause. Keep
+        // every queued message held for Play; no hidden control can block it.
+        queue.control = None;
+        if let Some(agent)=&content.agent {
+            if agent.running || agent.needs_turn || !queue.requests.is_empty() { queue.paused=true; }
+        }
+        content.save_queue(id,queue,Some(Receipt { model:None, id:request_id.into(),command:Some("abort".into()),text:String::new(),disposition:PromptDisposition::Handled,finished:true,notice:None,error:None })).await?;
+        if let Some(agent)=&mut content.agent {agent.stop();}
+        Ok(())
+    }
+    pub async fn close_session(&self, id: &str) -> Result<()> {
+        let runtime = self.runtime(id).await?;
+        if let Some(agent) = &mut runtime.content.lock().await.agent { agent.stop(); }
+        let _guard = runtime.operation.lock().await;
+        self.retire_session(id, &runtime).await;
+        self.broadcast_sessions().await; Ok(())
+    }
+    pub(crate) async fn retire_session(&self, id: &str, runtime: &Arc<SessionRuntime>) {
+        let task = {
+            let mut content = runtime.content.lock().await;
+            content.agent.as_mut().and_then(|agent| { agent.stop(); agent.task.take() })
+        };
+        if let Some(task) = task && let Err(error) = task.await { warn!(%error, "Agent task stopped unexpectedly"); }
+        let mut content = runtime.content.lock().await;
+        let usage = content.agent.as_ref().and_then(|agent| self.context_usage(&self.inner.settings.get(), &agent.model, agent.tokens));
+        content.agent = None; content.transcript = None;
+        self.set_runtime_state(id, runtime, SessionStatus::Sleeping, None, Some(usage));
+    }
+    pub async fn delete_session(&self, id: &str) -> Result<()> {
+        let _gate = self.inner.projects.lock().await;
+        let _deleting=self.deleting(vec![id.into()]);
+        let runtime=self.inner.runtimes.lock().await.get(id).cloned().unwrap_or_else(||Arc::new(SessionRuntime::new()));
+        if let Some(agent) = &mut runtime.content.lock().await.agent { agent.stop(); }
+        let _guard = runtime.operation.lock().await;
+        self.retire_session(id, &runtime).await;
+        self.inner.state.remove(id).await?;
+        self.inner.runtimes.lock().await.remove(id);
+        self.maintain_uploads().await?;
+        self.broadcast_sessions().await; Ok(())
+    }
+    pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
+        let title = title.trim();
+        if title.is_empty() || title.contains(['\n','\r']) || title.chars().count() > MAX_TITLE_CHARS { bail!("Invalid session title"); }
+        let runtime = self.runtime(id).await?; let _guard = runtime.operation.lock().await;
+        self.inner.state.rename(id, title.into(), false).await?;
+        self.broadcast_sessions().await; Ok(())
+    }
+    pub async fn fork_session(&self, id: &str, entry_id: &str) -> Result<(String, Option<String>)> { self.branch_session(id, Some(entry_id)).await }
+    pub async fn clone_session(&self, id: &str) -> Result<String> { Ok(self.branch_session(id, None).await?.0) }
+    async fn branch_session(&self, id: &str, entry_id: Option<&str>) -> Result<(String, Option<String>)> {
+        let _gate = self.inner.projects.lock().await;
+        let runtime = self.runtime(id).await?; let _guard = runtime.operation.lock().await;
+        let _content = runtime.content.lock().await;
+        let result = self.inner.state.branch(id,entry_id).await?;
+        self.broadcast_sessions().await; Ok(result)
+    }
+    pub(crate) fn deleting(&self,ids:Vec<String>)->Deleting {
+        self.inner.deleting.lock().unwrap().extend(ids.iter().cloned());Deleting {inner:self.inner.clone(),ids}
+    }
+    pub async fn shutdown(&self) {
+        if self.inner.shutting_down.swap(true, Ordering::AcqRel) { return; }
+        let runtimes = self.inner.runtimes.lock().await.iter().map(|(id,r)| (id.clone(),r.clone())).collect::<Vec<_>>();
+        for (_,runtime) in &runtimes { if let Some(agent) = &mut runtime.content.lock().await.agent { agent.stop(); } }
+        for (id,runtime) in runtimes { let _guard = runtime.operation.lock().await; self.retire_session(&id, &runtime).await; }
+    }
+    pub(crate) async fn runtime(&self, id: &str) -> Result<Arc<SessionRuntime>> {
+        if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        let mut runtimes=self.inner.runtimes.lock().await;
+        anyhow::ensure!(!self.inner.deleting.lock().unwrap().contains(id),"Chat is being deleted");
+        if self.inner.state.get(id).await?.is_none() {bail!("Unknown session {id}");}
+        runtimes.retain(|_,runtime|Arc::strong_count(runtime)>1 || runtime.snapshot().status!=SessionStatus::Sleeping);
+        anyhow::ensure!(runtimes.len()<128 || runtimes.contains_key(id),"Runtime admission is full (128 chats); close idle chats before starting another");
+        Ok(runtimes.entry(id.into()).or_insert_with(|| {let runtime=SessionRuntime::new();runtime.state.write().unwrap().revision=self.inner.state_clock.fetch_add(1,Ordering::AcqRel)+1;Arc::new(runtime)}).clone())
+    }
+    pub(crate) async fn ensure_loaded(&self, id: &str, runtime: &Arc<SessionRuntime>, content: &mut SessionContent) -> Result<()> {
+        if self.inner.shutting_down.load(Ordering::Acquire) { bail!("Tau is shutting down"); }
+        if content.agent.is_some() { return Ok(()); }
+        let stored = self.inner.state.get(id).await?.context("Unknown session")?;
+        let settings = self.inner.settings.get();
+        let mut queue = self.inner.state.queue(id).await?;
+        queue.run_id = None;
+        if !queue.requests.is_empty() || stored.needs_turn { queue.paused = true; }
+        let detail = (queue.paused && (stored.needs_turn || !queue.requests.is_empty())).then(|| "Pending work is paused; resume when ready".to_owned());
+        let usage = self.context_usage(&settings, &stored.model, stored.tokens);
+        // The agent needs only the durable queue/head, not display history.
+        // Provider context is loaded by the owned run *after* acceptance.
+        let generation = format!("{}:{id}",self.inner.state.block_cursor().await?.lineage);
+        content.transcript = Some(Transcript::new(generation,stored.head,stored.next_order,queue));
+        content.agent = Some(AgentSession { store:self.inner.state.clone(), revision:stored.revision, model:stored.model, thinking:stored.thinking,
+            running:false, resume_after_stop:false, cancel:tokio_util::sync::CancellationToken::new(), task:None, tokens:stored.tokens, needs_turn:stored.needs_turn });
+        self.set_runtime_state(id,runtime,SessionStatus::Idle,detail,Some(usage)); Ok(())
+    }
+    pub(crate) fn set_runtime_state(&self, id: &str, runtime: &Arc<SessionRuntime>, status: SessionStatus, detail: Option<String>, usage: Option<Option<ContextUsage>>) {
+        let mut current = runtime.state.write().unwrap_or_else(|e| e.into_inner());
+        let usage = usage.unwrap_or(current.context_usage);
+        if current.status == status && current.detail == detail && current.context_usage == usage { return; }
+        let schedule = status == SessionStatus::Idle && current.status != SessionStatus::Idle;
+        let idle_since = if status == SessionStatus::Idle { current.idle_since.or(Some(Instant::now())) } else { None };
+        let revision=self.inner.state_clock.fetch_add(1,Ordering::AcqRel)+1;
+        *current = RuntimeState { revision,status, detail:detail.clone(), context_usage:usage, idle_since }; drop(current);
+        let _ = self.inner.events.send(ServerMessage::SessionState { revision,restore_review:None,session_id:id.into(), status, detail, context_usage:usage });
+        let timeout = self.inner.settings.get().daemon.idle_timeout_seconds;
+        if schedule && timeout > 0 {
+            let manager = self.clone(); let id = id.to_owned(); let runtime = runtime.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(timeout)).await;
+                let _guard = runtime.operation.lock().await;
+                let content = runtime.content.lock().await;
+                // Unlike a Pi worker, the native runtime owns no unsaved queue.
+                // Paused/pending work survives eviction and reopens paused; retaining
+                // it here would abandon the one-shot timer and leak idle runtimes.
+                if runtime.snapshot().idle_since != idle_since || content.agent.as_ref().is_some_and(|a| a.running) { return; }
+                drop(content); manager.retire_session(&id, &runtime).await;
+            });
+        }
+    }
+    pub(crate) async fn broadcast_sessions(&self) {
+        let _=self.inner.events.send(ServerMessage::ResyncRequired {session_id:None});
+    }
+    pub async fn set_settings(&self, revision: u64, settings: Settings) -> Result<Settings> {
+        let updated = self.inner.settings.set(revision, settings).await?;
+        // Publish suggestions independently of any chat's commands/feed.
+        let _ = self.inner.events.send(ServerMessage::ModelCatalog { catalog: self.model_catalog() });
+        self.schedule_model_catalog();
+        self.broadcast_sessions().await;
+        Ok(updated)
+    }
+}
+pub(crate) fn safe_file_name(file_name: &str) -> String {
+    let safe = file_name.rsplit(['/', '\\']).next().unwrap_or_default().chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).take(160).collect::<String>().trim_matches('.').to_owned();
+    if safe.is_empty() { "attachment".into() } else { safe }
+}
+pub(crate) fn bounded(value: &str, max: usize) -> String { value.chars().take(max).collect() }
+
+pub(crate) struct Deleting {inner:Arc<ManagerInner>,ids:Vec<String>}
+impl Drop for Deleting {fn drop(&mut self) {let mut set=self.inner.deleting.lock().unwrap();for id in &self.ids {set.remove(id);}}}

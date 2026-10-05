@@ -11,9 +11,9 @@ usage() {
     cat <<'HELP'
 Usage: scripts/release-beta.sh [options]
   --plan                 Print the plan; no build, Git mutation or service action.
-  --merge LOCAL_BRANCH   Merge that feature into tau2-integration (never master).
+  --merge LOCAL_BRANCH   Merge that feature into tau2 (never master).
   --version X.Y.Z        Bump daemon/client/lockfile + Android code, and commit.
-  --push                 Push tau2-integration to origin/tau2; feature too if merged.
+  --push                 Push tau2 to origin/tau2; feature too if merged.
   --deploy               Install beta only, after both packages verify; requires pushed HEAD.
   --check                Compiler check, cached by build inputs (not docs-only commits).
   --test                 Nextest, cached by build inputs. OFF by default. Never Clippy.
@@ -49,7 +49,7 @@ if "$plan"; then
     echo 'One job; registry-offline unless --online. No backups, stable actions or implicit tests.'
     exit 0
 fi
-[[ $(git branch --show-current) == tau2-integration ]] || die 'Run in the tau2-integration worktree, not stable/master.'
+[[ $(git branch --show-current) == tau2 ]] || die 'Run in the tau2 worktree, not stable/master.'
 [[ -z $(git status --porcelain) ]] || die 'Commit/reconcile local changes first; nothing will be auto-stashed or discarded.'
 [[ -x "$cargo" ]] || die 'Managed Cargo wrapper missing.'
 [[ -z "$sender" || "$sender" == /* && -f "$sender" && -x "$sender" ]] || die '--send-command must be an absolute executable path (no shell expression).'
@@ -100,7 +100,7 @@ fi
 if [[ -n "$version" ]]; then
     python3 "$helper" bump "$version"
     if ! git diff --quiet; then
-        git add Cargo.lock daemon/Cargo.toml frontend/Cargo.toml frontend/android/AndroidManifest.xml
+        git add Cargo.lock crates/daemon/Cargo.toml crates/frontend/Cargo.toml crates/frontend/android/AndroidManifest.xml
         git commit -m "Release Tau 2 beta $version"
     fi
 fi
@@ -151,8 +151,8 @@ if "$finished"; then
 else
 build_daemon() { "$cargo" build --release --locked -p taud; install -m 0700 "$root/target/release/taud" "$daemon"; }
 step daemon "$key_daemon" "$daemon" -- build_daemon
-step windows "$key_win" "$win" "$root/target/x86_64-pc-windows-msvc/release/tau.exe" "$root/target/windows-sfx-Tau-Beta-$version/tau-windows-payload.tar.lzma" "$root/windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe" -- scripts/build-windows-sfx.sh
-step android "$key_android" "$root/target/android/arm64-v8a/tau-frontend-arm64-v8a.apk" "$root/target/android/arm64-v8a/libtau_frontend.so" -- frontend/android/build.sh
+step windows "$key_win" "$win" "$root/target/x86_64-pc-windows-msvc/release/tau.exe" "$root/target/windows-sfx-Tau-Beta-$version/tau-windows-payload.tar.lzma" "$root/crates/windows/target/x86_64-pc-windows-msvc/release/tau-launcher.exe" -- scripts/build-windows-sfx.sh
+step android "$key_android" "$root/target/android/arm64-v8a/tau-frontend-arm64-v8a.apk" "$root/target/android/arm64-v8a/libtau_frontend.so" -- crates/frontend/android/build.sh
 # Verification changes need not rebuild unchanged binaries.
 verifier=$(sha256sum "$helper" | cut -d' ' -f1)
 step verify-windows "$key_win:$verifier" "$win" -- python3 "$helper" windows "$version"
@@ -177,7 +177,7 @@ fi
 if "$deploy"; then
     remote=$(git ls-remote origin refs/heads/tau2 | cut -f1)
     [[ $(git rev-parse HEAD) == "$remote" ]] || die 'Deploy requires HEAD published to origin/tau2; use --push.'
-    deploy_key=$(sha256sum "$daemon" deploy/tau2-beta.service scripts/install-daemon.sh | sha256sum | cut -d' ' -f1)
+    deploy_key=$(sha256sum "$daemon" assets/tau2-beta.service scripts/install-daemon.sh | sha256sum | cut -d' ' -f1)
     pid=$(systemctl show tau2-beta.service -p MainPID --value)
     if [[ ${pid:-0} -gt 0 ]] && python3 "$helper" hit "$state/deploy.json" "$deploy_key" && cmp -s "$daemon" "/proc/$pid/exe" && python3 "$helper" health "$version" "$protocol"; then
         say 'deploy: matching beta already running; no restart'

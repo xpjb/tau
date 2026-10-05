@@ -1,5 +1,5 @@
 /target/
-/windows/target/
+/crates/windows/target/
 /dist/
 *.jks
 *.keystore
@@ -9,3 +9,5 @@
 *.msi
 *.tmp
 .DS_Store
+
+__pycache__/

@@ -46,7 +46,7 @@ systemctl stop tau2-beta.service
 # Atomic executable replacement leaves an already-running beta mapped to its old inode.
 install -m 0755 "$binary" /usr/local/lib/tau2-beta/taud.new
 mv -f /usr/local/lib/tau2-beta/taud.new /usr/local/lib/tau2-beta/taud
-install -m 0644 "$root/deploy/tau2-beta.service" /etc/systemd/system/tau2-beta.service
+install -m 0644 "$root/assets/tau2-beta.service" /etc/systemd/system/tau2-beta.service
 systemctl daemon-reload
 systemctl enable tau2-beta.service
 systemctl restart tau2-beta.service
