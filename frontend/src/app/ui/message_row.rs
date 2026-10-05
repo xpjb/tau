@@ -396,7 +396,7 @@ fn message_heading(chat: &Chat, id: &MessageId) -> (String, Option<String>, bool
 }
 fn message_actions(chat: &Chat, id: &MessageId, session: &str) -> Vec<(String, MenuChoice)> {
     let feed = &chat.feed; let m = &feed.messages[id]; let text = m.text(feed, &chat.local);
-    let mut copied = m.event.as_deref().and_then(|id| feed.event(id)).map(crate::details::message_text).unwrap_or_else(|| text.into());
+    let mut copied = m.event.as_deref().and_then(|id| feed.event(id)).filter(|_| matches!(m.body, MessageBody::Remote(_))).map(crate::details::message_text).unwrap_or_else(|| text.into());
     if m.event.is_none() && m.queue.is_none()
         && let Some(detail) = m.intent.as_ref().and_then(|id| chat.local.pending.iter().find(|p| &p.request.id == id)).and_then(|p| p.detail.as_deref()) {
         copied.push_str(&format!("\n{detail}"));

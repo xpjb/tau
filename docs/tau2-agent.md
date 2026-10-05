@@ -87,14 +87,14 @@ field is added.
   Writes use a private temporary file, fsync, atomic rename, directory fsync.
 - `auth.json` beside settings: private provider credentials, separate from menu
   settings. Supports Pi's Codex OAuth and API-key record shapes. Codex tokens are
-  refreshed in-process, serialized across all chats. With the daemon stopped,
-  `TAU_SETTINGS_PATH=/path/settings.json taud --login-codex` signs in without Pi
-  using the Codex device-code flow. API-key environment variable
-  names are configured per provider. For side-by-side beta operation,
-  `TAU_CODEX_AUTH_SOURCE` optionally reads a primary auth file without copying,
-  refreshing or writing it. Beta's own Codex record takes precedence. An expired or
-  rejected shared token reports that its primary owner must refresh, or that beta
-  needs its own login; it never races the primary refresh credential.
+  refreshed in-process under the existing Pi-compatible cross-process lock.
+  `TAU_CODEX_AUTH_SOURCE` selects a shared primary auth file; it is reread after
+  locking, renewed in place, and never copied into beta. Beta's own Codex record
+  takes precedence. **Settings → Sign in to Codex** provides browser device
+  authorization when renewal genuinely fails. The old CLI remains available for
+  server administration, not as client recovery instructions. See
+  [Codex recovery and validation](codex-signin.md). API-key environment variable
+  names are configured per provider.
 - `TAU_DATABASE_PATH`: `/var/lib/tau/tau.sqlite3` by default. SQLite schema 1,
   WAL, `synchronous=FULL`, foreign keys enabled. The database is private (0600).
   It replaces both native `state.json` and per-chat JSONL files. Old

@@ -1,5 +1,6 @@
 use crate::settings::SettingsExt;
 pub mod auth;
+mod auth_lock;
 pub mod history;
 mod provider;
 mod tools;

@@ -218,18 +218,19 @@ Tailnet routes. The connection token is reused from stable when first installing
 Beta starts with its own conversation database; stable history is not silently
 migrated. Use the explicit offline importer when a real cutover is authorized.
 
-Codex can be signed in independently:
+Codex refreshes automatically. For side-by-side use, `TAU_CODEX_AUTH_SOURCE`
+selects the primary credential file. Beta uses the same `proper-lockfile`
+directory lease as stable Pi, rereads after acquiring it, and saves a rotated
+token back to that file. It does not make a second credential copy.
 
-```sh
-TAU_SETTINGS_PATH=/var/lib/tau2-beta/settings.json \
-  /usr/local/lib/tau2-beta/taud --login-codex
-```
-
-For side-by-side use, `TAU_CODEX_AUTH_SOURCE` optionally reads a primary credential
-file **without copying, refreshing or modifying it**. An independently signed-in
-beta record takes precedence. If the primary token expires without a primary
-refresh, beta reports that explicitly rather than racing its refresh token.
-Static OpenRouter API keys can be stored privately in beta's own `auth.json`.
+If renewal genuinely fails, **Settings → Sign in to Codex** opens the browser
+sign-in flow with a code and automatic approval detection. A chat authentication
+failure opens this prompt directly; no terminal command is needed. Completing
+this optional sign-in creates an independent beta login for the chosen Codex
+account, taking precedence over the shared file without replacing stable's login.
+Authentication never automatically repeats model or tool work; **Resume chat**
+is explicit. See [Codex recovery](docs/codex-signin.md).
+Static OpenRouter API keys remain private in beta's own `auth.json`.
 
 Never copy only a running SQLite main file and omit its WAL: use SQLite's backup
 API / `.backup`, or stop beta before copying. Back up settings, auth and attachments

@@ -63,8 +63,9 @@ desktop. Mobile topic switches stay on the list until the user selects a chat.
 Settings and auth are separate private, atomic files. Settings CAS preserves exact
 prompt text and distinguishes missing/inherited (`null`) from intentionally empty
 replacements. Secrets never enter settings responses. Native OAuth refresh is
-serialized; optional read-only shared Codex credentials never initiate refresh and
-are superseded by beta's own independent login.
+serialized with the primary Pi-compatible credential lease. Shared Codex tokens
+are renewed in place without a beta copy; an independent beta login takes
+precedence. Browser device sign-in is an authenticated, ephemeral fallback.
 
 ## Client
 

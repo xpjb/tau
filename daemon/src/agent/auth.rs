@@ -49,21 +49,19 @@ impl AuthStore {
         // A cancelled model call must not interrupt a rotating refresh-token write.
         tokio::spawn(async move {
             let _guard = this.gate.lock().await;
+            let own_lock = super::auth_lock::AuthLock::acquire(&this.path).await?;
             let mut root = if this.path.try_exists()? { this.read().await? } else { json!({}) };
+            let mut path = &this.path;
+            let mut shared_lock = None;
             if provider == "openai-codex" && root.get(&provider).is_none() && let Some(source)=&this.shared_codex {
-                // Never rotate or copy the primary daemon's refresh token. Native
-                // beta login creates its own record and takes precedence here.
-                let shared=match Self::read_path(source).await {
+                // Participate in the primary's existing lock, then reread. A
+                // concurrent stable/beta refresh is reused, never duplicated.
+                shared_lock = Some(super::auth_lock::AuthLock::acquire(source).await?);
+                root = match Self::read_path(source).await {
                     Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind()==std::io::ErrorKind::NotFound) => return Err(SignInRequired.into()),
                     other => other?,
                 };
-                let record=&shared[&provider];
-                if record["type"] != "oauth" { return Err(SignInRequired.into()); }
-                let access=record["access"].as_str().filter(|v|!v.is_empty()).context("Shared Codex source has no access token")?;
-                if record["expires"].as_u64().unwrap_or(0)<=super::now_ms().saturating_add(30_000) || rejected.as_deref() == Some(access) {
-                    return Err(SignInRequired.into());
-                }
-                return Ok((access.to_owned(),Some(record["accountId"].as_str().filter(|v|!v.is_empty()).context("Shared Codex source has no account ID")?.into())));
+                path = source;
             }
             if provider == "openai-codex" && root.get(&provider).is_none() { return Err(SignInRequired.into()); }
             let record = root.get_mut(&provider).context("Provider has no daemon credentials; configure an API key")?;
@@ -71,14 +69,17 @@ impl AuthStore {
                 return Ok((record["key"].as_str().filter(|v| !v.is_empty()).context("API key is empty")?.to_owned(), None));
             }
             if record["type"] != "oauth" || provider != "openai-codex" { bail!("Unsupported credential type"); }
+            let lease = shared_lock.as_ref().unwrap_or(&own_lock);
             if record["expires"].as_u64().unwrap_or(0) <= super::now_ms() + 60_000 || rejected.as_deref() == record["access"].as_str() {
+                lease.check()?;
                 let refresh = record["refresh"].as_str().filter(|s| !s.is_empty()).ok_or(SignInRequired)?;
                 let (status, value) = auth_json(this.http.post(format!("{}/oauth/token", this.issuer))
                     .form(&[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", CLIENT)])).await?;
                 if matches!(status.as_u16(), 400 | 401 | 403) { return Err(SignInRequired.into()); }
                 if !status.is_success() { bail!("Codex token refresh returned HTTP {}; try again shortly", status.as_u16()); }
                 *record = credentials(&value, Some(refresh))?;
-                crate::settings::atomic_write(&this.path, &serde_json::to_vec_pretty(&root)?).await?;
+                lease.check()?;
+                crate::settings::atomic_write(path, &serde_json::to_vec_pretty(&root)?).await?;
             }
             let record = &root[&provider];
             Ok((record["access"].as_str().filter(|v| !v.is_empty()).context("Missing access token")?.to_owned(),
@@ -137,9 +138,11 @@ impl AuthStore {
     }
     async fn save_login(&self, record: Value) -> Result<()> {
         let _guard = self.gate.lock().await;
+        let lease = super::auth_lock::AuthLock::acquire(&self.path).await?;
         // Reread at commit time to preserve credentials changed during approval.
         let mut root = if self.path.try_exists()? { self.read().await? } else { json!({}) };
         root["openai-codex"] = record;
+        lease.check()?;
         crate::settings::atomic_write(&self.path, &serde_json::to_vec_pretty(&root)?).await
     }
     async fn approve_device(&self, id: &str, code: &str, mut interval: u64) -> Result<Value> {
@@ -201,7 +204,7 @@ fn credentials(value: &Value, previous_refresh: Option<&str>) -> Result<Value> {
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn side_by_side_auth_reads_rotations_but_never_rotates_or_rewrites_the_primary() {
+    async fn side_by_side_auth_reads_primary_rotations_without_copying_credentials() {
         let root=tempfile::tempdir().unwrap(); let primary=root.path().join("primary.json"); let own=root.path().join("beta.json");
         let record=|access:&str,expiry:u64|json!({"openai-codex":{"type":"oauth","access":access,"refresh":"never-submit-this-refresh","accountId":"fixture-account","expires":expiry}}).to_string();
         crate::settings::atomic_write(&primary,record("first",u64::MAX).as_bytes()).await.unwrap();
@@ -209,9 +212,7 @@ mod tests {
         assert_eq!(auth.authorization("openai-codex",None,None).await.unwrap().0,"first");
         crate::settings::atomic_write(&primary,record("rotated",u64::MAX).as_bytes()).await.unwrap();
         assert_eq!(auth.authorization("openai-codex",None,Some("first")).await.unwrap().0,"rotated");
-        assert!(auth.authorization("openai-codex",None,Some("rotated")).await.is_err());
         crate::settings::atomic_write(&primary,record("expired",0).as_bytes()).await.unwrap();
-        assert!(auth.authorization("openai-codex",None,None).await.is_err());
         assert_eq!(tokio::fs::read_to_string(&primary).await.unwrap(),record("expired",0));
         assert!(!own.exists(),"Reading a shared account must not copy its rotating refresh credential");
         crate::settings::atomic_write(&own,record("independent-beta",u64::MAX).as_bytes()).await.unwrap();
@@ -261,7 +262,7 @@ pub(crate) mod device_login_tests {
     async fn device_signin_coalesces_saves_only_beta_and_preserves_concurrent_other_credentials() {
         let (url, server, starts) = fixture(false, 30).await;
         let dir=tempfile::tempdir().unwrap();let own=dir.path().join("beta.json");let primary=dir.path().join("primary.json");
-        let shared=json!({"openai-codex":{"type":"oauth","access":"old-shared","refresh":"never-rotate-primary","accountId":"fixture-account","expires":0}}).to_string();
+        let shared=json!({}).to_string();
         crate::settings::atomic_write(&primary,shared.as_bytes()).await.unwrap();
         let auth=AuthStore::new(own.clone(),reqwest::Client::new()).shared_codex(Some(primary.clone())).with_issuer(url);
         assert!(auth.authorization("openai-codex",None,None).await.unwrap_err().is::<SignInRequired>());
@@ -288,5 +289,48 @@ pub(crate) mod device_login_tests {
         let next=pending_id(&auth.start_login().await.unwrap());assert_ne!(id,next);assert!(auth.login_status(&id,true).await.is_err());
         let state=finished(&auth,&next).await;assert!(matches!(state,tau_protocol::CodexLogin::Failed {message} if message.contains("expired")));
         assert_eq!(starts.load(Ordering::SeqCst),2);assert!(!own.exists());server.abort();
+    }
+}
+
+#[cfg(test)]
+mod shared_refresh_tests {
+    use super::*;
+    use axum::{Router, Json, routing::post};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[tokio::test]
+    async fn shared_codex_refresh_rotates_once_under_the_primary_lock_without_a_beta_copy() {
+        let calls=Arc::new(AtomicUsize::new(0));let count=calls.clone();
+        let access=format!("header.{}.signature",URL_SAFE_NO_PAD.encode(json!({"https://api.openai.com/auth":{"chatgpt_account_id":"fixture-account"}}).to_string()));
+        let expected=access.clone();
+        let app=Router::new().route("/oauth/token",post(move |axum::extract::Form(form):axum::extract::Form<std::collections::HashMap<String,String>>| {let count=count.clone();let access=access.clone();async move {
+            assert_eq!(form["grant_type"],"refresh_token");assert_eq!(form["refresh_token"],"rotate-only-once");
+            assert_eq!(count.fetch_add(1,Ordering::SeqCst),0);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Json(json!({"access_token":access,"refresh_token":"new-refresh","expires_in":3600}))
+        }}));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let issuer=format!("http://{}",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
+        let dir=tempfile::tempdir().unwrap();let primary=dir.path().join("primary.json");
+        let original=json!({"openai-codex":{"type":"oauth","access":"expired-access","refresh":"rotate-only-once","accountId":"fixture-account","expires":0},"other-provider":{"type":"api_key","key":"keep-other-provider"}});
+        crate::settings::atomic_write(&primary,original.to_string().as_bytes()).await.unwrap();
+        let a=AuthStore::new(dir.path().join("beta-a.json"),reqwest::Client::new()).shared_codex(Some(primary.clone())).with_issuer(issuer.clone());
+        let b=AuthStore::new(dir.path().join("beta-b.json"),reqwest::Client::new()).shared_codex(Some(primary.clone())).with_issuer(issuer);
+        let (a_result,b_result)=tokio::join!(a.authorization("openai-codex",None,None),b.authorization("openai-codex",None,Some("expired-access")));
+        assert_eq!(a_result.unwrap().0,expected);assert_eq!(b_result.unwrap().0,expected);assert_eq!(calls.load(Ordering::SeqCst),1);
+        let saved=AuthStore::read_path(&primary).await.unwrap();assert_eq!(saved["other-provider"],original["other-provider"]);assert_eq!(saved["openai-codex"]["refresh"],"new-refresh");
+        assert!(!a.path.exists() && !b.path.exists());assert!(!dir.path().join("primary.json.lock").exists());
+        server.abort();
+    }
+    #[tokio::test]
+    async fn shared_refresh_invalid_grant_requests_signin_without_destroying_the_login() {
+        let app=Router::new().route("/oauth/token",post(||async{(axum::http::StatusCode::BAD_REQUEST,Json(json!({"error":"invalid_grant","details":"do-not-leak-provider-body"})))}));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let issuer=format!("http://{}",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move{axum::serve(listener,app).await.unwrap()});
+        let dir=tempfile::tempdir().unwrap();let primary=dir.path().join("primary.json");
+        let original=json!({"openai-codex":{"type":"oauth","access":"expired","refresh":"revoked","accountId":"fixture-account","expires":0}}).to_string();
+        crate::settings::atomic_write(&primary,original.as_bytes()).await.unwrap();
+        let auth=AuthStore::new(dir.path().join("beta.json"),reqwest::Client::new()).shared_codex(Some(primary.clone())).with_issuer(issuer);
+        let error=auth.authorization("openai-codex",None,None).await.unwrap_err();assert!(error.is::<SignInRequired>());assert!(!error.to_string().contains("do-not-leak"));
+        assert_eq!(tokio::fs::read_to_string(primary).await.unwrap(),original);assert!(!auth.path.exists());server.abort();
     }
 }

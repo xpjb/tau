@@ -1,3 +1,22 @@
+# Codex automatic renewal and usable sign-in recovery — October 5, 2026
+
+The user requested an immediate beta fix/Windows installer, then clarified that
+routine shared-credential renewal must work automatically without new services,
+runtimes or an unnecessary independent login. The fix now uses the **deployed
+stable Pi's existing credential lock**, refreshes the selected file in place, and
+never copies the shared credentials. The in-app device sign-in link is a fallback
+for missing/revoked credentials, not for normal expiry. Error bodies wrap and both
+Copy paths include error metadata. See [implementation/evidence](docs/codex-signin.md).
+
+Focused auth/UI/control tests and actual deployed-Pi lock interoperability pass;
+managed daemon/frontend all-target compilation passes. No real completion or
+credential refresh was issued by these tests. At this source checkpoint the beta
+still runs 0.7.11/protocol 22; prepare **0.7.12/protocol 24** with the release script.
+The original request authorizes beta rollout and Windows delivery. Check for active
+beta work immediately before restart. Stable service/binary must remain unchanged.
+
+---
+
 # Client-first models and quiet Files rows — integrated source, October 2, 2026
 
 At the user's request, `fix/tau2-client-first-models` (`5c6fabc`) is merged as
