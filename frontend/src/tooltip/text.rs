@@ -2,7 +2,7 @@
 use super::{Content, INK};
 use sanscale::{Align, BlockKey, FontSpan, PaintHandle, PaintSpan, ParagraphKey, ParagraphSource, ShapedHandle, Style, TextService};
 use std::{borrow::Cow, ops::Range};
-use tau_markdown::Faces;
+use barkdown::Faces;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(crate) struct RichLabel {

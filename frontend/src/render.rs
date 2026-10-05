@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-use tau_markdown::{Document, Faces, Preview, Theme};
+use barkdown::{Document, Faces, Preview, Theme};
 use wgpu::util::DeviceExt;
 
 pub fn color(hex: u32) -> Color {
@@ -235,7 +235,7 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     images: HashMap<PathBuf, Image>,
     icons: HashMap<PathBuf, (u64, Image)>,
-    scenes: HashMap<String, (tau_markdown::Scene, Rect)>,
+    scenes: HashMap<String, (barkdown::Scene, Rect)>,
     pub selection: Option<Selection>,
     message_order: Vec<String>,
     #[cfg(test)] pub message_measurements: usize,

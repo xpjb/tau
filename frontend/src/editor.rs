@@ -1,7 +1,7 @@
 //! The shared composer/settings/dialog editor. Sanscale owns visual caret
 //! geometry; this component owns text, selection, undo, composition and viewport.
 use crate::render::{Layer, Renderer, color};
-use sanscale::{Align, Boundaries, Caret, Draw, FontChainHandle, Layout, Motion, Rect, ShapedHandle, Style, TextService, Vec2};
+use sanscale::{Align, WordBoundaries, Caret, Draw, FontChainHandle, Layout, Motion, Rect, ShapedHandle, Style, TextService, Vec2};
 use std::{borrow::Cow, ops::Range, time::Instant};
 use crate::scroll::ScrollMotion;
 use unicode_segmentation::UnicodeSegmentation;
@@ -562,7 +562,7 @@ fn word_kind(grapheme: &str) -> u8 {
     else if grapheme.chars().any(|c| c.is_alphanumeric() || c == '_') { 1 }
     else { 2 }
 }
-impl Boundaries for Words<'_> {
+impl WordBoundaries for Words<'_> {
     fn prev_word(&self, byte: usize) -> Option<usize> {
         if self.secret_len.is_some() { return Some(0); }
         let mut result = byte;

@@ -142,3 +142,49 @@ residency improvement included. No continuous-redraw workaround was introduced.
 
 No deployment, service restart, packages, production storage writes or paid
 provider calls. The original feature branches and worktrees remain preserved.
+
+
+## October 5, 2026 — Shared Barkdown and additional real-use evidence
+
+The user now reports the blink no longer occurs in Tau on the residency fix but
+still occurs in older Compendium. This strengthens the causal case beyond the
+original forced-capacity test; physical-device acceptance is still not supplied
+by a headless regression. Compendium is being updated to the same fixed master.
+
+Tau now pins Sanscale `15ad1f03e17a368e2ff4f1b269f60bad13483638`, which contains
+`4325844` and additionally renders tabs as four-space advances without changing
+source bytes/caret indexes. The small `WordBoundaries` API rename is migrated.
+The extracted Markdown crate is now Barkdown, full Git revision
+`f8dccb1b2ca6af5c8d0a91caf037bce85fb72ad7`, shared with Compendium. Tau's duplicate
+`markdown/` implementation is removed. Release fingerprinting follows Cargo.lock.
+
+Barkdown adds shared bounded syntax paint, a native display-math subset (including
+the reported bracketed probability expression), readable inline-math projection,
+and explicit `[citation unavailable]` fallback for raw transport citation tokens.
+It does not fabricate URLs from opaque source IDs or claim full TeX support.
+Fenced code remains literal. See the companion README for supported commands and
+bounds. Compendium uses the source-preserving code-paint adapter, not Tau's Preview.
+
+Native workspace/all-target compiler check and all 205 frontend library cases pass,
+including cache pressure, queued repaints, editing and a real-renderer math/code/tab
+fixture. The fixture's repeated frame is pixel-identical; tabs match four spaces.
+Run `f2dbbc5d-4a1b-4d27-824f-635e5b20fbdb`; logs
+`/tmp/tau2-barkdown-final-{check,lib-tests}.log`; inspected image
+`/tmp/barkdown-preview.png`. Barkdown passes 36 tests; Sanscale passes all 8 public
+service-lifecycle cases, including normally ignored GPU tests.
+
+Broad integration testing is not fully green. Two UDP-outage fixtures reject
+`GetModelCatalog`; both fail identically on the unchanged `9a510f3` baseline
+(`/tmp/tau2-baseline-outage-tests.log`). The other 46 integration cases produced 45 passes and one network-pressure failure
+with `Content sync: Unknown block`. That pressure case then passed both on baseline
+and in an isolated unchanged rerun (runs `46310091-14dc-4d04-a242-0015790f3a50`
+and `e95503e0-df78-42b0-9570-085dcaf28a3d`); preserve the first failure as a timing/
+reproducibility finding, not a fully green single-run suite. Logs:
+`/tmp/tau2-barkdown-final-integration-tests.log`,
+`/tmp/tau2-baseline-pressure-tests.log`, `/tmp/tau2-barkdown-pressure-rerun.log`.
+The rendering change does not rewrite transport fixtures to make the gate green.
+The seven release-script tests pass after removing the extracted local directory
+from fingerprint paths; Cargo.toml/Cargo.lock remain fingerprinted inputs.
+
+Source-only integration: no version/protocol/schema bump, packages, deployments,
+service restarts or live-data changes. Stable Tau is untouched.

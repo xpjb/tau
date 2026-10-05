@@ -16,7 +16,8 @@ See `HANDOFF.md` and [Codex recovery](docs/codex-signin.md).
 - `frontend/`: Chad window/surface lifecycle, Sanscale text, native Windows/Android UI.
 - `daemon/`: authenticated HTTP/WebSocket service and native Codex/OpenRouter agents.
 - `protocol/`: one owned, bidirectional serde contract, including revisioned settings.
-- `markdown/`: incremental Markdown layout; `transfer/`: authenticated, verified QUIC.
+- Barkdown (Git-pinned dependency): incremental Markdown and fenced-code syntax colors.
+- `transfer/`: authenticated, verified QUIC.
 - `windows/`: native per-user beta installer and launcher.
 
 The daemon uses the completed storage agent's SQLite implementation: WAL + FULL

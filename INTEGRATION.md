@@ -1,3 +1,17 @@
+# Shared Barkdown source integration — October 5, 2026
+
+Tau beta now uses the separate `xpjb/barkdown` repository, full-revision pinned,
+for Markdown, fenced-code syntax colors, bounded math and citation fallback.
+Sanscale's common master pin includes prepared-cache residency and tab fixes.
+Compendium shares those pins and code colors without changing its source editor.
+[Validation and caveats](docs/text-repaint-stability.md#october-5-2026--shared-barkdown-and-additional-real-use-evidence).
+
+This is source-only: no release number bump, client package, daemon deployment or
+service restart. The integrated-updater proposal belongs to Compendium's RFC;
+no self-update channel was published during this task.
+
+---
+
 # Unreleased Tau2 source — October 2, 2026
 
 Client-first model selection and quiet file rows are merged as `f442792`, on top

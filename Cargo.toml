@@ -1,7 +1,7 @@
 [workspace]
-members = ["daemon", "transfer", "protocol", "blocks", "markdown", "frontend", "code-viewer"]
+members = ["daemon", "transfer", "protocol", "blocks", "frontend", "code-viewer"]
 exclude = ["windows"]
 resolver = "2"
 
 [workspace.dependencies]
-sanscale = { git = "https://github.com/xpjb/sanscale", rev = "4325844c649dde6e2f1812a489ebca8d9b2ddadd" }
+sanscale = { git = "https://github.com/xpjb/sanscale", rev = "15ad1f03e17a368e2ff4f1b269f60bad13483638" }

@@ -143,3 +143,38 @@ fn queued_repaints_keep_text_pixels_stable_across_surfaces_and_atlas_updates() {
         assert_eq!(different, 0, "queued repaint {i} lost/changed text in {different} pixels");
     }
 }
+
+
+#[test]
+fn barkdown_math_syntax_citations_and_tabs_render_through_the_real_frontend() {
+    let ctx = HeadlessCtx::new(&Config {
+        size: (720, 520), device_limits: crate::desktop::limits(), ..Default::default()
+    }).unwrap();
+    let mut renderer = Renderer::new(&ctx).unwrap();
+    let source = "# Barkdown · woof!\n\n[\nP(\\text{at least one lost}) = 1-(1-p)^n\n]\n\n\\[\\frac{1}{n^2} + \\sqrt{x_1}\\]\n\nInline: $x^2$ and \\(\\alpha_1\\).\n\n```rust\nfn main() {\n\tlet greeting = \"woof 🐶\"; // tab, no tofu\n}\n```\n\nReference: \u{e200}cite\u{e202}turn2view0\u{e201}";
+    let rect = Rect::new(20., 20., 680., 480.);
+    renderer.message_height("barkdown", source, rect.width, 20.);
+    let mut layer = Layer::default();
+    layer.rect(Rect::new(0., 0., 720., 520.), color(0x0e141b));
+    renderer.message(&mut layer, "barkdown", Vec2::new(20., 20.), rect, 0.);
+    assert!(layer.draws.iter().any(|d| d.paint.is_some()), "syntax paints reach the frontend");
+    assert!(layer.draws.iter().any(|d| d.size < 15.), "positioned math scripts reach the frontend");
+    renderer.draw(&ctx, ctx.view(), std::slice::from_ref(&layer));
+    let reference = ctx.read_rgba8().unwrap();
+    renderer.draw(&ctx, ctx.view(), std::slice::from_ref(&layer));
+    assert_eq!(reference, ctx.read_rgba8().unwrap(), "retained highlighted/math frames stay stable");
+    if let Some(path) = std::env::var_os("TAU_BARKDOWN_DUMP") {
+        image::save_buffer(PathBuf::from(path), &reference, 720, 520, image::ColorType::Rgba8).unwrap();
+    }
+    let tab = "```rust\n\tlet answer = 42;\n```";
+    let mut frames = Vec::new();
+    for (key, source) in [("tab", tab.to_owned()), ("spaces", tab.replace('\t', "    "))] {
+        renderer.message_height(key, &source, rect.width, 20.);
+        let mut layer = Layer::default();
+        layer.rect(Rect::new(0., 0., 720., 520.), color(0x0e141b));
+        renderer.message(&mut layer, key, Vec2::new(20., 20.), rect, 0.);
+        renderer.draw(&ctx, ctx.view(), &[layer]);
+        frames.push(ctx.read_rgba8().unwrap());
+    }
+    assert_eq!(frames[0], frames[1], "tabs must have whitespace pixels, not tofu");
+}

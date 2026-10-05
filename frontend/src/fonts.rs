@@ -1,7 +1,7 @@
 //! Platform fonts are part of the OS, not the Android/Windows download.
 use sanscale::{FontData, FontHandle, TextService};
 use std::{collections::HashMap, path::PathBuf};
-use tau_markdown::Faces;
+use barkdown::Faces;
 
 #[derive(Default)]
 struct Files(HashMap<PathBuf, FontData>);

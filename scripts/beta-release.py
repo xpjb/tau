@@ -77,10 +77,10 @@ def fingerprint(stage):
     common = ['Cargo.toml', 'Cargo.lock', '.cargo/', 'rust-toolchain', 'blocks/', 'protocol/', 'transfer/']
     paths = {
         'daemon': common + ['daemon/', 'scripts/title_prompt.txt'],
-        'windows': common + ['frontend/', 'markdown/', 'windows/', 'scripts/build-windows-sfx.sh'],
-        'android': common + ['frontend/', 'markdown/', 'deploy/android-signing.sha256'],
-        'check': common + ['daemon/', 'frontend/', 'markdown/', 'windows/', 'scripts/title_prompt.txt'],
-        'test': common + ['daemon/', 'frontend/', 'markdown/', 'windows/', 'scripts/title_prompt.txt'],
+        'windows': common + ['frontend/', 'windows/', 'scripts/build-windows-sfx.sh'],
+        'android': common + ['frontend/', 'deploy/android-signing.sha256'],
+        'check': common + ['daemon/', 'frontend/', 'windows/', 'scripts/title_prompt.txt'],
+        'test': common + ['daemon/', 'frontend/', 'windows/', 'scripts/title_prompt.txt'],
     }[stage]
     h = hashlib.sha256()
     names = run('git', '-C', str(ROOT), 'ls-files', '-z').decode().split('\0')
