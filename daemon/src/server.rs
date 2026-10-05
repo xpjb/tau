@@ -300,6 +300,18 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
                             manager.schedule_model_catalog();
                             ServerMessage::ModelCatalog { catalog: manager.model_catalog() }
                         }
+                        command @ (ClientCommand::StartCodexLogin | ClientCommand::GetCodexLogin { .. } | ClientCommand::CancelCodexLogin { .. }) => {
+                            let result = match command {
+                                ClientCommand::StartCodexLogin => manager.inner.auth.start_login().await,
+                                ClientCommand::GetCodexLogin { login_id } => manager.inner.auth.login_status(&login_id, false).await,
+                                ClientCommand::CancelCodexLogin { login_id } => manager.inner.auth.login_status(&login_id, true).await,
+                                _ => unreachable!(),
+                            };
+                            match result {
+                                Ok(login) => ServerMessage::CodexLogin { request_id, login },
+                                Err(error) => ServerMessage::failure(request_id, error.to_string()),
+                            }
+                        },
                         ClientCommand::GetCodexUsage { force } => {
                             let result = manager.codex_usage(force).await;
                             ServerMessage::CodexUsage { request_id, report: result.report, error: result.error }
@@ -666,6 +678,54 @@ mod tests {
             }
         }).await.unwrap();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn device_signin_control_requires_tau_auth_and_keeps_tokens_off_the_wire() {
+        use super::*;
+        use crate::state::StateStore;
+        use tokio_tungstenite::{connect_async, tungstenite::{Message as ClientMessage, client::IntoClientRequest}};
+        let (issuer, oauth, _) = crate::agent::auth::device_login_tests::fixture(false, 30).await;
+        let root=tempfile::tempdir().unwrap();
+        let config=Config {bind:"127.0.0.1:0".parse().unwrap(),transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,
+            token:Arc::from("fixture-token"),settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
+            cwd:root.path().into(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),
+            attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
+        let mut manager=AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
+        Arc::get_mut(&mut manager.inner).unwrap().auth = crate::agent::auth::AuthStore::new(root.path().join("auth.json"),reqwest::Client::new()).with_issuer(issuer);
+        let observer = manager.clone();
+        let transfers=Arc::new(tau_transfer::blocks::Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(manager.clone())).await.unwrap());
+        let state=AppState {config,manager,telemetry_gate:Arc::new(Mutex::new(())),transfers,requests:Arc::new(tokio::sync::Semaphore::new(32)),admissions:Arc::new(tokio::sync::Semaphore::new(128))};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url=format!("ws://{}/v1/ws",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move {axum::serve(listener,Router::new().route("/v1/ws",get(websocket)).with_state(state)).await.unwrap();});
+        assert!(connect_async(&url).await.is_err());
+        let mut request=url.into_client_request().unwrap();request.headers_mut().insert("Authorization","Bearer fixture-token".parse().unwrap());
+        let (mut client,_)=connect_async(request).await.unwrap();
+        client.send(ClientMessage::Text(json!({"id":"signin","type":"start_codex_login"}).to_string().into())).await.unwrap();
+        let id=tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                let message=client.next().await.unwrap().unwrap();
+                let value:serde_json::Value=serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if value["requestId"]!="signin" {continue;}
+                assert_eq!(value["type"],"codex_login");assert_eq!(value["login"]["state"],"pending");
+                assert_eq!(value["login"]["userCode"],"ABCD-EFGH");
+                assert!(!value.to_string().contains("private-"));
+                break value["login"]["loginId"].as_str().unwrap().to_owned();
+            }
+        }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                client.send(ClientMessage::Text(json!({"id":"poll","type":"get_codex_login","loginId":id}).to_string().into())).await.unwrap();
+                let message=client.next().await.unwrap().unwrap();let text=message.to_text().unwrap();
+                assert!(!text.contains("private-"));let value:serde_json::Value=serde_json::from_str(text).unwrap();
+                if value["login"]["state"]=="complete" {break;}
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.unwrap();
+        assert!(observer.inner.state.list().await.unwrap().is_empty(),"Sign-in creates no conversation or model operation");
+        assert!(root.path().join("auth.json").exists());
+        server.abort();oauth.abort();
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ mod transcript;
 pub use transcript::*;
 
 // Protocol 23 pins new-chat model intent to the first prompt and adds an account catalogue.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;
@@ -70,6 +70,9 @@ pub enum ClientCommand {
     RefreshModelCatalog { provider: String },
     /// Read-only account quota; never a model prompt or a session operation.
     GetCodexUsage { #[serde(default)] force: bool },
+    StartCodexLogin,
+    GetCodexLogin { login_id: String },
+    CancelCodexLogin { login_id: String },
     CreateSession {
         #[serde(default = "general_project_id")]
         project_id: String,
@@ -208,6 +211,8 @@ pub enum ServerMessage {
     },
     Settings { request_id: String, settings: Box<settings::Settings> },
     CodexUsage { request_id: String, report: Option<CodexUsage>, error: Option<String> },
+    CodexLogin { request_id: String, login: CodexLogin },
+    CodexLoginRequired { session_id: String },
     ModelCatalog { catalog: ModelCatalog },
     Commands {
         session_id: String,
@@ -234,6 +239,18 @@ pub enum ServerMessage {
         session_id: Option<String>,
     },
 }
+
+/// Ephemeral device authorization only. Provider tokens never leave the daemon.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum CodexLogin {
+    Pending { login_id: String, user_code: String, verification_uri: String, expires_at_ms: u64 },
+    Complete,
+    Failed { message: String },
+    Cancelled,
+}
+pub const CODEX_LOGIN_URL: &str = "https://auth.openai.com/codex/device";
+pub const CODEX_SIGN_IN_REQUIRED: &str = "Sign in to Codex to continue. Use Settings → Sign in to Codex. No terminal command is needed.";
 
 impl ServerMessage {
     /// Only superseded replicated state may be coalesced. Response IDs retain

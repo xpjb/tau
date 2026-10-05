@@ -15,6 +15,7 @@ mod menu;
 mod notice;
 pub(super) mod scroll;
 mod settings;
+mod codex_login;
 pub(super) mod sidebar;
 mod tooltips;
 mod viewer;

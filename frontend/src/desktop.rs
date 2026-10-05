@@ -272,10 +272,12 @@ impl Desktop {
         for action in self.app.actions() {
             match action {
                 PlatformAction::Copy(text) => {
-                    if let Some(c) = &mut self.clipboard {
-                        let result = c.set_text(text).map_err(anyhow::Error::from);
-                        self.app.report(result);
-                    }
+                    let result = (|| -> anyhow::Result<()> {
+                        if self.clipboard.is_none() { self.clipboard = Some(arboard::Clipboard::new()?); }
+                        self.clipboard.as_mut().unwrap().set_text(text)?;
+                        Ok(())
+                    })();
+                    self.app.report(result);
                 }
                 PlatformAction::Paste { token } => {
                     if let Some(c) = &mut self.clipboard {

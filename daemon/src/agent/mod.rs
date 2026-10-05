@@ -1,5 +1,6 @@
 use crate::settings::SettingsExt;
 pub mod auth;
+mod auth_lock;
 pub mod history;
 mod provider;
 mod tools;
@@ -270,10 +271,13 @@ impl AgentManager {
                 Err(error) => {
                     let mut content = runtime.content.lock().await;
                     let mut message = assistant_message(&partial, &selected, if cancel.is_cancelled() {"aborted"} else {"error"}, &mut started);
-                    message["errorMessage"] = json!(bounded(&error.to_string(), 480));
+                    message["errorMessage"] = json!(bounded(&error.to_string(), 4096));
                     message["timestamp"] = json!(now_ms());
                     content.append(id, json!({"type":"message","origin":{"streamId":stream},"message":message})).await?;
                     content.agent.as_mut().unwrap().needs_turn = true;
+                    if error.is::<auth::SignInRequired>() {
+                        let _ = self.inner.events.send(crate::protocol::ServerMessage::CodexLoginRequired { session_id:id.into() });
+                    }
                     return Err(error);
                 }
             };

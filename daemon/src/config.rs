@@ -12,7 +12,7 @@ pub struct Config {
     pub token: Arc<str>,
     pub settings_path: PathBuf,
     pub import_pi_dir: Option<PathBuf>,
-    /// Optional read-only Codex credential source for side-by-side operation.
+    /// Optional shared Codex credential source; renewal uses the primary Pi file lock.
     pub codex_auth_source: Option<PathBuf>,
     pub cwd: PathBuf,
     pub database_path: PathBuf,

@@ -9,6 +9,11 @@ impl App {
     }
     pub(super) fn update_widgets(&mut self, dt: f32) {
         self.sync_navigation();
+        if self.root.dialog.is_none() && self.root.viewer.is_none()
+            && let Some(session) = self.controller.codex_login_required.take()
+            && self.controller.account.selected.as_ref() == Some(&session) {
+            self.ui.requests.push_back(ui::Request::Open(ui::DialogSpec::CodexLogin(Some(session))));
+        }
         self.reconcile_targets();
         self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
         self.ui.composing = self.composing();
