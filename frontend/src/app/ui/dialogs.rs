@@ -13,6 +13,7 @@ pub(in crate::app) enum TopicEdit {
 }
 pub(in crate::app) enum DialogSpec {
     Connection,
+    CodexLogin(Option<String>),
     Topic(TopicEdit),
     Models,
     Daemon,
@@ -20,6 +21,7 @@ pub(in crate::app) enum DialogSpec {
 }
 pub(in crate::app) enum Dialog {
     Connection(ConnectionDialog),
+    CodexLogin(super::codex_login::CodexDialog),
     Topic(TopicDialog),
     Models(super::settings::ModelsDialog),
     Daemon(super::settings::DaemonDialog),
@@ -31,10 +33,13 @@ impl Dialog {
             cx.model.notice = None;
         }
         Ok(match spec {
+            DialogSpec::CodexLogin(session) => Self::CodexLogin(super::codex_login::CodexDialog::new(session, cx)),
             DialogSpec::Connection => Self::Connection(ConnectionDialog::new(cx)),
             DialogSpec::Topic(edit) => Self::Topic(TopicDialog::new(edit, cx)?),
             DialogSpec::Models => Self::Models(super::settings::ModelsDialog::new(cx)?),
             DialogSpec::Daemon => Self::Daemon(super::settings::DaemonDialog::new(cx)?),
+            DialogSpec::Operation(super::Operation::Link(url)) if url == "tau:codex-login" =>
+                Self::CodexLogin(super::codex_login::CodexDialog::new(cx.model.account.selected.clone(), cx)),
             DialogSpec::Operation(operation) => {
                 Self::Operation(super::operations::OperationDialog::new(operation, cx)?)
             }
@@ -42,6 +47,7 @@ impl Dialog {
     }
     fn for_each_field(&mut self, mut run: impl FnMut(&mut TextField)) {
         match self {
+            Self::CodexLogin(_) => {},
             Self::Connection(d) => { run(&mut d.url); run(&mut d.token); }
             Self::Topic(d) => { for field in d.fields() { run(field); } }
             Self::Models(d) => { run(&mut d.models); run(&mut d.search); }
@@ -52,6 +58,7 @@ impl Dialog {
     pub fn stop_scrolling(&mut self) { self.for_each_field(|field| field.editor.stop_scrolling()); }
     pub fn id(&self) -> Id {
         match self {
+            Self::CodexLogin(d) => d.id,
             Self::Connection(d) => d.form.id,
             Self::Topic(d) => d.form.id,
             Self::Models(d) => d.id,
@@ -61,6 +68,7 @@ impl Dialog {
     }
     pub fn field(&mut self, target: Target) -> Option<&mut TextField> {
         match self {
+            Self::CodexLogin(_) => None,
             Self::Connection(d) => (!d.tools)
                 .then_some([&mut d.url, &mut d.token])
                 .into_iter()
@@ -74,6 +82,7 @@ impl Dialog {
     }
     pub fn field_ref(&self, target: Target) -> Option<&TextField> {
         match self {
+            Self::CodexLogin(_) => None,
             Self::Connection(d) => {
                 (!d.tools).then_some([&d.url, &d.token]).into_iter().flatten().find(|f| f.control.target == target)
             }
@@ -86,6 +95,7 @@ impl Dialog {
     #[cfg(test)]
     pub fn fields(&self) -> Vec<&TextField> {
         match self {
+            Self::CodexLogin(_) => vec![],
             Self::Connection(d) => vec![&d.url, &d.token],
             Self::Topic(d) => d.name.iter().chain(d.prompt.iter()).collect(),
             Self::Models(d) => vec![&d.models, &d.search],
@@ -115,6 +125,7 @@ impl Dialog {
             Self::Topic(d) => {
                 d.form.buttons.iter().filter_map(|(_, b)| b.control.rect.map(|r| (b.label.as_str(), r))).collect()
             }
+            Self::CodexLogin(d) => d.buttons(),
             Self::Models(d) => d.buttons(),
             Self::Daemon(d) => d.buttons(),
             Self::Operation(d) => d.buttons(),
@@ -128,6 +139,7 @@ impl Dialog {
 impl Widget for Dialog {
     fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
         match self {
+            Self::CodexLogin(d) => d.update(dt, cx),
             Self::Connection(d) => d.update(dt, cx),
             Self::Topic(d) => d.update(dt, cx),
             Self::Models(d) => d.update(dt, cx),
@@ -138,6 +150,7 @@ impl Widget for Dialog {
     }
     fn owns(&self, target: Target, model: &Controller, ui: &UiState) -> bool {
         match self {
+            Self::CodexLogin(d) => d.owns(target, model, ui),
             Self::Connection(d) => d.owns(target, model, ui),
             Self::Topic(d) => d.owns(target, model, ui),
             Self::Models(d) => d.owns(target, model, ui),
@@ -148,6 +161,7 @@ impl Widget for Dialog {
 
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
         match self {
+            Self::CodexLogin(d) => d.handle_event(event, cx),
             Self::Connection(d) => d.handle_event(event, cx),
             Self::Topic(d) => d.handle_event(event, cx),
             Self::Models(d) => d.handle_event(event, cx),
@@ -158,6 +172,7 @@ impl Widget for Dialog {
     fn visit_perframe(&mut self, frame: &mut Frame<'_>, cx: &mut Context<'_>) {
         frame.layer.above();
         match self {
+            Self::CodexLogin(d) => d.visit_perframe(frame, cx),
             Self::Connection(d) => d.visit_perframe(frame, cx),
             Self::Topic(d) => d.visit_perframe(frame, cx),
             Self::Models(d) => d.visit_perframe(frame, cx),
@@ -170,6 +185,7 @@ impl Widget for Dialog {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConnectionChoice {
     Connect,
+    CodexLogin,
     Cancel,
     Models,
     Daemon,
@@ -206,6 +222,7 @@ impl ConnectionDialog {
                     (ConnectionChoice::Cancel, "Cancel"),
                     (ConnectionChoice::Models, "Quick model selection"),
                     (ConnectionChoice::Daemon, "Open settings"),
+                    (ConnectionChoice::CodexLogin, "Sign in to Codex"),
                     (ConnectionChoice::Refresh, "Refresh models"),
                     (ConnectionChoice::Tools, "More…"),
                     (ConnectionChoice::Main, "Back"),
@@ -306,6 +323,7 @@ impl Widget for ConnectionDialog {
             Some(choice) => cx.ui.requests.push_back(Request::Replace {
                 owner: self.form.id,
                 spec: match choice {
+                    ConnectionChoice::CodexLogin => DialogSpec::CodexLogin(None),
                     ConnectionChoice::Models => DialogSpec::Models,
                     ConnectionChoice::Daemon => DialogSpec::Daemon,
                     ConnectionChoice::Refresh => DialogSpec::Operation(super::Operation::Refresh),
@@ -356,6 +374,9 @@ impl Widget for ConnectionDialog {
                 let y = b.y + 20. * s + i as f32 * (h + 18. * s);
                 field.labeled(Rect::new(x, y - 20. * s, w, h + 20. * s), frame, cx);
             }
+            if cx.model.epoch.is_some() && b.height / s >= 280. {
+                self.form.button(ConnectionChoice::CodexLogin, Rect::new(x, b.y + b.height - 84. * s - feedback, w, 32. * s), ButtonStyle::Primary, frame, cx);
+            }
             let y = b.y + b.height - 38. * s;
             self.form.buttons.iter_mut().find(|(c, _)| *c == ConnectionChoice::Connect).unwrap().1.control.enabled =
                 self.attempt.is_none();
@@ -381,7 +402,7 @@ impl Widget for ConnectionDialog {
         let intro = "Connect directly to the Tau daemon over your Tailnet.";
         let intro_h = cx.services.renderer.label_height(intro, inner_w, 16. * s, false).max(42. * s);
         let field_offset = 102. * s + intro_h + 18. * s;
-        let height = (416. + if configured { 92. } else { 0. } + if error.is_some() { 84. } else { 0. }) * s
+        let height = (416. + if configured { 134. } else { 0. } + if error.is_some() { 84. } else { 0. }) * s
             + field_offset
             - 146. * s;
         let card =
@@ -489,6 +510,8 @@ impl Widget for ConnectionDialog {
                     false,
                 );
             }
+            y += 42. * s;
+            self.form.button(ConnectionChoice::CodexLogin, Rect::new(x, y, inner_w, 32. * s), ButtonStyle::Primary, frame, cx);
             y += 42. * s;
         }
         if let Some(error) = error {

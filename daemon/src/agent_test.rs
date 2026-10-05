@@ -1205,3 +1205,21 @@ async fn aged_catalog_revalidates_on_restart_without_waking_chats_or_executing_a
 
 #[path = "agent_test_models.rs"]
 mod models;
+
+#[tokio::test]
+async fn codex_signin_failure_prompts_the_client_and_keeps_the_turn_for_explicit_resume() {
+    let mut model = ModelServer::start(vec![]).await;
+    let (root, manager, _, server) = fixture(&model, Api::Codex).await;
+    tokio::fs::remove_file(root.path().join("auth.json")).await.unwrap();
+    let session = manager.create_session_requested(None,"general",None).await.unwrap();
+    let mut messages=manager.subscribe();
+    manager.prompt(&session,"saved user message","signin-prompt").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {if matches!(messages.recv().await.unwrap(),crate::protocol::ServerMessage::CodexLoginRequired {session_id} if session_id==session) {break;}}
+    }).await.unwrap();
+    let export=root.path().join("history.json"); manager.inner.state.export_history(&session,&export).await.unwrap();
+    let history:Value=serde_json::from_slice(&tokio::fs::read(export).await.unwrap()).unwrap();
+    assert!(history["entries"].as_array().unwrap().iter().any(|e| e["message"]["errorMessage"]==tau_protocol::CODEX_SIGN_IN_REQUIRED));
+    assert!(model.requests.try_recv().is_err(),"No paid provider call without credentials");
+    manager.shutdown().await;server.abort();
+}

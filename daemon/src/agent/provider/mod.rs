@@ -295,6 +295,9 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
                 .map(|s| s.saturating_mul(1000)).unwrap_or_else(|| settings.agent.retry.base_delay_ms.saturating_mul(1 << attempt)).min(60_000);
             attempt += 1; tokio::time::sleep(Duration::from_millis(delay)).await; continue;
         }
+        if status == reqwest::StatusCode::UNAUTHORIZED && provider.api == Api::Codex {
+            return Err(super::auth::SignInRequired.into());
+        }
         if !status.is_success() {
             let mut body = response.bytes_stream();
             let bytes = tokio::time::timeout(Duration::from_secs(5), async {

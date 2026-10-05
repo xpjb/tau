@@ -104,6 +104,9 @@ impl RootWidget {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        let next_wake = if cx.ui.visible && matches!(self.dialog, Some(Dialog::CodexLogin(_))) {
+            Some(next_wake.map_or(std::time::Duration::from_secs(1), |d| d.min(std::time::Duration::from_secs(1))))
+        } else { next_wake };
         cx.services.wake.sync(next_wake);
         // Redraw only when the visible counter or dot actually changes.
         cx.ui.dirty |= cx.services.counter_bucket != counter_bucket;

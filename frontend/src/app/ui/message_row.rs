@@ -354,8 +354,12 @@ impl Widget for MessageRow {
 }
 fn display_body(chat: &Chat, id: &str, user: bool) -> String {
     let e = chat.feed.event(id).unwrap(); let body = chat.feed.bodies.get(id);
-    if e.attachment.is_none() && body.is_some_and(|b| b.missing()) { return "Loading…".into(); }
-    let mut source = if user { literal(&e.text) } else { e.text.clone() };
+    let mut source = if e.attachment.is_none() && body.is_some_and(|b| b.missing()) { "Loading…".into() } else if user { literal(&e.text) } else { e.text.clone() };
+    if let Some(error) = e.error_message.as_deref().filter(|s| !s.is_empty()) {
+        if !source.is_empty() { source.push_str("\n\n"); }
+        source.push_str(&literal(error));
+        if crate::details::codex_sign_in_error(error) { source.push_str("\n\n[Sign in to Codex](tau:codex-login)"); }
+    }
     if body.is_some_and(|b| b.limited) { source.push_str("\n\n[Preview limited. Fetch the complete message with Copy.]"); }
     source
 }
@@ -372,7 +376,7 @@ fn message_heading(chat: &Chat, id: &MessageId) -> (String, Option<String>, bool
         let error = e.is_error || e.error_message.is_some();
         let title = (e.role == EventRole::System || error).then(|| {
             if e.role == EventRole::User { if pending.is_some() { "You · synchronizing" } else { "You" }.into() }
-            else if let Some(error) = &e.error_message { format!("Assistant · {error}") }
+            else if e.error_message.is_some() { "Assistant · Error".into() }
             else { format!("{}{}", if e.role == EventRole::Assistant { "Tau" } else { "System" }, if e.phase == EventPhase::Live { " · writing" } else if e.phase == EventPhase::Interrupted { " · interrupted" } else { "" }) }
         });
         return (clock::label(clock::event_ms(e)), title, error);
@@ -392,9 +396,15 @@ fn message_heading(chat: &Chat, id: &MessageId) -> (String, Option<String>, bool
 }
 fn message_actions(chat: &Chat, id: &MessageId, session: &str) -> Vec<(String, MenuChoice)> {
     let feed = &chat.feed; let m = &feed.messages[id]; let text = m.text(feed, &chat.local);
-    let mut actions = vec![("Copy text".into(), MenuChoice::Copy(text.into()))];
+    let mut copied = m.event.as_deref().and_then(|id| feed.event(id)).map(crate::details::message_text).unwrap_or_else(|| text.into());
+    if m.event.is_none() && m.queue.is_none()
+        && let Some(detail) = m.intent.as_ref().and_then(|id| chat.local.pending.iter().find(|p| &p.request.id == id)).and_then(|p| p.detail.as_deref()) {
+        copied.push_str(&format!("\n{detail}"));
+    }
+    let mut actions = vec![("Copy text".into(), MenuChoice::Copy(copied))];
     if let Some(e) = m.event.as_deref().and_then(|id| feed.event(id)) {
         if matches!(m.body, MessageBody::Remote(_)) && feed.incomplete.contains(&e.id) { actions = vec![("Fetch complete message to copy".into(), MenuChoice::CopyDetails(session.into(), vec![e.id.clone()]))]; }
+        if e.error_message.as_deref().is_some_and(crate::details::codex_sign_in_error) { actions.push(("Sign in to Codex".into(), MenuChoice::CodexLogin(session.into()))); }
         if e.phase == EventPhase::Saved { actions.push(("Fork here".into(), MenuChoice::Fork(e.entry_id.clone()))); }
     } else if let Some(qid) = &m.queue {
         if m.intent.is_some() { return actions; }

@@ -31,6 +31,7 @@ pub(in crate::app) enum Choice {
     ForgetRecovered(String),
     Copy(String),
     CopyDetails(String, Vec<String>),
+    CodexLogin(String),
     CopySelection,
     Fork(String),
     EditQueue(String, u64, String),
@@ -100,6 +101,7 @@ impl Menu {
     }
     fn choose(&mut self, choice: Choice, cx: &mut Context<'_>) -> Result<()> {
         let dialog = match choice {
+            Choice::CodexLogin(session) => Some(DialogSpec::CodexLogin(Some(session))),
             Choice::RenameProject(key) => Some(DialogSpec::Topic(TopicEdit::Rename(key))),
             Choice::ProjectPrompt(key) => Some(DialogSpec::Topic(TopicEdit::Prompt(key))),
             Choice::DeleteProject(key) => Some(DialogSpec::Topic(TopicEdit::Delete(key))),

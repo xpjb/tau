@@ -4,6 +4,17 @@ use crate::store::LocalChat;
 use std::collections::{HashMap, HashSet};
 use tau_protocol::{Event, EventKind, EventRole};
 
+pub(crate) fn message_text(event: &Event) -> String {
+    match event.error_message.as_deref().filter(|e| !e.is_empty()) {
+        Some(error) if event.text.is_empty() => error.into(),
+        Some(error) => format!("{}\n\n{error}", event.text),
+        None => event.text.clone(),
+    }
+}
+pub(crate) fn codex_sign_in_error(error: &str) -> bool {
+    error == tau_protocol::CODEX_SIGN_IN_REQUIRED || error.starts_with("Shared Codex access needs its primary owner's refresh")
+}
+
 /// Copy is an explicit, complete-body operation, never a display description.
 pub fn copy<'a>(group: &[&Event], events: impl Iterator<Item = &'a Event>, parents: &HashMap<String, String>) -> String {
         let mut results: HashMap<&str, Vec<&Event>> = HashMap::new();
@@ -14,7 +25,7 @@ pub fn copy<'a>(group: &[&Event], events: impl Iterator<Item = &'a Event>, paren
         }
         let mut parts = vec![];
         for e in group {
-            if e.kind==EventKind::Text && e.role!=EventRole::Tool {parts.push(e.text.clone());continue;}
+            if e.kind==EventKind::Text && e.role!=EventRole::Tool {parts.push(message_text(e));continue;}
             if e.kind == EventKind::Thinking && e.role != EventRole::Tool {
                 if !e.text.is_empty() {
                     parts.push(format!("Thinking\n{}", e.text));

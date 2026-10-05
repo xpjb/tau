@@ -80,6 +80,8 @@ pub struct Controller {
     pub notice: Option<crate::notice::Notice>,
     pub transport_error: Option<String>,
     pub codex_usage: UsageView,
+    pub codex_login_result: Option<(String, std::result::Result<CodexLogin, String>)>,
+    pub codex_login_required: Option<String>,
     remote: crate::blocks::Cache,
     block_plan: Vec<crate::blocks::Plan>,
     background_dirty: std::collections::HashSet<String>,
@@ -135,7 +137,7 @@ impl Controller {
             epoch: None,
             notice: None,
             transport_error: None,
-            codex_usage: UsageView::default(),
+            codex_usage: UsageView::default(), codex_login_result: None, codex_login_required: None,
             remote,
             block_plan: vec![],background_dirty:Default::default(),plan_dirty:std::cell::Cell::new(true),
             viewport:None,
@@ -209,6 +211,7 @@ impl Controller {
         self.project_result = None;
         self.notice = None;
         self.codex_usage.clear();
+        self.codex_login_result = None; self.codex_login_required = None;
         if let Some(id) = self.account.selected.clone() {
             self.ensure_chat(&id)?;
         }
@@ -575,7 +578,13 @@ impl Controller {
             self.store.put(&self.identity,"account",&account)?;self.account=account;
         }
         if !deleted.is_empty() {self.project_deletions.insert(request.id.clone(),deleted);}
-        if durable || matches!(request.command,ClientCommand::GetSession {..}|ClientCommand::GetSettings|ClientCommand::RefreshModelCatalog {..}) {self.requests.insert(request.id.clone(),request.command.clone());}
+        if matches!(request.command, ClientCommand::StartCodexLogin | ClientCommand::GetCodexLogin { .. } | ClientCommand::CancelCodexLogin { .. }) {
+            // One ephemeral dialog owns authorization. Late polls/replaced forms
+            // cannot overwrite its newest result; codes never enter the outbox.
+            self.requests.retain(|_, command| !matches!(command, ClientCommand::StartCodexLogin | ClientCommand::GetCodexLogin { .. } | ClientCommand::CancelCodexLogin { .. }));
+            self.codex_login_result = None;
+        }
+        if durable || matches!(request.command,ClientCommand::GetSession {..}|ClientCommand::GetSettings|ClientCommand::RefreshModelCatalog {..}|ClientCommand::StartCodexLogin|ClientCommand::GetCodexLogin {..}|ClientCommand::CancelCodexLogin {..}) {self.requests.insert(request.id.clone(),request.command.clone());}
         self.network.as_ref().unwrap().send(Command::Request {epoch,request:request.clone()})?;
         Ok(request.id)
     }
@@ -1630,6 +1639,15 @@ impl Controller {
                 chat.commands = commands;
                 chat.commands_loaded = true;
             }
+            ServerMessage::CodexLoginRequired { session_id } => {
+                if self.account.selected.as_ref() == Some(&session_id) { self.codex_login_required = Some(session_id); }
+            }
+            ServerMessage::CodexLogin { request_id, login } => {
+                if matches!(self.requests.remove(&request_id), Some(ClientCommand::StartCodexLogin | ClientCommand::GetCodexLogin { .. } | ClientCommand::CancelCodexLogin { .. })) {
+                    if login == CodexLogin::Complete { self.codex_usage.clear(); self.model_catalog_attempt = None; self.warm_model_catalog(); }
+                    self.codex_login_result = Some((request_id, Ok(login)));
+                }
+            }
             ServerMessage::CodexUsage {request_id,report,error} => {
                 self.codex_usage.complete(&request_id,report,error);
             }
@@ -1663,6 +1681,11 @@ impl Controller {
                 error,
                 ..
             } => {
+                if matches!(self.requests.get(&request_id), Some(ClientCommand::StartCodexLogin | ClientCommand::GetCodexLogin { .. } | ClientCommand::CancelCodexLogin { .. })) {
+                    self.requests.remove(&request_id);
+                    self.codex_login_result = Some((request_id, Err(error.unwrap_or_else(|| "Codex sign-in unavailable".into()))));
+                    return Ok(());
+                }
                 if self.codex_usage.complete(&request_id,None,Some(error.clone().unwrap_or_else(||"Codex quota unavailable".into()))) {return Ok(());}
                 if let Some(notice) = notice {
                     self.notice = Some(notice.into());
