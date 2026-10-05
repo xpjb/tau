@@ -4,15 +4,12 @@ Rust client, daemon, coding agent, shared protocol, Markdown and verified file t
 No Pi worker, Kotlin/Compose client, Java desktop runtime, UniFFI bridge or Python title
 helper. Android retains a small Java bridge for Android OS APIs.
 
-**0.7.8 beta · protocol 20 (composer thinking level + checkpoint-yielding sync).**
-Windows x64 and Android ARM64 packages were verified and attached through Tau.
-The matching daemon is built but **not deployed**: wait for the user's explicit
-confirmation that both packages have been downloaded before restarting beta.
-The running daemon remains **0.7.7 / protocol 19**; the new clients need the pending
-protocol-20 daemon update. See `HANDOFF.md` and `INTEGRATION.md` for the release
-record. This is a separate installation, not a stable-Tau cutover.
-The maintained frontend branch is `tau2-rust-frontend`; the integrated release
-branch is `tau2`. Frontend work lands on the frontend branch before integration.
+**0.7.12 beta built · protocol 24 (shared Codex renewal + in-app sign-in).**
+Windows x64 and Android ARM64 packages are verified. The Windows installer has
+been queued for delivery through Tau. Deployment is pending an active beta chat;
+the running daemon remains **0.7.11 / protocol 22**. Do not install the new client
+until the matching daemon rollout is confirmed. Stable Tau is unchanged.
+See `HANDOFF.md` and [Codex recovery](docs/codex-signin.md).
 
 ## Components
 

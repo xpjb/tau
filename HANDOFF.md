@@ -1,19 +1,40 @@
-# Codex automatic renewal and usable sign-in recovery — October 5, 2026
+# Beta 0.7.12 built; deployment waiting for active work — October 5, 2026
 
-The user requested an immediate beta fix/Windows installer, then clarified that
-routine shared-credential renewal must work automatically without new services,
-runtimes or an unnecessary independent login. The fix now uses the **deployed
-stable Pi's existing credential lock**, refreshes the selected file in place, and
-never copies the shared credentials. The in-app device sign-in link is a fallback
-for missing/revoked credentials, not for normal expiry. Error bodies wrap and both
-Copy paths include error metadata. See [implementation/evidence](docs/codex-signin.md).
+- User requests: fix shared Codex renewal sensibly, no new services/runtimes or
+  credential-copying scheme; useful browser sign-in fallback; fix clipped errors
+  and right-click Copy; deploy beta and send Windows.
+- Source `5aceaf2` (sign-in/Copy) + `e5eb159` (shared primary lock), merged as
+  `996112c`; release **`344fa25`** published to `origin/tau2`, with feature
+  `fix/tau2-codex-signin` also published. Protocol **24**, no DB schema change.
+- **All packages verified.** Managed sequential release automation built daemon,
+  Windows and Android, checked embedded Windows payload/launcher and Android
+  identity/version/signature/native payload/alignments. Successful receipts in
+  `dist/releases/0.7.12/`; no checks/builds need repeating.
+- Windows `/root/tau2-integration/dist/Tau-Beta-0.7.12-windows-x64.exe` was submitted
+  with `send_file`: **queued for Tau delivery**, not confirmed downloaded/installed.
+  Caption explicitly says wait for daemon deployment before installing.
+  Android was built but **not sent** (user requested Windows).
+- **NOT DEPLOYED:** read-only checks at 09:40:54 through 09:44:45 UTC found 108 chats:
+  105 sleeping, 2 idle, **1 running**. Do not silently interrupt that work. Beta
+  remains PID `3209092`, 0.7.11/protocol 22. Stable remains PID `474496`, unchanged.
+- Once idle, or after explicit permission to interrupt the active run, resume:
+  `scripts/release-beta.sh --version 0.7.12 --push --deploy` in this worktree.
+  It reuses the verified release and does not run tests or rebuild packages.
+  Then check health/control and stable identity, update these release facts and
+  tell the user the sent installer can now be installed. Do not re-send blindly.
 
-Focused auth/UI/control tests and actual deployed-Pi lock interoperability pass;
-managed daemon/frontend all-target compilation passes. No real completion or
-credential refresh was issued by these tests. At this source checkpoint the beta
-still runs 0.7.11/protocol 22; prepare **0.7.12/protocol 24** with the release script.
-The original request authorizes beta rollout and Windows delivery. Check for active
-beta work immediately before restart. Stable service/binary must remain unchanged.
+Automatic renewal uses **the deployed stable Pi's existing credential lock**,
+refreshes in place, and never copies shared credentials. Genuine missing/revoked
+login opens the native device sign-in dialog. Completing that optional fallback
+creates an independent beta login; routine expiry does not need it. Nothing has
+changed the production credentials in this task. The user-facing original failure
+recovered on its own after stable's automatic refresh at 09:07 UTC, before the fix.
+
+Managed daemon/frontend all-target compilation, focused auth/control/UI nextest,
+existing dialog/connection cases and real deployed-Pi lock interoperability all
+pass. Local OAuth fixtures only; no paid provider request or live forced refresh.
+[Exact behavior/evidence](docs/codex-signin.md); logs/previews/status probes are in
+`/tmp/tau2-codex-signin/`. No physical Windows/browser-login acceptance is claimed.
 
 ---
 

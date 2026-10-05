@@ -761,3 +761,25 @@ detach cleanup pass. This is not full Android client or physical-phone acceptanc
 
 No release installers, service restart/deployment, production data write, stable
 change, or version/protocol/schema bump. Installed 0.7.11 clients are unchanged.
+
+
+## Codex recovery / beta 0.7.12 — October 5, 2026
+
+Merged `fix/tau2-codex-signin` (`e5eb159`) as `996112c`, released source `344fa25`
+published to `origin/tau2`. Shared Codex renewal now joins deployed Pi's existing
+credential lock and writes back to the shared file, without making a beta copy.
+Native device sign-in is only a fallback; error metadata wraps and copies with
+partial output. No added runtime/dependency/service. Protocol 24, same DB schema.
+
+Managed all-target daemon/frontend check, 8 focused auth/UI cases, 18 existing form
+cases, 9 final shared-auth cases, and one actual deployed-Pi cross-runtime lease
+case pass; the final Copy guard's focused render/action case passes too. See
+[implementation and validation](docs/codex-signin.md). No physical Windows or live
+browser sign-in certification.
+
+The existing release script built and verified daemon, Windows and Android
+sequentially; receipts under `dist/releases/0.7.12/`. Windows was queued through
+`send_file` with instructions to wait before installing. Android remains unsent.
+**Deployment held:** one active beta chat at 09:40–09:44 UTC. Running beta remains
+0.7.11 / protocol 22, PID 3209092. Stable PID 474496 unchanged. Resume the same
+release with `--push --deploy` once idle or explicitly authorized to interrupt.
