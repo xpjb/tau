@@ -12,6 +12,17 @@ use crate::state::SessionModel;
 use super::auth::AuthStore;
 mod codex;
 mod completions;
+pub mod recovery;
+pub use recovery::Recovery;
+
+#[derive(Debug)]
+pub struct StreamFailure(anyhow::Error);
+impl std::fmt::Display for StreamFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
+}
+impl std::error::Error for StreamFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.0.as_ref()) }
+}
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 trait Decoder: Send + Sync {
     fn response_limit(&self) -> usize { MAX_RESPONSE_BYTES }
@@ -19,6 +30,7 @@ trait Decoder: Send + Sync {
 }
 pub struct Stream<'a> {
     decoder: &'a dyn Decoder,
+    recovery: Option<&'a Recovery>,
     pub wire_bytes: usize,
     buffer: Vec<u8>,
     pub id: Option<String>,
@@ -44,6 +56,7 @@ impl<'a> Stream<'a> {
     fn new(decoder: &'a dyn Decoder) -> Self {
         Self {
             decoder,
+            recovery: None,
             wire_bytes: 0,
             buffer: Vec::new(),
             id: None,
@@ -187,9 +200,10 @@ pub struct Request<'a> {
     pub session_id: &'a str,
     pub definitions: Vec<Value>,
     pub mode: Mode,
+    pub recovery: Option<&'a Recovery>,
 }
 pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request<'_>, updates: mpsc::Sender<Value>) -> Result<Completion> {
-    let Request { settings, selected, thinking, messages, session_id, definitions, mode } = request;
+    let Request { settings, selected, thinking, messages, session_id, definitions, mode, recovery } = request;
     let model = settings.model(selected)?;
     let provider = &settings.providers[&selected.provider];
     let decoder: &dyn Decoder = match provider.api { Api::Codex => &codex::Codex, Api::ChatCompletions => &completions::Completions };
@@ -206,6 +220,7 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
     let mut attempt = 0;
     loop {
         let (key, account) = auth.authorization(&selected.provider, provider.api_key_env.as_deref(), rejected.as_deref()).await?;
+        let mut replay = (provider.api == Api::Codex).then(|| recovery::Replay::new(selected,account.as_deref().unwrap_or_default(),&provider.base_url,messages));
         let (route, mut body) = match provider.api {
             Api::ChatCompletions => {
                 if matches!(mode,Mode::Compact | Mode::Image) { bail!("Native compaction/image generation requires Codex"); }
@@ -213,7 +228,7 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
                 if mode != Mode::Summary && provider.web_search && selected.provider == "openrouter" {
                     tools.push(json!({"type":"openrouter:web_search", "parameters":{"engine":"exa", "max_results":5}}));
                 }
-                let mut body = json!({"model":model.id, "messages":messages.iter().map(|message| { let mut message = message.clone(); if let Some(map) = message.as_object_mut() { map.remove("usage"); map.remove("codex_output"); map.remove("annotations"); } message }).collect::<Vec<_>>(), "stream":true, "stream_options":{"include_usage":true}});
+                let mut body = json!({"model":model.id, "messages":messages.iter().filter(|message| message["role"] != "reasoning_recovery").map(|message| { let mut message = message.clone(); if let Some(map) = message.as_object_mut() { map.remove("usage"); map.remove("codex_output"); map.remove("annotations"); } message }).collect::<Vec<_>>(), "stream":true, "stream_options":{"include_usage":true}});
                 if !tools.is_empty() { body["tools"] = json!(tools); }
                 if let Some(effort) = &effort { body["reasoning"] = json!({"effort":effort}); }
                 ("chat/completions", body)
@@ -231,6 +246,7 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
                             }
                             input.push(message["item"].clone());
                         }
+                        Some("reasoning_recovery") => input.extend(replay.as_mut().unwrap().items(message)),
                         Some("user") => {
                             let content = if let Some(text) = message["content"].as_str() { vec![json!({"type":"input_text", "text":text})] }
                                 else { message["content"].as_array().context("Invalid user parts")?.iter().map(|part| match part["type"].as_str() {
@@ -267,6 +283,7 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
                 ("responses", body)
             }
         };
+        if let (Some(replay),Some(recovery)) = (&replay,recovery) { replay.capture_into(recovery); }
         if mode == Mode::Search && provider.api != Api::Codex { body["tools"] = json!([{"type":"openrouter:web_search", "parameters":{"max_results":5}}]); }
         let mut request = http.post(format!("{}/{route}", provider.base_url.trim_end_matches('/'))).bearer_auth(&key)
             .header("Accept", "text/event-stream").header("User-Agent", concat!("Tau/", env!("CARGO_PKG_VERSION")));
@@ -310,6 +327,8 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
                 bytes
             }).await.unwrap_or_default();
             let error: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            if status.as_u16() == 400 && recovery::reasoning_rejected(error.get("error").unwrap_or(&error))
+                && let (Some(replay),Some(recovery)) = (&replay,recovery) { recovery.reject(&replay.used); }
             let message = error.pointer("/error/message").or_else(|| error.get("message")).and_then(Value::as_str).unwrap_or_default();
             let mut message = message.replace(&key, "[redacted]");
             if let Some(account) = account.as_deref().filter(|id| !id.is_empty()) { message = message.replace(account, "[redacted]"); }
@@ -317,18 +336,26 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
             bail!("Model provider returned HTTP {} for {}/{}{}{}", status.as_u16(), selected.provider, selected.model_id,
                 if message.is_empty() { "" } else { ": " }, message);
         }
-        // Never retry a started response, including image generation: provider-side
-        // effects/billing may already have happened even when no output was delivered.
+        // The agent owns continuation: commit safe reasoning before another request.
+        // Retrying here would discard that state and could repeat native image effects.
         let mut chunks = response.bytes_stream();
         let mut stream = Stream::new(decoder);
-        while let Some(chunk) = tokio::time::timeout(idle, chunks.next()).await.context("Model stream stalled")? {
-            stream.push(&chunk.context("Model stream disconnected")?)?;
-            if stream.error.is_some() { bail!("Model provider reported a stream error"); }
+        stream.recovery = recovery;
+        while let Some(chunk) = tokio::time::timeout(idle, chunks.next()).await
+            .map_err(|error| StreamFailure(anyhow::Error::new(error).context("Model stream stalled")))? {
+            let chunk = chunk.map_err(|error| StreamFailure(anyhow::Error::new(error).context("Model stream disconnected")))?;
+            stream.push(&chunk)?;
+            if let Some(error) = &stream.error {
+                if recovery::reasoning_rejected(error) && let (Some(replay),Some(recovery)) = (&replay,recovery) { recovery.reject(&replay.used); }
+                if error["code"] == 500 { return Err(StreamFailure(anyhow::anyhow!("Model provider reported a transient stream error")).into()); }
+                bail!("Model provider reported a stream error");
+            }
             if mode == Mode::Chat { updates.send(stream.assistant_message()).await.context("Agent stopped receiving model output")?; }
             if stream.done { break; }
         }
-        stream.finish_input()?;
-        if !stream.done || stream.error.is_some() || !matches!(stream.finish_reason.as_deref(), Some("stop" | "tool_calls" | "length")) {
+        stream.finish_input().map_err(|error| StreamFailure(error.context("Model stream ended mid-event")))?;
+        if !stream.done { return Err(StreamFailure(anyhow::anyhow!("Model response was incomplete; tools were not executed")).into()); }
+        if stream.error.is_some() || !matches!(stream.finish_reason.as_deref(), Some("stop" | "tool_calls" | "length")) {
             bail!("Model response was incomplete; tools were not executed");
         }
         let mut message = stream.assistant_message();
@@ -347,6 +374,20 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completed_checkpoint_survives_an_error_in_the_same_transport_chunk() {
+        for tail in [b"data: {\"type\":\"error\",\"error\":{\"code\":\"server_error\"}}\n\n".as_slice(), b"data: malformed-json\n\n"] {
+            let capture = Recovery::default();
+            recovery::Replay::new(&SessionModel {provider:"openai-codex".into(),model_id:"gpt-6-astra".into()},"fixture","http://fixture",&[]).capture_into(&capture);
+            let item = json!({"type":"reasoning","id":"rs_chunk","encrypted_content":"private-cipher","summary":[]});
+            let mut wire = format!("data: {}\n\n",json!({"type":"response.output_item.done","output_index":0,"item":item})).into_bytes();
+            wire.extend_from_slice(tail);
+            let mut stream = Stream::new(&codex::Codex); stream.recovery = Some(&capture);
+            let _ = stream.push(&wire);
+            assert_eq!(capture.snapshot().unwrap()["items"],json!([item]));
+            assert!(!stream.assistant_message().to_string().contains("private-cipher"));
+        }
+    }
     #[test]
     fn frames_sse_at_every_byte_boundary_and_rejects_invalid_or_oversized_input() {
         for separator in ["\n\n", "\r\n\r\n", "\r\r"] {

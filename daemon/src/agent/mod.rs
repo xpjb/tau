@@ -193,6 +193,7 @@ impl AgentManager {
     async fn run_agent(&self, id: &str, runtime: &Arc<SessionRuntime>) -> Result<()> {
         let mut compacted = false;
         let mut project_prompt = None;
+        let mut stream_retries = 0u32;
         loop {
             let settings = self.inner.settings.get();
             let (selected, thinking, cancel, store, tokens) = {
@@ -248,9 +249,10 @@ impl AgentManager {
             }
             let stream = uuid::Uuid::new_v4().to_string();
             let (updates, mut receiver) = mpsc::channel(8);
+            let recovery = provider::Recovery::default();
             let generation = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
                 settings:&settings, selected:&selected, thinking:&thinking, messages:&messages, session_id:id,
-                definitions:tools::definitions(settings.providers[&selected.provider].api != crate::settings::Api::Codex && settings.models.iter().any(|m|settings.providers[&m.provider].api == crate::settings::Api::Codex)), mode:provider::Mode::Chat,
+                definitions:tools::definitions(settings.providers[&selected.provider].api != crate::settings::Api::Codex && settings.models.iter().any(|m|settings.providers[&m.provider].api == crate::settings::Api::Codex)), mode:provider::Mode::Chat, recovery:Some(&recovery),
             }, updates);
             tokio::pin!(generation);
             let mut partial = json!({"role":"assistant","content":""});
@@ -269,19 +271,35 @@ impl AgentManager {
             let completion = match completion {
                 Ok(completion) => completion,
                 Err(error) => {
+                    // A new signed checkpoint advances the run. Repeated failures
+                    // without progress consume the configured retry budget instead.
+                    if recovery.advanced() { stream_retries = 0; }
+                    let retry = !cancel.is_cancelled() && settings.agent.retry.enabled
+                        && error.is::<provider::StreamFailure>() && recovery.retry_safe()
+                        && stream_retries < settings.agent.retry.max_retries;
                     let mut content = runtime.content.lock().await;
                     let mut message = assistant_message(&partial, &selected, if cancel.is_cancelled() {"aborted"} else {"error"}, &mut started);
-                    message["errorMessage"] = json!(bounded(&error.to_string(), 4096));
+                    if !retry { message["errorMessage"] = json!(bounded(&error.to_string(), 4096)); }
+                    if let Some(checkpoint) = recovery.snapshot() { message["tauReasoningRecovery"] = checkpoint; }
                     message["timestamp"] = json!(now_ms());
                     content.append(id, json!({"type":"message","origin":{"streamId":stream},"message":message})).await?;
                     content.agent.as_mut().unwrap().needs_turn = true;
                     if error.is::<auth::SignInRequired>() {
                         let _ = self.inner.events.send(crate::protocol::ServerMessage::CodexLoginRequired { session_id:id.into() });
                     }
+                    drop(content);
+                    if retry {
+                        stream_retries += 1;
+                        tracing::info!(session=%id, attempt=stream_retries, checkpoint_progress=recovery.advanced(), "Continuing after a transient model stream failure");
+                        let delay = settings.agent.retry.base_delay_ms.saturating_mul(1u64 << (stream_retries - 1).min(16)).min(60_000);
+                        tokio::select! { _=cancel.cancelled()=>return Ok(()), _=tokio::time::sleep(std::time::Duration::from_millis(delay))=>{} }
+                        continue;
+                    }
                     return Err(error);
                 }
             };
             compacted = false;
+            stream_retries = 0;
             let calls = completion.message["tool_calls"].as_array().cloned().unwrap_or_default();
             let mut attachments = Vec::new();
             // Decode/validate the entire response before staging or publishing any files.
@@ -322,7 +340,7 @@ impl AgentManager {
                         tokio::select! {
                             _ = cancel.cancelled() => Err(anyhow::anyhow!("Tool cancelled")),
                             result = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
-                                settings:&settings, selected:&selected, thinking:"low", messages:&messages, session_id:id, definitions:vec![], mode:provider::Mode::Search,
+                                settings:&settings, selected:&selected, thinking:"low", messages:&messages, session_id:id, definitions:vec![], mode:provider::Mode::Search, recovery:None,
                             }, updates) =>
                                 result.map(|completion| tools::text_result(format!("{}\n{}", completion.message["content"].as_str().unwrap_or_default(), completion.message["annotations"]))),
                         }
@@ -365,7 +383,7 @@ impl AgentManager {
         let result=tokio::select! {
             _=cancel.cancelled() => bail!("Image generation cancelled; do not assume no billing or automatically retry"),
             result=tokio::time::timeout(std::time::Duration::from_secs(600),provider::generate(&self.inner.http,&self.inner.auth,provider::Request {
-                settings,selected:&selected,thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Image,
+                settings,selected:&selected,thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Image,recovery:None,
             },updates)) => result.context("Image generation timed out; outcome may be unknown, do not automatically retry")?
                 .context("Image request failed; billing/outcome may be unknown. Do not automatically retry; ask the user before another generation request")?,
         };
@@ -388,6 +406,16 @@ impl AgentManager {
             let mut prefix = entries[..cut].to_vec();
             // An earlier checkpoint can sit after its retained boundary in append order.
             prefix.extend(entries[cut..].iter().filter(|entry| entry["type"] == "compaction").cloned());
+            // A rejection after the retained boundary also invalidates a
+            // recovered item in the prefix being compacted. Carry only that
+            // exclusion, never the suffix's new reasoning or user messages.
+            for entry in &entries[cut..] {
+                if let Some(recovery) = entry.pointer("/message/tauReasoningRecovery")
+                    && recovery["rejectedIds"].as_array().is_some_and(|ids| !ids.is_empty()) {
+                    let mut marker = recovery.clone(); marker["items"] = json!([]);
+                    prefix.push(json!({"type":"message","message":{"role":"assistant","stopReason":"error","tauReasoningRecovery":marker}}));
+                }
+            }
             (entries[cut]["id"].clone(),prefix)
         };
         settings.model(&selected)?;
@@ -402,7 +430,7 @@ impl AgentManager {
         let (updates, _receiver) = mpsc::channel(1);
         let generation = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
             settings:&settings, selected:&selected, thinking:&thinking, messages:&messages, session_id:id, definitions:vec![],
-            mode:if native {provider::Mode::Compact} else {provider::Mode::Summary},
+            mode:if native {provider::Mode::Compact} else {provider::Mode::Summary}, recovery:None,
         }, updates);
         let result = tokio::select! {
             _ = cancel.cancelled() => bail!("Compaction cancelled; history is unchanged"),
@@ -433,7 +461,7 @@ impl AgentManager {
                 json!({"role":"user","content":settings.daemon.title_prompt.replace("{text}",&text)})];
             let (updates,_receiver)=mpsc::channel(1);
             tokio::time::timeout(std::time::Duration::from_secs(30),provider::generate(&self.inner.http,&self.inner.auth,provider::Request {
-                settings:&settings,selected:settings.daemon.title_model.as_ref().unwrap_or(&stored.model),thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Summary,
+                settings:&settings,selected:settings.daemon.title_model.as_ref().unwrap_or(&stored.model),thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Summary,recovery:None,
             },updates)).await.ok().and_then(Result::ok).and_then(|completion|completion.message["content"].as_str().map(str::to_owned))
                 .map(|title|title.trim().to_owned()).filter(|title|title.chars().count()>1 && title.chars().count()<=crate::protocol::MAX_TITLE_CHARS && !title.contains(['\n','\r']))
         } else { None };

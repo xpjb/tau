@@ -55,11 +55,13 @@ impl Decoder for Codex {
             | "response.web_search_call.completed" => stream.progress_events += 1,
             "response.image_generation_call.in_progress" | "response.image_generation_call.generating"
             | "response.image_generation_call.completed" | "response.image_generation_call.partial_image" => {
+                if let Some(recovery) = stream.recovery { recovery.image_started(); }
                 stream.progress_events += 1;
             }
             "response.output_item.added" | "response.output_item.done" => {
                 let item = event.get("item").context("Codex output event has no item")?;
                 if item.get("type").and_then(Value::as_str) == Some("image_generation_call") {
+                    if let Some(recovery) = stream.recovery { recovery.image_started(); }
                     stream.progress_events += 1;
                 }
                 let index = event.get("output_index").and_then(Value::as_u64)
@@ -69,6 +71,7 @@ impl Decoder for Codex {
                     if completed.is_some() {
                         bail!("Codex returned a duplicate completed output index");
                     }
+                    if let Some(recovery) = stream.recovery { recovery.record(item); }
                     *completed = Some(item.clone());
                     stream.progress_events += 1;
                 } else if item.get("type").and_then(Value::as_str) == Some("function_call") {
@@ -112,6 +115,12 @@ impl Decoder for Codex {
             }
             "response.completed" | "response.done" | "response.incomplete" => {
                 let response = event.get("response").context("Codex completion has no response")?;
+                if let Some(recovery) = stream.recovery {
+                    for item in response["output"].as_array().into_iter().flatten() {
+                        if item["type"] == "image_generation_call" { recovery.image_started(); }
+                        recovery.record(item);
+                    }
+                }
                 let status = response.get("status").and_then(Value::as_str)
                     .context("Codex completion has no status")?;
                 if kind == "response.incomplete" || status != "completed" {

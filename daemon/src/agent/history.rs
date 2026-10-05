@@ -35,7 +35,12 @@ use crate::state::SessionModel;
         }
         if entry["type"] != "message" { continue; }
         let message = &entry["message"];
-        if message["role"]=="assistant" && matches!(message["stopReason"].as_str(),Some("aborted"|"error")) {continue;}
+        if message["role"]=="assistant" && matches!(message["stopReason"].as_str(),Some("aborted"|"error")) {
+            if let Some(recovery) = message.get("tauReasoningRecovery") {
+                output.push(json!({"role":"reasoning_recovery","recovery":recovery}));
+            }
+            continue;
+        }
         if let Some(native) = message.get("tauModelMessage") { output.push(native.clone()); continue; }
         let content = &message["content"];
         let text = content.as_str().map(str::to_owned).unwrap_or_else(|| content.as_array().into_iter().flatten()

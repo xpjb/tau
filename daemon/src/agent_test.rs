@@ -1223,3 +1223,5 @@ async fn codex_signin_failure_prompts_the_client_and_keeps_the_turn_for_explicit
     assert!(model.requests.try_recv().is_err(),"No paid provider call without credentials");
     manager.shutdown().await;server.abort();
 }
+#[path="agent_test_recovery.rs"]
+mod recovery;
