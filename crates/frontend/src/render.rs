@@ -6,6 +6,7 @@ use std::{
 };
 use barkdown::{Document, Faces, Preview, Theme};
 use wgpu::util::DeviceExt;
+pub(crate) mod trace;
 
 pub fn color(hex: u32) -> Color {
     let channel = |n: u32| {
@@ -226,6 +227,7 @@ pub struct Selection {
     pub focus: TextPoint,
 }
 pub struct Renderer {
+    pub(crate) trace: Option<trace::Trace>,
     pub text: TextService,
     pub faces: Faces,
     pub messages: HashMap<String, MessageView>,
@@ -361,6 +363,7 @@ impl Renderer {
             ..Default::default()
         });
         Ok(Self {
+            trace: trace::Trace::from_env(ctx.device(), ctx.format()),
             text,
             faces,
             messages: HashMap::new(),
@@ -813,6 +816,9 @@ impl Renderer {
         layer.images.push((key, rect, intersect(rect, clip)));
     }
     pub fn draw(&mut self, ctx: &impl RenderContext, target: &wgpu::TextureView, layers: &[Layer]) {
+        let trace_started = self.trace.as_ref().map(|_| std::time::Instant::now());
+        let mut commands = trace::Commands::default();
+        let text_before = trace_started.and_then(|_| trace::text_commands());
         let (width, height) = ctx.size();
         self.text
             .set_transform(TextService::pixel_ortho(width, height));
@@ -917,6 +923,8 @@ impl Renderer {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_vertex_buffer(0, shapes[i].1.slice(..));
                     pass.draw(0..shapes[i].0, 0..1);
+                    commands.shape_draws += 1;
+                    commands.shape_vertices += u64::from(shapes[i].0);
                 }
                 for (j, (path, _, clip)) in layer.images.iter().enumerate() {
                     if let Some(image) = self
@@ -930,6 +938,7 @@ impl Renderer {
                         pass.set_bind_group(0, &image.bind, &[]);
                         pass.set_vertex_buffer(0, image_buffers[i][j].slice(..));
                         pass.draw(0..6, 0..1);
+                        commands.image_draws += 1;
                     }
                 }
                 for (index, segment) in batches[i].segments().iter().enumerate() {
@@ -940,11 +949,18 @@ impl Renderer {
                     if let Some([x, y, w, h]) = scissor(clip, width, height) {
                         pass.set_scissor_rect(x, y, w, h);
                         self.text.draw_segment(&mut pass, &batches[i], index);
+                    } else {
+                        commands.skipped_text_segments += 1;
                     }
                 }
             }
         }
+        if trace_started.is_some() { commands.finish_text(text_before); }
         ctx.queue().submit([encoder.finish()]);
+        commands.submitted = true;
+        if let (Some(trace), Some(started)) = (&mut self.trace, trace_started) {
+            trace.frame(ctx, &self.text, &layers, &batches, commands, started);
+        }
     }
 }
 fn scissor(r: Rect, width: u32, height: u32) -> Option<[u32; 4]> {

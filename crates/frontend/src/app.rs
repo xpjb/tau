@@ -147,12 +147,15 @@ impl App {
         self.with_ui(|root, cx| root.workspace.chat.transcript.save(cx))
     }
     pub fn tick(&mut self, dt: f32) -> bool {
+        let started = self.trace_started();
         self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
         let visible = self.with_ui(|root, cx| root.workspace.chat_visible(cx));
         if let Err(error) = self.controller.viewing(visible) {
             self.controller.report_error(error);
         }
+        let poll_started = self.trace_started();
         self.ui.dirty |= self.controller.poll();
+        let poll_us = poll_started.map_or(0, |s| s.elapsed().as_micros() as u64);
         if self.services.transfers.download_identity != self.controller.identity {
             self.services.transfers.download_identity = self.controller.identity.clone();
             self.services.transfers.export_errors.clear();
@@ -166,7 +169,43 @@ impl App {
         self.update_widgets(dt);
         self.with_ui(|root, cx| root.timers(cx));
         let waiting = self.ui.capture.is_some_and(|c| c.touch && !c.dragged && c.started.elapsed().as_millis() < 450);
-        std::mem::take(&mut self.ui.dirty) || waiting
+        let wants_redraw = std::mem::take(&mut self.ui.dirty) || waiting;
+        if let (Some(trace), Some(started)) = (&mut self.services.renderer.trace, started) {
+            trace.tick(wants_redraw, self.ui.window_focused, self.ui.visible, poll_us, started);
+        }
+        wants_redraw
+    }
+    #[cfg(windows)]
+    pub fn enable_desktop_diagnostics(&mut self, ctx: &impl RenderContext) {
+        if self.services.renderer.trace.is_none()
+            && std::env::var_os("TAU_RENDER_TRACE").is_none_or(|value| value != "off")
+        {
+            self.services.renderer.trace = Some(crate::render::trace::Trace::normal(
+                self.controller.store.root.join("diagnostics"), ctx.device(), ctx.format()));
+        }
+    }
+    pub(crate) fn trace_started(&self) -> Option<crate::render::trace::Stamp> {
+        self.services.renderer.trace.as_ref().map(|_| crate::render::trace::Stamp::now())
+    }
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn trace_stage(&mut self, stage: crate::render::trace::Stage, frame: u64, started: Option<crate::render::trace::Stamp>) {
+        if let (Some(trace), Some(started)) = (&mut self.services.renderer.trace, started) {
+            trace.stage(stage, frame, started, (self.ui.dirty, self.ui.window_focused, self.ui.visible));
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn trace_wakes(&mut self, received: u64, posted: u64) {
+        if let Some(trace) = &mut self.services.renderer.trace { trace.wakes(received, posted); }
+    }
+    #[cfg(not(target_os = "android"))]
+    pub fn save_render_trace(&mut self) -> bool {
+        let Some(trace) = &self.services.renderer.trace else { return false; };
+        match trace.save() {
+            Ok(path) => self.controller.notice = Some(format!("Rendering diagnostics saved to {}", path.display()).into()),
+            Err(error) => self.controller.report_error(anyhow::anyhow!("Could not save rendering diagnostics: {error}")),
+        }
+        self.ui.dirty = true;
+        true
     }
     pub fn frame(&mut self, ctx: &impl RenderContext, view: &wgpu::TextureView) {
         self.sync_navigation();
@@ -458,6 +497,9 @@ fn count(n: u64) -> String {
     out
 }
 
+#[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/repaint.rs"]
+mod repaint_tests;
 #[cfg(all(test, not(target_os = "android")))]
 #[path = "../tests/unit/app/connection.rs"]
 mod connection_tests;

@@ -507,3 +507,7 @@ fn next_attempt(started: Instant, failed: Instant) -> Instant {
 #[cfg(test)]
 #[path = "../../tests/unit/net.rs"]
 mod acquisition_tests;
+
+#[cfg(test)]
+#[path = "../../tests/support/network_mailbox.rs"]
+pub(crate) mod test_mailbox;

@@ -808,3 +808,30 @@ fn downloaded_assistant_copy_preserves_error_metadata_and_partial_output() {
         assert_eq!(f.cache.copy_ready("chat", &["text".into()]).unwrap(), Some(expected));
     }
 }
+
+#[test]
+fn diagnostics_measures_shared_cache_lock_wait_on_the_ui_thread() {
+    use crate::render::trace::{Trace, Stage, Stamp};
+    let f = Fixture::new();
+    let ctx = chad::HeadlessCtx::new(&chad::Config { size: (32, 32),
+        device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
+    let mut trace = Trace::normal(f._root.path().join("diagnostics"), &ctx.device, ctx.surface_format);
+    let worker_cache = f.cache.clone();
+    let (held, waiting) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _guard = worker_cache.db.lock().unwrap();
+        held.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    waiting.recv().unwrap();
+    let stamp = Stamp::now();
+    f.cache.cached_header("chat", "absent").unwrap();
+    trace.stage(Stage::Pointer, 0, stamp, (false, true, true));
+    worker.join().unwrap();
+    let log = std::fs::read_to_string(trace.save().unwrap()).unwrap();
+    let sample = log.lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|r| r["kind"] == "stage").unwrap();
+    let waited = sample["cache_wait_us"].as_u64().unwrap();
+    let elapsed = sample["callback_us"].as_u64().unwrap();
+    assert!(waited > 50_000 && waited <= elapsed, "cache contention must be visible in the callback: {sample}");
+}

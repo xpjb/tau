@@ -19,7 +19,10 @@ use std::{
 };
 use tau_net::SessionStatus;
 mod scroll;
+pub(crate) mod wake;
 use scroll::WheelDecoder;
+use wake::WakeGate;
+use crate::render::trace::Stage;
 
 // Account/session are captured when the document picker is opened.
 enum DesktopEvent {
@@ -29,6 +32,7 @@ enum DesktopEvent {
 }
 struct Desktop {
     app: App,
+    wake: Arc<WakeGate>,
     cursor: Vec2,
     cursor_icon: CursorIcon,
     modifiers: ModifiersState,
@@ -71,14 +75,18 @@ impl ChadApp for Desktop {
                 .map_err(|e| e.to_string())?;
         }
         let waker = ctx.waker();
-        let mut app = App::new(ctx, store, Arc::new(move || waker.wake()), false)
+        let wake = WakeGate::new(Arc::new(move || waker.wake()));
+        let mut app = App::new(ctx, store, wake.callback(), false)
             .map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        app.enable_desktop_diagnostics(ctx);
         app.ui.window_focused = ctx.window.has_focus();
         ctx.window.set_ime_allowed(true);
         let (tx, rx) = mpsc::channel();
         let attention_identity = app.controller.identity.clone();
         Ok(Self {
             app,
+            wake,
             cursor: Vec2::new(0., 0.),
             cursor_icon: CursorIcon::Default,
             modifiers: ModifiersState::empty(),
@@ -92,6 +100,19 @@ impl ChadApp for Desktop {
         })
     }
     fn event(&mut self, ctx: &mut Ctx, event: &WindowEvent) {
+        let started = self.app.trace_started();
+        let stage = match event {
+            WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => Some(Stage::Hover),
+            WindowEvent::MouseInput { .. } => Some(Stage::Pointer),
+            WindowEvent::KeyboardInput { .. } => Some(Stage::Key),
+            WindowEvent::MouseWheel { .. } => Some(Stage::Wheel),
+            WindowEvent::Ime(_) => Some(Stage::Ime),
+            WindowEvent::Focused(_) => Some(Stage::Focus),
+            WindowEvent::Occluded(_) => Some(Stage::Visibility),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => Some(Stage::Resize),
+            WindowEvent::DroppedFile(_) => Some(Stage::FileDrop),
+            _ => None,
+        };
         match event {
             WindowEvent::CloseRequested => {
                 let result = self.app.save();
@@ -156,6 +177,13 @@ impl ChadApp for Desktop {
             WindowEvent::Ime(Ime::Disabled) => self.app.cancel_preedit(),
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => self.app.preedit(text.clone(), *cursor),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if !event.repeat && event.logical_key == Key::Named(NamedKey::F12)
+                    && self.modifiers.control_key() && self.modifiers.shift_key()
+                    && self.app.save_render_trace()
+                {
+                    ctx.request_redraw();
+                    return;
+                }
                 let cancelled = self.app.cancel_autoscroll();
                 if cancelled && event.logical_key == Key::Named(NamedKey::Escape) {
                     self.sync_cursor(ctx);
@@ -194,8 +222,9 @@ impl ChadApp for Desktop {
             }
             _ => {}
         }
-        self.actions(ctx);
+        self.actions();
         self.sync_cursor(ctx);
+        if let Some(stage) = stage { self.app.trace_stage(stage, ctx.frame_index, started); }
         // Desktop OnDemand forwards input but does not schedule a frame for it.
         // Waiting until update() to request redraw deadlocks visible input feedback.
         if self.app.needs_redraw() {
@@ -203,6 +232,9 @@ impl ChadApp for Desktop {
         }
     }
     fn update(&mut self, ctx: &mut Ctx) {
+        let started = self.app.trace_started();
+        let (received, posted) = self.wake.begin_update();
+        self.app.trace_wakes(received, posted);
         self.app
             .resize(ctx.size(), ctx.scale_factor() as f32, Vec2::new(0., 0.));
         while let Ok(event) = self.rx.try_recv() {
@@ -224,7 +256,7 @@ impl ChadApp for Desktop {
         if self.app.tick(ctx.dt) {
             ctx.request_redraw();
         }
-        self.actions(ctx);
+        self.actions();
         if self.attention_identity != self.app.controller.identity {
             self.attention_identity = self.app.controller.identity.clone();
             self.seen_finished.clear();
@@ -249,8 +281,10 @@ impl ChadApp for Desktop {
             ctx.window.request_user_attention(None);
             self.attention_requested = false;
         }
+        self.app.trace_stage(Stage::Update, ctx.frame_index, started);
     }
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
+        let started = self.app.trace_started();
         self.app.frame(ctx, view);
         if let Some(rect) = self.app.ime_rect() {
             ctx.window.set_ime_cursor_area(
@@ -259,6 +293,7 @@ impl ChadApp for Desktop {
             );
         }
         self.sync_cursor(ctx);
+        self.app.trace_stage(Stage::Paint, ctx.frame_index, started);
         if self.app.needs_redraw() {
             ctx.request_redraw();
         }
@@ -272,7 +307,7 @@ impl Desktop {
             ctx.window.set_cursor(icon);
         }
     }
-    fn actions(&mut self, ctx: &mut Ctx) {
+    fn actions(&mut self) {
         for action in self.app.actions() {
             match action {
                 PlatformAction::Copy(text) => {
@@ -304,7 +339,7 @@ impl Desktop {
                 }
                 PlatformAction::PickFile { identity, session } => {
                     let tx = self.tx.clone();
-                    let waker = ctx.waker();
+                    let waker = self.wake.clone();
                     std::thread::spawn(move || {
                         if let Some(files) = rfd::FileDialog::new().pick_files() {
                             let _ = tx.send(DesktopEvent::Pick(Ok((identity, session, files))));
@@ -314,7 +349,7 @@ impl Desktop {
                 }
                 PlatformAction::SaveDownload {key,source,name} => {
                     let tx = self.tx.clone();
-                    let waker = ctx.waker();
+                    let waker = self.wake.clone();
                     std::thread::spawn(move || {
                         let result=crate::downloads::default_directory()
                             .and_then(|root|crate::downloads::save_into(&root,&source,&name))
@@ -335,7 +370,7 @@ impl Desktop {
                         }
                     } else if matches!(action, SavedAction::Extract) {
                         let tx = self.tx.clone();
-                        let waker = ctx.waker();
+                        let waker = self.wake.clone();
                         let completion_target = target.clone();
                         let worker = std::thread::Builder::new().name("tau-extract".into()).spawn(move || {
                             // Busy includes opening the folder, not only writing its files.

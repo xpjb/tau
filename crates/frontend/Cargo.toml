@@ -1,6 +1,6 @@
 [package]
 name = "tau-frontend"
-version = "0.7.13"
+version = "0.7.14"
 edition = "2024"
 
 [lib]
@@ -52,6 +52,9 @@ png = "0.18"
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
+# Existing thread-local counters distinguish encoded text/emoji draws from
+# nonempty inputs. No GPU queries/readback or timing instrumentation is enabled.
+sanscale = { workspace = true, features = ["perf-counters"] }
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 
 [dev-dependencies]

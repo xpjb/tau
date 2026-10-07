@@ -105,6 +105,12 @@ pub struct Controller {
     wake: Wake,
 }
 impl Controller {
+    #[cfg(test)]
+    pub(crate) fn test_mailbox(&mut self, wake: Wake) -> net::test_mailbox::Mailbox {
+        let (network, mailbox) = net::test_mailbox::Mailbox::new(wake);
+        self.network = Some(network);
+        mailbox
+    }
     pub fn new(store: Store, wake: Wake) -> Result<Self> {
         let settings: Settings = store.get("", "settings")?;
         let identity = settings.identity();
