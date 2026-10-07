@@ -150,3 +150,57 @@ fn key_repeat_cost_reports_work_not_an_idle_polling_loop() {
     eprintln!("one completed headless frame including readback: {:?}", started.elapsed());
     assert!(!h.app.tick(0.), "idle editor needs neither a timer nor continuous redraws");
 }
+
+#[test]
+fn desktop_double_and_triple_click_select_word_and_paragraph_through_the_real_composer() {
+    let mut h = Harness::new();
+    h.app.input("alpha beta_gamma delta\nsecond paragraph");
+    h.frame();
+    h.app.key("Home",true,false);
+    for _ in 0..9 {h.app.key("ArrowRight",false,false);}
+    h.frame();
+    let caret = h.app.ime_rect().unwrap();
+    let point = Vec2::new(caret.x,caret.y + caret.height/2.);
+    h.app.press(0,point,false);h.app.release(0,point);
+    assert!(h.app.root.workspace.chat.composer.field.editor.selected().is_empty());
+    h.app.press(0,point,false);
+    h.app.motion(0,Vec2::new(point.x+0.5,point.y)); // Ordinary mouse jitter must not collapse selection.
+    h.app.release(0,point);
+    assert_eq!(h.app.root.workspace.chat.composer.field.editor.selected(),"beta_gamma");
+    h.app.press(0,point,false);h.app.release(0,point);
+    assert_eq!(h.app.root.workspace.chat.composer.field.editor.selected(),"alpha beta_gamma delta");
+    assert!(h.app.needs_redraw());
+    assert_eq!(h.copy(),"alpha beta_gamma delta");
+    assert_eq!(h.app.controller.selected().unwrap().local.draft,"alpha beta_gamma delta\nsecond paragraph");
+    // Typing/keyboard interaction breaks the click sequence.
+    h.app.press(0,point,false);h.app.release(0,point);
+    assert!(h.app.root.workspace.chat.composer.field.editor.selected().is_empty());
+}
+
+#[test]
+fn settings_fields_use_the_same_multiclick_and_shift_click_path() {
+    let mut h = Harness::new();
+    let mut settings = tau_net::settings::Settings::default();
+    settings.agent.system_prompt = "alpha beta gamma\nsecond paragraph".into();
+    h.app.open_ui(ui::DialogSpec::Daemon).unwrap();
+    h.app.with_ui(|root,cx| {
+        let ui::Dialog::Daemon(dialog) = root.dialog.as_mut().unwrap() else {panic!("daemon dialog")};
+        dialog.draft = Some(crate::daemon_settings::Draft::new(&settings,cx.model.identity.clone()).unwrap());
+        dialog.load(cx).unwrap();cx.ui.focus = Some(dialog.value.as_ref().unwrap().control.target);
+    });
+    h.frame();
+    h.app.key("Home",true,false);
+    for _ in 0..8 {h.app.key("ArrowRight",false,false);}
+    h.frame();
+    let caret = h.app.ime_rect().unwrap();let point = Vec2::new(caret.x,caret.y+caret.height/2.);
+    for _ in 0..2 {h.app.press(0,point,false);h.app.release(0,point);}
+    assert_eq!(h.app.root.dialog.as_ref().unwrap().fields()[0].editor.selected(),"beta");
+    h.app.press(0,point,false);h.app.release(0,point);
+    assert_eq!(h.app.root.dialog.as_ref().unwrap().fields()[0].editor.selected(),"alpha beta gamma");
+    h.app.key("Home",true,false);h.frame();
+    h.app.ui.pointer_shift = true;
+    h.app.press(0,point,false);h.app.release(0,point);
+    h.app.ui.pointer_shift = false;
+    assert_eq!(h.copy(),"alpha be");
+    assert_eq!(h.app.root.dialog.as_ref().unwrap().fields()[0].editor.value,settings.agent.system_prompt);
+}

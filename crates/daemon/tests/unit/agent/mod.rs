@@ -353,6 +353,9 @@ async fn incomplete_stream_never_executes_tools_abort_kills_shell_group_and_retr
     let shell = call("sleep", "bash", json!({"command":"echo $$ > shell.pid; sleep 60 & echo $! > child.pid; wait"}));
     let mut model = ModelServer::start(vec![partial,completion("",vec![shell]),Reply {status:429,bytes:vec![],gate:None, body_gate:None},completion("Recovered",vec![])]).await;
     let (root, manager, url, server) = fixture(&model, Api::ChatCompletions).await;
+    // This test exercises explicit recovery with automatic retry disabled.
+    let mut settings = manager.inner.settings.get(); settings.agent.retry.enabled = false;
+    manager.set_settings(settings.revision,settings).await.unwrap();
     let mut client = Client::connect(&url).await;
     let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
     client.open(&id).await;
@@ -385,6 +388,8 @@ async fn incomplete_stream_never_executes_tools_abort_kills_shell_group_and_retr
     }
     let snapshot = client.open(&id).await;
     assert!(snapshot["queue"]["paused"].as_bool().unwrap());
+    let mut settings = manager.inner.settings.get(); settings.agent.retry.enabled = true;
+    manager.set_settings(settings.revision,settings).await.unwrap();
     client.request(json!({"id":"retry","type":"prompt","sessionId":id,"text":"Continue"})).await;
     client.request(json!({"id":"resume2","type":"queue_control","sessionId":id,"generation":snapshot["generation"],"operation":{"type":"resume","runId":null}})).await;
     let first = model.request().await; let retried = model.request().await;

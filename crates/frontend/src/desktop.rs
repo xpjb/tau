@@ -148,7 +148,10 @@ impl ChadApp for Desktop {
                 let (amount, horizontal, precise) = self.scroll.decode(delta, ctx.scale_factor() as f32, self.modifiers.shift_key(), Instant::now());
                 self.app.scroll(amount, horizontal, self.cursor, precise);
             }
-            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.modifiers = m.state();
+                self.app.ui.pointer_shift = self.modifiers.shift_key();
+            }
             WindowEvent::Ime(Ime::Commit(text)) => self.app.input(text),
             WindowEvent::Ime(Ime::Disabled) => self.app.cancel_preedit(),
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => self.app.preedit(text.clone(), *cursor),
@@ -182,6 +185,7 @@ impl ChadApp for Desktop {
             WindowEvent::Focused(false) => {
                 self.app.ui.window_focused = false;
                 self.modifiers = ModifiersState::empty();
+                self.app.ui.pointer_shift = false;
                 self.scroll = WheelDecoder::default();
                 self.app.cancel_preedit();
                 self.app.cancel_pointer();

@@ -269,7 +269,13 @@ impl AgentManager {
                         && stream_retries < settings.agent.retry.max_retries;
                     let mut content = runtime.content.lock().await;
                     let mut message = assistant_message(&partial, &selected, if cancel.is_cancelled() {"aborted"} else {"error"}, &mut started);
-                    if !retry { message["errorMessage"] = json!(bounded(&error.to_string(), 4096)); }
+                    if retry {
+                        // Keep the diagnostic in expandable details, without an
+                        // error banner, paused queue or false completion signal.
+                        message["content"].as_array_mut().unwrap().push(json!({"type":"thinking",
+                            "thinking":format!("Retrying automatically (attempt {}): {}", stream_retries + 1, bounded(&error.to_string(), 4096)),
+                            "timestamp":now_ms()}));
+                    } else { message["errorMessage"] = json!(bounded(&error.to_string(), 4096)); }
                     if let Some(checkpoint) = recovery.snapshot() { message["tauReasoningRecovery"] = checkpoint; }
                     message["timestamp"] = json!(now_ms());
                     content.append(id, json!({"type":"message","origin":{"streamId":stream},"message":message})).await?;
@@ -280,7 +286,7 @@ impl AgentManager {
                     drop(content);
                     if retry {
                         stream_retries += 1;
-                        tracing::info!(session=%id, attempt=stream_retries, checkpoint_progress=recovery.advanced(), "Continuing after a transient model stream failure");
+                        tracing::info!(session=%id, attempt=stream_retries, checkpoint_progress=recovery.advanced(), %error, "Continuing after a transient model stream failure");
                         let delay = settings.agent.retry.base_delay_ms.saturating_mul(1u64 << (stream_retries - 1).min(16)).min(60_000);
                         tokio::select! { _=cancel.cancelled()=>return Ok(()), _=tokio::time::sleep(std::time::Duration::from_millis(delay))=>{} }
                         continue;

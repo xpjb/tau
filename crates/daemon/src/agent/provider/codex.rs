@@ -102,15 +102,9 @@ impl Decoder for Codex {
                 let error = event.get("error")
                     .or_else(|| event.get("response").and_then(|response| response.get("error")))
                     .unwrap_or(event);
-                let code = error.get("code").cloned().unwrap_or(Value::Null);
-                let status = match code.as_str() {
-                    Some("server_error" | "internal_error" | "internal_server_error") => json!(500),
-                    _ => code.clone(),
-                };
-                stream.error = Some(json!({
-                    "code": status, "message": error.get("message"),
-                    "metadata": {"error_type": code}
-                }));
+                // Preserve code, type and status for common retry classification
+                // and redacted diagnostics instead of reducing everything to 500.
+                stream.error = Some(error.clone());
                 stream.finish_reason = Some("error".into());
             }
             "response.completed" | "response.done" | "response.incomplete" => {

@@ -37,6 +37,13 @@ impl View {
             (self.rect.width - horizontal * 2.).max(1.), (self.rect.height - vertical * 2.).max(1.))
     }
 }
+#[derive(Clone, Copy)]
+enum SelectionUnit { Word, Paragraph }
+struct SelectedWord(Range<usize>);
+impl WordBoundaries for SelectedWord {
+    fn prev_word(&self, _: usize) -> Option<usize> { Some(self.0.start) }
+    fn next_word(&self, _: usize) -> Option<usize> { Some(self.0.end) }
+}
 struct CachedLayout {
     style: Style,
     secret: bool,
@@ -53,6 +60,7 @@ pub struct Editor {
     caret: Caret,
     anchor: usize,
     goal: Option<f32>,
+    mouse_selection: Option<(Range<usize>, SelectionUnit)>,
     after_edit: bool,
     composition: Option<Composition>,
     undo: Vec<Snapshot>,
@@ -73,7 +81,7 @@ impl Editor {
             native_revision: 0,
             native_composition: None,
             value, caret: Caret { byte_index: end, line_index: 0 }, anchor: end,
-            single_line: false, center_one_line: false, goal: None, after_edit: true, follow_caret: true,
+            single_line: false, center_one_line: false, goal: None, mouse_selection: None, after_edit: true, follow_caret: true,
             composition: None, undo: Vec::new(), redo: Vec::new(), layout: None,
             view: None, visible: false, scroll: Vec2::new(0., 0.),
             motion: [ScrollMotion::default(), ScrollMotion::default()],
@@ -152,6 +160,7 @@ impl Editor {
         true
     }
     fn native_changed(&mut self) {
+        self.mouse_selection = None;
         self.stop_scrolling();
         { self.native_revision += 1; self.native_composition = None; }
     }
@@ -336,6 +345,49 @@ impl Editor {
             self.place(caret, view.secret, extend);
         }
     }
+    /// Desktop multi-click selection uses the same measured layout as caret
+    /// placement. Keep the original unit for word/paragraph-granularity drags.
+    pub(crate) fn mouse_down(&mut self, text: &mut TextService, chain: FontChainHandle, point: Vec2, clicks: u8, shift: bool) {
+        self.hit(text, chain, point, shift);
+        let unit = match clicks { 2 => SelectionUnit::Word, 3 => SelectionUnit::Paragraph, _ => return };
+        let Some(view) = self.view else { return; };
+        let Some(cached) = &self.layout else { return; };
+        let layout = text.measure(cached.block);
+        let range = self.unit_range(layout, view.secret, unit);
+        self.anchor = range.start;
+        self.place(layout.caret_at(self.display_byte(range.end, view.secret)), view.secret, true);
+        self.mouse_selection = Some((range, unit));
+    }
+    fn unit_range(&self, layout: &Layout, secret: bool, unit: SelectionUnit) -> Range<usize> {
+        let byte = self.display_byte(self.caret.byte_index, secret);
+        let range = match unit {
+            SelectionUnit::Paragraph => layout.select_paragraph_at(byte),
+            SelectionUnit::Word => {
+                // Motion skips whitespace; selection must not swallow the
+                // previous word when a click lands exactly at a word's start.
+                let word = if secret { 0..layout.len_bytes() } else {
+                    self.value.split_word_bound_indices().find(|(at, word)| *at <= byte && byte < at + word.len())
+                        .or_else(|| self.value.split_word_bound_indices().next_back())
+                        .map_or(byte..byte, |(at, word)| at..at + word.len())
+                };
+                layout.select_word_at(byte, &SelectedWord(word))
+            }
+        };
+        self.source_byte(range.start, secret)..self.source_byte(range.end, secret)
+    }
+    pub(crate) fn mouse_drag(&mut self, text: &mut TextService, chain: FontChainHandle, point: Vec2) {
+        let selection = self.mouse_selection.clone();
+        self.hit(text, chain, point, true);
+        let Some((origin, unit)) = selection else { return; };
+        let Some(view) = self.view else { return; };
+        let Some(cached) = &self.layout else { return; };
+        let layout = text.measure(cached.block);
+        let range = self.unit_range(layout, view.secret, unit);
+        let end = if range.start < origin.start { self.anchor = origin.end; range.start }
+            else { self.anchor = origin.start; range.end.max(origin.end) };
+        self.place(layout.caret_at(self.display_byte(end, view.secret)), view.secret, true);
+        self.mouse_selection = Some((origin, unit));
+    }
     pub(crate) fn stop_scrolling(&mut self) {
         for motion in &mut self.motion { motion.stop(); }
     }
@@ -402,7 +454,7 @@ impl Editor {
         let x = speed(point.x, inner.x, inner.width);
         let y = speed(point.y, inner.y, inner.height);
         let changed = self.wheel(text, chain, x, true) | self.wheel(text, chain, y, false);
-        if changed { self.hit(text, chain, point, true); }
+        if changed { self.mouse_drag(text, chain, point); }
         changed
     }
     pub fn height(&mut self, renderer: &mut Renderer, width: f32, size: f32) -> f32 {

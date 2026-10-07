@@ -35,3 +35,16 @@ fn generated_images_enforce_encoding_format_individual_cumulative_and_count_boun
     assert!(stream.done); assert_eq!(stream.images.len(),MAX_GENERATED_FILES);
     assert!(!stream.assistant_message().to_string().contains(&png));
 }
+
+#[test]
+fn stream_failures_preserve_provider_code_type_and_status_for_retry_classification() {
+    for error in [json!({"type":"server_error","message":"Try again"}),
+        json!({"code":"upstream_error","status":503,"message":"Disconnected"}),
+        json!({"code":"insufficient_quota","type":"rate_limit_error","message":"Quota exhausted"})] {
+        for event in [json!({"type":"error","error":error}),json!({"type":"response.failed","response":{"error":error}})] {
+            let mut stream = Stream::new(&Codex);
+            Codex.decode(&event,&mut stream).unwrap();
+            assert_eq!(stream.error,Some(error.clone()));
+        }
+    }
+}

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -108,11 +108,39 @@ fn call_ids(message:&Value)->Vec<String> {
 
 
 /// Prefer whole user turns within the retention budget, but a long single task
-/// must also be compactable between completed assistant/tool exchanges. Never
-/// strand a result on the other side of its call, including multi-call batches.
+/// must also be compactable between assistant/tool exchanges. Only stored
+/// results constrain a cut: missing results already become explicit unknown
+/// outcomes in `messages`, and must not poison every later boundary forever.
 pub fn compaction_cut(entries: &[Value], keep_tokens: u64) -> Result<usize> {
+    let mut pending = HashMap::new();
+    let mut last_result = vec![0; entries.len()];
+    for (index, entry) in entries.iter().enumerate() {
+        if entry["type"] != "message" { continue; }
+        let message = &entry["message"];
+        match message["role"].as_str() {
+            Some("assistant") if !matches!(message["stopReason"].as_str(), Some("error" | "aborted")) => {
+                let calls = message.get("tauModelMessage").map(call_ids).unwrap_or_else(|| {
+                    message["content"].as_array().into_iter().flatten().filter(|part| part["type"] == "toolCall")
+                        .filter_map(|part| part["id"].as_str().map(str::to_owned)).collect()
+                });
+                for call in calls { pending.insert(call, index); }
+            }
+            Some("toolResult") => {
+                if let Some(id) = message["toolCallId"].as_str() {
+                    // Imported history may use call|item on only one side. An
+                    // ambiguous alias cannot settle two distinct native calls.
+                    let calls = if pending.contains_key(id) { vec![id.to_owned()] } else {
+                        pending.keys().filter(|call| call.split('|').next() == id.split('|').next()).cloned().collect()
+                    };
+                    for call in &calls { last_result[pending[call]] = index; }
+                    if calls.len() == 1 { pending.remove(&calls[0]); }
+                }
+            }
+            _ => {},
+        }
+    }
     let mut boundaries = Vec::new();
-    let mut pending = HashSet::new();
+    let mut through = 0;
     let mut size = 0u64;
     let mut have_history = false;
     for (index, entry) in entries.iter().enumerate() {
@@ -120,21 +148,10 @@ pub fn compaction_cut(entries: &[Value], keep_tokens: u64) -> Result<usize> {
         let role = message["role"].as_str();
         if entry["type"] == "message" {
             if role == Some("assistant") && matches!(message["stopReason"].as_str(), Some("error" | "aborted")) { continue; }
-            if have_history && pending.is_empty() && matches!(role, Some("user" | "assistant")) {
+            if have_history && index > through && matches!(role, Some("user" | "assistant")) {
                 boundaries.push((index, size, role == Some("user")));
             }
-            if role == Some("assistant") {
-                pending.extend(message.get("tauModelMessage").map(call_ids).unwrap_or_else(|| {
-                    message["content"].as_array().into_iter().flatten().filter(|part| part["type"] == "toolCall")
-                        .filter_map(|part| part["id"].as_str().map(str::to_owned)).collect()
-                }));
-            } else if role == Some("toolResult") && let Some(id) = message["toolCallId"].as_str() && !pending.remove(id) {
-                // Imported history may use call|item on only one side. An
-                // ambiguous alias cannot settle two distinct native calls.
-                let mut aliases = pending.iter().filter(|call| call.split('|').next() == id.split('|').next());
-                let alias = aliases.next().cloned().filter(|_| aliases.next().is_none());
-                if let Some(alias) = alias { pending.remove(&alias); }
-            }
+            through = through.max(last_result[index]);
         }
         if matches!(entry["type"].as_str(), Some("message" | "tau_attachment" | "custom_message")) {
             have_history = true;

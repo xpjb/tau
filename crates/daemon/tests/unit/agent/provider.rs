@@ -31,3 +31,19 @@ fn frames_sse_at_every_byte_boundary_and_rejects_invalid_or_oversized_input() {
     let mut codex = Stream::new(&codex::Codex);
     assert!(codex.push(b"data: [DONE]\n\n").is_err(), "Codex requires a completed response");
 }
+
+#[test]
+fn transient_stream_classification_preserves_details_without_retrying_permanent_causes() {
+    for code in [json!(408),json!(429),json!(502),json!("503"),json!("upstream_error"),json!("server_error"),json!("overloaded_error")] {
+        assert!(transient_stream_error(&json!({"code":code})),"{code}");
+    }
+    for error in [json!({"code":"insufficient_quota","type":"rate_limit_error"}),
+        json!({"code":"invalid_api_key","type":"server_error"}),
+        json!({"code":"context_length_exceeded"}),json!({"code":"invalid_reasoning_signature"}),
+        json!({"code":400}),json!({"code":401}),json!({"code":"unknown_error"})] {
+        assert!(!transient_stream_error(&error),"{error}");
+    }
+    let error = stream_error(&json!({"code":"upstream_error","message":"secret-token account-value disconnected"}),"secret-token",Some("account-value"));
+    assert!(error.is::<StreamFailure>());
+    assert_eq!(error.to_string(),"Model provider stream error (upstream_error): [redacted] [redacted] disconnected");
+}

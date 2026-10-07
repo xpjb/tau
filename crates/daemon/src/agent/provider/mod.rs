@@ -23,6 +23,39 @@ impl std::fmt::Display for StreamFailure {
 impl std::error::Error for StreamFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.0.as_ref()) }
 }
+// Stream events use both HTTP-like numbers and provider-specific strings.
+// Unknown/permanent errors remain actionable instead of entering a retry loop.
+fn transient_stream_error(error: &Value) -> bool {
+    let codes = [&error["code"], &error["type"], &error["status"], &error["status_code"], &error["metadata"]["error_type"]];
+    // A rate-limit envelope can also carry exhausted quota or invalid credentials;
+    // retrying those cannot help. Explicit permanent causes take precedence.
+    if recovery::reasoning_rejected(error) || codes.iter().any(|code| matches!(code.as_str(),
+        Some("invalid_api_key" | "authentication_error" | "unauthorized" | "permission_denied"
+            | "insufficient_quota" | "billing_hard_limit_reached" | "usage_limit_reached" | "quota_exceeded"
+            | "invalid_request" | "invalid_request_error" | "context_length_exceeded" | "context_window_exceeded"
+            | "content_policy_violation" | "content_filter"))) { return false; }
+    codes.into_iter().any(|code| {
+            let status = code.as_u64().or_else(|| code.as_str().and_then(|v| v.parse::<u64>().ok()));
+            status.is_some_and(|status| matches!(status, 408 | 429 | 500..=599))
+                || matches!(code.as_str(), Some("server_error" | "internal_error" | "internal_server_error"
+                    | "upstream_error" | "upstream_stream_error" | "stream_error" | "stream_disconnected"
+                    | "rate_limit_exceeded" | "rate_limit_error" | "too_many_requests"
+                    | "overloaded_error" | "model_overloaded" | "service_unavailable"
+                    | "timeout" | "request_timeout" | "timeout_error"))
+        })
+}
+fn stream_error(error: &Value, key: &str, account: Option<&str>) -> anyhow::Error {
+    let code = error["metadata"]["error_type"].as_str().map(str::to_owned)
+        .or_else(|| error["code"].as_str().or_else(|| error["type"].as_str()).map(str::to_owned))
+        .or_else(|| error["code"].as_u64().map(|v| v.to_string()));
+    let mut detail = format!("Model provider stream error{}{}", code.map_or(String::new(), |code| format!(" ({code})")),
+        error["message"].as_str().filter(|m| !m.is_empty()).map_or(String::new(), |m| format!(": {m}")));
+    for secret in [Some(key),account].into_iter().flatten().filter(|s| !s.is_empty()) {
+        detail = detail.replace(secret, "[redacted]");
+    }
+    let error_message = anyhow::anyhow!(crate::manager::bounded(&detail, 4096));
+    if transient_stream_error(error) { StreamFailure(error_message).into() } else { error_message }
+}
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 trait Decoder: Send + Sync {
     fn response_limit(&self) -> usize { MAX_RESPONSE_BYTES }
@@ -192,6 +225,7 @@ pub enum Mode { Chat, Compact, Search, Summary, Image }
 pub struct GeneratedImage { pub bytes: Vec<u8> }
 pub struct Completion { pub message: Value, pub tokens: Option<u64>, pub account: Option<String>, pub limited: bool, pub images: Vec<GeneratedImage> }
 
+#[derive(Clone)]
 pub struct Request<'a> {
     pub settings: &'a Settings,
     pub selected: &'a SessionModel,
@@ -203,6 +237,29 @@ pub struct Request<'a> {
     pub recovery: Option<&'a Recovery>,
 }
 pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request<'_>, updates: mpsc::Sender<Value>) -> Result<Completion> {
+    // Chat commits recoverable state before continuing in the agent loop. Image
+    // requests must never be replayed automatically. Compaction, summaries and
+    // searches have no local tool effects and can retry their disposable stream.
+    if matches!(request.mode, Mode::Chat | Mode::Image) {
+        return generate_request(http, auth, request, updates).await;
+    }
+    let mut retries = 0;
+    loop {
+        let recovery = Recovery::default();
+        let result = generate_request(http, auth, Request { recovery:Some(&recovery), ..request.clone() }, updates.clone()).await;
+        match result {
+            Err(error) if error.is::<StreamFailure>() && recovery.retry_safe()
+                && request.settings.agent.retry.enabled && retries < request.settings.agent.retry.max_retries => {
+                let delay = request.settings.agent.retry.base_delay_ms.saturating_mul(1u64 << retries.min(16)).min(60_000);
+                retries += 1;
+                tracing::info!(session=%request.session_id, attempt=retries, %error, "Retrying transient model stream failure");
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            result => return result,
+        }
+    }
+}
+async fn generate_request(http: &reqwest::Client, auth: &AuthStore, request: Request<'_>, updates: mpsc::Sender<Value>) -> Result<Completion> {
     let Request { settings, selected, thinking, messages, session_id, definitions, mode, recovery } = request;
     let model = settings.model(selected)?;
     let provider = &settings.providers[&selected.provider];
@@ -341,19 +398,23 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
         let mut chunks = response.bytes_stream();
         let mut stream = Stream::new(decoder);
         stream.recovery = recovery;
+        let check_error = |error: Option<&Value>| -> Result<()> {
+            if let Some(error) = error {
+                if recovery::reasoning_rejected(error) && let (Some(replay),Some(recovery)) = (&replay,recovery) { recovery.reject(&replay.used); }
+                return Err(stream_error(error, &key, account.as_deref()));
+            }
+            Ok(())
+        };
         while let Some(chunk) = tokio::time::timeout(idle, chunks.next()).await
             .map_err(|error| StreamFailure(anyhow::Error::new(error).context("Model stream stalled")))? {
             let chunk = chunk.map_err(|error| StreamFailure(anyhow::Error::new(error).context("Model stream disconnected")))?;
             stream.push(&chunk)?;
-            if let Some(error) = &stream.error {
-                if recovery::reasoning_rejected(error) && let (Some(replay),Some(recovery)) = (&replay,recovery) { recovery.reject(&replay.used); }
-                if error["code"] == 500 { return Err(StreamFailure(anyhow::anyhow!("Model provider reported a transient stream error")).into()); }
-                bail!("Model provider reported a stream error");
-            }
+            check_error(stream.error.as_ref())?;
             if mode == Mode::Chat { updates.send(stream.assistant_message()).await.context("Agent stopped receiving model output")?; }
             if stream.done { break; }
         }
         stream.finish_input().map_err(|error| StreamFailure(error.context("Model stream ended mid-event")))?;
+        check_error(stream.error.as_ref())?;
         if !stream.done { return Err(StreamFailure(anyhow::anyhow!("Model response was incomplete; tools were not executed")).into()); }
         if stream.error.is_some() || !matches!(stream.finish_reason.as_deref(), Some("stop" | "tool_calls" | "length")) {
             bail!("Model response was incomplete; tools were not executed");

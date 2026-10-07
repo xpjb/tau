@@ -269,3 +269,92 @@ async fn checkpoint_recovery_compaction_applies_rejections_after_its_retained_bo
     client.until(|m|m["type"]=="session_state" && m["sessionId"]==id && m["status"]=="idle").await;
     manager.shutdown().await;server.abort();
 }
+
+#[tokio::test]
+async fn transient_stream_errors_retry_both_apis_without_pausing_or_executing_partial_tools() {
+    for api in [Api::Codex, Api::ChatCompletions] {
+        for code in [json!(503),json!(429),json!("upstream_error"),json!("upstream_stream_error"),json!("rate_limit_exceeded")] {
+            let mut failed = if api == Api::Codex { interrupted(&[reasoning("rs_transient")]) } else {
+                let mut reply = completion("Discard partial answer",vec![call("partial","bash",json!({"command":"touch must-not-exist"}))]);
+                let end = reply.bytes.windows(4).position(|b| b==b"\r\n\r\n").unwrap()+4;
+                reply.bytes.truncate(end); reply
+            };
+            failed.bytes.extend(frame(json!({"type":"error","error":{"code":code,"message":"fixture-access fixture-key fixture-account temporary upstream failure"}})));
+            let effect = json!({"command":"printf x >> effects"});
+            let replies = if api == Api::Codex {
+                vec![failed,codex("",vec![json!({"type":"function_call","call_id":"effect","name":"bash","arguments":effect.to_string()})]),codex("Finished",vec![])]
+            } else { vec![failed,completion("",vec![call("effect","bash",effect)]),completion("Finished",vec![])] };
+            let mut model = ModelServer::start(replies).await;
+            let (root,manager,url,server) = fixture(&model,api).await;
+            let mut client = Client::connect(&url).await;
+            let id = manager.create_session(None,"general").await.unwrap();
+            manager.prompt(&id,"Finish without waiting for me","work").await.unwrap();
+            model.request().await;
+            let resumed = model.request().await;
+            assert!(!resumed.to_string().contains("must-not-exist"));
+            if api == Api::Codex { assert_eq!(count_item(&resumed,"rs_transient"),1); }
+            model.request().await;
+            client.until(|m| m["type"]=="session_state" && m["sessionId"]==id && m["status"]=="idle").await;
+            assert!(!client.seen.iter().any(|m| m["type"]=="session_state" && m["status"]=="error"));
+            assert!(!manager.inner.state.queue(&id).await.unwrap().paused);
+            assert_eq!(tokio::fs::read(root.path().join("effects")).await.unwrap(),b"x");
+            assert!(!root.path().join("must-not-exist").exists());
+            let history = manager.inner.state.context(&id,&manager.inner.settings.get().agent.model).await.unwrap();
+            let failure = history.iter().find(|e|e["message"]["stopReason"]=="error").unwrap();
+            assert!(failure["message"].get("errorMessage").is_none());
+            let display = client.page(&id,None).await.to_string();
+            assert!(display.contains("Retrying automatically") && display.contains("temporary upstream failure"));
+            assert!(!display.contains(if api == Api::Codex {"fixture-access"} else {"fixture-key"}));
+            if api == Api::Codex { assert!(!display.contains("fixture-account")); }
+            assert!(model.requests.try_recv().is_err());
+            manager.shutdown().await; server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn stream_errors_at_eof_keep_their_details_and_permanent_errors_do_not_retry() {
+    for api in [Api::Codex,Api::ChatCompletions] {
+        for code in ["invalid_api_key","insufficient_quota","invalid_request_error","invalid_encrypted_content"] {
+            let bytes = format!("data: {}",json!({"type":"error","error":{"code":code,"message":"Deliberate permanent failure"}})).into_bytes();
+            let mut model = ModelServer::start(vec![Reply {status:200,bytes,gate:None,body_gate:None}]).await;
+            let (_root,manager,url,server) = fixture(&model,api).await;
+            let mut client = Client::connect(&url).await;
+            let id = manager.create_session(None,"general").await.unwrap();
+            manager.prompt(&id,"Task","work").await.unwrap(); model.request().await;
+            let error = client.until(|m|m["type"]=="session_state" && m["sessionId"]==id && m["status"]=="error").await;
+            assert!(error["detail"].as_str().unwrap().contains(code),"{error}");
+            assert!(error["detail"].as_str().unwrap().contains("Deliberate permanent failure"));
+            assert!(model.requests.try_recv().is_err());
+            manager.shutdown().await; server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn compaction_retries_a_transient_stream_error_without_changing_history_twice() {
+    for native in [true,false] {
+        let failure = Reply {status:200,bytes:frame(json!({"type":"response.failed","response":{"error":{"code":"upstream_error","message":"try again"}}})),gate:None,body_gate:None};
+        let checkpoint = if native { codex("",vec![json!({"type":"compaction","encrypted_content":"checkpoint"})]) }
+            else {codex("Task summary",vec![])};
+        let mut model = ModelServer::start(vec![codex("First answer",vec![]),failure,checkpoint]).await;
+        let (_root,manager,url,server) = fixture(&model,Api::Codex).await;
+        let mut settings = manager.inner.settings.get(); settings.agent.compaction.native_codex = native;
+        manager.set_settings(settings.revision,settings).await.unwrap();
+        let mut client = Client::connect(&url).await;
+        let id = manager.create_session(None,"general").await.unwrap();
+        manager.prompt(&id,"Task","work").await.unwrap();model.request().await;
+        client.until(|m|m["type"]=="session_state" && m["sessionId"]==id && m["status"]=="running").await;
+        client.until(|m|m["type"]=="session_state" && m["sessionId"]==id && m["status"]=="idle").await;
+        manager.prompt(&id,"/compact","compact").await.unwrap();
+        let first = model.request().await; let retry = model.request().await;
+        assert_eq!(first,retry);
+        let receipt = client.until(|m|m["type"]=="receipts" && m["reports"][0]["id"]=="compact" && m["reports"][0]["complete"]==true).await;
+        assert!(receipt["reports"][0]["error"].is_null(),"{receipt}");
+        let entries = manager.inner.state.context(&id,&manager.inner.settings.get().agent.model).await.unwrap();
+        assert_eq!(entries.iter().filter(|e|e["type"]=="compaction").count(),1);
+        assert!(!manager.inner.state.queue(&id).await.unwrap().paused);
+        assert!(model.requests.try_recv().is_err());
+        manager.shutdown().await;server.abort();
+    }
+}

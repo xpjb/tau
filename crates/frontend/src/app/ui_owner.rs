@@ -29,6 +29,11 @@ impl App {
         {
             return true;
         }
+        // Any intervening press, key, edit, wheel or navigation breaks a text
+        // multi-click sequence. Hover/motion/release alone do not.
+        if !matches!(event, ui::Event::Hover(_) | ui::Event::Move { .. } | ui::Event::Up { .. }) {
+            self.ui.input_serial = self.ui.input_serial.wrapping_add(1);
+        }
         self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
         self.ui.composing = self.composing();
         let old_focus = self.ui.focus;

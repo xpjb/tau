@@ -66,7 +66,9 @@ impl Recovery {
     pub fn reject(&self, ids: &[String]) { self.0.lock().unwrap().rejected = ids.to_vec(); }
     pub fn retry_safe(&self) -> bool {
         let state = self.0.lock().unwrap();
-        state.scope.is_object() && !state.image_started
+        // Scope controls encrypted-checkpoint replay, not transport retry safety.
+        // Chat-completions has no Codex scope and still has no executed local tools.
+        !state.image_started
     }
     pub fn advanced(&self) -> bool { !self.0.lock().unwrap().items.is_empty() }
     pub fn snapshot(&self) -> Option<Value> {

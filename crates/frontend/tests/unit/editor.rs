@@ -335,3 +335,66 @@ fn touch_endpoints_cross_and_shrink_on_real_unicode_and_wrapped_layouts() {
         }
     }
 }
+
+impl Fixture {
+    fn point(&self, editor: &Editor, byte: usize) -> Vec2 {
+        let view = editor.view.unwrap();
+        let layout = self.layout(editor);
+        let caret = layout.caret_rect(layout.caret_at(editor.display_byte(byte, view.secret)));
+        let origin = editor.origin(layout,view);
+        Vec2::new(origin.x+caret.x_em*view.size,origin.y+(caret.y_em+caret.height_em/2.)*view.size)
+    }
+}
+
+#[test]
+fn mouse_selects_unicode_words_and_whole_soft_wrapped_paragraphs_without_editing() {
+    for width in [12.,80.] {
+        let mut f = Fixture::new();
+        let original = "alpha beta_gamma delta\nsecond e\u{301}lan 😀 paragraph\nthird";
+        let mut e = Editor::new(original.into());
+        f.view(&mut e,width,80.,false);
+        for (byte, expected) in [(0,"alpha"),(6,"beta_gamma"),(9,"beta_gamma"),(original.find("e\u{301}").unwrap(),"e\u{301}lan"),
+            (original.find('😀').unwrap(),"😀"),(original.len(),"third")] {
+            let point = f.point(&e,byte);
+            e.mouse_down(&mut f.text,f.chain,point,2,false);
+            assert_eq!(e.selected(),expected,"word at {byte}, wrap {width}");
+            e.mouse_drag(&mut f.text,f.chain,point);
+            assert_eq!(e.selected(),expected,"stationary move keeps the entire word");
+        }
+        let point = f.point(&e,9);
+        e.mouse_down(&mut f.text,f.chain,point,3,false);
+        assert_eq!(e.selected(),"alpha beta_gamma delta");
+        let point = f.point(&e,original.find("paragraph").unwrap()+3);
+        e.mouse_drag(&mut f.text,f.chain,point);
+        assert_eq!(e.selected(),"alpha beta_gamma delta\nsecond e\u{301}lan 😀 paragraph");
+        assert_eq!(e.value,original);
+        assert!(e.undo.is_empty());
+    }
+}
+
+#[test]
+fn mouse_word_drag_crosses_its_anchor_and_shift_click_extends_selection() {
+    let mut f = Fixture::new(); let mut e = Editor::new("alpha beta gamma delta".into());
+    f.view(&mut e,80.,10.,false);
+    let start = f.point(&e,8); e.mouse_down(&mut f.text,f.chain,start,2,false);
+    for (byte,selected) in [(18,"beta gamma delta"),(2,"alpha beta"),(8,"beta")] {
+        let point = f.point(&e,byte); e.mouse_drag(&mut f.text,f.chain,point);
+        assert_eq!(e.selected(),selected);
+    }
+    let start = f.point(&e,6);e.mouse_down(&mut f.text,f.chain,start,1,false);
+    let end = f.point(&e,16);e.mouse_down(&mut f.text,f.chain,end,1,true);
+    assert_eq!(e.selected(),"beta gamma");
+    assert!(e.replace("replacement"));
+    assert_eq!(e.value,"alpha replacement delta");
+    f.key(&mut e,"z",true,false);
+    assert_eq!(e.value,"alpha beta gamma delta");assert_eq!(e.selected(),"beta gamma");
+}
+
+#[test]
+fn masked_field_double_click_selects_the_secret_without_exposing_word_boundaries() {
+    let mut f = Fixture::new();let mut e = Editor::line("one-😀 e\u{301}lan".into());
+    f.view(&mut e,80.,10.,true);
+    let point = f.point(&e,4);
+    e.mouse_down(&mut f.text,f.chain,point,2,false);
+    assert_eq!(e.selected(),e.value);
+}

@@ -227,6 +227,23 @@ impl Widget for Button {
     }
 }
 
+#[derive(Default)]
+struct MouseClicks {
+    last: Option<(u64, u64, std::time::Instant, Vec2, u8)>,
+}
+impl MouseClicks {
+    fn press(&mut self, owner: u64, serial: u64, point: Vec2, scale: f32, now: std::time::Instant) -> u8 {
+        let count = match self.last {
+            Some((id, previous, at, pos, count)) if id == owner && previous.wrapping_add(1) == serial
+                && now.saturating_duration_since(at).as_millis() < 400
+                && (point.x - pos.x).abs() + (point.y - pos.y).abs() < 6. * scale => count + 1,
+            _ => 1,
+        };
+        self.last = (count < 3).then_some((owner, serial, now, point, count));
+        count
+    }
+}
+
 pub(in crate::app) struct TextField {
     pub control: Control,
     pub editor: Editor,
@@ -236,6 +253,7 @@ pub(in crate::app) struct TextField {
     pub size: f32,
     pub decorated: bool,
     selection_drag: Option<(u64, Vec2)>,
+    mouse_clicks: MouseClicks,
 }
 impl TextField {
     pub fn update_scroll(&mut self, dt: f32, cx: &mut Context<'_>) {
@@ -267,6 +285,7 @@ impl TextField {
             size: 15.,
             decorated: true,
             selection_drag: None,
+            mouse_clicks: MouseClicks::default(),
         }
     }
 }
@@ -347,7 +366,11 @@ impl Widget for TextField {
             Event::Down { point, touch: false, .. }
                 if self.control.enabled && self.control.contains(point) && cx.ui.capture.is_none() =>
             {
-                self.editor.hit(&mut renderer.text, renderer.faces.prose[0], point, false);
+                let clicks = if cx.ui.pointer_shift {
+                    self.mouse_clicks.last = None;
+                    1
+                } else { self.mouse_clicks.press(self.editor.native_id(), cx.ui.input_serial, point, cx.ui.scale, now) };
+                self.editor.mouse_down(&mut renderer.text, renderer.faces.prose[0], point, clicks, focused && cx.ui.pointer_shift);
             }
             Event::Move { pointer, point } if capture.is_some_and(|c| c.pointer == pointer) => {
                 let capture = capture.unwrap();
@@ -363,7 +386,10 @@ impl Widget for TextField {
                         self.editor.wheel(&mut renderer.text, renderer.faces.prose[0], amount, false);
                     }
                 } else {
-                    self.editor.hit(&mut renderer.text, renderer.faces.prose[0], point, true);
+                    if capture.dragged || (point.x - capture.start.x).abs() + (point.y - capture.start.y).abs() > 7. * cx.ui.scale {
+                        self.mouse_clicks.last = None;
+                    }
+                    self.editor.mouse_drag(&mut renderer.text, renderer.faces.prose[0], point);
                 }
             }
             Event::Wheel { amount, horizontal, point, precise } if self.control.contains(point) => {
@@ -676,3 +702,7 @@ impl<A: Clone + PartialEq> Controls<A> {
         button.visit_perframe(&mut Frame { layer, bounds: rect, clip }, cx);
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/app/ui/controls.rs"]
+mod tests;

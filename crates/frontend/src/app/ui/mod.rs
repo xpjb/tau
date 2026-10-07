@@ -391,6 +391,8 @@ pub(crate) struct UiState {
     pub(crate) scale: f32,
     pub(crate) mobile: bool,
     pub(crate) window_focused: bool,
+    pub(crate) pointer_shift: bool,
+    pub(super) input_serial: u64,
     pub(super) visible: bool,
     pub(crate) dirty: bool,
     pub(super) focus: Option<Target>,
@@ -421,6 +423,8 @@ impl UiState {
             scale: 1.,
             mobile,
             window_focused: true,
+            pointer_shift: false,
+            input_serial: 0,
             visible: true,
             dirty: true,
             focus: None,
@@ -452,6 +456,7 @@ impl UiState {
         }
     }
     pub fn cancel(&mut self) {
+        self.input_serial = self.input_serial.wrapping_add(1);
         self.capture = None;
         self.hot = None;
         self.hover = None;

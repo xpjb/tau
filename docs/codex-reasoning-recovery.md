@@ -1,6 +1,6 @@
 # Codex reasoning recovery and automatic continuation
 
-October 5, 2026 (UTC).
+October 5, 2026 (UTC); retry coverage updated October 7, 2026.
 
 ## Contract
 
@@ -8,6 +8,7 @@ Completed encrypted reasoning survives a failed or aborted Codex response. On a
 transient upstream body disconnect, idle timeout, premature EOF, or server-error
 stream event, the agent commits the recoverable state and continues automatically.
 The chat stays running and the recovered failure has no user-facing error banner.
+A redacted retry diagnostic is retained in expandable Details.
 
 Recovery accepts only completed reasoning items with a nonempty ID, encrypted
 content and a valid summary array. Provider, API, exact model, account and endpoint
@@ -41,6 +42,10 @@ authentication failures and other non-transient errors retain the ordinary error
 path. Recognized encrypted-reasoning rejection durably suppresses those recovered
 IDs on a later continuation. Local tool execution still follows successful whole-
 response validation; interrupted calls do not execute.
+
+The shared retry classifier also covers chat-completions streams and disposable
+compaction/summary/search requests. See `recovery-and-editor-fixes.md` for the
+compaction deadlock, retry-classification and editor regressions.
 
 ## Implementation
 
