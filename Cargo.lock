@@ -540,7 +540,7 @@ dependencies = [
 [[package]]
 name = "barkdown"
 version = "0.1.0"
-source = "git+https://github.com/xpjb/barkdown?rev=9bc7163193c5e1764e5c20a7119b5318673aa6b9#9bc7163193c5e1764e5c20a7119b5318673aa6b9"
+source = "git+https://github.com/xpjb/barkdown?rev=9dc5dd99164585876c38aba76dfa09a34a2ae2eb#9dc5dd99164585876c38aba76dfa09a34a2ae2eb"
 dependencies = [
  "ropey",
  "sanscale",

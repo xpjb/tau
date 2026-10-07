@@ -19,7 +19,7 @@ libc = "0.2"
 tempfile = "3"
 tau-block-store = { path = "../block-store" }
 tau-net = { path = "../net", features = ["native"] }
-barkdown = { git = "https://github.com/xpjb/barkdown", rev = "9bc7163193c5e1764e5c20a7119b5318673aa6b9" }
+barkdown = { git = "https://github.com/xpjb/barkdown", rev = "9dc5dd99164585876c38aba76dfa09a34a2ae2eb" }
 chad = { git = "https://github.com/xpjb/chad", rev = "a0f465e06eeb5e498bd45b0b4b23305a69778a40" }
 sanscale = { workspace = true }
 anyhow = "1"
