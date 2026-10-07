@@ -5,6 +5,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 helper="$root/scripts/beta-release.py"
 cargo=/usr/local/bin/cargo
+release_args=("$@")
 merge= version= sender=
 push=false deploy=false check=false test=false plan=false online=false retry_send=false
 usage() {
@@ -48,6 +49,10 @@ if "$plan"; then
     echo 'Order: prepare Git/version -> optional cached checks -> daemon -> Windows -> Android -> verify -> push -> beta deploy -> delivery.'
     echo 'One job; registry-offline unless --online. No backups, stable actions or implicit tests.'
     exit 0
+fi
+if "$deploy" && grep -Fq '/tau2-beta.service' /proc/$$/cgroup; then
+    say 'deploy: moving release out of the beta service before its restart'
+    exec systemd-run --quiet --scope --collect --same-dir --expand-environment=no "$root/scripts/release-beta.sh" "${release_args[@]}"
 fi
 [[ $(git branch --show-current) == tau2 ]] || die 'Run in the tau2 worktree, not stable/master.'
 [[ -z $(git status --porcelain) ]] || die 'Commit/reconcile local changes first; nothing will be auto-stashed or discarded.'
