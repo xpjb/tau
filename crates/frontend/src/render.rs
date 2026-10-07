@@ -184,6 +184,7 @@ pub struct MessageView {
     pub source: String,
     pub doc: Document,
     pub view: Preview,
+    used: u64,
 }
 impl MessageView {
     pub fn update(&mut self, source: &str) {
@@ -229,6 +230,10 @@ pub struct Renderer {
     pub faces: Faces,
     pub messages: HashMap<String, MessageView>,
     next_namespace: u32,
+    message_clock: u64,
+    // Logical source-byte/document limits, not a process-RSS estimate. The
+    // shared TextService separately bounds its paragraph and glyph caches.
+    message_cache_budget: (usize, usize),
     pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
     image_layout: wgpu::BindGroupLayout,
@@ -359,6 +364,8 @@ impl Renderer {
             text,
             faces,
             messages: HashMap::new(),
+            message_clock: 0,
+            message_cache_budget: (8 * 1024 * 1024, 4096),
             next_namespace: 1,
             pipeline,
             image_pipeline,
@@ -483,6 +490,7 @@ impl Renderer {
     pub fn message_height(&mut self, key: &str, source: &str, width: f32, size: f32) -> f32 {
         #[cfg(test)] { self.message_measurements += 1; }
         self.message_order.push(key.to_owned());
+        self.message_clock += 1;
         let message = self.messages.entry(key.into()).or_insert_with(|| {
             let namespace = self.next_namespace;
             self.next_namespace += 1;
@@ -490,8 +498,10 @@ impl Renderer {
                 source: String::new(),
                 doc: Document::new(""),
                 view: Preview::new(namespace),
+                used: 0,
             }
         });
+        message.used = self.message_clock;
         message.update(source);
         message.view.sync(
             &message.doc,
@@ -515,6 +525,8 @@ impl Renderer {
         let Some(message) = self.messages.get_mut(key) else {
             return;
         };
+        self.message_clock += 1;
+        message.used = self.message_clock;
         let mut scene = message.view.scene(
             &mut self.text,
             &message.doc,
@@ -629,6 +641,38 @@ impl Renderer {
     }
     pub(crate) fn order_messages(&mut self, keys: impl Iterator<Item = String>) {
         self.message_order = keys.collect();
+        if self.selection.as_ref().is_some_and(|s|
+            !self.message_order.contains(&s.anchor.key) || !self.message_order.contains(&s.focus.key)) {
+            self.selection = None;
+        }
+    }
+    /// Navigation/collapsing a disclosure is not cache pressure. Only retire
+    /// least-recently-used documents when a bound is exceeded, never documents
+    /// backing this frame's draws or an in-progress selection.
+    pub(crate) fn trim_messages(&mut self, pinned: &std::collections::HashSet<String>) {
+        let mut bytes: usize = self.messages.values().map(|m| m.source.len()).sum();
+        let (max_bytes, max_documents) = self.message_cache_budget;
+        if bytes <= max_bytes && self.messages.len() <= max_documents { return; }
+        let selected = self.selection.as_ref().and_then(|s| {
+            let a = self.message_order.iter().position(|k| k == &s.anchor.key)?;
+            let b = self.message_order.iter().position(|k| k == &s.focus.key)?;
+            Some(self.message_order[a.min(b)..=a.max(b)].iter().collect::<std::collections::HashSet<_>>())
+        }).unwrap_or_default();
+        let mut cold = self.messages.iter().filter(|(key, _)| !pinned.contains(*key) && !selected.contains(*key))
+            .map(|(key, m)| (m.used, key.clone())).collect::<Vec<_>>();
+        cold.sort_unstable();
+        for (_, key) in cold {
+            if bytes <= max_bytes && self.messages.len() <= max_documents { break; }
+            let mut message = self.messages.remove(&key).unwrap();
+            bytes -= message.source.len();
+            message.view.release(&mut self.text);
+        }
+        // A visible message/selection may itself exceed the limit; keep its
+        // draw handles alive. The next viewport/navigation can reclaim it.
+    }
+    #[cfg(test)]
+    pub(crate) fn message_cache_budget(&mut self, bytes: usize, documents: usize) {
+        self.message_cache_budget = (bytes, documents);
     }
     pub fn retain_messages(&mut self, keys: &std::collections::HashSet<String>) {
         if self

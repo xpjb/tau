@@ -10,10 +10,13 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     time::Instant,
 };
+mod cache;
+
 pub(in crate::app) struct Placed {
     pub key: String,
     item: ItemId,
     stamp: u64,
+    exact: bool,
     pub top: f32,
     pub height: f32,
     sender: tau_net::EventRole,
@@ -30,6 +33,9 @@ enum Reading {
 pub(in crate::app) struct Transcript {
     pub rows: Vec<MessageRow>,
     measured: Option<(u64, u32, u32)>,
+    cached: cache::Cache,
+    reconcile: bool,
+    generation: String,
     pub scroll: ScrollState,
     pub horizontal: ScrollState,
     pub models: QuickModels,
@@ -47,6 +53,7 @@ impl Transcript {
         let id = Id::new();
         Self {
             rows: vec![], measured: None,
+            cached: cache::Cache::default(), reconcile: true, generation: String::new(),
             scroll: ScrollState::new(id, false),
             horizontal: ScrollState::new(id, true),
             models: QuickModels::new(),
@@ -80,11 +87,31 @@ impl Transcript {
                 row.detach(cx);
             }
             cx.services.renderer.selection = None;
-            cx.services.renderer.retain_messages(&HashSet::new());
+            cx.services.renderer.clear_scenes();
+            let same_source = self.binding.as_ref().is_some_and(|(identity, lineage, _)|
+                identity == &next.0 && lineage == &next.1);
+            let mut cached = std::mem::take(&mut self.cached);
+            if same_source {
+                if let (Some((_, _, Some(session))), Some(measured)) = (&self.binding, self.measured) {
+                    cached.put(session.clone(), cache::Layout { measured, placed: std::mem::take(&mut self.placed) });
+                }
+            } else {
+                cached = cache::Cache::default();
+                cx.services.renderer.retain_messages(&HashSet::new());
+            }
+            let restored = next.2.as_deref().and_then(|session| cached.take(session));
             *self = Self::new();
+            self.cached = cached;
+            if let Some(layout) = restored {
+                self.measured = Some(layout.measured);
+                self.placed = layout.placed;
+            }
+            self.cached.trim(self.placed.len());
             if let Some(chat) = cx.model.selected() {
                 self.reading = Reading::Position(chat.local.position.clone());
             }
+            // Always reconcile identities/stamps on a return, even if a dropped
+            // and reloaded Feed happens to reuse the same numeric revision.
             self.binding = Some(next);
             cx.ui.dirty = true;
         }
@@ -197,7 +224,6 @@ impl Transcript {
         }
     }
     fn place_reading(&mut self, session: &str, quick_models: bool, owners: &HashMap<String, MessageRow>, cx: &mut Context<'_>) {
-        let old = self.scroll.value;
         let chat = &cx.model.chats[session];
         // A removed/renamed control is not unloaded history. Resume the row
         // checkpoint instead of seeking older pages for a dead disclosure key.
@@ -212,10 +238,12 @@ impl Transcript {
                     // Center the controls, not the long message/image above them.
                     let panel = attachments::control_panel(Rect::new(0., p.top, self.scroll.rect.width, p.height), cx.ui.scale);
                     self.scroll.set(panel.y + panel.height / 2. - self.scroll.rect.height / 2.);
-                    self.reading = Reading::Position(Position {
-                        key: Some(p.key.clone()), offset: (self.scroll.value - p.top) / cx.ui.scale, follow: false,
-                    });
-                    self.checkpoint(cx);
+                    if p.exact {
+                        self.reading = Reading::Position(Position {
+                            key: Some(p.key.clone()), offset: (self.scroll.value - p.top) / cx.ui.scale, follow: false,
+                        });
+                        self.checkpoint(cx);
+                    }
                 } else {
                     self.scroll.value = 0.;
                     if cx.model.account.missing_chats.contains(session)
@@ -240,9 +268,31 @@ impl Transcript {
                 }
             }
         }
-        self.scroll.shift_wheel(self.scroll.value - old);
     }
 
+    fn place_window(&mut self, session: &str, start: f32, quick_models: bool, owners: &HashMap<String, MessageRow>, cx: &mut Context<'_>) {
+        let mut y = start;
+        for index in 0..self.placed.len() {
+            let joins = self.placed.get(index + 1).is_some_and(|next| next.sender == self.placed[index].sender);
+            let p = &mut self.placed[index];
+            p.top = y;
+            y += p.height + if joins { 0. } else { 12. * cx.ui.scale };
+        }
+        let height = self.scroll.rect.height;
+        self.scroll.max = (y - height).max(0.);
+        if y < height { for p in &mut self.placed { p.top += height - y; } }
+        self.place_reading(session, quick_models, owners, cx);
+    }
+    fn measure_row(&mut self, index: usize, width: f32, session: &str, owners: &mut HashMap<String, MessageRow>, cx: &mut Context<'_>) {
+        let p = &mut self.placed[index];
+        let owner = owners.entry(p.key.clone()).or_insert_with(|| MessageRow::new(p.item.clone(), session));
+        owner.item = p.item.clone();
+        p.height = owner.measure(width, session, cx);
+        p.text_keys = owner.text_keys(session);
+        p.overflow = p.text_keys.iter().filter_map(|k| cx.services.renderer.messages.get(k))
+            .map(|m| m.view.width - (width - 28. * cx.ui.scale - if matches!(p.item, ItemId::Tool(_)) { 16. * cx.ui.scale } else { 0. })).fold(0., f32::max);
+        p.exact = true;
+    }
 }
 impl Widget for Transcript {
     fn update(&mut self, dt: f32, cx: &mut Context<'_>) {
@@ -315,7 +365,7 @@ impl Widget for Transcript {
         } else { 12. * s };
         let signature = (cx.model.chats[&session].feed.revision, bubble_width.to_bits(), s.to_bits());
         let mut owners = std::mem::take(&mut self.rows).into_iter().map(|row| (row.key.clone(), row)).collect::<HashMap<_, _>>();
-        if self.measured != Some(signature) {
+        if self.reconcile || self.measured != Some(signature) || self.generation != cx.model.chats[&session].feed.generation {
             // Presentation owns only ordered child identities. The feed already
             // decided local/queue/history ownership; no body/action descriptions
             // are assembled here. Details headers and each native tool are
@@ -344,38 +394,65 @@ impl Widget for Transcript {
                 if let Some(mut old) = previous.remove(&key).filter(|p| p.stamp == stamp && self.measured.is_some_and(|(_, w, scale)| (w, scale) == (signature.1, signature.2))) {
                     old.item = item; old.sender = sender; self.placed.push(old); continue;
                 }
-                let mut temporary;
-                let owner = if let Some(owner) = owners.get_mut(&key) { owner.item = item.clone(); owner }
-                    else { temporary = MessageRow::new(item.clone(), &session); &mut temporary };
-                let height = owner.measure(bubble_width, &session, cx);
-                let text_keys = owner.text_keys(&session);
-                let overflow = text_keys.iter().filter_map(|k| cx.services.renderer.messages.get(k))
-                    .map(|m| m.view.width - (bubble_width - 28. * s - if matches!(item, ItemId::Tool(_)) { 16. * s } else { 0. })).fold(0., f32::max);
-                self.placed.push(Placed { key, item, stamp, top: 0., height, sender, text_keys, overflow });
+                // Offscreen rows need an index, not a Markdown document. Use
+                // cheap provisional extents until the reading window reaches
+                // them. Exact heights are retained across chat switches.
+                let height = match item { ItemId::Details { .. } => 62., ItemId::Tool(_) => 36., _ => 80. } * s;
+                let text_keys = if matches!(item, ItemId::Message(_) | ItemId::Thinking(_)) { vec![key.clone()] } else { vec![] };
+                self.placed.push(Placed { key, item, stamp, exact: false, top: 0., height, sender, text_keys, overflow: 0. });
             }
-            let keys = self.placed.iter().flat_map(|p| p.text_keys.iter().cloned()).collect();
-            cx.services.renderer.retain_messages(&keys);
             self.measured = Some(signature);
+            self.generation = cx.model.chats[&session].feed.generation.clone();
+            self.reconcile = false;
+            self.cached.trim(self.placed.len());
         }
-        cx.services.renderer.order_messages(self.placed.iter().flat_map(|p| p.text_keys.iter().cloned()));
-        let mut y = quick_top + quick_h;
-        for index in 0..self.placed.len() {
-            let joins = self.placed.get(index + 1).is_some_and(|next| next.sender == self.placed[index].sender);
-            let p = &mut self.placed[index]; p.top = y;
-            y += p.height + if joins { 0. } else { 12. * s };
+        // Refine from the reading anchor outward. Reposition after each exact
+        // height: one tall reasoning message can fill the window, so do not
+        // eagerly shape the other rows a provisional height put nearby.
+        let old_scroll = self.scroll.value;
+        loop {
+            self.place_window(&session, quick_top + quick_h, quick_models, &owners, cx);
+            let top = self.scroll.value - 2. * viewport.height;
+            let bottom = self.scroll.value + 3. * viewport.height;
+            let follow = matches!(&self.reading, Reading::Position(p) if p.follow);
+            let focus = self.scroll.value + if follow { viewport.height } else { 0. };
+            // A saved offset may lie thousands of pixels into an unmeasured
+            // row. Refine that identity first, even if its provisional extent
+            // currently places it outside the estimated viewport.
+            let anchor = match &self.reading {
+                Reading::Position(p) if !p.follow => p.key.as_ref().and_then(|key|
+                    self.placed.iter().position(|row| &row.key == key)),
+                Reading::Disclosure(p) => p.key.as_ref().and_then(|key|
+                    self.placed.iter().position(|row| owners.get(&row.key).is_some_and(|owner| owner.anchor(key).is_some()))),
+                _ => None,
+            }.filter(|&i| !self.placed[i].exact);
+            let candidate = anchor.or_else(|| self.placed.iter().enumerate()
+                .filter(|(_, p)| !p.exact && p.top + p.height >= top && p.top <= bottom)
+                .min_by(|(a, p), (b, q)| {
+                    let distance = |p: &Placed| (p.top - focus).max(focus - p.top - p.height).max(0.);
+                    distance(p).total_cmp(&distance(q)).then_with(|| if follow { b.cmp(a) } else { a.cmp(b) })
+                }).map(|(i, _)| i));
+            let Some(index) = candidate else { break; };
+            self.measure_row(index, bubble_width, &session, &mut owners, cx);
         }
+        // Provisional extents may temporarily clamp the viewport. Only the
+        // final anchor adjustment may shift/clamp an in-flight wheel target.
+        self.scroll.shift_wheel(self.scroll.value - old_scroll);
         self.horizontal.max = self.placed.iter().map(|p| p.overflow).fold(0., f32::max);
         self.horizontal.value = self.horizontal.value.clamp(0., self.horizontal.max);
-        self.scroll.max = (y - viewport.height).max(0.);
-        if y < viewport.height { for p in &mut self.placed { p.top += viewport.height - y; } }
-        self.place_reading(&session, quick_models, &owners, cx);
+        cx.services.renderer.order_messages(self.placed.iter().flat_map(|p| p.text_keys.iter().cloned()));
         let top = self.scroll.value - 2. * viewport.height;
         let bottom = self.scroll.value + 3. * viewport.height;
         self.history_near_edge(&session, self.locating_download() || self.scroll.value <= 2. * viewport.height, cx);
         if quick_models { self.models.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x, viewport.y + quick_top - self.scroll.value, width, quick_h), clip: viewport }, cx); }
         for (index, p) in self.placed.iter().enumerate() {
             // A pinned disclosure survives a temporarily tiny viewport, like capture.
-            let active = owners.get(&p.key).is_some_and(|row| {
+            // Keep a saved row interested even when its unloaded placeholder
+            // is shorter than the saved offset. Otherwise it can fall outside
+            // overscan and never receive the body needed to resolve that offset.
+            let reading_anchor = matches!(&self.reading, Reading::Position(position)
+                if !position.follow && position.key.as_ref() == Some(&p.key));
+            let active = reading_anchor || owners.get(&p.key).is_some_and(|row| {
                 cx.ui.capture.is_some_and(|c| c.target.scope == row.control.target.scope
                     || row.attachment.as_ref().is_some_and(|a| a.controls.id == c.target.scope))
                     || matches!(&self.reading, Reading::Disclosure(position)
@@ -399,6 +476,8 @@ impl Widget for Transcript {
         for mut removed in owners.into_values() { removed.detach(cx); }
         // New owners may have touched existing text caches after order was set.
         cx.services.renderer.order_messages(self.placed.iter().flat_map(|p| p.text_keys.iter().cloned()));
+        let pinned = self.rows.iter().flat_map(|row| row.text_keys(&session)).collect();
+        cx.services.renderer.trim_messages(&pinned);
         // Tick/reflow can move text under a stationary held pointer. Resolve
         // against the new scenes, not only when the host sends pointer motion.
         if self.selecting

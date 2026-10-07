@@ -504,3 +504,7 @@ mod composer_status_tests;
 
 #[cfg(test)]
 use crate::tooltip::Tooltip;
+
+#[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/app/transcript.rs"]
+mod transcript_tests;

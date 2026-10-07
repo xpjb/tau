@@ -63,3 +63,40 @@ fn subtle_hover_and_circle_have_separate_clipped_shapes() {
     assert_eq!(ripple.ripple.unwrap().1, 15.);
     assert_eq!(ripple.corners, [12.; 4]);
 }
+
+#[cfg(not(target_os = "android"))]
+#[test]
+fn message_cache_pressure_is_lru_and_protects_draws_and_selection() {
+    use std::collections::HashSet;
+    let ctx = chad::HeadlessCtx::new(&chad::Config {
+        size: (360, 240), device_limits: crate::desktop::limits(), ..Default::default()
+    }).unwrap();
+    let mut renderer = Renderer::new(&ctx).unwrap();
+    for key in ["a", "b", "c"] { renderer.message_height(key, key, 300., 16.); }
+    renderer.trim_messages(&HashSet::from(["c".into()]));
+    assert_eq!(renderer.messages.len(), 3, "ordinary painting cannot evict other chats");
+    let b = renderer.messages["b"].doc.identity();
+    renderer.message_cache_budget(usize::MAX, 2);
+    renderer.trim_messages(&HashSet::from(["c".into()]));
+    assert!(!renderer.messages.contains_key("a"));
+    assert_eq!(renderer.messages["b"].doc.identity(), b);
+    sanscale::profiling::reset_work_counters();
+    renderer.message_height("b", "b", 300., 16.);
+    assert_eq!(sanscale::profiling::work_counters().shape_calls, 0);
+    renderer.message_height("d", "d", 300., 16.);
+    renderer.trim_messages(&HashSet::from(["d".into()]));
+    assert!(!renderer.messages.contains_key("c"), "b was recently reused");
+    renderer.order_messages(["b".into(), "d".into()].into_iter());
+    renderer.begin_selection(TextPoint { key: "b".into(), byte: 0 });
+    renderer.extend_selection(TextPoint { key: "d".into(), byte: 1 });
+    renderer.message_cache_budget(0, usize::MAX);
+    renderer.trim_messages(&HashSet::new());
+    assert_eq!(renderer.messages.len(), 2, "an active selection may exceed the cache budget");
+    assert_eq!(renderer.selected_text().as_deref(), Some("b\n\nd"));
+    renderer.selection = None;
+    renderer.trim_messages(&HashSet::from(["d".into()]));
+    assert_eq!(renderer.messages.len(), 1, "source bytes independently trigger eviction, but current draws remain pinned");
+    renderer.message_cache_budget(8 * 1024 * 1024, 4096);
+    renderer.message_height("b", "b", 300., 16.);
+    assert_ne!(renderer.messages["b"].doc.identity(), b);
+}
