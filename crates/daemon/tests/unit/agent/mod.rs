@@ -283,8 +283,9 @@ fn codex_with_tokens(text: &str, extra: Vec<Value>, tokens: u64) -> Reply {
 #[tokio::test]
 async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposing_it_to_clients() {
     let reasoning = json!({"type":"reasoning","id":"rs_fixture","encrypted_content":"private-reasoning-cipher","summary":[{"type":"summary_text","text":"Thinking π🧠"}]});
+    let search = json!({"type":"web_search_call","id":"ws_fixture","status":"completed","action":{"type":"search","query":"fixture query"}});
     let checkpoint = json!({"type":"compaction","encrypted_content":"private-compaction-cipher"});
-    let gate = Arc::new(Notify::new()); let mut first = codex("First answer",vec![reasoning]);
+    let gate = Arc::new(Notify::new()); let mut first = codex("First answer",vec![reasoning,search]);
     let prefix = first.bytes.windows(2).position(|bytes| bytes == b"\n\n").unwrap()+2;
     first.body_gate = Some((prefix,gate.clone()));
     let mut model = ModelServer::start(vec![first,codex("Second answer",vec![]),codex("",vec![checkpoint]),codex("Third answer",vec![])]).await;
@@ -298,7 +299,10 @@ async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposin
         let payload = model.request().await;
         assert_eq!(payload["model"], "gpt-6-astra"); assert_eq!(payload["reasoning"]["effort"], "max");
         assert_eq!(payload["store"], false);
-        if request == "two" { assert!(payload["input"].to_string().contains("private-reasoning-cipher")); }
+        if request == "two" {
+            assert!(payload["input"].to_string().contains("private-reasoning-cipher"));
+            assert!(payload["input"].to_string().contains("ws_fixture"), "Normal turns retain provider-managed search history");
+        }
         else {
             thinking_started = tokio::time::timeout(Duration::from_secs(5),async {
                 loop {
@@ -324,6 +328,8 @@ async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposin
     let payload = model.request().await;
     assert_eq!(payload["input"].as_array().unwrap().last().unwrap()["type"], "compaction_trigger");
     assert!(payload["input"].to_string().contains("First task"));
+    assert!(payload["input"].to_string().contains("private-reasoning-cipher"));
+    assert!(!payload["input"].to_string().contains("ws_fixture"), "Native compaction omits provider-managed search records that response protection cannot process");
     assert!(!payload["input"].to_string().contains("Second task"));
     manager.close_session(&id).await.unwrap();
     let snapshot = client.open(&id).await;

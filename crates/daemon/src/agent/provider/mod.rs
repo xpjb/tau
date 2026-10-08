@@ -313,8 +313,9 @@ async fn generate_request(http: &reqwest::Client, auth: &AuthStore, request: Req
                             input.push(json!({"role":"user", "content":content}));
                         }
                         Some("assistant") => {
-                            if let Some(items) = message["codex_output"].as_array() { input.extend(items.iter().cloned()); }
-                            else {
+                            if let Some(items) = message["codex_output"].as_array() {
+                                input.extend(items.iter().filter(|item| mode != Mode::Compact || item["type"] != "web_search_call").cloned());
+                            } else {
                                 if let Some(text) = message["content"].as_str().filter(|text| !text.is_empty()) {
                                     input.push(json!({"type":"message", "role":"assistant", "status":"completed", "id":format!("msg_tau_history_{index}"),
                                         "content":[{"type":"output_text", "text":text, "annotations":[]}]}));
