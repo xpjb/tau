@@ -34,6 +34,49 @@ fn path(config: &Config, input: &str) -> PathBuf {
 }
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> { value[field].as_str().with_context(|| format!("{field} must be a string")) }
 
+// Keep script text out of argv (pgrep/pkill -f), without sharing stdin with the
+// script's commands. The returned guard must outlive the spawned shell.
+#[cfg(unix)]
+fn shell_script(process: &mut tokio::process::Command, source: &str) -> Result<std::fs::File> {
+    use std::io::{Seek, Write};
+    use std::os::fd::AsRawFd;
+    if source.contains('\0') { bail!("Shell script contains a NUL byte"); }
+    let mut script = tempfile::tempfile().context("Could not create shell script")?;
+    // Bash opens its own script-reading FD before executing this first line.
+    // Close our transport FD so commands neither inherit it nor consume it.
+    write!(script, "exec 3<&-\n{source}").context("Could not write shell script")?;
+    script.rewind()?;
+    let fd = script.as_raw_fd();
+    process.arg("/dev/fd/3");
+    // SAFETY: the caller retains script until the child exits. Only async-signal-
+    // safe syscalls run after fork; CLOEXEC remains set in the parent, so other
+    // concurrently spawned tools cannot inherit this script across exec.
+    unsafe {
+        process.pre_exec(move || {
+            if libc::dup2(fd, 3) == -1 || libc::fcntl(3, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(script)
+}
+
+#[cfg(not(unix))]
+fn shell_script(process: &mut tokio::process::Command, source: &str) -> Result<tempfile::TempPath> {
+    use std::io::Write;
+    if source.contains('\0') { bail!("Shell script contains a NUL byte"); }
+    let mut script = tempfile::NamedTempFile::new().context("Could not create shell script")?;
+    script.write_all(source.as_bytes()).context("Could not write shell script")?;
+    let path = script.into_temp_path();
+    process.arg(&path);
+    Ok(path)
+}
+
+#[cfg(all(test, unix))]
+#[path = "../../tests/unit/agent/tools.rs"]
+mod tests;
+
 pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, session: &str, name: &str, args: &Value, cancel: &CancellationToken) -> Result<Value> {
     if cancel.is_cancelled() { bail!("Tool cancelled"); }
     match name {
@@ -107,7 +150,8 @@ pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, s
             #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
             let output = options.open(&output_path)?;
             let mut process = tokio::process::Command::new(&settings.agent.shell_path);
-            process.arg("-c").arg(format!("{}\n{command}", settings.agent.shell_command_prefix)).current_dir(&config.cwd)
+            let _script = shell_script(&mut process, &format!("{}\n{command}", settings.agent.shell_command_prefix))?;
+            process.current_dir(&config.cwd)
                 .stdin(Stdio::null()).stdout(output.try_clone()?).stderr(output).kill_on_drop(true)
                 .env_remove("TAU_TOKEN").env_remove("TAU_FLAG_TOKEN");
             #[cfg(unix)] process.process_group(0);

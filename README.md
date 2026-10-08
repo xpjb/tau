@@ -41,3 +41,6 @@ See [Codex sign-in](docs/codex-signin.md) and
 `scripts/release-beta.sh` builds matching daemon, Windows and Android packages.
 Client packages are delivered before deployment; restarting the beta service
 requires explicit operator approval.
+
+The [Bash launcher](docs/bash-launcher.md) keeps tool scripts out of process
+arguments while preserving independent standard input.
