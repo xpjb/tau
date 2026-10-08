@@ -290,6 +290,8 @@ async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposin
     first.body_gate = Some((prefix,gate.clone()));
     let mut model = ModelServer::start(vec![first,codex("Second answer",vec![]),codex("",vec![checkpoint]),codex("Third answer",vec![])]).await;
     let (root, manager, url, server) = fixture(&model, Api::Codex).await;
+    let mut settings = manager.inner.settings.get(); settings.providers.get_mut("openai-codex").unwrap().web_search = true;
+    manager.set_settings(settings.revision,settings).await.unwrap();
     let mut client = Client::connect(&url).await;
     let id = client.request(json!({"id":"create","type":"create_session"})).await["sessionId"].as_str().unwrap().to_owned();
     client.open(&id).await;
@@ -329,7 +331,8 @@ async fn codex_replays_encrypted_reasoning_and_native_compaction_without_exposin
     assert_eq!(payload["input"].as_array().unwrap().last().unwrap()["type"], "compaction_trigger");
     assert!(payload["input"].to_string().contains("First task"));
     assert!(payload["input"].to_string().contains("private-reasoning-cipher"));
-    assert!(!payload["input"].to_string().contains("ws_fixture"), "Native compaction omits provider-managed search records that response protection cannot process");
+    assert!(payload["input"].to_string().contains("ws_fixture"), "Native compaction retains provider-managed search history");
+    assert!(payload["tools"].as_array().unwrap().iter().any(|tool| tool["type"] == "web_search"), "Native compaction declares the provider-managed search tool");
     assert!(!payload["input"].to_string().contains("Second task"));
     manager.close_session(&id).await.unwrap();
     let snapshot = client.open(&id).await;

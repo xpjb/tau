@@ -313,9 +313,8 @@ async fn generate_request(http: &reqwest::Client, auth: &AuthStore, request: Req
                             input.push(json!({"role":"user", "content":content}));
                         }
                         Some("assistant") => {
-                            if let Some(items) = message["codex_output"].as_array() {
-                                input.extend(items.iter().filter(|item| mode != Mode::Compact || item["type"] != "web_search_call").cloned());
-                            } else {
+                            if let Some(items) = message["codex_output"].as_array() { input.extend(items.iter().cloned()); }
+                            else {
                                 if let Some(text) = message["content"].as_str().filter(|text| !text.is_empty()) {
                                     input.push(json!({"type":"message", "role":"assistant", "status":"completed", "id":format!("msg_tau_history_{index}"),
                                         "content":[{"type":"output_text", "text":text, "annotations":[]}]}));
@@ -331,7 +330,7 @@ async fn generate_request(http: &reqwest::Client, auth: &AuthStore, request: Req
                 }
                 if mode == Mode::Compact { input.push(json!({"type":"compaction_trigger"})); }
                 let mut tools = definitions.iter().map(|tool| { let mut tool = tool.clone(); tool["type"] = json!("function"); tool["strict"] = json!(false); tool }).collect::<Vec<_>>();
-                if matches!(mode,Mode::Chat | Mode::Search) && provider.web_search { tools.push(json!({"type":"web_search", "search_context_size":"medium"})); }
+                if matches!(mode,Mode::Chat | Mode::Search | Mode::Compact) && provider.web_search { tools.push(json!({"type":"web_search", "search_context_size":"medium"})); }
                 if matches!(mode,Mode::Chat | Mode::Image) { tools.push(json!({"type":"image_generation", "model":"gpt-image-2", "output_format":"png"})); }
                 let mut body = json!({"model":model.id, "store":false, "stream":true, "instructions":instructions.join("\n\n"), "input":input,
                     "tools":tools, "tool_choice":if mode == Mode::Search { json!({"type":"web_search"}) } else if mode == Mode::Image { json!({"type":"image_generation"}) } else { json!("auto") },
