@@ -76,11 +76,6 @@ stay under 24 KiB; the daemon also accepts old schema 1 pending reports. Failed
 report writes are printed to stderr instead of silently discarded. The patch
 prevents this selection defect; it adds no blanket UI catch-and-continue policy.
 
-## Retired incidental flags
-
-The `flag_it` agent tool has been removed. Historical `flags.jsonl` files are
-retained beside the daemon state; removing the tool does not delete records.
-
 ## Daemon installation
 
 Build and install the independent systemd service:
