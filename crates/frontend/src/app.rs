@@ -434,7 +434,13 @@ impl App {
     }
 }
 pub(crate) fn literal(text: &str) -> String {
-    text.chars().flat_map(|c| if "\\`*_{}[]<>()#+-.!|~>".contains(c) { vec!['\\', c] } else { vec![c] }).collect()
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_ascii_punctuation() { write!(&mut encoded, "&#{};", c as u32).unwrap(); }
+        else { encoded.push(c); }
+    }
+    encoded
 }
 pub(crate) fn code(text: &str) -> String {
     let n = text.split(|c| c != '`').map(str::len).max().unwrap_or(0).max(2) + 1;

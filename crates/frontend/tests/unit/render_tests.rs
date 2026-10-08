@@ -1,5 +1,26 @@
 use super::*;
 
+#[test]
+fn literal_user_prose_round_trips_barkdown_without_markup() {
+    use barkdown::markdown::{Content, TextKind};
+    let prose = "* One file for tests (tests.rs) (tests may only test public interfaces) (I'm not joking - express it end to end or it deserves its own crate) (Something has to be done to curb the slop)";
+    let source = crate::app::literal(prose);
+    let doc = barkdown::Document::new(&source);
+    let Content::Text { kind: TextKind::Paragraph, element } = &doc.blocks()[0].content else { panic!() };
+    assert_eq!(element.rich.text, prose);
+    assert!(element.rich.math.is_none());
+
+    let syntax = "[plain label](https://example.org) &amp; $x^2$ **bold**";
+    let rich = barkdown::markdown::inline::parse(&crate::app::literal(syntax));
+    assert_eq!(rich.text, syntax);
+    assert!(rich.math.is_none());
+    assert!(rich.links.is_empty());
+    assert!(rich.runs.iter().all(|run| run.flags == 0));
+
+    let punctuation: String = (b'!'..=b'~').map(char::from).filter(|c| c.is_ascii_punctuation()).collect();
+    assert_eq!(barkdown::markdown::inline::parse(&crate::app::literal(&punctuation)).text, punctuation);
+}
+
 #[cfg(not(target_os = "android"))]
 #[test]
 fn markdown_link_underline_is_visible_below_the_baseline() {
