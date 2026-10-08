@@ -76,32 +76,10 @@ stay under 24 KiB; the daemon also accepts old schema 1 pending reports. Failed
 report writes are printed to stderr instead of silently discarded. The patch
 prevents this selection defect; it adds no blanket UI catch-and-continue policy.
 
-## Incidental flags
+## Retired incidental flags
 
-Tau agents can call `flag_it(str)` to record a new finding outside the current
-work: technical debt, environment problems, or wasted resources. Include what
-was observed, where, and why it matters. Omit secrets and continue the current
-task; flagging does not authorize extra work or start another agent.
-
-The daemon appends one JSON record to `flags.jsonl` beside its configured
-`state.json` (normally `/var/lib/tau/flags.jsonl`). Each record contains `id`,
-`timestampMs`, `sessionId`, `sessionTitle`, and the full `text`, limited to 4096
-characters. The daemon serializes and syncs the write before confirming it and
-broadcasting a **Flagged** notice through the existing client banner. The file
-is created with owner-only permissions. Accepted writes and their notifications
-finish even if the calling connection closes. If the tool reports an unconfirmed
-save, inspect the log before retrying; it never automatically retries.
-
-The tool is registered only in Tau workers. The daemon supplies a worker-scoped,
-flag-only capability; it does not expose the full client bearer token. A worker
-cannot flag another chat, and its capability expires when it stops. The new
-`POST /v1/sessions/{session_id}/flags` endpoint accepts only that capability.
-Temporary fork workers do not receive it. This feature keeps the existing client
-notification messages. Notifications reach connected clients; this adds
-no offline push service, issue tracker, or automatic investigation.
-
-Later, ask an agent to read the log and investigate a flag by ID. Deployment must
-include both the updated daemon and Tau extension.
+The `flag_it` agent tool has been removed. Historical `flags.jsonl` files are
+retained beside the daemon state; removing the tool does not delete records.
 
 ## Daemon installation
 
