@@ -7,7 +7,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::settings::Settings;
-use crate::state::StateStore;
 use crate::transcript::IMAGE_LIMIT;
 use crate::attachments::{image_mime, regular_file};
 
@@ -18,7 +17,6 @@ pub fn definitions(image_bridge: bool) -> Vec<Value> {
         ("write", "Write a file, creating parent directories. Replaces existing contents.", json!({"path":{"type":"string"},"content":{"type":"string"}}), vec!["path","content"]),
         ("edit", "Apply exact replacements against the original file. Each oldText must be unique; edits must not overlap.", json!({"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}}), vec!["path","edits"]),
         ("send_file", "Send a local file to the user through Tau. Files are staged automatically; PNG, JPEG, and WebP files up to 10 MB appear inline.", json!({"path":{"type":"string","minLength":1},"caption":{"type":"string","maxLength":1024}}), vec!["path"]),
-        ("flag_it", "Log an incidental finding outside the task. State location and impact, omit secrets, and continue the current task.", json!({"str":{"type":"string","minLength":1,"maxLength":4096}}), vec!["str"]),
         ("generate_image", "Generate or edit one image through the configured Codex account (gpt-image-2). It is delivered automatically. Optional imagePaths are local PNG/JPEG/WebP references, at most four, 10 MB each.", json!({"prompt":{"type":"string","minLength":1,"maxLength":32000},"imagePaths":{"type":"array","maxItems":4,"items":{"type":"string"}}}), vec!["prompt"]),
         ("web_search", "Search the web.", json!({"query":{"type":"string"}}), vec!["query"]),
     ].into_iter().filter(|(name,_,_,_)| *name != "generate_image" || image_bridge).map(|(name, description, properties, required)| json!({"name":name,
@@ -77,7 +75,7 @@ fn shell_script(process: &mut tokio::process::Command, source: &str) -> Result<t
 #[path = "../../tests/unit/agent/tools.rs"]
 mod tests;
 
-pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, session: &str, name: &str, args: &Value, cancel: &CancellationToken) -> Result<Value> {
+pub async fn execute(config: &Config, settings: &Settings, name: &str, args: &Value, cancel: &CancellationToken) -> Result<Value> {
     if cancel.is_cancelled() { bail!("Tool cancelled"); }
     match name {
         "read" => {
@@ -186,11 +184,6 @@ pub async fn execute(config: &Config, settings: &Settings, state: &StateStore, s
             if input.is_empty() { bail!("Attachment path must not be empty"); }
             let caption = args.get("caption").map(|_| string(args, "caption")).transpose()?;
             crate::attachments::send_file(&config.attachment_root, &path(config, input), caption, cancel).await
-        }
-        "flag_it" => {
-            let saved = state.flag(session, string(args, "str")?).await?;
-            let mut result = text_result(format!("Flag {} saved. Continue the current task.", saved.id));
-            result["details"] = json!({"flagId":saved.id}); Ok(result)
         }
         _ => bail!("Unknown tool {name}"),
     }

@@ -167,6 +167,7 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     let first = model.request().await;
     let definitions = first["tools"].as_array().unwrap();
     assert_eq!(definitions.iter().filter(|tool| tool["function"]["name"] == "send_file").count(), 1);
+    assert!(!definitions.iter().any(|tool| tool["function"]["name"] == "flag_it"));
     assert!(!definitions.iter().any(|tool| tool["function"]["name"] == "send_image" || tool["type"] == "image_generation"));
     assert_eq!(first["messages"].as_array().unwrap().last().unwrap()["content"], "Make an artifact");
     for (request, text) in [("queued","Original queued text"),("deleted","Do not run me")] {
@@ -199,13 +200,13 @@ async fn websocket_acceptance_tools_queue_restart_and_settings_are_one_native_pa
     client.until(|m| m["type"] == "session_state" && m["status"] == "idle" && m["sessionId"] == id).await;
     assert_eq!(tokio::fs::read(root.path().join("outbox/artifact.txt")).await.unwrap(), b"beta\n");
     assert_eq!(tokio::fs::read(root.path().join("count")).await.unwrap(), b"x");
-    let flags = tokio::fs::read_to_string(root.path().join("flags.jsonl")).await.unwrap();
-    assert_eq!(flags.lines().count(), 1);
+    assert!(!root.path().join("flags.jsonl").exists(), "Retired tools must not create flag logs");
     let snapshot = client.open(&id).await;
     let attachment = snapshot["events"].as_array().unwrap().iter().find(|event| event["attachment"]["fileName"] == "artifact.txt").unwrap();
     let resolved = manager.resolve_attachment(&id, attachment["entryId"].as_str().unwrap()).await.unwrap();
     assert_eq!(resolved.size, 5);
     let events = snapshot["events"].as_array().unwrap();
+    assert!(events.iter().any(|event| event["toolName"] == "flag_it" && event["isError"] == true));
     assert_eq!(events.iter().filter(|event| event["attachment"].is_object()).count(), 5);
     assert_eq!(events.iter().filter(|event| event["role"] == "tool" && event["toolName"] == "send_file" && event["isError"] == true).count(), 3);
     for (name, kind) in [("pixel.png","image"),("large.png","file"),("misleading.png","file")] {

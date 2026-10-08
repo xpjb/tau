@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::manager::{AgentManager, PromptOutcome, SessionContent, SessionRuntime, bounded};
 use std::collections::BTreeMap;
 use tau_net::{PromptDisposition, ModelSuggestion};
-use tau_net::{ServerMessage, SessionStatus};
+use tau_net::SessionStatus;
 use crate::state::SessionModel;
 use crate::transcript::{QueueState, TranscriptChange};
 use crate::settings::SteeringMode;
@@ -341,13 +341,10 @@ impl AgentManager {
                                 result.map(|completion| tools::text_result(format!("{}\n{}", completion.message["content"].as_str().unwrap_or_default(), completion.message["annotations"]))),
                         }
                     }
-                    Ok(args) => tools::execute(&self.inner.config, &settings, &self.inner.state, id, name, &args, &cancel).await,
+                    Ok(args) => tools::execute(&self.inner.config, &settings, name, &args, &cancel).await,
                 };
                 let mut result = match result { Ok(result) => result, Err(error) => { let mut result = tools::text_result(bounded(&error.to_string(), 2000)); result["isError"] = json!(true); result } };
                 result["role"] = json!("toolResult"); result["toolCallId"] = call["id"].clone(); result["toolName"] = json!(name); result["timestamp"] = json!(now_ms());
-                if name == "flag_it" && result["isError"] != true {
-                    let _ = self.inner.events.send(ServerMessage::Notice { session_id:id.into(), message:result["content"][0]["text"].as_str().unwrap_or("Flag recorded").into() });
-                }
                 runtime.content.lock().await.append(id, json!({"type":"message","message":result})).await?;
             }
             for attachment in attachments { runtime.content.lock().await.append(id, attachment).await?; }

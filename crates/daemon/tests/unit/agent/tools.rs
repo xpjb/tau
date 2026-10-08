@@ -6,7 +6,6 @@ struct Fixture {
     _root: tempfile::TempDir,
     config: Config,
     settings: Settings,
-    state: StateStore,
 }
 
 impl Fixture {
@@ -18,15 +17,14 @@ impl Fixture {
             import_pi_dir: None, codex_auth_source: None, cwd: root.path().into(), database_path: root.path().join("tau.sqlite3"),
             telemetry_path: root.path().join("crashes.jsonl"), attachment_root: root.path().join("outbox"), upload_root: root.path().join("uploads"),
         };
-        let state = StateStore::load(config.database_path.clone()).await.unwrap();
-        Self { _root: root, config, settings: Settings::default(), state }
+        Self { _root: root, config, settings: Settings::default() }
     }
 
     async fn run(&self, command: &str, seconds: Option<u64>, cancel: &CancellationToken) -> Result<String> {
         let mut args = json!({"command": command});
         if let Some(seconds) = seconds { args["timeout"] = json!(seconds); }
         let result = tokio::time::timeout(Duration::from_secs(10), execute(
-            &self.config, &self.settings, &self.state, "unused", "bash", &args, cancel,
+            &self.config, &self.settings, "bash", &args, cancel,
         )).await.expect("bash tool did not finish")?;
         Ok(result["content"][0]["text"].as_str().unwrap().to_owned())
     }

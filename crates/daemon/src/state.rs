@@ -11,12 +11,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::transcript::{EventProjection, Event, QueueState};
 
 pub(crate) use tau_net::settings::DEFAULT_TITLE_PROMPT;
-pub(crate) const MAX_FLAG_CHARS: usize = 4096;
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Flag { pub id: String, pub timestamp_ms: u64, pub session_id: String, pub session_title: String, pub text: String }
-
 pub use tau_net::SessionModel;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -50,7 +44,7 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 #[derive(Clone)]
-pub struct StateStore { connection: Arc<Mutex<Connection>>, readers: Arc<Readers>, path: PathBuf, flag_gate: Arc<tokio::sync::Mutex<()>>, pub(crate) block_changes: tokio::sync::watch::Sender<u64>, #[cfg(test)] pub(crate) context_gate:Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>> }
+pub struct StateStore { connection: Arc<Mutex<Connection>>, readers: Arc<Readers>, path: PathBuf, pub(crate) block_changes: tokio::sync::watch::Sender<u64>, #[cfg(test)] pub(crate) context_gate:Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>> }
 
 impl StateStore {
     pub async fn load(path: PathBuf) -> Result<Self> {
@@ -132,7 +126,7 @@ impl StateStore {
         }).await??;
         let reader_path = path.clone();
         let readers = tokio::task::spawn_blocking(move || Readers::open(&reader_path)).await??;
-        Ok(Self { connection:Arc::new(Mutex::new(connection)), readers:Arc::new(readers), path, flag_gate:Arc::new(tokio::sync::Mutex::new(())), block_changes:tokio::sync::watch::channel(0).0, #[cfg(test)] context_gate:Arc::new(std::sync::Mutex::new(None)) })
+        Ok(Self { connection:Arc::new(Mutex::new(connection)), readers:Arc::new(readers), path, block_changes:tokio::sync::watch::channel(0).0, #[cfg(test)] context_gate:Arc::new(std::sync::Mutex::new(None)) })
     }
     /// Read one committed snapshot without taking the writer's mutex.
     pub(crate) async fn read<T: Send + 'static>(&self, action: impl FnOnce(&Connection) -> Result<T> + Send + 'static) -> Result<T> {
@@ -527,24 +521,7 @@ impl StateStore {
             Ok(())
         }).await
     }
-    pub async fn flag(&self, id: &str, text: &str) -> Result<Flag> {
-        use tokio::io::AsyncWriteExt;
-        if text.trim().is_empty() || text.chars().count() > MAX_FLAG_CHARS { bail!("Flag text must contain 1–{MAX_FLAG_CHARS} characters"); }
-        let _guard = self.flag_gate.lock().await;
-        let session = self.get(id).await?.context("Unknown session")?;
-        let flag = Flag { id:uuid::Uuid::new_v4().to_string(),timestamp_ms:crate::agent::now_ms(),session_id:id.into(),session_title:session.title,text:text.into() };
-        let mut bytes = serde_json::to_vec(&flag)?; bytes.push(b'\n');
-        let path = self.path.with_file_name("flags.jsonl");
-        if path == self.path { bail!("Database and flag paths must differ"); }
-        let mut options = tokio::fs::OpenOptions::new(); options.create(true).append(true);
-        #[cfg(unix)] options.mode(0o600);
-        let mut file = options.open(path).await.context("Could not open Tau flag log")?;
-        let length = file.metadata().await?.len();
-        if let Err(error) = async { file.write_all(&bytes).await?; file.sync_all().await }.await {
-            file.set_len(length).await?; file.sync_all().await?; return Err(error.into());
-        }
-        Ok(flag)
-    }
+
 }
 
 fn find_created_session(db: &Connection, request: &str, payload: &str) -> Result<Option<String>> {
