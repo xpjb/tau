@@ -8,8 +8,8 @@ pub mod blocks;
 mod transcript;
 pub use transcript::*;
 
-// Protocol 26 combines source-bound native peers with Codex device sign-in.
-pub const PROTOCOL_VERSION: u32 = 26;
+// Protocol 27 expands verified body ranges and their bounded credit window.
+pub const PROTOCOL_VERSION: u32 = 27;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_CHARS: usize = 256 * 1024;

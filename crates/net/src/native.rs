@@ -109,7 +109,7 @@ struct Frame { pub header: Header, pub data: Vec<u8> }
 impl Frame {
     pub fn metadata(header: Header) -> Self { Self { header, data:vec![] } }
     fn data(version: u64, offset: u64, hash: String, bytes: &[u8]) -> Result<Self> {
-        ensure!(bytes.len() <= BLOCK_CHUNK_BYTES, "Content chunk exceeds range limit");
+        ensure!(bytes.len() <= MAX_BLOCK_RANGE_BYTES, "Content chunk exceeds range limit");
         let compressed = if bytes.len() >= 1024 { zstd::bulk::compress(bytes,1)? } else { vec![] };
         let (codec, data) = if !compressed.is_empty() && compressed.len()+16 < bytes.len() {
             (Codec::Zstd, compressed)
@@ -118,7 +118,7 @@ impl Frame {
     }
     pub fn decoded(&self) -> Result<Vec<u8>> {
         let Header::Data { hash, length, codec, .. } = &self.header else { ensure!(self.data.is_empty(),"Metadata carried content"); return Ok(vec![]); };
-        ensure!(*length as usize <= BLOCK_CHUNK_BYTES && self.data.len() <= BLOCK_CHUNK_BYTES,"Oversized content frame");
+        ensure!(*length as usize <= MAX_BLOCK_RANGE_BYTES && self.data.len() <= MAX_BLOCK_RANGE_BYTES,"Oversized content frame");
         let bytes = match codec {
             Codec::Raw => self.data.clone(),
             Codec::Zstd => zstd::bulk::decompress(&self.data,*length as usize).context("Invalid compressed block chunk")?,
@@ -130,7 +130,7 @@ impl Frame {
 
 fn encode(frame: &Frame) -> Result<Vec<u8>> {
     let head = serde_json::to_vec(&frame.header)?;
-    ensure!(head.len() <= MAX_WIRE_HEADER && frame.data.len() <= BLOCK_CHUNK_BYTES,"Frame exceeds byte budget");
+    ensure!(head.len() <= MAX_WIRE_HEADER && frame.data.len() <= MAX_BLOCK_RANGE_BYTES,"Frame exceeds byte budget");
     ensure!(matches!(frame.header,Header::Data { .. }) || frame.data.is_empty(),"Unexpected content payload");
     let mut bytes = Vec::with_capacity(8+head.len()+frame.data.len());
     bytes.extend_from_slice(&(head.len() as u32).to_be_bytes());
@@ -142,7 +142,7 @@ async fn receive(recv: &mut RecvStream) -> Result<(Frame,u32)> {
     let mut lengths = [0;8]; recv.read_exact(&mut lengths).await?;
     let h = u32::from_be_bytes(lengths[..4].try_into().unwrap()) as usize;
     let n = u32::from_be_bytes(lengths[4..].try_into().unwrap()) as usize;
-    ensure!(h > 0 && h <= MAX_WIRE_HEADER && n <= BLOCK_CHUNK_BYTES,"Peer exceeded frame budget");
+    ensure!(h > 0 && h <= MAX_WIRE_HEADER && n <= MAX_BLOCK_RANGE_BYTES,"Peer exceeded frame budget");
     let mut head = vec![0;h]; recv.read_exact(&mut head).await?;
     let header: Header = serde_json::from_slice(&head)?;
     ensure!(matches!(header,Header::Data { .. }) || n == 0,"Metadata carried content bytes");
@@ -268,13 +268,17 @@ impl Drop for Server {
     fn drop(&mut self) { if let Some(task) = self.task.get_mut().unwrap().take() { task.abort(); } }
 }
 
-async fn send_credited(send: &mut SendStream, recv: &mut RecvStream, credit: &mut u32, frame: Frame, counters:Option<&Counters>) -> Result<()> {
+fn watch_window(request:&BlockWatch)->u32 {
+    if matches!(request,BlockWatch::Block(_)) {BLOCK_BODY_WINDOW_BYTES} else {BLOCK_WINDOW_BYTES}
+}
+
+async fn send_credited(send: &mut SendStream, recv: &mut RecvStream, credit: &mut u32, window:u32, frame: Frame, counters:Option<&Counters>) -> Result<()> {
     let bytes = encode(&frame)?;
     while (*credit as usize) < bytes.len() {
         let (frame,n) = tokio::time::timeout(IO_TIMEOUT,receive(recv)).await.context("Block consumer stopped granting credit")??;
         if let Some(counters)=counters {counters.rx.fetch_add(n as u64,Ordering::Relaxed);}
         let Header::Credit { bytes } = frame.header else { bail!("Expected block byte credit"); };
-        ensure!(bytes > 0 && bytes <= BLOCK_WINDOW_BYTES && credit.saturating_add(bytes) <= BLOCK_WINDOW_BYTES,"Invalid block credit");
+        ensure!(bytes > 0 && bytes <= window && credit.saturating_add(bytes) <= window,"Invalid block credit");
         *credit += bytes;
     }
     tokio::time::timeout(IO_TIMEOUT,send.write_all(&bytes)).await.context("Block writer stalled")??;
@@ -291,7 +295,8 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
         return serve_upload(send, recv, backend, grants, node, spec).await;
     }
     let Header::Watch { mut request, mut credit, priority } = frame.header else { bail!("Expected block watch or upload"); };
-    ensure!(credit == BLOCK_WINDOW_BYTES,"Invalid initial block window");
+    let window=watch_window(&request);
+    ensure!(credit==window,"Invalid initial block window");
     ensure!((-10..=10).contains(&priority),"Invalid stream priority");
     send.set_priority(priority)?;
     let mut changes = backend.changes();
@@ -310,8 +315,8 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
                     if finite_done.contains(&watch) {continue;}
                     let page=backend.feed(req.clone()).await?;
                     if initial || page.reset || !page.records.is_empty() {
-                        for record in page.records {send_credited(send,recv,&mut credit,Frame::metadata(Header::Record {watch,record}),None).await?;}
-                        send_credited(send,recv,&mut credit,Frame::metadata(Header::Page {watch,reset:page.reset,cursor:page.cursor.clone(),floor:page.floor,before:page.before,more:page.more}),None).await?;
+                        for record in page.records {send_credited(send,recv,&mut credit,window,Frame::metadata(Header::Record {watch,record}),None).await?;}
+                        send_credited(send,recv,&mut credit,window,Frame::metadata(Header::Page {watch,reset:page.reset,cursor:page.cursor.clone(),floor:page.floor,before:page.before,more:page.more}),None).await?;
                     }
                     if req.before.is_some() {finite_done.insert(watch);}
                     req.cursor=Some(page.cursor);req.floor=page.floor;more|=page.more;
@@ -325,14 +330,14 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
                     _ = send.stopped() => return Ok(()),
                     range = backend.read(req.clone()) => range?,
                 };
-                let Some(range)=range else {return send_credited(send,recv,&mut credit,Frame::metadata(Header::Absent),None).await;};
+                let Some(range)=range else {return send_credited(send,recv,&mut credit,window,Frame::metadata(Header::Absent),None).await;};
                 if sent_revision != Some(range.header.revision) {
                     send.set_priority(if matches!(range.header.kind,BlockKind::File | BlockKind::Image) { -10 } else { priority.min(5) })?;
-                    send_credited(send,recv,&mut credit,Frame::metadata(Header::Block { block:range.header.clone() }),None).await?;
+                    send_credited(send,recv,&mut credit,window,Frame::metadata(Header::Block { block:range.header.clone() }),None).await?;
                     sent_revision = Some(range.header.revision);
                 }
                 if !range.bytes.is_empty() {
-                    send_credited(send,recv,&mut credit,Frame::data(range.header.version,range.offset,range.hash.clone(),&range.bytes)?,None).await?;
+                    send_credited(send,recv,&mut credit,window,Frame::data(range.header.version,range.offset,range.hash.clone(),&range.bytes)?,None).await?;
                 }
                 req.version = range.header.version; req.offset = range.offset + range.bytes.len() as u64;
                 let more = req.offset < range.header.length;
@@ -346,7 +351,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
         // Do not yield between feeds: a slow first page must not starve the
         // later members of a batched interest on every renewal.
         if tokio::time::Instant::now() >= deadline {
-            return send_credited(send,recv,&mut credit,Frame::metadata(Header::Yield),None).await;
+            return send_credited(send,recv,&mut credit,window,Frame::metadata(Header::Yield),None).await;
         }
         if more { continue; }
         // Subscribe before reading. Notifications are only wakeups; loss or
@@ -354,7 +359,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
         tokio::select! {
             _ = send.stopped() => return Ok(()),
             _ = tokio::time::sleep_until(deadline) => {
-                return send_credited(send,recv,&mut credit,Frame::metadata(Header::Yield),None).await;
+                return send_credited(send,recv,&mut credit,window,Frame::metadata(Header::Yield),None).await;
             }
             result = changes.changed() => {
                 if result.is_err() { break; }
@@ -367,7 +372,7 @@ async fn serve_stream(send: &mut SendStream, recv: &mut RecvStream, backend: Arc
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
     }
-    send_credited(send,recv,&mut credit,Frame::metadata(Header::End),None).await
+    send_credited(send,recv,&mut credit,window,Frame::metadata(Header::End),None).await
 }
 
 async fn serve_upload(send: &mut SendStream, recv: &mut RecvStream, backend: Arc<dyn Backend>, grants: &Grants, node: NodeId, spec: UploadSpec) -> Result<()> {
@@ -438,7 +443,7 @@ impl Uploader {
         ensure!(!self.status.sealed && !bytes.is_empty() && bytes.len() <= BLOCK_CHUNK_BYTES && self.status.offset.saturating_add(bytes.len() as u64) <= self.spec.length, "Invalid upload write");
         let frame = Frame::data(1,self.status.offset,blake3::hash(bytes).to_hex().to_string(),bytes)?;
         let encoded=encode(&frame)?.len() as u64;
-        send_credited(&mut self.send,&mut self.recv,&mut self.credit,frame,Some(&self.stats)).await?;
+        send_credited(&mut self.send,&mut self.recv,&mut self.credit,BLOCK_WINDOW_BYTES,frame,Some(&self.stats)).await?;
         self.stats.tx.fetch_add(encoded,Ordering::Relaxed);self.stats.content_tx.fetch_add(bytes.len() as u64,Ordering::Relaxed);
         self.status.offset += bytes.len() as u64;
         Ok(())
@@ -572,7 +577,7 @@ impl Peer {
     }
 }
 
-struct Watcher { stats:Arc<Counters>,complete:bool,send: SendStream, recv: RecvStream, _permit:tokio::sync::OwnedSemaphorePermit, _class:tokio::sync::OwnedSemaphorePermit }
+struct Watcher { stats:Arc<Counters>,complete:bool,window:u32,send: SendStream, recv: RecvStream, _permit:tokio::sync::OwnedSemaphorePermit, _class:tokio::sync::OwnedSemaphorePermit }
 impl Watcher {
     pub async fn next(&mut self) -> Result<(Frame,u32)> {
         let (frame,bytes)=receive(&mut self.recv).await?;self.stats.rx.fetch_add(bytes as u64,Ordering::Relaxed);
@@ -580,7 +585,7 @@ impl Watcher {
     }
     /// Return credit only after consuming/persisting the preceding bounded frame.
     pub async fn consumed(&mut self, bytes: u32) -> Result<()> {
-        ensure!(bytes > 0 && bytes <= BLOCK_WINDOW_BYTES,"Invalid consumed byte count");
+        ensure!(bytes > 0 && bytes <= self.window,"Invalid consumed byte count");
         let credit=encode(&Frame::metadata(Header::Credit {bytes}))?;self.send.write_all(&credit).await?;self.stats.tx.fetch_add(credit.len() as u64,Ordering::Relaxed);
         Ok(())
     }
@@ -605,13 +610,13 @@ async fn serve_files(send: &mut SendStream, recv: &mut RecvStream, backend: Arc<
     };
     let bytes = serde_json::to_vec(&reply)?;
     ensure!(bytes.len() <= MAX_FILE_REPLY_BYTES, "Filesystem response exceeds limit");
-    send_credited(send, recv, &mut credit, Frame::metadata(Header::Browsed { length: bytes.len() as u64, hash: blake3::hash(&bytes).to_hex().to_string() }), None).await?;
+    send_credited(send, recv, &mut credit, BLOCK_WINDOW_BYTES, Frame::metadata(Header::Browsed { length: bytes.len() as u64, hash: blake3::hash(&bytes).to_hex().to_string() }), None).await?;
     for (i, chunk) in bytes.chunks(BLOCK_CHUNK_BYTES).enumerate() {
         ensure!(authorized(grants, &node), "Block authorization expired");
         let frame = Frame::data(1,(i*BLOCK_CHUNK_BYTES) as u64,blake3::hash(chunk).to_hex().to_string(),chunk)?;
-        send_credited(send, recv, &mut credit, frame, None).await?;
+        send_credited(send, recv, &mut credit, BLOCK_WINDOW_BYTES, frame, None).await?;
     }
-    send_credited(send, recv, &mut credit, Frame::metadata(Header::End), None).await
+    send_credited(send, recv, &mut credit, BLOCK_WINDOW_BYTES, Frame::metadata(Header::End), None).await
 }
 impl Peer {
     /// Dropping this future resets only its own stream. It shares the foreground
@@ -628,7 +633,7 @@ impl Peer {
             send.write_all(&bytes).await?;
             self.transport.stats.tx.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             self.transport.stats.opened();
-            let mut stream = Watcher { stats: self.transport.stats.clone(), complete: false, send, recv, _permit: permit, _class: class };
+            let mut stream = Watcher { stats: self.transport.stats.clone(), complete: false, window:BLOCK_WINDOW_BYTES, send, recv, _permit: permit, _class: class };
             let mut expected = None; let mut body = Vec::new();
             loop {
                 let (frame, wire_bytes) = tokio::time::timeout(IO_TIMEOUT, stream.next()).await??;

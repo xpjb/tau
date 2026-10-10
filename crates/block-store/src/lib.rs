@@ -230,19 +230,27 @@ pub fn feed(db: &Connection, request: &FeedRequest) -> Result<FeedPage> {
 }
 
 
-/// A range never crosses a chunk boundary and is always hard byte-bounded.
+/// Text keeps fine-grained delivery. Sealed files combine adjacent storage chunks
+/// so one verified, durable client range covers several stored parts.
 pub fn read(db: &Connection, request: &BlockRequest) -> Result<Option<ContentRange>> {
     scope_ok(&request.scope)?;
     let Some(h) = header(db,&request.scope,&request.id)? else {return Ok(None);};
     let offset = if request.version == h.version { request.offset } else { 0 };
     ensure!(offset <= h.length, "Block offset is beyond the durable head");
-    let bytes = if offset == h.length { vec![] } else {
-        let start = offset / BLOCK_CHUNK_BYTES as u64 * BLOCK_CHUNK_BYTES as u64;
-        let (hash, bytes) = part(db,&request.scope,&request.id,h.version,start)?.context("Source content is missing")?;
-        ensure!(blake3::hash(&bytes).to_hex().as_str() == hash, "Source content is corrupt");
-        bytes.get((offset-start) as usize..).context("Source content has a gap")?.to_vec()
-    };
-    ensure!(offset + bytes.len() as u64 <= h.length && bytes.len() <= BLOCK_CHUNK_BYTES, "Source content exceeds its head");
+    let limit = if h.sealed && matches!(h.kind,BlockKind::File|BlockKind::Image) {MAX_BLOCK_RANGE_BYTES} else {BLOCK_CHUNK_BYTES};
+    let mut bytes=Vec::with_capacity(limit.min(h.length.saturating_sub(offset) as usize));
+    let mut next=offset;
+    while next<h.length && bytes.len()<limit {
+        let start=next/BLOCK_CHUNK_BYTES as u64*BLOCK_CHUNK_BYTES as u64;
+        let (hash,part)=part(db,&request.scope,&request.id,h.version,start)?.context("Source content is missing")?;
+        ensure!(blake3::hash(&part).to_hex().as_str()==hash,"Source content is corrupt");
+        let at=(next-start) as usize;
+        let available=part.get(at..).context("Source content has a gap")?;
+        ensure!(!available.is_empty(),"Source content has a gap");
+        let n=available.len().min(limit-bytes.len());
+        bytes.extend_from_slice(&available[..n]);next+=n as u64;
+    }
+    ensure!(offset+bytes.len() as u64<=h.length && bytes.len()<=MAX_BLOCK_RANGE_BYTES,"Source content exceeds its head");
     Ok(Some(ContentRange { header:h, offset, hash:blake3::hash(&bytes).to_hex().to_string(), bytes }))
 }
 
@@ -344,7 +352,7 @@ pub fn cache_lineage(db: &Connection, lineage: &str) -> Result<()> {
 
 pub fn cache_range(db: &Connection, scope: &str, range: &ContentRange) -> Result<()> {
     writing(db)?;
-    ensure!(range.bytes.len() <= BLOCK_CHUNK_BYTES && range.offset.saturating_add(range.bytes.len() as u64) <= range.header.length, "Content exceeds its bounds");
+    ensure!(range.bytes.len() <= MAX_BLOCK_RANGE_BYTES && range.offset.saturating_add(range.bytes.len() as u64) <= range.header.length, "Content exceeds its bounds");
     ensure!(blake3::hash(&range.bytes).to_hex().as_str() == range.hash,"Content hash mismatch");
     cache_header(db,scope,&range.header)?;
     let Some(current) = header(db,scope,&range.header.id)? else { return Ok(()); };

@@ -5,10 +5,12 @@ use anyhow::ensure;
 use serde::{Deserialize, Serialize};
 
 pub const BLOCK_CHUNK_BYTES: usize = 16 * 1024;
+pub const MAX_BLOCK_RANGE_BYTES: usize = 4 * BLOCK_CHUNK_BYTES;
 pub const MAX_BLOCK_HEADER_BYTES: usize = 4096;
 pub const MAX_BLOCK_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_FEED_PAGE: usize = 32;
 pub const BLOCK_WINDOW_BYTES: u32 = 64 * 1024;
+pub const BLOCK_BODY_WINDOW_BYTES: u32 = 1024 * 1024;
 pub const UPLOAD_SCOPE: &str = "@uploads";
 pub const CONTROL_SCOPE: &str = "@control";
 pub const MAX_COMMAND_BYTES: u64 = 8 * 1024 * 1024;

@@ -8,7 +8,7 @@ fn compression_is_chunk_local_bounded_and_verified_after_decompression() {
     let mut frame = Frame::data(range.header.version,range.offset,range.hash.clone(),&range.bytes).unwrap();
     assert!(matches!(frame.header,Header::Data {codec:Codec::Zstd,..}));
     assert!(frame.data.len() < 100); assert_eq!(frame.decoded().unwrap(),bytes);
-    if let Header::Data { length,.. } = &mut frame.header { *length = (BLOCK_CHUNK_BYTES+1) as u32; }
+    if let Header::Data { length,.. } = &mut frame.header { *length = (MAX_BLOCK_RANGE_BYTES+1) as u32; }
     assert!(frame.decoded().is_err());
     if let Header::Data { length,hash,.. } = &mut frame.header { *length = BLOCK_CHUNK_BYTES as u32; *hash = "bad".into(); }
     assert!(frame.decoded().is_err());

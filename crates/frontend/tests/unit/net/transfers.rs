@@ -61,14 +61,14 @@ async fn download_rebinds_after_node_restart_but_never_crosses_a_source_lineage(
         fn read(&self,request:BlockRequest)->futures_util::future::BoxFuture<'static,Result<Option<ContentRange>>> {
             let db=self.db.clone();let stall=self.stall.clone();
             Box::pin(async move {
-                if request.offset>=BLOCK_CHUNK_BYTES as u64 && stall.load(Ordering::Acquire) {std::future::pending::<()>().await;}
+                if request.offset>=MAX_BLOCK_RANGE_BYTES as u64 && stall.load(Ordering::Acquire) {std::future::pending::<()>().await;}
                 tau_block_store::read(&db.lock().unwrap(),&request)
             })
         }
         fn changes(&self)->watch::Receiver<u64> {self.changes.clone()}
     }
     for changed_lineage in [false,true] {
-        let mut f=Fixture::new();let bytes=vec![b'x';BLOCK_CHUNK_BYTES*4];
+        let mut f=Fixture::new();let bytes=vec![b'x';MAX_BLOCK_RANGE_BYTES*2];
         f.put("file",None,0,BlockKind::File,json!({}),&bytes);
         let stall=Arc::new(AtomicBool::new(true));let (_changes,changes)=watch::channel(0);
         let source=Arc::new(Source {db:Arc::new(Mutex::new(f.source)),stall:stall.clone(),changes});
@@ -95,7 +95,7 @@ async fn download_rebinds_after_node_restart_but_never_crosses_a_source_lineage(
         } else {
             assert!(status.failure.is_none(),"{:?}",status.failure);
             assert_eq!(std::fs::read(&path).unwrap(),bytes);
-            assert_eq!(client.stats().resumed_bytes,BLOCK_CHUNK_BYTES as u64,"The new node starts from the verified prefix, not byte zero");
+            assert_eq!(client.stats().resumed_bytes,MAX_BLOCK_RANGE_BYTES as u64,"The new node starts from the verified prefix, not byte zero");
         }
         client.shutdown().await;server.shutdown().await;
     }

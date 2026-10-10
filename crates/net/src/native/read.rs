@@ -51,10 +51,11 @@ impl Peer {
             let connection=match connection {Some(connection)=>connection,None=>self.connection().await?};
             let (mut send,recv)=connection.open_bi().await?;
             let offset=if let BlockWatch::Block(block)=&request {block.offset} else {0};
-            let bytes=encode(&Frame::metadata(Header::Watch {request,credit:BLOCK_WINDOW_BYTES,priority}))?;
+            let window=watch_window(&request);
+            let bytes=encode(&Frame::metadata(Header::Watch {request,credit:window,priority}))?;
             send.write_all(&bytes).await?;self.transport.stats.tx.fetch_add(bytes.len() as u64,Ordering::Relaxed);
             self.transport.stats.opened();self.transport.stats.resumed.fetch_add(offset,Ordering::Relaxed);
-            Ok((Watcher {stats:self.transport.stats.clone(),complete:false,send,recv,_permit:permit,_class:class},connection))
+            Ok((Watcher {stats:self.transport.stats.clone(),complete:false,window,send,recv,_permit:permit,_class:class},connection))
         }).await
     }
 }

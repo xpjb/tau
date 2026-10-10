@@ -199,7 +199,7 @@ async fn no_credit_bounds_a_slow_stream_without_blocking_another_feed() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let mut watch = peer.read(feed_request(None),Priority::Foreground).await.unwrap();
     assert!(matches!(update(&mut watch).await,Update::Page {page,..} if !page.records.is_empty()));
-    assert!(backend.reads.load(Ordering::SeqCst) <= 6,"Credit, not an unbounded outbound FIFO, limits read-ahead");
+    assert!(backend.reads.load(Ordering::SeqCst) <= BLOCK_BODY_WINDOW_BYTES as usize/MAX_BLOCK_RANGE_BYTES+2,"Credit, not an unbounded outbound FIFO, limits read-ahead");
     drop(stalled);
     client.shutdown().await; server.shutdown().await;
 }

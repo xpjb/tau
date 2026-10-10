@@ -29,7 +29,7 @@ fn download(source: &Connection, cache: &mut Connection, id: &str) -> usize {
     let mut bytes = 0;
     while req.offset < h.length {
         let range = read(source,&req).unwrap().unwrap();
-        assert!(range.bytes.len() <= BLOCK_CHUNK_BYTES);
+        assert!(range.bytes.len() <= MAX_BLOCK_RANGE_BYTES);
         req.offset += range.bytes.len() as u64; bytes += range.bytes.len();
         let tx = cache.transaction().unwrap(); cache_range(&tx,"chat",&range).unwrap(); tx.commit().unwrap();
     }
@@ -71,6 +71,22 @@ fn appends_are_linear_and_sealing_does_not_resend_or_change_identity() {
     assert_eq!(cached_content(&cache,"chat","code").unwrap(),vec![b'x';32768]);
     let count: u64 = source.query_row("SELECT count(*) FROM block_chunks",[],|r|r.get(0)).unwrap();
     assert_eq!(count,1,"Identical sealed chunks deduplicate; abandoned live tails are collected");
+}
+
+#[test]
+fn sealed_file_ranges_batch_storage_chunks_while_text_stays_fine_grained() {
+    let mut source=db();let bytes=(0..MAX_BLOCK_RANGE_BYTES+17).map(|n|(n%251) as u8).collect::<Vec<_>>();
+    let mut file=block("file",None,0,BlockKind::File);file.sealed=true;save(&mut source,file,&bytes);
+    let mut text=block("text",None,1,BlockKind::Text);text.sealed=true;save(&mut source,text,&bytes);
+    let first=read(&source,&BlockRequest {scope:"chat".into(),id:"file".into(),version:1,offset:0,follow:false}).unwrap().unwrap();
+    assert_eq!(first.bytes.len(),MAX_BLOCK_RANGE_BYTES);assert_eq!(first.bytes,bytes[..MAX_BLOCK_RANGE_BYTES]);
+    let mut cache=db();let tx=cache.transaction().unwrap();cache_range(&tx,"chat",&first).unwrap();
+    assert_eq!(cached_prefix(&tx,"chat","file").unwrap(),MAX_BLOCK_RANGE_BYTES as u64);
+    let parts:u64=tx.query_row("SELECT count(*) FROM block_parts WHERE scope='chat' AND id='file'",[],|r|r.get(0)).unwrap();assert_eq!(parts,4);tx.commit().unwrap();
+    let resumed=read(&source,&BlockRequest {scope:"chat".into(),id:"file".into(),version:1,offset:BLOCK_CHUNK_BYTES as u64,follow:false}).unwrap().unwrap();
+    assert_eq!(resumed.offset,BLOCK_CHUNK_BYTES as u64);assert_eq!(resumed.bytes,bytes[BLOCK_CHUNK_BYTES..]);
+    let text=read(&source,&BlockRequest {scope:"chat".into(),id:"text".into(),version:1,offset:0,follow:false}).unwrap().unwrap();
+    assert_eq!(text.bytes.len(),BLOCK_CHUNK_BYTES);
 }
 
 #[test]
