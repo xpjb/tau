@@ -9,6 +9,7 @@ mod app;
 mod cache_ttl;
 mod clock;
 mod codex_usage;
+mod crash;
 pub mod controller;
 #[cfg(not(target_os = "android"))]
 mod demo;

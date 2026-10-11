@@ -399,14 +399,8 @@ pub extern "system" fn Java_app_tau_rust_MainActivity_nativeViewport(
 }
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
-    let crash = app.internal_data_path().map(|p| p.join("client-crash.log"));
-    let panic_path = crash.clone();
-    std::panic::set_hook(Box::new(move |info| {
-        if let Some(path) = &panic_path {
-            let trace = format!("{info}\n{}", std::backtrace::Backtrace::force_capture());
-            let _ = std::fs::write(path, trace.chars().take(65536).collect::<String>());
-        }
-    }));
+    let crash_root = app.internal_data_path().map(|path| path.join("tau2"));
+    if let Some(root) = &crash_root { crate::crash::install(root.clone()); }
     let result = chad::android::run::<Android>(
         app,
         Config {
@@ -418,11 +412,7 @@ pub fn android_main(app: AndroidApp) {
             ..Default::default()
         },
     );
-    if let Err(error) = result {
-        if let Some(path) = crash {
-            let _ = std::fs::write(path, error);
-        }
-    }
+    if let (Some(root), Err(error)) = (&crash_root, &result) { crate::crash::record_error(root, error); }
     if let Ok(mut runtime) = RUNTIME.lock() {
         *runtime = None;
     }

@@ -414,36 +414,42 @@ pub fn run() -> Result<(), String> {
             args.iter().any(|a| a == "--downloads-preview"),
         );
     }
-    #[cfg(windows)]
-    {
-        // Keep beta taskbar grouping/pins separate from the stable Tau launcher.
-        // SAFETY: the application ID is a static, null-terminated UTF-16 string.
-        let result = unsafe {
-            windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
-                windows_sys::core::w!("app.tau.beta"),
-            )
-        };
-        if result < 0 {
-            return Err(format!(
-                "Could not set Tau Beta application identity: {result:#x}"
-            ));
+    let data_root = root();
+    crate::crash::install(data_root.clone());
+    let result = (|| {
+        #[cfg(windows)]
+        {
+            // Keep beta taskbar grouping/pins separate from the stable Tau launcher.
+            // SAFETY: the application ID is a static, null-terminated UTF-16 string.
+            let result = unsafe {
+                windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+                    windows_sys::core::w!("app.tau.beta"),
+                )
+            };
+            if result < 0 {
+                return Err(format!(
+                    "Could not set Tau Beta application identity: {result:#x}"
+                ));
+            }
         }
-    }
-    let icon = image::load_from_memory(include_bytes!("../assets/tau-beta.png"))
-        .map_err(|e| e.to_string())?
-        .to_rgba8();
-    chad::run::<Desktop>(Config {
-        title: "Tau Beta".into(),
-        icon: Some(chad::AppIcon {
-            width: icon.width(),
-            height: icon.height(),
-            rgba: icon.into_raw(),
-        }),
-        size: (1100, 760),
-        redraw: chad::RedrawMode::OnDemand,
-        device_limits: limits(),
-        ..Default::default()
-    })
+        let icon = image::load_from_memory(include_bytes!("../assets/tau-beta.png"))
+            .map_err(|e| e.to_string())?
+            .to_rgba8();
+        chad::run::<Desktop>(Config {
+            title: "Tau Beta".into(),
+            icon: Some(chad::AppIcon {
+                width: icon.width(),
+                height: icon.height(),
+                rgba: icon.into_raw(),
+            }),
+            size: (1100, 760),
+            redraw: chad::RedrawMode::OnDemand,
+            device_limits: limits(),
+            ..Default::default()
+        })
+    })();
+    if let Err(error) = &result { crate::crash::record_error(&data_root, error); }
+    result
 }
 pub fn limits() -> wgpu::Limits {
     wgpu::Limits {

@@ -181,7 +181,7 @@ impl Controller {
         self.requests.clear();
         self.project_deletions.clear();
         self.codex_usage.offline();
-        self.network = Some(Network::start_cached(self.settings.clone(), self.wake.clone(),self.remote.clone()));
+        self.network = Some(Network::start_cached(self.settings.clone(), self.wake.clone(),self.remote.clone(),self.store.root.clone()));
     }
     pub fn configure(&mut self, settings: Settings) -> Result<()> {
         let settings = settings.normalized();

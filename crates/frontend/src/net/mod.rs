@@ -91,9 +91,9 @@ pub struct Network {
     pub files: tokio::sync::watch::Receiver<Option<Arc<crate::net::files::FileUpdate>>>,
 }
 impl Network {
-    pub fn start(settings: Settings, wake: Wake) -> Self { Self::start_inner(settings,wake,None) }
-    pub fn start_cached(settings: Settings, wake: Wake, cache: crate::replica::Cache) -> Self { Self::start_inner(settings,wake,Some(cache)) }
-    fn start_inner(settings: Settings, wake: Wake, cache: Option<crate::replica::Cache>) -> Self {
+    pub fn start(settings: Settings, wake: Wake) -> Self { Self::start_inner(settings,wake,None,None) }
+    pub fn start_cached(settings: Settings, wake: Wake, cache: crate::replica::Cache, crash_root: PathBuf) -> Self { Self::start_inner(settings,wake,Some(cache),Some(crash_root)) }
+    fn start_inner(settings: Settings, wake: Wake, cache: Option<crate::replica::Cache>, crash_root:Option<PathBuf>) -> Self {
         let (block_notices,replicas) = mpsc::channel(32);
         let (file_updates,files) = tokio::sync::watch::channel(None);
         let (index_updates,file_index) = tokio::sync::watch::channel(None);
@@ -108,7 +108,7 @@ impl Network {
                     .enable_all()
                     .build()
                 {
-                    Ok(rt) => rt.block_on(run(settings, rx, sink, cache, block_notices, file_updates, index_updates, interests)),
+                    Ok(rt) => rt.block_on(run(settings, rx, sink, cache, block_notices, file_updates, index_updates, interests, crash_root)),
                     Err(_) => {
                         sink.send(Event::Fatal("Cannot start network runtime".into()));
                     }
@@ -162,7 +162,7 @@ impl std::fmt::Display for HeartbeatTimeout {
 }
 impl std::error::Error for HeartbeatTimeout {}
 
-async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: EventSender, cache: Option<crate::replica::Cache>, block_notices:mpsc::Sender<ReplicaNotice>, file_updates:tokio::sync::watch::Sender<Option<Arc<crate::net::files::FileUpdate>>>, index_updates:tokio::sync::watch::Sender<Option<Arc<crate::net::files::IndexUpdate>>>, interests: sync::Interests) {
+async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: EventSender, cache: Option<crate::replica::Cache>, block_notices:mpsc::Sender<ReplicaNotice>, file_updates:tokio::sync::watch::Sender<Option<Arc<crate::net::files::FileUpdate>>>, index_updates:tokio::sync::watch::Sender<Option<Arc<crate::net::files::IndexUpdate>>>, interests: sync::Interests, crash_root:Option<PathBuf>) {
     let content_service = if let Some(cache)=cache {
         match sync::Content::start(cache,events.clone(),block_notices.clone(),file_updates,index_updates,interests).await {
             Ok(service)=>Some(service),
@@ -192,6 +192,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
     let mut epoch = 0u64;
     let mut attempt = 0;
     let mut jobs = tokio::task::JoinSet::new();
+    let mut crash_upload = None;
     let (prepared_tx,mut prepared_rx) = mpsc::channel::<(u64,Result<ClientRequest,(String,String)>)>(8);
     let (resolved_tx,mut resolved_rx)=mpsc::channel::<(u64,String,u64,Result<ServerMessage>,tokio::sync::OwnedSemaphorePermit,usize)>(8);
     let descriptor_budget=Arc::new(tokio::sync::Semaphore::new(128*1024*1024));
@@ -254,6 +255,12 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             generations.clear();
             let connected_at=Instant::now();
             if !events.send(Event::Ready {epoch,lineage:lineage.context("Missing source lineage")?,at:connected_at}) {return Ok(());}
+            if crash_upload.as_ref().is_none_or(tokio::task::JoinHandle::is_finished)
+                && let Some(root)=crash_root.clone()
+            {
+                let settings=settings.clone();
+                crash_upload=Some(tokio::spawn(async move { let _=crate::crash::upload_pending(&root,&settings).await; }));
+            }
             let mut next_ping = connected_at + HEARTBEAT_INTERVAL;
             let mut waiting: Option<(Vec<u8>, Instant)> = None;
             let mut metrics=tokio::time::interval_at(tokio::time::Instant::now()+Duration::from_secs(5),Duration::from_secs(5));
