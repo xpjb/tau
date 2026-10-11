@@ -2,6 +2,7 @@
 name = "tau-frontend"
 version = "0.7.17"
 edition = "2024"
+autotests = false
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -9,6 +10,10 @@ crate-type = ["rlib", "cdylib"]
 [[bin]]
 name = "tau"
 path = "src/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
 
 [build-dependencies]
 winresource = { version = "0.1", default-features = false }
