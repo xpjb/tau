@@ -11,7 +11,27 @@ use tokio::sync::watch;
 
 pub const QUEUE: &str = "@queue";
 const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub struct View { pub queue_removals:HashMap<String,u64>,pub previews:Vec<(String,Vec<String>,usize)>,pub partial:bool,pub queue_changed:bool,pub generation:String,pub sequence:u64,pub events:Vec<Event>,pub queue:QueueState,pub before:Option<u64>,pub delivered:Vec<String>, pub bodies:HashMap<String,Body>, pub incomplete:std::collections::HashSet<String>, pub states:HashMap<String,ToolState>, pub parents:HashMap<String,String> }
+const VIEW_ROOTS: usize = 256;
+const VIEW_BEFORE: usize = VIEW_ROOTS / 2;
+pub(crate) const VIEW_BODY_BYTES: usize = 8*1024*1024;
+pub struct View {
+    pub queue_removals: HashMap<String,u64>,
+    pub partial: bool,
+    pub trim_bodies: bool,
+    pub queue_changed: bool,
+    pub generation: String,
+    pub sequence: u64,
+    pub events: Vec<Event>,
+    pub queue: QueueState,
+    pub before: Option<FeedPosition>,
+    pub start: Option<FeedPosition>,
+    pub after: bool,
+    pub delivered: Vec<String>,
+    pub bodies: HashMap<String,Body>,
+    pub incomplete: std::collections::HashSet<String>,
+    pub states: HashMap<String,ToolState>,
+    pub parents: HashMap<String,String>,
+}
 /// Verified preview state, separate from both authored bytes and finality.
 /// None means the body directory/header has not arrived, not a completed empty body.
 #[derive(Clone, Debug, Hash)]
@@ -130,7 +150,7 @@ impl Cache {
             }
             tx.commit()?;
         }
-        self.snapshot_inner(scope, Some(&ids), &BTreeSet::new(), true, None, true, true)?.context("Preview has no native directory")
+        self.snapshot_inner(scope, Some(&ids), Some(&ids), true, None, true, true)?.context("Preview has no native directory")
     }
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path.parent().context("Cache path has no parent")?)?;
@@ -173,27 +193,33 @@ impl Cache {
         if !d.full {d.ids.insert(id.into());d.full=d.ids.len()>128;}
         if d.full {d.ids.clear();}
     }
-    pub fn viewport_changed(&self,scope:&str,ids:impl Iterator<Item=String>) {
+    pub fn viewport_changed(&self,scope:&str,ids:impl Iterator<Item=String>,rewindow:bool) {
         let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();
-        d.viewing=true;
+        d.viewing=true;d.full|=rewindow;
         if !d.full {d.ids.extend(ids);d.full=d.ids.len()>128;}
         if d.full {d.ids.clear();}
     }
+    #[cfg(test)]
     pub fn changes(&self,scope:&str,visible:Option<&BTreeSet<String>>,full:bool)->Result<Option<View>> {
-        self.changes_retaining(scope, visible, &BTreeSet::new(), full)
+        self.changes_window(scope,visible,visible,&BTreeSet::new(),true,full)
     }
-    pub(crate) fn changes_retaining(&self, scope: &str, visible: Option<&BTreeSet<String>>, retained: &BTreeSet<String>, full: bool) -> Result<Option<View>> {
+    pub(crate) fn changes_window(&self, scope: &str, visible: Option<&BTreeSet<String>>, anchor: Option<&BTreeSet<String>>, loaded: &BTreeSet<String>, tail: bool, full: bool) -> Result<Option<View>> {
         let dirty=self.dirty.lock().unwrap().remove(scope).unwrap_or_default();
-        if full || dirty.full {return self.snapshot_inner(scope,visible,retained,true,None,true,full || dirty.viewing);}
-        if dirty.ids.is_empty() {return Ok(None);}
-        let (ids,queue)=self.read(|db| {let mut ids=BTreeSet::new();let mut queue=false;
+        if full || dirty.full {return self.snapshot_inner(scope,visible,anchor,true,None,true,full || dirty.viewing);}
+        if dirty.ids.is_empty() {
+            return if dirty.viewing {self.snapshot_inner(scope,visible,anchor,true,Some(&[]),false,true)} else {Ok(None)};
+        }
+        let (ids,queue,outside)=self.read(|db| {let mut ids=BTreeSet::new();let mut queue=false;let mut outside=false;
             for id in dirty.ids {
                 if let Some(h)=tau_block_store::header(db,scope,&id)? {
-                    queue|=h.id==QUEUE || h.parent.as_deref()==Some(QUEUE);
-                    ids.insert(h.parent.filter(|p|p!=QUEUE).unwrap_or(h.id));
+                    if h.id==QUEUE || h.parent.as_deref()==Some(QUEUE) {queue=true;continue;}
+                    let root=h.parent.unwrap_or(h.id);
+                    if loaded.is_empty() || loaded.contains(&root) {ids.insert(root);} else {outside=true;}
                 }
-            }Ok((ids.into_iter().collect::<Vec<_>>(),queue))})?;
-        self.snapshot_inner(scope,visible,retained,true,Some(&ids),queue,dirty.viewing)
+            }Ok((ids.into_iter().collect::<Vec<_>>(),queue,outside))})?;
+        if outside {return self.snapshot_inner(scope,visible,if tail {None} else {anchor},true,None,true,dirty.viewing);}
+        if ids.is_empty() && !queue {return Ok(None);}
+        self.snapshot_inner(scope,visible,anchor,true,Some(&ids),queue,dirty.viewing)
     }
     pub(crate) fn epoch(&self)->u64 {replica_epoch(&self.writer()).unwrap_or(u64::MAX)}
     pub fn clear(&self)->Result<()> {
@@ -269,37 +295,73 @@ impl Cache {
         if let Some(current) = tau_block_store::header(&tx,scope,&header.id)? { adopt_echo(&tx,scope,&current)?; }
         tx.commit()?;self.changed(scope,&header.id,false); Ok(())
     }
-    #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,&BTreeSet::new(),false,None,true,true)}
+    #[cfg(test)] pub fn snapshot(&self,scope:&str)->Result<Option<View>> {self.snapshot_inner(scope,None,None,false,None,true,true)}
     pub(crate) fn resume_viewport(&self, scope: &str, local: &LocalChat) -> Result<Option<BTreeSet<String>>> {
         if local.position.follow { return Ok(None); }
         let Some(key) = &local.position.key else { return Ok(None); };
         self.read(|db| {
-            let roots = tau_block_store::children(db, scope, None)?;
-            let anchor = roots.iter().position(|h| {
-                key == &format!("{scope}/{}",h.id) || key == &format!("{scope}/details:{}",h.id)
-                    || key == &format!("{scope}/tool:{}",h.id) || key == &format!("{scope}/thinking:{}",h.id)
-                    || h.meta.pointer("/event/origin/requestId").and_then(|v|v.as_str())
-                        .is_some_and(|request| key == &format!("message:{scope}:{request}"))
-            });
-            Ok(anchor.map(|index| roots.iter().skip(index.saturating_sub(14)).take(30)
-                .filter(|h|h.id!=QUEUE).map(|h|h.id.clone()).collect()))
+            let prefix=format!("{scope}/");
+            let direct=key.strip_prefix(&prefix).map(|id| id.strip_prefix("details:").or_else(||id.strip_prefix("tool:")).or_else(||id.strip_prefix("thinking:")).unwrap_or(id));
+            if let Some(id)=direct && tau_block_store::header(db,scope,id)?.is_some_and(|h|h.parent.is_none() && h.id!=QUEUE) {
+                return Ok(Some(BTreeSet::from([id.to_owned()])));
+            }
+            let request=key.strip_prefix(&format!("message:{scope}:"));
+            let Some(request)=request else {return Ok(None);};
+            let mut query=db.prepare("SELECT header FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 ORDER BY position,id")?;
+            for raw in query.query_map(rusqlite::params![scope,QUEUE],|r|r.get::<_,String>(0))? {
+                let h:BlockHeader=serde_json::from_str(&raw?)?;
+                if h.meta.pointer("/event/origin/requestId").and_then(|v|v.as_str())==Some(request) {
+                    return Ok(Some(BTreeSet::from([h.id])));
+                }
+            }
+            Ok(None)
         })
     }
-    pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,&BTreeSet::new(),true,None,true,true)}
+    pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,visible,true,None,true,true)}
     pub fn has_snapshot(&self,scope:&str)->Result<bool> {self.read(|db|Ok(tau_block_store::cached_feed(db,scope,None)?.is_some()))}
-    fn snapshot_inner(&self, scope: &str, visible:Option<&BTreeSet<String>>,retained:&BTreeSet<String>,preview:bool,only:Option<&[String]>,include_queue:bool,touch:bool) -> Result<Option<View>> {
+    fn snapshot_inner(&self, scope: &str, visible:Option<&BTreeSet<String>>,anchor:Option<&BTreeSet<String>>,preview:bool,only:Option<&[String]>,include_queue:bool,touch:bool) -> Result<Option<View>> {
         let Some((view,accessed))=self.read(|db| {
         let Some(page) = tau_block_store::cached_feed(&db,scope,None)? else { return Ok(None); };
-        let mut body_budget=8*1024*1024usize;let mut group_budgets=HashMap::new();let mut preview_ids=HashMap::<String,Vec<String>>::new();
-        let mut roots = if let Some(ids)=only {ids.iter().filter_map(|id|tau_block_store::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?} else {tau_block_store::children(&db,scope,None)?};
-        let recent=roots.iter().rev().filter(|h|h.id!=QUEUE).take(30).map(|h|h.id.clone()).collect::<BTreeSet<_>>();
+        let mut body_budget=VIEW_BODY_BYTES;let mut group_budgets=HashMap::new();
+        let mut roots = if let Some(ids)=only {
+            ids.iter().filter_map(|id|tau_block_store::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?
+        } else {
+            let mut at=None::<BlockHeader>;
+            for id in anchor.into_iter().flatten() {
+                let Some(mut h)=tau_block_store::header(&db,scope,id)? else {continue;};
+                while let Some(parent)=h.parent.clone() {
+                    if parent==QUEUE {break;}
+                    let Some(root)=tau_block_store::header(&db,scope,&parent)? else {break;};
+                    h=root;
+                }
+                if h.parent.is_none() && h.id!=QUEUE && at.as_ref().is_none_or(|old|(h.order,h.id.as_str())<(old.order,old.id.as_str())) {at=Some(h);}
+            }
+            if let Some(at)=at {
+                let mut query=db.prepare("SELECT header FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 AND (position<?3 OR (position=?3 AND id<?4)) ORDER BY position DESC,id DESC LIMIT ?5")?;
+                let mut older=query.query_map(rusqlite::params![scope,QUEUE,at.order,at.id,VIEW_ROOTS as u64],|r|r.get::<_,String>(0))?
+                    .map(|raw|Ok(serde_json::from_str::<BlockHeader>(&raw?)?)).collect::<Result<Vec<_>>>()?;
+                let mut query=db.prepare("SELECT header FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 AND (position>?3 OR (position=?3 AND id>=?4)) ORDER BY position,id LIMIT ?5")?;
+                let mut newer=query.query_map(rusqlite::params![scope,QUEUE,at.order,at.id,VIEW_ROOTS as u64],|r|r.get::<_,String>(0))?
+                    .map(|raw|Ok(serde_json::from_str::<BlockHeader>(&raw?)?)).collect::<Result<Vec<_>>>()?;
+                newer.truncate(VIEW_ROOTS-older.len().min(VIEW_BEFORE));
+                older.truncate(VIEW_ROOTS-newer.len());
+                older.reverse();older.into_iter().chain(newer).collect()
+            } else {
+                let mut query=db.prepare("SELECT header FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 ORDER BY position DESC,id DESC LIMIT ?3")?;
+                let mut roots=query.query_map(rusqlite::params![scope,QUEUE,VIEW_ROOTS as u64],|r|r.get::<_,String>(0))?
+                    .map(|raw|Ok(serde_json::from_str::<BlockHeader>(&raw?)?)).collect::<Result<Vec<_>>>()?;
+                roots.reverse();roots
+            }
+        };
+        let start=roots.iter().min_by_key(|h|(h.order,h.id.as_str())).map(|h|FeedPosition {order:h.order,id:h.id.clone()});
+        let end=roots.iter().max_by_key(|h|(h.order,h.id.as_str())).map(|h|FeedPosition {order:h.order,id:h.id.clone()});
+        let cached_before=if let Some(start)=&start {db.query_row("SELECT EXISTS(SELECT 1 FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 AND (position<?3 OR (position=?3 AND id<?4)))",rusqlite::params![scope,QUEUE,start.order,start.id],|r|r.get(0))?} else {false};
+        let after=if let Some(end)=&end {db.query_row("SELECT EXISTS(SELECT 1 FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 AND (position>?3 OR (position=?3 AND id>?4)))",rusqlite::params![scope,QUEUE,end.order,end.id],|r|r.get(0))?} else {false};
+        let before=if cached_before {start.clone()} else {page.before.clone()};
+        let recent=roots.iter().rev().take(30).map(|h|h.id.clone()).collect::<BTreeSet<_>>();
         let visible=visible.unwrap_or(&recent);
-        let resident = |id: &String| visible.contains(id) || retained.contains(id);
-        let wanted=|h:&BlockHeader|!preview || resident(&h.id) || h.parent.as_ref().is_some_and(resident);
-        // Hydrate the current viewport first, then already-read scrollback. A
-        // history page/metadata refresh must not blank the previous screen, but
-        // retained bytes must never consume the foreground projection budget.
-        roots.sort_by_key(|h| (!visible.contains(&h.id), !retained.contains(&h.id), std::cmp::Reverse(h.order)));
+        let wanted=|h:&BlockHeader|!preview || visible.contains(&h.id) || h.parent.as_ref().is_some_and(|parent|visible.contains(parent));
+        roots.sort_by_key(|h| (!visible.contains(&h.id), std::cmp::Reverse(h.order)));
         let mut accessed = BTreeSet::new();
         let mut read = |id: &str, limit: usize| -> Result<Vec<u8>> {
             let bytes = tau_block_store::cached_preview(&db, scope, id, limit)?;
@@ -320,7 +382,6 @@ impl Cache {
                 if let Some(parent)=&h.parent {parents.insert(h.id.clone(),parent.clone());}
                 let group=h.parent.as_deref().unwrap_or(&h.id);
                 let allowance=group_budgets.entry(group).or_insert(256*1024usize);
-                preview_ids.entry(group.into()).or_default().push(h.id.clone());
                 if let Some(reference)=h.meta.get("fullEvent") {
                     let id=reference["id"].as_str().context("Invalid metadata reference")?;
                     let length=metadata_length(&db,scope,reference)?.unwrap_or(u64::MAX);
@@ -381,13 +442,8 @@ impl Cache {
                 .collect::<rusqlite::Result<HashMap<String,u64>>>()?
         } else { HashMap::new() };
         events.sort_by_key(|e|e.order);
-        let mut previews = preview_ids.into_iter().map(|(root,ids)| {
-            let used=256*1024-group_budgets[root.as_str()]; (root,ids,used)
-        }).collect::<Vec<_>>();
-        // Feed's bounded LRU evicts retained/offscreen groups before the viewport.
-        previews.sort_by_key(|(root,_,_)| (visible.contains(root), root.clone()));
-        Ok(Some((View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
-            events,queue,before:page.before.as_ref().map(|p|p.order),delivered,bodies,incomplete,states,parents },accessed)))
+        Ok(Some((View { queue_removals,partial:only.is_some(),trim_bodies:only.is_some() && touch,queue_changed:include_queue,generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
+            events,queue,before,start,after,delivered,bodies,incomplete,states,parents },accessed)))
         })? else {return Ok(None);};
         // Recency is disposable metadata, not a prerequisite for rendering a
         // verified read. Never wait for the ordered writer just to refresh it.
@@ -408,11 +464,17 @@ impl Cache {
         ensure!(ids.len()<=4096,"Copy fewer than 4097 sections at a time");
         let mut seen=BTreeSet::new();let ids=ids.iter().filter(|id|seen.insert(*id)).cloned().collect::<Vec<_>>();let ids=ids.as_slice();
         if !self.read(|db|copy_complete(db,scope,ids))? {return Ok(None);}
-        let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false,true)?.context("Details are not cached")?;
+        let view=self.snapshot_inner(scope,None,None,false,Some(ids),false,true)?.context("Details are not cached")?;
         let text=view.copy_details(ids);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
     }
-    pub fn history_cursor(&self, scope: &str) -> Result<Option<FeedPosition>> {
-        self.read(|db|Ok(tau_block_store::cached_feed(db,scope,None)?.and_then(|p|p.before)))
+    pub fn history_cursor(&self, scope: &str, start: Option<&FeedPosition>) -> Result<Option<FeedPosition>> {
+        self.read(|db| {
+            if let Some(start)=start {
+                let older:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 AND (position<?3 OR (position=?3 AND id<?4)))",rusqlite::params![scope,QUEUE,start.order,start.id],|r|r.get(0))?;
+                if older {return Ok(None);}
+            }
+            Ok(tau_block_store::cached_feed(db,scope,None)?.and_then(|p|p.before))
+        })
     }
     #[cfg(test)]
     pub fn plan(&self,scope:&str,local:&LocalChat,copy:&[String])->Result<Plan> {self.plan_visible(scope,local,copy,None)}

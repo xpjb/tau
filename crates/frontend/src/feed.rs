@@ -44,7 +44,6 @@ pub struct Feed {
     pub sequence: u64,
     pub events: BTreeMap<u64, Event>,
     by_id: HashMap<String, u64>,
-    previews:std::collections::VecDeque<(String,Vec<String>,usize)>,
     pub queue: QueueState,
     pub queue_transitions: HashMap<String,u64>, // Display-only rows awaiting the root cursor.
     pub bodies: HashMap<String,crate::replica::Body>,
@@ -52,7 +51,9 @@ pub struct Feed {
     pub block_states: HashMap<String,blocks::ToolState>,
     pub parents: HashMap<String,String>,
     pub children: HashMap<String, Vec<String>>,
-    pub before: Option<u64>,
+    pub before: Option<blocks::FeedPosition>,
+    pub start: Option<blocks::FeedPosition>,
+    pub after: bool,
     pub synchronized: bool,
     pub loading: bool,
     pub opening: bool,
@@ -121,36 +122,39 @@ impl Feed {
     }
 
     /// Conservative decoded-view accounting, not a process-RSS promise. Headers
-    /// are <=4 KiB each; preview payloads and full queued text are counted too.
+    /// are <=4 KiB each; decoded event fields and full queued text are counted too.
     pub(crate) fn resident_bytes(&self) -> usize {
-        self.previews.iter().map(|(_,_,bytes)|bytes).sum::<usize>()
-            + self.events.len() * tau_net::blocks::MAX_BLOCK_HEADER_BYTES
+        self.events.len() * tau_net::blocks::MAX_BLOCK_HEADER_BYTES
+            + self.events.values().map(|event|event.text.len()+event.error_message.as_ref().map_or(0,String::len)
+                + event.tool_name.as_ref().map_or(0,String::len)+event.stop_reason.as_ref().map_or(0,String::len)
+                + event.attachment.as_ref().and_then(|file|file.caption.as_ref()).map_or(0,String::len)).sum::<usize>()
             + self.queue.requests.iter().map(|q|q.text.len()+1024).sum::<usize>()
     }
 
-    pub(crate) fn retained_roots(&self) -> std::collections::BTreeSet<String> {
-        self.previews.iter().map(|(root,_,_)| root.clone()).collect()
+    pub(crate) fn root_ids(&self) -> std::collections::BTreeSet<String> {
+        self.events.values().filter(|event|!self.parents.contains_key(&event.id)).map(|event|event.id.clone()).collect()
     }
 
     pub fn event(&self, id: &str) -> Option<&Event> {
         self.by_id.get(id).and_then(|n| self.events.get(n))
     }
 
-    fn drop_preview(&mut self,ids:&[String]) {
-        fn short(value:&mut Option<String>) {if let Some(s)=value {let mut n=s.len().min(64);while !s.is_char_boundary(n) {n-=1;}*s=s[..n].to_owned();}}
-        for id in ids {
-            if let Some(event)=self.by_id.get(id).and_then(|n|self.events.get_mut(n)) {
-                event.text.clear();
-                if let Some(body) = self.bodies.get_mut(id) { body.resident = 0; body.limited = false; }
-                short(&mut event.error_message);short(&mut event.tool_name);short(&mut event.stop_reason);
-                if let Some(file)=&mut event.attachment {short(&mut file.caption);}
-                self.incomplete.insert(id.clone());
-            }
-        }
-    }
     pub(crate) fn native_view(&mut self,mut view:crate::replica::View)->Result<Vec<String>> {
         let mut ids = HashSet::new(); let mut orders = HashSet::new();
-        ensure!(view.events.iter().all(|e| !e.id.is_empty() && ids.insert(&e.id) && orders.insert(e.order)), "Duplicate native event identity/order");
+        ensure!(view.events.iter().all(|e| !e.id.is_empty() && ids.insert(e.id.as_str()) && orders.insert(e.order)), "Duplicate native event identity/order");
+        let body_bytes=|event:&Event| event.text.len()+event.error_message.as_ref().map_or(0,String::len)
+            + event.tool_name.as_ref().map_or(0,String::len)+event.stop_reason.as_ref().map_or(0,String::len)
+            + event.attachment.as_ref().and_then(|file|file.caption.as_ref()).map_or(0,String::len);
+        if view.trim_bodies && self.events.values().filter(|event|!ids.contains(event.id.as_str())).map(body_bytes).sum::<usize>()
+            + view.events.iter().map(body_bytes).sum::<usize>() > crate::replica::VIEW_BODY_BYTES {
+            let short=|value:&mut Option<String>| if let Some(text)=value {let mut n=text.len().min(64);while !text.is_char_boundary(n) {n-=1;}*text=text[..n].to_owned();};
+            for event in self.events.values_mut().filter(|event|!ids.contains(event.id.as_str())) {
+                event.text.clear();short(&mut event.error_message);short(&mut event.tool_name);short(&mut event.stop_reason);
+                if let Some(file)=&mut event.attachment {short(&mut file.caption);}
+                if let Some(body)=self.bodies.get_mut(&event.id) {body.resident=0;body.limited=false;}
+                self.incomplete.insert(event.id.clone());
+            }
+        }
         if self.generation == view.generation {
             if view.queue_changed {
                 for (i,q) in self.queue.requests.iter().enumerate() {
@@ -169,10 +173,6 @@ impl Feed {
             self.queue_transitions.retain(|_,revision| *revision > view.sequence);
         } else { self.queue_transitions.clear(); }
         let delivered=view.delivered.clone();
-        if !view.partial {while let Some((_,ids,_))=self.previews.pop_front() {self.drop_preview(&ids);}}
-        for (root,_,_) in &view.previews {
-            if let Some(i)=self.previews.iter().position(|(old,_,_)|old==root) {let (_,ids,_)=self.previews.remove(i).unwrap();self.drop_preview(&ids);}
-        }
         if view.partial {
             if view.queue_changed {self.incomplete.retain(|id|!id.starts_with("queued:"));self.bodies.retain(|id,_|!id.starts_with("queued:"));}
             for event in &view.events {self.incomplete.remove(&event.id);self.parents.remove(&event.id);self.block_states.remove(&event.id);}
@@ -187,14 +187,10 @@ impl Feed {
             self.bodies=view.bodies;self.incomplete=view.incomplete;self.block_states=view.states;self.parents=view.parents;
         }
         for event in view.events { self.by_id.insert(event.id.clone(), event.order); self.events.insert(event.order, event); }
-        self.generation = view.generation; self.sequence = view.sequence; self.before = view.before;
+        self.generation = view.generation; self.sequence = view.sequence;
+        if !view.partial {self.before=view.before;self.start=view.start;self.after=view.after;}
         if view.queue_changed { self.queue = view.queue; }
         self.revision += 1;
-        self.previews.extend(view.previews.into_iter().filter(|(_,_,bytes)|*bytes>0));
-        let mut bytes=self.previews.iter().map(|(_,_,bytes)|bytes).sum::<usize>();
-        while self.previews.len()>128 || bytes>8*1024*1024 {
-            let (_,ids,size)=self.previews.pop_front().unwrap();bytes-=size;self.drop_preview(&ids);
-        }
         Ok(delivered)
     }
 }

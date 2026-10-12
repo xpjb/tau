@@ -124,12 +124,12 @@ fn download_destination_survives_empty_loading_and_multiple_older_pages() {
     h.app.controller.preview("demo", events[50..].to_vec(), QueueState::default(), Some(50)).unwrap();
     h.app.controller.epoch = Some(1); // Allow the existing near-edge paging gate.
     h.app.frame(&h.ctx, h.ctx.view());
-    assert_eq!(h.app.root.workspace.chat.transcript.history_attempt.as_ref().unwrap().2, 50);
+    assert_eq!(h.app.root.workspace.chat.transcript.history_attempt.as_ref().unwrap().2.order, 50);
     assert!(h.app.root.workspace.chat.transcript.locating_download());
     assert_eq!(h.app.controller.chats["demo"].local.position.key, before.key);
     h.app.controller.preview("demo", events[30..].to_vec(), QueueState::default(), Some(30)).unwrap();
     h.app.frame(&h.ctx, h.ctx.view());
-    assert_eq!(h.app.root.workspace.chat.transcript.history_attempt.as_ref().unwrap().2, 30);
+    assert_eq!(h.app.root.workspace.chat.transcript.history_attempt.as_ref().unwrap().2.order, 30);
     assert!(h.app.root.workspace.chat.transcript.locating_download());
     h.app.controller.preview("demo", events[0..].to_vec(), QueueState::default(), None).unwrap();
     h.app.controller.epoch = None;

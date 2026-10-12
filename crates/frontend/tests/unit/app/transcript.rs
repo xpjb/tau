@@ -187,3 +187,19 @@ fn cold_reading_anchor_is_measured_before_applying_its_deep_saved_offset() {
         assert!((t.scroll.value - row.top - 1200.).abs() < 0.1);
     }
 }
+
+#[test]
+fn transcript_page_keys_move_one_view_and_end_returns_to_latest() {
+    let mut h=Harness::new(false);h.settle();h.app.ui.focus=None;
+    let bottom=h.app.root.workspace.chat.transcript.scroll.max;
+    h.app.key("PageUp",false,false);
+    let up=h.app.root.workspace.chat.transcript.scroll.value;
+    assert!(up<bottom && bottom-up<=h.app.root.workspace.chat.transcript.scroll.rect.height);
+    h.app.key("PageDown",false,false);
+    assert!(h.app.root.workspace.chat.transcript.scroll.value>up);
+    h.app.controller.chats.get_mut("demo").unwrap().feed.after=true;
+    h.app.key("End",false,false);h.frame();
+    assert!(!h.app.controller.chats["demo"].feed.after);
+    assert!(h.app.controller.chats["demo"].local.position.follow);
+    assert_eq!(h.app.root.workspace.chat.transcript.scroll.value,h.app.root.workspace.chat.transcript.scroll.max);
+}

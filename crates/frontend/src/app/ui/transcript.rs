@@ -41,9 +41,10 @@ pub(in crate::app) struct Transcript {
     pub models: QuickModels,
     pub placed: Vec<Placed>,
     reading: Reading,
-    pub history_attempt: Option<(String, String, u64, u64)>,
+    pub history_attempt: Option<(String, String, tau_net::blocks::FeedPosition, u64)>,
     pub autoscroll: Option<Autoscroll>,
     pub interests: BTreeSet<String>,
+    pub window: BTreeSet<String>,
     selection: Target,
     pub(super) selecting: bool,
     binding: Option<(String, Option<String>, Option<String>)>,
@@ -62,6 +63,7 @@ impl Transcript {
             history_attempt: None,
             autoscroll: None,
             interests: BTreeSet::new(),
+            window: BTreeSet::new(),
             selection: Target { scope: id, widget: Id::new() },
             selecting: false,
             binding: None,
@@ -71,6 +73,7 @@ impl Transcript {
         self.scroll.rect = Rect::new(0., 0., 0., 0.);
         self.horizontal.rect = self.scroll.rect;
         self.interests.clear();
+        self.window.clear();
         self.models.controls.begin();
         for row in &mut self.rows {
             row.hide();
@@ -166,12 +169,17 @@ impl Transcript {
     /// Called for actual scrolling, not as a paint-time save/restore round trip.
     pub fn remember_scroll(&mut self, cx: &mut Context<'_>) {
         let follow = !self.scroll.moving() && self.autoscroll.is_none()
+            && !cx.model.selected().is_some_and(|chat|chat.feed.after)
             && self.scroll.max - self.scroll.value < cx.ui.scale;
         self.reading = Reading::Position(self.position(follow).unwrap_or_default());
         self.checkpoint(cx);
     }
     pub fn tail(&mut self, cx: &mut Context<'_>) {
         self.cancel();
+        if cx.model.selected().is_some_and(|chat|chat.feed.after) {
+            let result=cx.model.latest();
+            cx.report(result);
+        }
         self.reading = Reading::Position(Position { follow: true, ..Position::default() });
         self.scroll.value = self.scroll.max;
         self.checkpoint(cx);
@@ -213,7 +221,7 @@ impl Transcript {
         if !feed.synchronized || feed.loading {
             return;
         }
-        if let (Some(before), Some(epoch)) = (feed.before, cx.model.epoch) {
+        if let (Some(before), Some(epoch)) = (feed.before.clone(), cx.model.epoch) {
             let attempt = (session.to_owned(), feed.generation.clone(), before, epoch);
             if self.history_attempt.as_ref() == Some(&attempt) {
                 return;
@@ -350,6 +358,7 @@ impl Widget for Transcript {
         };
         self.bind(cx);
         self.interests.clear();
+        self.window.clear();
         self.models.controls.begin();
         let s = cx.ui.scale;
         let viewport = frame.bounds;
@@ -459,6 +468,7 @@ impl Widget for Transcript {
                         if position.key.as_ref().is_some_and(|key| row.anchor(key).is_some()))
             });
             if !active && (p.top + p.height < top || p.top > bottom) { continue; }
+            if let Some(id)=p.item.root(&cx.model.chats[&session]) {self.window.insert(id.to_owned());}
             let mut row = if let Some(owner) = owners.remove(&p.key) { owner } else {
                 let mut owner = MessageRow::new(p.item.clone(), &session); owner.measure(bubble_width, &session, cx); owner
             };
@@ -533,6 +543,18 @@ impl Transcript {
                 cx.services.platform.push(PlatformAction::Copy(text));
             }
             return true;
+        }
+        if cx.ui.focus.is_none() && let Event::Key {key,ctrl:false,..}=*event
+            && matches!(key,"PageUp"|"PageDown"|"Home"|"End") {
+            self.cancel();self.history_attempt=None;
+            match key {
+                "PageUp"=>self.scroll.set(self.scroll.value-self.scroll.rect.height*0.9),
+                "PageDown"=>self.scroll.set(self.scroll.value+self.scroll.rect.height*0.9),
+                "Home"=>self.scroll.set(0.),
+                "End"=>{self.tail(cx);return true;}
+                _=>unreachable!(),
+            }
+            self.remember_scroll(cx);cx.ui.dirty=true;return true;
         }
         if let Event::Down { point, .. } = *event
             && contains(self.scroll.rect, point)

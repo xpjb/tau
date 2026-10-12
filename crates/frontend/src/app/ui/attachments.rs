@@ -362,7 +362,7 @@ pub(in crate::app) struct AttachmentBrowser {
     form: super::controls::Controls<BrowserChoice>,
     bounds: Rect,
     binding: Option<(String, Option<String>, String)>,
-    history_attempt: Option<(String, String, u64, u64)>,
+    history_attempt: Option<(String, String, tau_net::blocks::FeedPosition, u64)>,
     pub interests: BTreeSet<String>,
 }
 impl AttachmentBrowser {
@@ -417,7 +417,7 @@ impl AttachmentBrowser {
         };
         if feed.synchronized
             && !feed.loading
-            && let (Some(before), Some(epoch)) = (feed.before, cx.model.epoch)
+            && let (Some(before), Some(epoch)) = (feed.before.clone(), cx.model.epoch)
         {
             let attempt = (session.clone(), feed.generation.clone(), before, epoch);
             if self.history_attempt.as_ref() != Some(&attempt) {

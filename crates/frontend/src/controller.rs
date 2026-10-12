@@ -54,6 +54,11 @@ struct Catalog {
     sessions_done:bool,projects_done:bool,refresh:bool,
     sessions:Vec<SessionSummary>,projects:Vec<Project>,
 }
+struct Viewport {
+    scope: String,
+    window: std::collections::BTreeSet<String>,
+    visible: std::collections::BTreeSet<String>,
+}
 pub struct Controller {
     pub store: Store,
     pub settings: Settings,
@@ -84,7 +89,7 @@ pub struct Controller {
     block_plan: Vec<crate::replica::Plan>,
     background_dirty: std::collections::HashSet<String>,
     plan_dirty:std::cell::Cell<bool>,
-    viewport:Option<(String,std::collections::BTreeSet<String>)>,
+    viewport:Option<Viewport>,
     copy:Option<(String,Vec<String>)>,
     pub copied:Option<String>,
     pub file_update:Option<std::sync::Arc<crate::net::files::FileUpdate>>,
@@ -1000,10 +1005,23 @@ impl Controller {
         if feed.loading || !feed.synchronized {
             return Ok(());
         }
-        if let Some(before) = self.remote.history_cursor(&id)? {
+        if let Some(before) = self.remote.history_cursor(&id,feed.start.as_ref())? {
             self.network.as_ref().ok_or_else(||anyhow::Error::from(net::ConnectionUnavailable))?.history(id.clone(),before)?;
             self.chats.get_mut(&id).unwrap().feed.loading = true;
         }
+        Ok(())
+    }
+    pub fn latest(&mut self) -> Result<()> {
+        let Some(id)=self.account.selected.clone() else {return Ok(());};
+        let Some(view)=self.remote.preview(&id,None)? else {return Ok(());};
+        let chat=self.chats.get_mut(&id).context("Unknown cached chat")?;
+        let delivered=chat.feed.native_view(view)?;
+        chat.feed.synchronized=chat.feed.queue.available;
+        let before=chat.local.pending.len();
+        chat.local.reconcile_complete(&chat.feed.queue,&delivered,&chat.feed.incomplete);
+        chat.reconcile();
+        if chat.local.pending.len()!=before {self.store.save_chat(&self.identity,&id,&chat.local)?;}
+        self.viewport=None;self.plan_dirty.set(true);
         Ok(())
     }
     pub fn download_key(session: &str, entry: &str) -> String {
@@ -1187,8 +1205,14 @@ impl Controller {
         self.plan_dirty.set(true);
         self.remember_local_body(scope);
         let full=self.chats.get(scope).is_none_or(|chat|chat.feed.generation.is_empty());
-        let retained = self.chats.get(scope).map(|chat| chat.feed.retained_roots()).unwrap_or_default();
-        if let Some(view) = self.remote.changes_retaining(scope,self.viewport.as_ref().filter(|(id,_)|id==scope).map(|(_,ids)|ids),&retained,full)? {
+        let loaded=self.chats.get(scope).map(|chat|chat.feed.root_ids()).unwrap_or_default();
+        let tail=self.chats.get(scope).is_none_or(|chat|chat.local.position.follow);
+        let viewport=self.viewport.as_ref().filter(|viewport|viewport.scope==scope);
+        let resume=if !tail && viewport.is_none_or(|viewport|viewport.window.is_empty()) {
+            self.chats.get(scope).map(|chat|self.remote.resume_viewport(scope,&chat.local)).transpose()?.flatten()
+        } else {None};
+        let anchor=viewport.and_then(|viewport|(!viewport.window.is_empty()).then_some(&viewport.window)).or(resume.as_ref());
+        if let Some(view) = self.remote.changes_window(scope,viewport.map(|viewport|&viewport.visible),anchor,&loaded,tail,full)? {
             let chat = self.chats.get_mut(scope).context("Unknown cached chat")?;
             let delivered=chat.feed.native_view(view)?;
             chat.feed.synchronized = chat.feed.queue.available;
@@ -1208,12 +1232,21 @@ impl Controller {
         self.watch_blocks()?;
         Ok(())
     }
-    pub fn viewport(&mut self,scope:&str,ids:std::collections::BTreeSet<String>) {
-        if self.viewport.as_ref().is_some_and(|(id,old)|id==scope && old==&ids) {return;}
-        // Leaving the viewport is not invalidation. Keep those verified previews
-        // warm until Feed's byte/group budget needs the space.
-        self.remote.viewport_changed(scope,ids.iter().cloned());
-        self.viewport=Some((scope.into(),ids));self.plan_dirty.set(true);
+    pub fn viewport(&mut self, scope: &str, window: std::collections::BTreeSet<String>, visible: std::collections::BTreeSet<String>) {
+        if self.viewport.as_ref().is_some_and(|old|old.scope==scope && old.window==window && old.visible==visible) {return;}
+        let rewindow=self.chats.get(scope).is_some_and(|chat| {
+            let roots=chat.feed.events.values().filter(|event|!chat.feed.parents.contains_key(&event.id))
+                .map(|event|event.id.as_str()).collect::<Vec<_>>();
+            let mut positions=roots.iter().enumerate().filter(|(_,id)|window.contains::<str>(*id)).map(|(index,_)|index);
+            let Some(first)=positions.next() else {return false;};
+            let last=positions.last().unwrap_or(first);
+            let guard=(roots.len()/4).clamp(8,64);
+            (chat.feed.before.is_some() && first<guard)
+                || (chat.feed.after && roots.len().saturating_sub(last+1)<guard)
+        });
+        self.remote.viewport_changed(scope,visible.iter().cloned(),rewindow);
+        self.viewport=Some(Viewport {scope:scope.into(),window,visible});
+        self.plan_dirty.set(true);
         if let Err(error)=self.refresh_blocks(scope) {self.report_error(error);}
     }
     fn sync_scopes(&self) -> Vec<String> {
@@ -1273,7 +1306,7 @@ impl Controller {
                 self.ensure_chat(&id)?;
                 self.remote.plan_active(&id, &self.chats[&id].local,
                     self.copy.as_ref().map_or(&[],|(_,ids)|ids.as_slice()),
-                    self.viewport.as_ref().filter(|(scope,_)|scope==&id).map(|(_,ids)|ids))?
+                    self.viewport.as_ref().filter(|viewport|viewport.scope==id).map(|viewport|&viewport.visible))?
             } else if !self.background_dirty.contains(&id) && let Some(index)=old_plans.get(&id) {
                 self.block_plan[*index].clone()
             } else { self.remote.plan_background(&id)? };

@@ -115,7 +115,7 @@ fn viewport_limits_body_interests_and_copy_waits_for_sealed_content() {
     let mut f=Fixture::new();
     for n in 0..100 {let id=format!("text-{n}");f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),b"body");}
     f.page(None,None);
-    while let Some(before)=f.cache.history_cursor("chat").unwrap() {f.page(None,Some(before));}
+    while let Some(before)=f.cache.history_cursor("chat",None).unwrap() {f.page(None,Some(before));}
     let plan=f.cache.plan("chat",&LocalChat::default(),&[]).unwrap();
     assert!(plan.blocks.len()<=31);assert!(plan.blocks.iter().any(|(id,_)|id=="text-99"));
     let visible=BTreeSet::from(["text-3".into(),"text-4".into()]);
@@ -147,7 +147,7 @@ fn viewport_body_admission_advances_past_cached_rows_and_closed_tools() {
             }
         }
         f.page(None, None);
-        while let Some(before) = f.cache.history_cursor("chat").unwrap() { f.page(None, Some(before)); }
+        while let Some(before) = f.cache.history_cursor("chat",None).unwrap() { f.page(None, Some(before)); }
         for id in visible.iter().skip(30) { if mode != "text" { f.page(Some(id), None); } }
         let mut fetched = BTreeSet::new();
         for _ in 0..3 {
@@ -174,7 +174,7 @@ fn viewport_body_admission_advances_past_cached_rows_and_closed_tools() {
 fn copy_interest_advances_in_bounded_cohorts_instead_of_starving_after_thirty_cards() {
     let mut f=Fixture::new();let ids=(0..100).map(|n|format!("thinking-{n}")).collect::<Vec<_>>();
     for (n,id) in ids.iter().enumerate() {f.put(id,None,n as u64,BlockKind::Thinking,event(id,n as u64,"thinking"),b"thought");}
-    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat").unwrap() {f.page(None,Some(before));}
+    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat",None).unwrap() {f.page(None,Some(before));}
     let mut fetched=BTreeSet::new();
     for expected in [30,30,30,10] {
         assert!(f.cache.copy_ready("chat",&ids).unwrap().is_none());
@@ -198,14 +198,15 @@ fn sqlite_full_and_cross_handle_reset_never_advance_a_verified_prefix() {
 }
 
 #[test]
-fn sparse_projection_and_retained_previews_are_bounded_across_many_updates() {
+fn viewport_projection_evicts_previous_bodies_across_many_updates() {
     let mut f=Fixture::new();let bytes=vec![b'x';300*1024];
     for i in 0..128 {let id=format!("e{i:03}");f.put(&id,None,i,BlockKind::Text,event(&id,i,"text"),&bytes);}
     f.page(None,None);
-    loop {let before=f.cache.history_cursor("chat").unwrap();if let Some(before)=before {f.page(None,Some(before));} else {break;}}
+    loop {let before=f.cache.history_cursor("chat",None).unwrap();if let Some(before)=before {f.page(None,Some(before));} else {break;}}
     let mut feed=crate::feed::Feed::default();feed.native_view(f.cache.changes("chat",None,true).unwrap().unwrap()).unwrap();
     for i in 0..128 {
         let id=format!("e{i:03}");f.body(&id);let visible=BTreeSet::from([id.clone()]);
+        f.cache.viewport_changed("chat",visible.iter().cloned(),false);
         let view=f.cache.changes("chat",Some(&visible),false).unwrap().unwrap();assert!(view.partial);assert_eq!(view.events.len(),1);
         assert!(view.incomplete.contains(&id));assert!(view.bodies[&id].limited);assert!(!view.events[0].text.contains("Preview limited"));
         feed.native_view(view).unwrap();
@@ -332,7 +333,7 @@ fn attachment_history_paging_clears_loading_without_fetching_closed_tools_or_fil
     let mut feed = crate::feed::Feed::default();
     feed.native_view(f.cache.changes("chat", Some(&visible), true).unwrap().unwrap()).unwrap();
     let mut pages = 1;
-    while let Some(before) = f.cache.history_cursor("chat").unwrap() {
+    while let Some(before) = f.cache.history_cursor("chat",None).unwrap() {
         feed.loading = true;
         f.cache.changed("chat", "event-99", false);
         feed.native_view(f.cache.changes("chat", Some(&visible), false).unwrap().unwrap()).unwrap();
@@ -590,42 +591,24 @@ fn body_reuse_is_bounded_disposable_and_does_not_accept_corrupt_cached_candidate
 
 
 #[test]
-fn warm_scrollback_survives_viewport_and_history_changes_without_stale_replacements() {
-    let mut f = Fixture::new();
-    for n in 0..100 {
-        let id = format!("e{n:03}");
-        f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),format!("body {n}").as_bytes());
-    }
-    f.page(None,None);
-    let mut feed = crate::feed::Feed::default();
-    feed.native_view(f.cache.changes("chat",None,true).unwrap().unwrap()).unwrap();
-    for n in 68..100 {
-        let id = format!("e{n:03}"); f.body(&id);
-        let visible = BTreeSet::from([id]);
-        let view = f.cache.changes_retaining("chat",Some(&visible),&feed.retained_roots(),false).unwrap().unwrap();
-        feed.native_view(view).unwrap();
-    }
-    // A page prepends metadata, not grounds to replace the screen just read
-    // with Loading rows. Their bytes already reside on disk.
-    let before = f.cache.history_cursor("chat").unwrap().unwrap();
-    f.page(None,Some(before));
-    feed.native_view(f.cache.changes_retaining("chat",Some(&BTreeSet::from(["e067".into()])),&feed.retained_roots(),false).unwrap().unwrap()).unwrap();
-    for n in 68..100 { assert_eq!(feed.event(&format!("e{n:03}")).unwrap().text,format!("body {n}")); }
-    for n in 36..68 {
-        let id = format!("e{n:03}");f.body(&id);
-        feed.native_view(f.cache.changes_retaining("chat",Some(&BTreeSet::from([id])),&feed.retained_roots(),false).unwrap().unwrap()).unwrap();
-    }
-    assert_eq!(feed.retained_roots().len(),64,"small messages aren't evicted after just 32 groups");
-    assert_eq!(feed.event("e099").unwrap().text,"body 99");
-    // A same-ID replacement must invalidate the old bytes even offscreen.
-    f.put("e099",None,99,BlockKind::Text,event("e099",99,"text"),b"replacement");
-    f.page(None,None);
-    feed.native_view(f.cache.changes_retaining("chat",Some(&BTreeSet::from(["e036".into()])),&feed.retained_roots(),false).unwrap().unwrap()).unwrap();
-    assert!(feed.event("e099").unwrap().text.is_empty());assert!(feed.bodies["e099"].missing());
-    // A full authoritative reset still removes ghost off-window rows.
-    f.cache.clear().unwrap();f.page(None,None);
-    feed.native_view(f.cache.changes_retaining("chat",None,&feed.retained_roots(),true).unwrap().unwrap()).unwrap();
-    assert!(feed.event("e036").is_none());
+fn projection_keeps_one_bounded_window_and_uses_cached_history_before_network() {
+    let mut f=Fixture::new();
+    for n in 0..1024 {let id=format!("e{n:04}");f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),b"body");}
+    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat",None).unwrap() {f.page(None,Some(before));}
+    let tail=f.cache.preview("chat",None).unwrap().unwrap();
+    assert_eq!(tail.events.len(),VIEW_ROOTS);assert_eq!(tail.events.first().unwrap().id,"e0768");assert_eq!(tail.events.last().unwrap().id,"e1023");
+    assert!(tail.before.is_some());assert!(!tail.after);assert!(f.cache.history_cursor("chat",tail.start.as_ref()).unwrap().is_none());
+    let anchor=BTreeSet::from(["e0500".into()]);
+    let middle=f.cache.preview("chat",Some(&anchor)).unwrap().unwrap();
+    assert_eq!(middle.events.len(),VIEW_ROOTS);assert!(middle.events.iter().any(|event|event.id=="e0500"));assert!(middle.before.is_some() && middle.after);
+    let mut feed=crate::feed::Feed::default();feed.native_view(middle).unwrap();
+    assert_eq!(feed.root_ids().len(),VIEW_ROOTS);
+    f.put("e1024",None,1024,BlockKind::Text,event("e1024",1024,"text"),b"new body");f.page(None,None);
+    let loaded=feed.root_ids();
+    feed.native_view(f.cache.changes_window("chat",Some(&anchor),Some(&anchor),&loaded,false,false).unwrap().unwrap()).unwrap();
+    assert_eq!(feed.root_ids().len(),VIEW_ROOTS);assert!(feed.after);assert!(feed.event("e0500").is_some());
+    let latest=f.cache.preview("chat",None).unwrap().unwrap();
+    assert_eq!(latest.events.len(),VIEW_ROOTS);assert_eq!(latest.events.last().unwrap().id,"e1024");assert!(!latest.after);
 }
 
 #[test]
@@ -635,7 +618,7 @@ fn disk_reads_refresh_eviction_recency_and_saved_anchors_hydrate_offline() {
         let id = format!("e{n:03}"); f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),format!("body {n:02}").as_bytes());
     }
     f.page(None,None);
-    while let Some(before) = f.cache.history_cursor("chat").unwrap() { f.page(None,Some(before)); }
+    while let Some(before) = f.cache.history_cursor("chat",None).unwrap() { f.page(None,Some(before)); }
     f.body("e001"); f.body("e002");
     f.cache = Cache::open(&f._root.path().join("cache.db")).unwrap();
     let mut local = LocalChat::default(); local.position.follow = false;
@@ -657,19 +640,18 @@ fn disk_reads_refresh_eviction_recency_and_saved_anchors_hydrate_offline() {
 }
 
 #[test]
-fn foreground_projection_precedes_retained_scrollback_and_stays_byte_bounded() {
+fn foreground_projection_hydrates_only_the_visible_byte_bounded_window() {
     let mut f = Fixture::new();
     let bytes = vec![b'x';256*1024];
     for n in 0..40 {
         let id=format!("e{n:03}"); f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),&bytes);
     }
-    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat").unwrap() {f.page(None,Some(before));}
+    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat",None).unwrap() {f.page(None,Some(before));}
     for n in 0..40 {f.body(&format!("e{n:03}"));}
-    let retained=(0..32).map(|n|format!("e{n:03}")).collect();
     let visible=BTreeSet::from(["e039".into()]);
-    let view=f.cache.changes_retaining("chat",Some(&visible),&retained,true).unwrap().unwrap();
+    let view=f.cache.preview("chat",Some(&visible)).unwrap().unwrap();
     assert_eq!(view.events.iter().find(|e|e.id=="e039").unwrap().text.len(),bytes.len());
-    assert!(view.previews.iter().map(|(_,_,size)|size).sum::<usize>()<=8*1024*1024);
+    assert!(view.events.iter().filter(|event|!event.text.is_empty()).map(|event|event.text.len()).sum::<usize>()<=8*1024*1024);
     let mut feed=crate::feed::Feed::default();feed.native_view(view).unwrap();
     assert_eq!(feed.event("e039").unwrap().text.len(),bytes.len());
 }
@@ -699,6 +681,33 @@ fn background_plans_only_fetch_a_bounded_text_tail_and_queue_not_hidden_details_
 }
 
 #[test]
+fn controller_opens_a_bounded_tail_restores_an_old_anchor_and_jumps_latest() {
+    use crate::{controller::Controller,store::Store};
+    use tau_net::SessionSummary;
+    let mut f=Fixture::new();
+    let mut c=Controller::new(Store::open(f._root.path().join("client")).unwrap(),Arc::new(||{})).unwrap();
+    f.cache=c.store.block_cache(&c.identity).unwrap();f.cache.configure(&f.lineage).unwrap();
+    for n in 0..600 {let id=format!("e{n:03}");f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),b"body");}
+    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat",None).unwrap() {f.page(None,Some(before));}
+    let session=serde_json::from_value::<SessionSummary>(json!({
+        "id":"chat","title":"chat","starter":false,"status":"idle","createdAtMs":1,"updatedAtMs":1
+    })).unwrap();
+    c.install_sessions(vec![session]).unwrap();c.select("chat").unwrap();
+    assert_eq!(c.chats["chat"].feed.root_ids().len(),VIEW_ROOTS);assert!(c.chats["chat"].feed.event("e599").is_some());assert!(!c.chats["chat"].feed.after);
+    let edge=c.chats["chat"].feed.events.values().find(|event|!c.chats["chat"].feed.parents.contains_key(&event.id)).unwrap().id.clone();
+    c.viewport("chat",BTreeSet::from([edge.clone()]),BTreeSet::from([edge]));
+    assert_eq!(c.chats["chat"].feed.root_ids().len(),VIEW_ROOTS);assert!(c.chats["chat"].feed.after);assert!(c.chats["chat"].feed.event("e344").is_some());
+    let edge=c.chats["chat"].feed.events.values().rev().find(|event|!c.chats["chat"].feed.parents.contains_key(&event.id)).unwrap().id.clone();
+    c.viewport("chat",BTreeSet::from([edge.clone()]),BTreeSet::from([edge]));
+    assert_eq!(c.chats["chat"].feed.root_ids().len(),VIEW_ROOTS);
+    let chat=c.chats.get_mut("chat").unwrap();chat.local.position=crate::store::Position {follow:false,key:Some("chat/e100".into()),offset:4.};chat.feed=crate::feed::Feed::default();
+    c.ensure_chat("chat").unwrap();
+    assert_eq!(c.chats["chat"].feed.root_ids().len(),VIEW_ROOTS);assert!(c.chats["chat"].feed.event("e100").is_some());assert!(c.chats["chat"].feed.after);
+    c.latest().unwrap();
+    assert_eq!(c.chats["chat"].feed.root_ids().len(),VIEW_ROOTS);assert!(c.chats["chat"].feed.event("e599").is_some());assert!(c.chats["chat"].feed.event("e100").is_none());assert!(!c.chats["chat"].feed.after);
+}
+
+#[test]
 fn controller_keeps_recent_views_warm_and_reopens_evicted_scrollback_from_disk() {
     use crate::{controller::Controller,store::Store};
     use tau_net::SessionSummary;
@@ -706,14 +715,14 @@ fn controller_keeps_recent_views_warm_and_reopens_evicted_scrollback_from_disk()
     let mut c=Controller::new(Store::open(f._root.path().join("client")).unwrap(),Arc::new(||{})).unwrap();
     f.cache=c.store.block_cache(&c.identity).unwrap();f.cache.configure(&f.lineage).unwrap();
     for n in 0..80 {let id=format!("e{n:03}");f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),format!("body {n}").as_bytes());}
-    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat").unwrap() {f.page(None,Some(before));}
+    f.page(None,None);while let Some(before)=f.cache.history_cursor("chat",None).unwrap() {f.page(None,Some(before));}
     f.body("e001");f.body("e002");
     let sessions=["chat","b","c","d","e"].into_iter().map(|id| serde_json::from_value::<SessionSummary>(json!({
         "id":id,"title":id,"starter":false,"status":"idle","createdAtMs":1,"updatedAtMs":1
     })).unwrap()).collect();
     c.install_sessions(sessions).unwrap();c.select("chat").unwrap();
-    c.viewport("chat",BTreeSet::from(["e001".into()]));
-    c.viewport("chat",BTreeSet::from(["e002".into()]));
+    c.viewport("chat",BTreeSet::from(["e001".into()]),BTreeSet::from(["e001".into()]));
+    c.viewport("chat",BTreeSet::from(["e002".into()]),BTreeSet::from(["e002".into()]));
     assert_eq!(c.chats["chat"].feed.event("e001").unwrap().text,"body 1","leaving the viewport isn't eviction");
     c.chats.get_mut("chat").unwrap().local.position=crate::store::Position {follow:false,key:Some("chat/e001".into()),offset:5.};
     c.draft("keep my draft".into()).unwrap();
@@ -771,7 +780,7 @@ fn live_projection_does_not_add_a_ui_thread_recency_write_per_chunk() {
     f.cache.changed("chat","text",false);
     f.cache.changes("chat",Some(&BTreeSet::from(["text".into()])),false).unwrap();
     assert_eq!(clock(),before,"network-driven projection already has download recency");
-    f.cache.viewport_changed("chat",["text".into()].into_iter());
+    f.cache.viewport_changed("chat",["text".into()].into_iter(),false);
     f.cache.changes("chat",Some(&BTreeSet::from(["text".into()])),false).unwrap();
     assert!(clock()>before,"an actual visit refreshes eviction recency");
 }

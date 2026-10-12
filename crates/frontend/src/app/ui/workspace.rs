@@ -322,18 +322,21 @@ impl Widget for Workspace {
                 frame.visit(bounds, child, cx);
             }
         }
-        let mut interests = self.chat.transcript.interests.clone();
-        interests.extend(self.attachments.interests.iter().cloned());
+        let transcript = self.chat.transcript.interests.clone();
+        let attachments = self.attachments.interests.clone();
+        let mut visible = transcript;
+        visible.extend(attachments.iter().cloned());
+        let window = if layout[1].is_some() { self.chat.transcript.window.clone() } else { attachments };
         let request = if (layout[1].is_some() || layout[2].is_some()) && self.chat.code.view.is_none() {
-            cx.model.account.selected.clone().map(|session| (session, interests))
+            cx.model.account.selected.clone().map(|session| (session, window, visible))
         } else {
             None
         };
         let revision = cx.model.selected().map(|chat| chat.feed.revision);
-        if let Some((session, interests)) = request {
-            cx.model.viewport(&session, interests);
+        if let Some((session, window, visible)) = request {
+            cx.model.viewport(&session, window, visible);
         } else if let Some(session) = cx.model.account.selected.clone() {
-            cx.model.viewport(&session, std::collections::BTreeSet::new());
+            cx.model.viewport(&session, std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
         }
         // Viewport hydration runs after the children painted. If it projects
         // disk bytes, repaint their new bodies/heights without waiting for IO.
@@ -432,8 +435,8 @@ impl Widget for ChatPane {
                 ChatChild::Transcript => Rect::new(b.x, b.y + header, b.width, (bottom - b.y - header).max(1.)),
                 ChatChild::Header => Rect::new(b.x, b.y, b.width, header),
                 ChatChild::Composer => {
-                    self.composer.away_from_tail =
-                        self.transcript.scroll.value + 24. * cx.ui.scale < self.transcript.scroll.max;
+                    self.composer.away_from_tail = cx.model.chats[&session].feed.after
+                        || self.transcript.scroll.value + 24. * cx.ui.scale < self.transcript.scroll.max;
                     b
                 }
                 ChatChild::Code => b,
