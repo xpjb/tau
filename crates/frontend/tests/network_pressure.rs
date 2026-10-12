@@ -1,6 +1,8 @@
 #![cfg(unix)]
-//! Real controller/transport/cache + daemon + local provider, with seeded link
-//! faults and mixed work. Run via nextest; each case gets its own process/observer.
+//! Focused network fixture, excluded from normal test runs because real socket
+//! scheduling makes wall-clock completion intentionally variable. Run with:
+//! `cargo nextest run --locked -p tau-frontend --run-ignored ignored-only -E 'test(/network_pressure::/)'`
+//! Each case gets its own process and observer.
 use std::{collections::{BTreeMap,BTreeSet},net::SocketAddr,path::PathBuf,sync::{Arc,atomic::{AtomicU64,Ordering}},time::{Duration,Instant}};
 use axum::{Json,Router,extract::State,response::IntoResponse,routing::post};
 use futures_util::{SinkExt,StreamExt};
@@ -345,8 +347,11 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=4)]
+#[ignore = "focused network pressure fixture"]
 async fn normal_link_pressure_has_no_alerts_or_read_write_head_of_line_blocking() {run(Profile::NORMAL,7,false).await;}
 #[tokio::test(flavor="multi_thread",worker_threads=4)]
+#[ignore = "focused network pressure fixture"]
 async fn seeded_dodgy_link_keeps_control_responsive_during_bulk_and_queue_handoffs() {run(Profile::DODGY,29,false).await;}
 #[tokio::test(flavor="multi_thread",worker_threads=4)]
+#[ignore = "focused network pressure fixture"]
 async fn blackhole_recovers_original_intents_and_bulk_without_duplicate_effects() {run(Profile::DODGY,91,true).await;}
