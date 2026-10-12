@@ -810,28 +810,46 @@ fn downloaded_assistant_copy_preserves_error_metadata_and_partial_output() {
 }
 
 #[test]
-fn diagnostics_measures_shared_cache_lock_wait_on_the_ui_thread() {
+fn ui_reads_do_not_wait_for_replica_writes_and_reader_contention_stays_diagnostic() {
     use crate::render::trace::{Trace, Stage, Stamp};
-    let f = Fixture::new();
-    let ctx = chad::HeadlessCtx::new(&chad::Config { size: (32, 32),
-        device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
-    let mut trace = Trace::normal(f._root.path().join("diagnostics"), &ctx.device, ctx.surface_format);
-    let worker_cache = f.cache.clone();
-    let (held, waiting) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let _guard = worker_cache.db.lock().unwrap();
-        held.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
+    let f=Fixture::new();f.page(None,None);
+    let writer_cache=f.cache.clone();
+    let (held,waiting)=std::sync::mpsc::channel();
+    let (release,gate)=std::sync::mpsc::channel();
+    let writer=std::thread::spawn(move || {
+        let db=writer_cache.db.lock().unwrap();
+        db.execute_batch("BEGIN IMMEDIATE; UPDATE block_state SET lineage='uncommitted' WHERE singleton=1").unwrap();
+        held.send(()).unwrap();gate.recv_timeout(Duration::from_secs(5)).unwrap();
+        db.execute_batch("ROLLBACK").unwrap();
     });
     waiting.recv().unwrap();
-    let stamp = Stamp::now();
-    f.cache.cached_header("chat", "absent").unwrap();
-    trace.stage(Stage::Pointer, 0, stamp, (false, true, true));
-    worker.join().unwrap();
-    let log = std::fs::read_to_string(trace.save().unwrap()).unwrap();
-    let sample = log.lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
-        .find(|r| r["kind"] == "stage").unwrap();
-    let waited = sample["cache_wait_us"].as_u64().unwrap();
-    let elapsed = sample["callback_us"].as_u64().unwrap();
-    assert!(waited > 50_000 && waited <= elapsed, "cache contention must be visible in the callback: {sample}");
+    let reader_cache=f.cache.clone();let lineage=f.lineage.clone();let (read,completed)=std::sync::mpsc::channel();
+    let reader=std::thread::spawn(move || {
+        assert_eq!(reader_cache.lineage().unwrap(),lineage);
+        let view=reader_cache.preview("chat",None).unwrap().unwrap();
+        reader_cache.remember_local("chat",&local_prompt("request","local body"),&lineage).unwrap();
+        read.send(view).unwrap();
+    });
+    let view=completed.recv_timeout(Duration::from_secs(1));
+    release.send(()).unwrap();reader.join().unwrap();writer.join().unwrap();
+    let view=view.expect("UI work waited behind the download writer");
+    assert_eq!(view.generation,format!("{}:chat",f.lineage));
+    assert_eq!(f.cache.db.lock().unwrap().query_row("SELECT count(*) FROM local_echoes",[],|r|r.get::<_,u32>(0)).unwrap(),0);
+
+    let ctx=chad::HeadlessCtx::new(&chad::Config {size:(32,32),
+        device_limits:crate::desktop::limits(),..Default::default()}).unwrap();
+    let mut trace=Trace::normal(f._root.path().join("diagnostics"),&ctx.device,ctx.surface_format);
+    let worker_cache=f.cache.clone();let (held,waiting)=std::sync::mpsc::channel();
+    let worker=std::thread::spawn(move || {
+        let _guard=worker_cache.reader.lock().unwrap();held.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    waiting.recv().unwrap();let stamp=Stamp::now();
+    f.cache.has_snapshot("chat").unwrap();
+    trace.stage(Stage::Pointer,0,stamp,(false,true,true));worker.join().unwrap();
+    let log=std::fs::read_to_string(trace.save().unwrap()).unwrap();
+    let sample=log.lines().map(|l|serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|r|r["kind"]=="stage").unwrap();
+    let waited=sample["cache_wait_us"].as_u64().unwrap();let elapsed=sample["callback_us"].as_u64().unwrap();
+    assert!(waited>50_000&&waited<=elapsed,"reader contention must remain visible in the callback: {sample}");
 }

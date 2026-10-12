@@ -1,7 +1,7 @@
 //! Verified SQLite replica and display projection. Network workers only commit
 //! validated headers/ranges here; local outbox intent remains in `store`.
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{collections::{BTreeSet, HashMap}, path::Path, sync::{Arc, Mutex}, time::Duration};
 use tau_net::blocks::*;
 use tau_net::{ClientCommand, Event, EventKind, EventRole, QueueOperation, QueueState};
@@ -33,15 +33,23 @@ struct Prefetched {
     bodies: HashMap<(String,String),(u64,u64)>,
 }
 #[derive(Clone)]
-pub struct Cache { prefetched:Arc<Mutex<Prefetched>>,exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db: Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
+pub struct Cache { prefetched:Arc<Mutex<Prefetched>>,exports:Option<std::path::PathBuf>,dirty:Arc<Mutex<HashMap<String,Dirty>>>, db:Arc<Mutex<Connection>>, reader:Arc<Mutex<Connection>>, bound:Arc<std::sync::atomic::AtomicBool>, _lease:Arc<std::fs::File> }
 impl Cache {
-    // Measure UI-thread contention only when diagnostics is active there. Keep
-    // the existing connection/transaction semantics; this is not a lock bypass.
-    fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
-        let started = crate::render::trace::cache_lock_timer();
-        let db = self.db.lock().unwrap();
+    fn writer(&self) -> std::sync::MutexGuard<'_, Connection> {
+        let started=crate::render::trace::cache_lock_timer();
+        let db=self.db.lock().unwrap();
         crate::render::trace::cache_lock_wait(started);
         db
+    }
+    // UI reads use a committed WAL snapshot independent of the ordered writer.
+    fn read<T>(&self, action: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let started=crate::render::trace::cache_lock_timer();
+        let mut db=self.reader.lock().unwrap();
+        crate::render::trace::cache_lock_wait(started);
+        let tx=db.transaction()?;
+        let value=action(&tx)?;
+        tx.commit()?;
+        Ok(value)
     }
     /// Persist one verified transport update. This is the single async ingress;
     /// the existing transaction guards reject stale source/window writers.
@@ -57,7 +65,7 @@ impl Cache {
     }
 
     pub(crate) fn needs_body(&self, scope: &str, id: &str, background: bool) -> bool {
-        let db = self.connection();
+        let db = self.writer();
         tau_block_store::header(&db,scope,id).ok().flatten().is_none_or(|h|
             if background {tau_block_store::cached_bytes(&db,scope,id).map_or(true,|bytes|bytes!=h.length)}
             else {!h.sealed || tau_block_store::cached_content(&db,scope,id).map_or(true,|bytes|bytes.len() as u64!=h.length)})
@@ -68,7 +76,7 @@ impl Cache {
         Some(((h.version,h.length,h.sealed),tau_block_store::cached_prefix(&db,scope,id).ok()?))
     }
     pub(crate) fn descriptor(&self, reference: &ContentRef, epoch: u64) -> Result<tau_net::ServerMessage> {
-        let db = self.connection();
+        let db = self.writer();
         ensure!(replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==reference.lineage,"Descriptor source changed");
         let bytes = tau_block_store::cached_content(&db,&reference.scope,&reference.id)?;
         drop(db);
@@ -82,7 +90,7 @@ impl Cache {
     pub(crate) fn seed_preview(&self, scope: &str, events: Vec<Event>, mut queue: QueueState, before: Option<u64>) -> Result<View> {
         let ids = events.iter().map(|e| e.id.clone()).collect::<BTreeSet<_>>();
         {
-            let mut db = self.connection(); let tx = db.transaction()?;
+            let mut db = self.writer(); let tx = db.transaction()?;
             let mut wanted = BTreeSet::from([QUEUE.to_owned()]);
             let mut parents = BTreeSet::from([None, Some(QUEUE.to_owned())]);
             let mut put = |id: String, parent: Option<String>, order, kind, meta, sealed, bytes: &[u8]| -> Result<()> {
@@ -154,8 +162,11 @@ impl Cache {
         }
         let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;
         db.pragma_update(None,"max_page_count",1024u64*1024*1024/page_size)?;
+        let reader=Connection::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        reader.busy_timeout(DB_BUSY_TIMEOUT)?;
+        reader.execute_batch("PRAGMA query_only=ON")?;
         let exports=path.parent().filter(|p|p.file_name().is_some_and(|n|n=="blocks")).and_then(Path::parent).map(|root|root.join("downloads"));
-        Ok(Self { prefetched:Default::default(),exports,dirty:Default::default(),db:Arc::new(Mutex::new(db)),bound:Arc::new(std::sync::atomic::AtomicBool::new(false)),_lease:Arc::new(lease) })
+        Ok(Self { prefetched:Default::default(),exports,dirty:Default::default(),db:Arc::new(Mutex::new(db)),reader:Arc::new(Mutex::new(reader)),bound:Arc::new(std::sync::atomic::AtomicBool::new(false)),_lease:Arc::new(lease) })
     }
     fn changed(&self,scope:&str,id:&str,full:bool) {
         let mut dirty=self.dirty.lock().unwrap();let d=dirty.entry(scope.into()).or_default();d.full|=full;
@@ -175,43 +186,43 @@ impl Cache {
         let dirty=self.dirty.lock().unwrap().remove(scope).unwrap_or_default();
         if full || dirty.full {return self.snapshot_inner(scope,visible,retained,true,None,true,full || dirty.viewing);}
         if dirty.ids.is_empty() {return Ok(None);}
-        let (ids,queue)={let db=self.connection();let mut ids=BTreeSet::new();let mut queue=false;
+        let (ids,queue)=self.read(|db| {let mut ids=BTreeSet::new();let mut queue=false;
             for id in dirty.ids {
-                if let Some(h)=tau_block_store::header(&db,scope,&id)? {
+                if let Some(h)=tau_block_store::header(db,scope,&id)? {
                     queue|=h.id==QUEUE || h.parent.as_deref()==Some(QUEUE);
                     ids.insert(h.parent.filter(|p|p!=QUEUE).unwrap_or(h.id));
                 }
-            }(ids.into_iter().collect::<Vec<_>>(),queue)};
+            }Ok((ids.into_iter().collect::<Vec<_>>(),queue))})?;
         self.snapshot_inner(scope,visible,retained,true,Some(&ids),queue,dirty.viewing)
     }
-    pub(crate) fn epoch(&self)->u64 {replica_epoch(&self.connection()).unwrap_or(u64::MAX)}
+    pub(crate) fn epoch(&self)->u64 {replica_epoch(&self.writer()).unwrap_or(u64::MAX)}
     pub fn clear(&self)->Result<()> {
-        let mut db=self.connection();let tx=db.transaction()?;
+        let mut db=self.writer();let tx=db.transaction()?;
         tx.execute_batch("DELETE FROM local_echoes; DELETE FROM blocks; DELETE FROM block_cache_feeds; DELETE FROM block_cache_tombstones; UPDATE replica_epoch SET epoch=epoch+1;")?;tx.commit()?;Ok(())
     }
     pub(crate) fn previous_source(&self)->Result<Option<String>> {
-        let db=self.connection();let known:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM blocks) OR EXISTS(SELECT 1 FROM block_cache_feeds)",[],|r|r.get(0))?;
-        Ok(if known {Some(tau_block_store::cursor(&db)?.lineage)} else {None})
+        self.read(|db| {let known:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM blocks) OR EXISTS(SELECT 1 FROM block_cache_feeds)",[],|r|r.get(0))?;
+            Ok(if known {Some(tau_block_store::cursor(db)?.lineage)} else {None})})
     }
     pub fn authorized(&self) -> bool { self.bound.load(std::sync::atomic::Ordering::Acquire) }
     pub fn has_file(&self, scope:&str, id:&str) -> bool {
-        tau_block_store::header(&self.connection(),scope,id).ok().flatten().is_some_and(|h|matches!(h.kind,BlockKind::File|BlockKind::Image))
+        self.read(|db|Ok(tau_block_store::header(db,scope,id)?.is_some_and(|h|matches!(h.kind,BlockKind::File|BlockKind::Image)))).unwrap_or(false)
     }
     pub(crate) fn feed_request(&self, scope: &str, parent: Option<&str>, before: Option<FeedPosition>) -> Result<FeedRequest> {
-        let db = self.connection();
+        let db = self.writer();
         let saved = tau_block_store::cached_feed(&db,scope,parent)?;
         Ok(FeedRequest { scope:scope.into(),parent:parent.map(str::to_owned),
             cursor:if before.is_some() {None} else {saved.as_ref().map(|p|p.cursor.clone())},
             floor:saved.map_or(0,|p|p.floor),before })
     }
     pub(crate) fn block_request(&self, scope: &str, id: &str) -> Result<BlockRequest> {
-        let mut db = self.connection(); let tx = db.transaction()?;
+        let mut db = self.writer(); let tx = db.transaction()?;
         let h = tau_block_store::header(&tx,scope,id)?;
         let offset = tau_block_store::cached_prefix(&tx,scope,id)?; tx.commit()?;
         Ok(BlockRequest { scope:scope.into(),id:id.into(),version:h.map_or(0,|h|h.version),offset,follow:true })
     }
     pub(crate) fn configure(&self, lineage: &str) -> Result<()> {
-        let mut db = self.connection(); let tx = db.transaction()?;
+        let mut db = self.writer(); let tx = db.transaction()?;
         if tau_block_store::cursor(&tx)?.lineage != lineage { tx.execute("DELETE FROM local_echoes", [])?; }
         tau_block_store::cache_lineage(&tx,lineage)?; tx.commit()?;
         self.bound.store(true,std::sync::atomic::Ordering::Release); Ok(())
@@ -219,7 +230,7 @@ impl Cache {
     #[cfg(test)]
     fn page(&self,lineage:&str,request:&FeedRequest,page:&FeedPage)->Result<()> {self.page_at(lineage,request,page,self.epoch())}
     pub(crate) fn page_at(&self,lineage:&str,request:&FeedRequest,page:&FeedPage,epoch:u64) -> Result<()> {
-        let mut db = self.connection(); let tx = db.transaction()?;
+        let mut db = self.writer(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
         ensure!(page.cursor.lineage == lineage && tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
         let reset=page.reset && request.cursor.is_some() && request.before.is_none()
@@ -241,7 +252,7 @@ impl Cache {
     #[cfg(test)]
     fn range(&self,lineage:&str,scope:&str,range:&ContentRange)->Result<()> {self.range_at(lineage,scope,range,self.epoch())}
     pub(crate) fn range_at(&self,lineage:&str,scope:&str,range:&ContentRange,epoch:u64) -> Result<()> {
-        let mut db = self.connection(); let tx = db.transaction()?;
+        let mut db = self.writer(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
         ensure!(tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
         tau_block_store::cache_range(&tx,scope,range)?;
@@ -251,7 +262,7 @@ impl Cache {
     #[cfg(test)]
     fn header(&self,lineage:&str,scope:&str,header:&BlockHeader)->Result<()> {self.header_at(lineage,scope,header,self.epoch())}
     pub(crate) fn header_at(&self,lineage:&str,scope:&str,header:&BlockHeader,epoch:u64) -> Result<()> {
-        let mut db = self.connection(); let tx = db.transaction()?;
+        let mut db = self.writer(); let tx = db.transaction()?;
         ensure!(replica_epoch(&tx)?==epoch,"Replica window changed; retry from verified state");
         ensure!(tau_block_store::cursor(&tx)?.lineage == lineage,"Stale data connection");
         tau_block_store::cache_header(&tx,scope,header)?;
@@ -262,21 +273,22 @@ impl Cache {
     pub(crate) fn resume_viewport(&self, scope: &str, local: &LocalChat) -> Result<Option<BTreeSet<String>>> {
         if local.position.follow { return Ok(None); }
         let Some(key) = &local.position.key else { return Ok(None); };
-        let db = self.connection();
-        let roots = tau_block_store::children(&db, scope, None)?;
-        let anchor = roots.iter().position(|h| {
-            key == &format!("{scope}/{}",h.id) || key == &format!("{scope}/details:{}",h.id)
-                || key == &format!("{scope}/tool:{}",h.id) || key == &format!("{scope}/thinking:{}",h.id)
-                || h.meta.pointer("/event/origin/requestId").and_then(|v|v.as_str())
-                    .is_some_and(|request| key == &format!("message:{scope}:{request}"))
-        });
-        Ok(anchor.map(|index| roots.iter().skip(index.saturating_sub(14)).take(30)
-            .filter(|h|h.id!=QUEUE).map(|h|h.id.clone()).collect()))
+        self.read(|db| {
+            let roots = tau_block_store::children(db, scope, None)?;
+            let anchor = roots.iter().position(|h| {
+                key == &format!("{scope}/{}",h.id) || key == &format!("{scope}/details:{}",h.id)
+                    || key == &format!("{scope}/tool:{}",h.id) || key == &format!("{scope}/thinking:{}",h.id)
+                    || h.meta.pointer("/event/origin/requestId").and_then(|v|v.as_str())
+                        .is_some_and(|request| key == &format!("message:{scope}:{request}"))
+            });
+            Ok(anchor.map(|index| roots.iter().skip(index.saturating_sub(14)).take(30)
+                .filter(|h|h.id!=QUEUE).map(|h|h.id.clone()).collect()))
+        })
     }
     pub fn preview(&self,scope:&str,visible:Option<&BTreeSet<String>>)->Result<Option<View>> {self.snapshot_inner(scope,visible,&BTreeSet::new(),true,None,true,true)}
-    pub fn has_snapshot(&self,scope:&str)->Result<bool> {Ok(tau_block_store::cached_feed(&self.connection(),scope,None)?.is_some())}
+    pub fn has_snapshot(&self,scope:&str)->Result<bool> {self.read(|db|Ok(tau_block_store::cached_feed(db,scope,None)?.is_some()))}
     fn snapshot_inner(&self, scope: &str, visible:Option<&BTreeSet<String>>,retained:&BTreeSet<String>,preview:bool,only:Option<&[String]>,include_queue:bool,touch:bool) -> Result<Option<View>> {
-        let db = self.connection();
+        let Some((view,accessed))=self.read(|db| {
         let Some(page) = tau_block_store::cached_feed(&db,scope,None)? else { return Ok(None); };
         let mut body_budget=8*1024*1024usize;let mut group_budgets=HashMap::new();let mut preview_ids=HashMap::<String,Vec<String>>::new();
         let mut roots = if let Some(ids)=only {ids.iter().filter_map(|id|tau_block_store::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?} else {tau_block_store::children(&db,scope,None)?};
@@ -369,31 +381,38 @@ impl Cache {
                 .collect::<rusqlite::Result<HashMap<String,u64>>>()?
         } else { HashMap::new() };
         events.sort_by_key(|e|e.order);
-        // Recency is disposable metadata, not a prerequisite for rendering a
-        // verified read. Never wait for another writer (or upgrade a stale WAL
-        // snapshot) just to refresh it, including the first viewport's visit.
-        // Actual content writes retain the normal busy timeout and durability.
-        if touch && !accessed.is_empty() && let Some(tx) = try_replica_maintenance(&db)? {
-            tau_block_store::touch_cache(&tx, scope, accessed.iter().map(String::as_str))?;
-            tx.commit()?;
-        }
         let mut previews = preview_ids.into_iter().map(|(root,ids)| {
             let used=256*1024-group_budgets[root.as_str()]; (root,ids,used)
         }).collect::<Vec<_>>();
         // Feed's bounded LRU evicts retained/offscreen groups before the viewport.
         previews.sort_by_key(|(root,_,_)| (visible.contains(root), root.clone()));
-        Ok(Some(View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
-            events,queue,before:page.before.as_ref().map(|p|p.order),delivered,bodies,incomplete,states,parents }))
+        Ok(Some((View { queue_removals,previews,partial:only.is_some(),queue_changed:include_queue,generation:format!("{}:{scope}",page.cursor.lineage),sequence:page.cursor.sequence,
+            events,queue,before:page.before.as_ref().map(|p|p.order),delivered,bodies,incomplete,states,parents },accessed)))
+        })? else {return Ok(None);};
+        // Recency is disposable metadata, not a prerequisite for rendering a
+        // verified read. Never wait for the ordered writer just to refresh it.
+        if touch && !accessed.is_empty() {
+            let db=match self.db.try_lock() {
+                Ok(db)=>Some(db),
+                Err(std::sync::TryLockError::WouldBlock)=>None,
+                Err(std::sync::TryLockError::Poisoned(error))=>Some(error.into_inner()),
+            };
+            if let Some(db)=db && let Some(tx)=try_replica_maintenance(&db)? {
+                tau_block_store::touch_cache(&tx, scope, accessed.iter().map(String::as_str))?;
+                tx.commit()?;
+            }
+        }
+        Ok(Some(view))
     }
     pub fn copy_ready(&self, scope:&str, ids:&[String]) -> Result<Option<String>> {
         ensure!(ids.len()<=4096,"Copy fewer than 4097 sections at a time");
         let mut seen=BTreeSet::new();let ids=ids.iter().filter(|id|seen.insert(*id)).cloned().collect::<Vec<_>>();let ids=ids.as_slice();
-        if !copy_complete(&self.connection(),scope,ids)? {return Ok(None);}
+        if !self.read(|db|copy_complete(db,scope,ids))? {return Ok(None);}
         let view=self.snapshot_inner(scope,None,&BTreeSet::new(),false,Some(ids),false,true)?.context("Details are not cached")?;
         let text=view.copy_details(ids);ensure!(text.len() as u64<=MAX_BLOCK_BYTES,"Clipboard output exceeds 64 MiB; copy fewer sections");Ok(Some(text))
     }
     pub fn history_cursor(&self, scope: &str) -> Result<Option<FeedPosition>> {
-        Ok(tau_block_store::cached_feed(&self.connection(),scope,None)?.and_then(|p|p.before))
+        self.read(|db|Ok(tau_block_store::cached_feed(db,scope,None)?.and_then(|p|p.before)))
     }
     #[cfg(test)]
     pub fn plan(&self,scope:&str,local:&LocalChat,copy:&[String])->Result<Plan> {self.plan_visible(scope,local,copy,None)}
@@ -415,16 +434,15 @@ impl Cache {
     pub(crate) fn plan_background(&self, scope: &str) -> Result<Plan> {
         // A small tail only. Do not inherit open Details/tool preferences from
         // the foreground, walk old history, or download attachment payloads.
-        let viewport = {
-            let db = self.connection();
+        let viewport = self.read(|db| {
             let mut query = db.prepare("SELECT header FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 ORDER BY position DESC,id DESC LIMIT 32")?;
             let roots = query.query_map(rusqlite::params![scope,QUEUE], |r| r.get::<_,String>(0))?
                 .map(|raw| Ok(serde_json::from_str::<BlockHeader>(&raw?)?)).collect::<Result<Vec<_>>>()?;
-            roots.into_iter().filter(|h|
+            Ok(roots.into_iter().filter(|h|
                 h.kind == BlockKind::Text && h.meta.pointer("/event/role").and_then(|v|v.as_str()) != Some("tool")
                 || h.meta.pointer("/event/attachment").is_some_and(|v|v.is_object()))
-                .take(8).map(|h| h.id).collect()
-        };
+                .take(8).map(|h| h.id).collect())
+        })?;
         let mut plan = self.plan_visible(scope, &LocalChat::default(), &[], Some(&viewport))?;
         plan.background = true;
         plan.foreground.clear();
@@ -433,7 +451,7 @@ impl Cache {
         // version/prefix; explicit viewing/copy still fetches evicted bytes.
         let mut candidates=viewport.clone();
         candidates.extend(plan.blocks.iter().map(|(id,_)|id.clone()));
-        let db=self.connection();
+        self.read(|db| {
         for id in &viewport {
             if let Some(h)=tau_block_store::header(&db,scope,id)?
                 && let Some(id)=h.meta.pointer("/fullEvent/id").and_then(|v|v.as_str()) {candidates.insert(id.into());}
@@ -455,6 +473,8 @@ impl Cache {
             let length=required(id,length);
             stored>=length || fetched.bodies.get(&(scope.into(),id.clone()))!=Some(&(version,length))
         }));
+        Ok(())
+        })?;
         let mut budget = 8 * 1024 * 1024u64;
         plan.blocks.retain(|(id, head)| {
             let length = head.map_or(0, |(_,length,_,_)|
@@ -469,7 +489,7 @@ impl Cache {
         let rendered = viewport.is_some();
         let resume = if !rendered { self.resume_viewport(scope,local)? } else { None };
         let viewport = viewport.or(resume.as_ref());
-        let db = self.connection();
+        self.read(|db| {
         let roots = if let Some(viewport)=viewport {
             let ids=viewport.iter().chain(copy.iter()).collect::<BTreeSet<_>>();
             ids.into_iter().filter_map(|id|tau_block_store::header(&db,scope,id).transpose()).collect::<Result<Vec<_>>>()?.into_iter().filter(|h|h.parent.is_none()).collect()
@@ -605,6 +625,7 @@ impl Cache {
         let foreground=blocks.iter().filter(|id|*id==QUEUE || recent.contains(*id) || tau_block_store::header(&db,scope,id).ok().flatten().is_some_and(|h|!h.sealed && h.kind!=BlockKind::Code))
             .cloned().collect();
         Ok(Plan { scope:scope.into(),parents,blocks:heads,older,foreground,background:false })
+        })
     }
 }
 // Admission only for optional read-recency/local-echo reuse, never authored or
@@ -675,8 +696,8 @@ fn text_prefix(bytes: &[u8]) -> Result<String> {
 pub struct Plan { pub background: bool, pub scope: String, pub parents: BTreeSet<Option<String>>, pub blocks: Vec<(String,Option<(u64,u64,bool,u64)>)>, pub older:Vec<(String,FeedPosition)>, pub foreground:BTreeSet<String> }
 
 impl Cache {
-    pub fn lineage(&self) -> Result<String> { Ok(tau_block_store::cursor(&self.connection())?.lineage) }
-    pub(crate) fn cached_header(&self, scope:&str, id:&str) -> Result<Option<BlockHeader>> { tau_block_store::header(&self.connection(),scope,id) }
+    pub fn lineage(&self) -> Result<String> { self.read(|db|Ok(tau_block_store::cursor(db)?.lineage)) }
+    pub(crate) fn cached_header(&self, scope:&str, id:&str) -> Result<Option<BlockHeader>> { tau_block_store::header(&self.writer(),scope,id) }
     pub fn file_ready(&self, scope:&str, id:&str, path:&Path, limit:u64) -> Result<bool> {
         let Some(h)=self.cached_header(scope,id)? else {return Ok(false);};
         let Some(expected)=h.meta.get("sha256").and_then(|v|v.as_str()) else {return Ok(false);};
@@ -698,7 +719,7 @@ impl Cache {
         while offset<header.length {
             ensure!(!*cancel.borrow(),"Download cancelled");
             let range={
-                let db=self.connection();
+                let db=self.writer();
                 ensure!(replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==lineage,"Data source changed");
                 tau_block_store::read(&db,&BlockRequest {scope:scope.into(),id:header.id.clone(),version:header.version,offset,follow:false})?.context("Cached file no longer exists")?
             };
@@ -714,7 +735,7 @@ impl Cache {
         if let Some(root)=&self.exports && target.starts_with(root) {crate::disk::collect_downloads(root,target,header.length,1024*1024*1024)?;}
         // Hold the cache fence through the final rename: clear/reset cannot be
         // followed by late publication from a previously verified generation.
-        let db=self.connection();
+        let db=self.writer();
         ensure!(!*cancel.borrow() && replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==lineage,"Download cancelled or data source changed");
         temp.persist(target)?;
         #[cfg(unix)] std::fs::File::open(parent)?.sync_all()?;
@@ -736,9 +757,13 @@ fn initialize_echoes(db: &Connection) -> Result<()> {
 impl Cache {
     pub(crate) fn remember_local(&self, scope: &str, local: &LocalChat, lineage: &str) -> Result<()> {
         if local.pending.is_empty() { return Ok(()); }
-        let db = self.connection();
+        let db=match self.db.try_lock() {
+            Ok(db)=>db,
+            Err(std::sync::TryLockError::WouldBlock)=>return Ok(()),
+            Err(std::sync::TryLockError::Poisoned(error))=>error.into_inner(),
+        };
         // Saved intent remains in the authored store. Optional replica reuse
-        // must not turn startup/viewport contention into a lock error popup.
+        // must not make the UI wait behind verified content writes.
         let Some(tx) = try_replica_maintenance(&db)? else { return Ok(()); };
         // Never lend bytes or retire authored work across a source restore.
         if tau_block_store::cursor(&tx)?.lineage != lineage { return Ok(()); }
