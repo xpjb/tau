@@ -147,6 +147,8 @@ impl App {
         self.with_ui(|root, cx| root.workspace.chat.transcript.save(cx))
     }
     pub fn tick(&mut self, dt: f32) -> bool {
+        #[cfg(not(target_os = "android"))]
+        let _scope = living_telemetry::scope!("ui", "app_tick");
         let started = self.trace_started();
         self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
         let visible = self.with_ui(|root, cx| root.workspace.chat_visible(cx));
@@ -208,6 +210,8 @@ impl App {
         true
     }
     pub fn frame(&mut self, ctx: &impl RenderContext, view: &wgpu::TextureView) {
+        #[cfg(not(target_os = "android"))]
+        let scene_scope = living_telemetry::scope!("frame", "scene");
         self.sync_navigation();
         self.services.renderer.clear_scenes();
         let bounds = Rect::new(self.ui.origin.x, self.ui.origin.y, self.ui.size.0 as f32, self.ui.size.1 as f32);
@@ -218,7 +222,13 @@ impl App {
             self.report(Err(error));
         }
         self.reconcile_targets();
+        #[cfg(not(target_os = "android"))]
+        drop(scene_scope);
+        #[cfg(not(target_os = "android"))]
+        let render_scope = living_telemetry::scope!("frame", "renderer");
         self.services.renderer.draw(ctx, view, &[layer]);
+        #[cfg(not(target_os = "android"))]
+        drop(render_scope);
         if let Some(point) = self.ui.hover {
             self.ui_event(ui::Event::Hover(Some(point)));
         }

@@ -6,7 +6,7 @@ use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 async fn private_diagnostics_survive_bounded_restart_upload_retries() {
     let root = tempfile::tempdir().unwrap();
     let first_secret = "private chat and bearer token";
-    record(root.path(), "rust.panic", first_secret, Some(("src/main.rs", 42)));
+    record(root.path(), "rust.panic", first_secret, Some(("src/main.rs", 42)), false);
     let pending = root.path().join(PENDING_REPORT);
     let local = root.path().join(LOCAL_TRACE);
     let first = std::fs::read(&pending).unwrap();
@@ -20,7 +20,7 @@ async fn private_diagnostics_survive_bounded_restart_upload_retries() {
     assert!(std::fs::read_to_string(&local).unwrap().contains(first_secret));
 
     let second_secret = "new private failure";
-    record(root.path(), "app.tau.FatalError", second_secret, None);
+    record(root.path(), "app.tau.FatalError", second_secret, None, false);
     assert_eq!(std::fs::read(&pending).unwrap(), first, "The first unsent report must remain pending");
     assert!(std::fs::read_to_string(&local).unwrap().contains(second_secret), "The latest full local trace must remain available");
     let parsed = crash_frames("stack backtrace:\n   0: app::ui::paint\n             at C:\\src\\ui.rs:91:7\n", None);

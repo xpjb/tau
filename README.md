@@ -36,8 +36,9 @@ Markdown rendering uses the external Barkdown repository, pinned to
 The native-network refactor, client-first model selection, Codex device sign-in,
 and encrypted reasoning checkpoint recovery are integrated on this mainline.
 
-See [Codex sign-in](docs/codex-signin.md) and
-[reasoning recovery](docs/codex-reasoning-recovery.md) for behavior and ownership.
+See [Codex sign-in](docs/codex-signin.md),
+[reasoning recovery](docs/codex-reasoning-recovery.md), and
+[desktop telemetry](docs/telemetry.md) for behavior and ownership.
 `scripts/release-beta.sh` builds matching daemon, Windows and Android packages.
 Client packages are delivered before deployment; restarting the beta service
 requires explicit operator approval.

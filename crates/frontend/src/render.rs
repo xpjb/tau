@@ -816,6 +816,8 @@ impl Renderer {
         layer.images.push((key, rect, intersect(rect, clip)));
     }
     pub fn draw(&mut self, ctx: &impl RenderContext, target: &wgpu::TextureView, layers: &[Layer]) {
+        #[cfg(not(target_os = "android"))]
+        let prepare_scope = living_telemetry::scope!("renderer", "prepare");
         let trace_started = self.trace.as_ref().map(|_| std::time::Instant::now());
         let mut commands = trace::Commands::default();
         let text_before = trace_started.and_then(|_| trace::text_commands());
@@ -894,6 +896,10 @@ impl Renderer {
                 .collect::<Vec<_>>();
             image_buffers.push(buffers);
         }
+        #[cfg(not(target_os = "android"))]
+        drop(prepare_scope);
+        #[cfg(not(target_os = "android"))]
+        let encode_scope = living_telemetry::scope!("renderer", "encode");
         let mut encoder = ctx.device().create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -956,9 +962,17 @@ impl Renderer {
             }
         }
         if trace_started.is_some() { commands.finish_text(text_before); }
+        #[cfg(not(target_os = "android"))]
+        drop(encode_scope);
+        #[cfg(not(target_os = "android"))]
+        let submit_scope = living_telemetry::scope!("renderer", "submit");
         ctx.queue().submit([encoder.finish()]);
+        #[cfg(not(target_os = "android"))]
+        drop(submit_scope);
         commands.submitted = true;
         if let (Some(trace), Some(started)) = (&mut self.trace, trace_started) {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("renderer", "diagnostics");
             trace.frame(ctx, &self.text, &layers, &batches, commands, started);
         }
     }

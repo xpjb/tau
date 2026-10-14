@@ -57,6 +57,8 @@ fn root() -> PathBuf {
 }
 impl ChadApp for Desktop {
     fn init(ctx: &mut Ctx) -> Result<Self, String> {
+        let _busy = living_telemetry::busy!("ui", "init");
+        crate::telemetry::set_refresh_rate_millihertz(ctx.window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz()));
         #[cfg(windows)]
         {
             use chad::winit::{
@@ -84,6 +86,7 @@ impl ChadApp for Desktop {
         ctx.window.set_ime_allowed(true);
         let (tx, rx) = mpsc::channel();
         let attention_identity = app.controller.identity.clone();
+        crate::telemetry::update_app_state(&app.controller, app.ui.window_focused, app.ui.visible, true);
         Ok(Self {
             app,
             wake,
@@ -100,7 +103,15 @@ impl ChadApp for Desktop {
         })
     }
     fn event(&mut self, ctx: &mut Ctx, event: &WindowEvent) {
+        let _busy = living_telemetry::busy!("ui", "window_event");
+        let recorded_input = match event {
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::KeyboardInput { .. }
+            | WindowEvent::MouseWheel { .. } | WindowEvent::Ime(_) | WindowEvent::DroppedFile(_) => living_telemetry::input_received(),
+            _ => false,
+        };
+        let force_state = matches!(event, WindowEvent::Focused(_) | WindowEvent::Occluded(_));
         let started = self.app.trace_started();
+        let event_scope = living_telemetry::scope!("ui", "dispatch_event");
         let stage = match event {
             WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => Some(Stage::Hover),
             WindowEvent::MouseInput { .. } => Some(Stage::Pointer),
@@ -128,14 +139,23 @@ impl ChadApp for Desktop {
                 self.app.motion(0, self.cursor);
             }
             WindowEvent::CursorLeft { .. } => self.app.hover(None),
-            WindowEvent::Occluded(occluded) => self.app.set_connection_visible(!occluded),
-            WindowEvent::ScaleFactorChanged { .. } => ctx.request_redraw(),
+            WindowEvent::Occluded(occluded) => {
+                self.app.set_connection_visible(!occluded);
+                if *occluded { living_telemetry::clear_pending_frame(); }
+            }
+            WindowEvent::Moved(_) => crate::telemetry::set_refresh_rate_millihertz(
+                ctx.window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz())),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                living_telemetry::redraw_requested();
+                ctx.request_redraw();
+            }
             WindowEvent::Focused(true) => {
                 self.app.ui.window_focused = true;
                 if self.attention_requested {
                     ctx.window.request_user_attention(None);
                     self.attention_requested = false;
                 }
+                living_telemetry::redraw_requested();
                 ctx.request_redraw();
             }
             WindowEvent::MouseInput {
@@ -181,12 +201,14 @@ impl ChadApp for Desktop {
                     && self.modifiers.control_key() && self.modifiers.shift_key()
                     && self.app.save_render_trace()
                 {
+                    living_telemetry::redraw_requested();
                     ctx.request_redraw();
                     return;
                 }
                 let cancelled = self.app.cancel_autoscroll();
                 if cancelled && event.logical_key == Key::Named(NamedKey::Escape) {
                     self.sync_cursor(ctx);
+                    living_telemetry::redraw_requested();
                     ctx.request_redraw();
                     return;
                 }
@@ -222,16 +244,24 @@ impl ChadApp for Desktop {
             }
             _ => {}
         }
+        drop(event_scope);
+        let actions_scope = living_telemetry::scope!("ui", "platform_actions");
         self.actions();
+        drop(actions_scope);
         self.sync_cursor(ctx);
         if let Some(stage) = stage { self.app.trace_stage(stage, ctx.frame_index, started); }
         // Desktop OnDemand forwards input but does not schedule a frame for it.
         // Waiting until update() to request redraw deadlocks visible input feedback.
+        crate::telemetry::update_app_state(&self.app.controller, self.app.ui.window_focused, self.app.ui.visible, force_state);
         if self.app.needs_redraw() {
+            living_telemetry::redraw_requested();
             ctx.request_redraw();
+        } else if recorded_input {
+            living_telemetry::clear_pending_input();
         }
     }
     fn update(&mut self, ctx: &mut Ctx) {
+        let _busy = living_telemetry::busy!("ui", "update");
         let started = self.app.trace_started();
         let (received, posted) = self.wake.begin_update();
         self.app.trace_wakes(received, posted);
@@ -254,6 +284,7 @@ impl ChadApp for Desktop {
             }
         }
         if self.app.tick(ctx.dt) {
+            living_telemetry::redraw_requested();
             ctx.request_redraw();
         }
         self.actions();
@@ -282,10 +313,19 @@ impl ChadApp for Desktop {
             self.attention_requested = false;
         }
         self.app.trace_stage(Stage::Update, ctx.frame_index, started);
+        crate::telemetry::update_app_state(&self.app.controller, self.app.ui.window_focused, self.app.ui.visible, false);
     }
     fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
+        let _busy = living_telemetry::busy!("ui", "frame");
+        let mut telemetry_frame = living_telemetry::Frame::start();
+        telemetry_frame.phase("app");
         let started = self.app.trace_started();
         self.app.frame(ctx, view);
+        telemetry_frame.field("frame_index", ctx.frame_index);
+        telemetry_frame.field("width", ctx.size().0);
+        telemetry_frame.field("height", ctx.size().1);
+        telemetry_frame.field("connected", self.app.controller.epoch.is_some());
+        telemetry_frame.phase("platform");
         if let Some(rect) = self.app.ime_rect() {
             ctx.window.set_ime_cursor_area(
                 PhysicalPosition::new(rect.x as f64, rect.y as f64),
@@ -295,8 +335,11 @@ impl ChadApp for Desktop {
         self.sync_cursor(ctx);
         self.app.trace_stage(Stage::Paint, ctx.frame_index, started);
         if self.app.needs_redraw() {
+            living_telemetry::redraw_requested();
             ctx.request_redraw();
         }
+        telemetry_frame.finish();
+        crate::telemetry::update_app_state(&self.app.controller, self.app.ui.window_focused, self.app.ui.visible, false);
     }
 }
 impl Desktop {
@@ -415,6 +458,9 @@ pub fn run() -> Result<(), String> {
         );
     }
     let data_root = root();
+    if let Err(error) = crate::telemetry::init(data_root.clone()) {
+        eprintln!("Tau telemetry initialization failed: {error}");
+    }
     crate::crash::install(data_root.clone());
     let result = (|| {
         #[cfg(windows)]
@@ -449,6 +495,7 @@ pub fn run() -> Result<(), String> {
         })
     })();
     if let Err(error) = &result { crate::crash::record_error(&data_root, error); }
+    crate::telemetry::shutdown();
     result
 }
 pub fn limits() -> wgpu::Limits {

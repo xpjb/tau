@@ -393,7 +393,7 @@ pub(crate) struct UiState {
     pub(crate) window_focused: bool,
     pub(crate) pointer_shift: bool,
     pub(super) input_serial: u64,
-    pub(super) visible: bool,
+    pub(crate) visible: bool,
     pub(crate) dirty: bool,
     pub(super) focus: Option<Target>,
     pub(super) composer: Option<Target>,

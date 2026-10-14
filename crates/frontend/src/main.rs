@@ -1,6 +1,9 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #[cfg(not(target_os = "android"))]
 fn main() {
+    if tau_frontend::run_watchdog_from_args() {
+        return;
+    }
     if let Err(error) = tau_frontend::run() {
         #[cfg(windows)]
         {

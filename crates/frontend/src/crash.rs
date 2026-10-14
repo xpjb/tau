@@ -23,7 +23,7 @@ pub(crate) fn install(root: PathBuf) {
         let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let detail = info.to_string();
             let location = info.location().map(|location| (location.file(), location.line()));
-            record(&root, "rust.panic", &detail, location);
+            record(&root, "rust.panic", &detail, location, true);
         }));
         if saved.is_err() { eprintln!("Tau crash reporting failed"); }
         previous(info);
@@ -31,10 +31,10 @@ pub(crate) fn install(root: PathBuf) {
 }
 
 pub(crate) fn record_error(root: &Path, detail: &str) {
-    record(root, "app.tau.FatalError", detail, None);
+    record(root, "app.tau.FatalError", detail, None, false);
 }
 
-fn record(root: &Path, exception_class: &str, detail: &str, location: Option<(&str, u32)>) {
+fn record(root: &Path, exception_class: &str, detail: &str, location: Option<(&str, u32)>, panic_report: bool) {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Err(error) = std::fs::create_dir_all(root) {
         eprintln!("Tau could not create its crash directory: {error}");
@@ -49,6 +49,13 @@ fn record(root: &Path, exception_class: &str, detail: &str, location: Option<(&s
     let current = std::thread::current();
     let thread = current.name().unwrap_or("unnamed");
     let backtrace = Backtrace::force_capture().to_string();
+    #[cfg(not(target_os = "android"))]
+    if panic_report {
+        let location = location.map(|(file, line)| format!("{file}:{line}")).unwrap_or_else(|| "unknown location".into());
+        crate::telemetry::report_panic(&location, detail, &backtrace);
+    }
+    #[cfg(target_os = "android")]
+    let _ = panic_report;
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let mut trace = format!("Tau {} crash {} at {}\nThread: {}\n{}\n{}", env!("CARGO_PKG_VERSION"), report_id, timestamp, thread, detail, backtrace);
     if trace.len() > MAX_LOCAL_BYTES {

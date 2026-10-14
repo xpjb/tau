@@ -26,7 +26,11 @@ mod render;
 mod scroll;
 mod tooltip;
 #[cfg(not(target_os = "android"))]
+mod telemetry;
+#[cfg(not(target_os = "android"))]
 pub use desktop::run;
+#[cfg(not(target_os = "android"))]
+pub use telemetry::run_watchdog_from_args;
 
 mod disk;
 #[cfg(not(target_os = "android"))]
