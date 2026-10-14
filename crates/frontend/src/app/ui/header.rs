@@ -163,7 +163,7 @@ impl Widget for Header {
             },
             Rect::new(title_x, b.y + 30. * s, title_width, 18. * s),
             12. * s,
-            color(if !connected { 0xfbbf24 } else if failed { 0xf87171 } else if paused && !running { 0xfbbf24 } else { 0x4ade80 }),
+            color(if !connected { cx.model.health.color(std::time::Instant::now()) } else if failed { 0xf87171 } else if paused && !running { 0xfbbf24 } else { 0x4ade80 }),
             false,
         );
         self.controls.icon(

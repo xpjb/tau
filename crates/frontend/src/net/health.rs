@@ -26,6 +26,7 @@ pub enum Phase {
     Offline,
     Connecting,
     Connected,
+    Disconnected,
     Blocked,
 }
 #[derive(Default)]
@@ -59,7 +60,7 @@ impl Health {
         self.pending_since = None;
     }
     pub fn retry_scheduled(&mut self, at: Instant) {
-        self.phase = Phase::Connecting;
+        self.phase = Phase::Disconnected;
         self.retry_at = Some(at);
     }
     pub fn connected(&mut self) { self.connected_at(Instant::now()); }
@@ -78,7 +79,7 @@ impl Health {
         self.phase = if fatal {
             Phase::Blocked
         } else {
-            Phase::Connecting
+            Phase::Disconnected
         };
         self.pending_since = None;
         self.deadline = None;
@@ -102,7 +103,7 @@ impl Health {
     pub fn counter(&self, now: Instant) -> Option<(&'static str, u128)> {
         let age = |at| now.saturating_duration_since(at).as_millis();
         match self.phase {
-            Phase::Connecting => self.attempt_at.map(|at| ("Last attempt", age(at))),
+            Phase::Connecting | Phase::Disconnected => self.attempt_at.map(|at| ("Last attempt", age(at))),
             Phase::Connected => self.last_ping.map(|at| ("Last ping", age(at)))
                 .or_else(|| self.next_ping.map(|at| ("Next ping in", at.saturating_duration_since(now).as_millis()))),
             _ => None,
@@ -120,7 +121,7 @@ impl Health {
     }
     pub fn color(&self, now: Instant) -> u32 {
         match self.phase {
-            Phase::Offline | Phase::Blocked => RED,
+            Phase::Offline | Phase::Disconnected | Phase::Blocked => RED,
             Phase::Connecting => ORANGE,
             Phase::Connected => {
                 let pending = self.pending_since.map(|sent| now.saturating_duration_since(sent));
@@ -157,12 +158,13 @@ impl Health {
             Phase::Offline => ("No WebSocket", "not configured"),
             Phase::Connecting => ("No WebSocket", "acquiring"),
             Phase::Connected => ("WebSocket", "connected"),
+            Phase::Disconnected => ("No WebSocket", "disconnected"),
             Phase::Blocked => ("No WebSocket", "needs attention"),
         };
         let tint = status_tint(self.color(now));
         content.strong(title, INK).dim(" · ").strong(state, tint);
         let remaining = |at: Instant| at.saturating_duration_since(now).as_millis();
-        if self.phase == Phase::Connecting {
+        if matches!(self.phase, Phase::Connecting | Phase::Disconnected) {
             if let Some(at) = self.attempt_at {
                 content.line().dim(format!("Attempt #{} started: ", self.attempt))
                     .strong(format!("{}ms", now.saturating_duration_since(at).as_millis()), INK).dim(" ago");

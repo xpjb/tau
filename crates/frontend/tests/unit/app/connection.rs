@@ -110,10 +110,10 @@ fn connection_card_shows_live_ack_and_waiting_counters_but_leaves_unread_dot_alo
     assert!(
         app.root.tooltips.info
             .content.text
-            .starts_with("No WebSocket · acquiring\nAttempt #2 started:")
+            .starts_with("No WebSocket · disconnected\nAttempt #2 started:")
     );
     assert!(app.root.tooltips.info.content.text.ends_with("\nLast failure: Ping timed out"));
-    assert_eq!(app.controller.health.color(Instant::now()), 0xfb923c);
+    assert_eq!(app.controller.health.color(Instant::now()), 0xff5a5f);
     let disconnected = ctx.read_rgba8().unwrap();
     let pixel = |image: &[u8], x, y| {
         let offset = ((y * ctx.size().0 + x) * 4) as usize;

@@ -330,8 +330,9 @@ impl App {
             ConnectionPreview::Disconnected => {
                 self.controller.epoch = None;
                 self.controller.connection = "Ping timed out".into();
-                self.controller.health.disconnected(false);
                 self.controller.health.attempt(2, now - Duration::from_millis(1234));
+                self.controller.health.disconnected(false);
+                self.controller.health.retry_scheduled(now + Duration::from_millis(766));
             }
             ConnectionPreview::Unconfigured => {
                 self.controller.epoch = None;

@@ -96,7 +96,7 @@ fn latency_bands_escalate_while_waiting_and_fail_closed_without_a_socket() {
     ack(&mut health, now, 3100);
     assert_eq!(health.color(now), RED);
     health.disconnected(false);
-    assert_eq!(health.color(now), ORANGE);
+    assert_eq!(health.color(now), RED);
 }
 #[test]
 fn stable_latency_missed_pings_and_jitter_use_recent_windows() {
