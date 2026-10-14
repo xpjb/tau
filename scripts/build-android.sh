@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-app=$(cd "$(dirname "$0")/.." && pwd)
-root=$(cd "$app/../.." && pwd)
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+app="$root/crates/frontend"
+cd "$root"
+[[ $# == 0 ]] || { echo "Usage: $0" >&2; exit 2; }
 cargo=/usr/local/bin/cargo
+unset CARGO_TARGET_DIR
+read -r version _ code < <(python3 scripts/beta-release.py meta)
+start=$SECONDS
 export CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=1
 export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-XX:ActiveProcessorCount=1"
 sdk=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/android-sdk}}
@@ -15,24 +21,26 @@ case "$abi" in
     x86_64) triple=x86_64-linux-android; clang=x86_64-linux-android29-clang ;;
     *) echo "Unsupported ABI: $abi (use arm64-v8a or x86_64)" >&2; exit 1 ;;
 esac
-target=$(realpath -m "${CARGO_TARGET_DIR:-$root/target}")
+target="$root/target"
 out=$target/android/$abi
 keystore=${ANDROID_KEYSTORE:-$HOME/.android/debug.keystore}
 jar=$sdk/platforms/android-35/android.jar
+output="$root/dist/Tau-Beta-$version-android-$abi.apk"
 for tool in "$llvm/llvm-strip" "$llvm/$clang" "$tools/aapt2" "$tools/d8" "$tools/zipalign" "$tools/apksigner"; do
     test -x "$tool" || { echo "Missing Android build tool: $tool" >&2; exit 1; }
 done
-test -f "$jar" || { echo "Install Android SDK platform 35" >&2; exit 1; }
-test -f "$keystore" || { echo "Existing beta signing key required: $keystore (refusing to create a new identity)" >&2; exit 1; }
-cd "$root"
+test -f "$jar" || { echo 'Install Android SDK platform 35' >&2; exit 1; }
+test -f "$keystore" || { echo "Existing beta signing key required: $keystore" >&2; exit 1; }
+python3 scripts/beta-release.py check-key
 variable=${triple//-/_}
 export "CC_$variable=$llvm/$clang" "AR_$variable=$llvm/llvm-ar"
+printf '[android] build Tau Beta %s for %s\n' "$version" "$abi"
+
 "$cargo" build --release --locked --target "$triple" -p tau-frontend --lib --target-dir "$target" \
     --config net.git-fetch-with-cli=true \
     --config "target.$triple.linker=\"$llvm/$clang\"" \
     --config "target.$triple.rustflags=[\"-C\", \"link-arg=-Wl,-z,max-page-size=16384\", \"-C\", \"link-arg=-Wl,-z,common-page-size=16384\"]"
-mkdir -p "$out/classes" "$out/dex"
-# Keep Cargo's original for symbolication; never strip shared cache artifacts.
+mkdir -p "$out/classes" "$out/dex" "$root/dist"
 cp "$target/$triple/release/libtau_frontend.so" "$out/libtau_frontend.so"
 "$llvm/llvm-strip" --strip-unneeded "$out/libtau_frontend.so"
 find "$out/classes" "$out/dex" -type f -delete
@@ -45,12 +53,10 @@ rm -f "$out/resources.zip" "$out/unsigned.apk" "$out/aligned.apk" \
 "$tools/aapt2" compile --dir "$app/android/res" -o "$out/resources.zip"
 "$tools/aapt2" link -I "$jar" --manifest "$app/android/AndroidManifest.xml" \
     -o "$out/unsigned.apk" "$out/resources.zip"
-python3 - "$out/unsigned.apk" "$out/libtau_frontend.so" "$abi" \
-    "$out/dex/classes.dex" <<'PY'
+python3 - "$out/unsigned.apk" "$out/libtau_frontend.so" "$abi" "$out/dex/classes.dex" <<'PY'
 import sys
 import zipfile
 with zipfile.ZipFile(sys.argv[1], 'a', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as apk:
-    # A standard, directly installable APK: PackageManager extracts this library.
     apk.write(sys.argv[2], 'lib/' + sys.argv[3] + '/libtau_frontend.so')
     apk.write(sys.argv[4], 'classes.dex', compress_type=zipfile.ZIP_DEFLATED)
 PY
@@ -60,4 +66,8 @@ PY
     --out "$out/tau-frontend-$abi.apk" "$out/aligned.apk"
 "$tools/apksigner" verify --verbose "$out/tau-frontend-$abi.apk"
 "$tools/zipalign" -c -P 16 4 "$out/tau-frontend-$abi.apk"
-printf '\nBuilt %s\n' "$out/tau-frontend-$abi.apk"
+python3 scripts/beta-release.py android "$version" "$code" "$abi" >/dev/null
+install -m 0600 "$out/tau-frontend-$abi.apk" "$output"
+sha256sum "$output" > "$output.sha256"
+printf '[android] complete in %dm%02ds\n' "$(((SECONDS-start)/60))" "$(((SECONDS-start)%60))"
+ls -lh "$output" "$output.sha256"

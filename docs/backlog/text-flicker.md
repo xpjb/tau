@@ -204,8 +204,8 @@ added while a recorder exists.
   orderly latest-file replacement and real topic switching pass. Win32
   `ShowWindow`/`IsIconic` controls verify minimize/restore; 30/90-second waits
   and separated pointer bursts are captured. These are not AMD reproductions.
-- Normal 0.7.14 installer built via `scripts/build-windows-sfx.sh --beta` using
-  managed Cargo. `scripts/beta-release.py windows 0.7.14` verifies its embedded
+- Normal 0.7.14 installer built through the Windows packaging entry point (now
+  `scripts/build-windows.sh`) using managed Cargo. `scripts/beta-release.py windows 0.7.14` verifies its embedded
   payload/launcher and that the payload matches the built client.
 
 Current artifact hashes and working-source hashes are recorded in

@@ -13,8 +13,8 @@ cargo nextest run --locked --workspace
 ```
 
 Windows launcher and installer crates use a separate workspace at
-`crates/windows/Cargo.toml`. Linux packaging entry points are
-`scripts/build-windows-sfx.sh` and `crates/frontend/android/build.sh`.
+`crates/windows/Cargo.toml`. Packaging entry points are
+`scripts/build-windows.sh` and `scripts/build-android.sh`.
 
 ## Source and tests
 
@@ -39,9 +39,9 @@ and encrypted reasoning checkpoint recovery are integrated on this mainline.
 See [Codex sign-in](docs/codex-signin.md),
 [reasoning recovery](docs/codex-reasoning-recovery.md), and
 [desktop telemetry](docs/telemetry.md) for behavior and ownership.
-`scripts/release-beta.sh` builds matching daemon, Windows and Android packages.
-Client packages are delivered before deployment; restarting the beta service
-requires explicit operator approval.
+The [release process](docs/release.md) builds and delivers Windows before Android,
+then stops. Daemon build and deployment are a separate, explicitly approved final
+operation.
 
 The [Bash launcher](docs/bash-launcher.md) keeps tool scripts out of process
 arguments while preserving independent standard input.
