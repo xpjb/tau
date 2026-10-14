@@ -85,6 +85,8 @@ impl Workspace {
             || self.navigation.lineage != cx.model.account.source_lineage
             || self.navigation.session != cx.model.account.selected
         {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("navigation", "reset_workspace");
             cx.ui.navigation_changed();
             self.chat.code.close_code(cx);
             self.cancel(cx);
@@ -102,6 +104,14 @@ impl Workspace {
         self.chat.composer.bind(cx);
     }
     pub fn navigate_chat(&mut self, id: &str, cx: &mut Context<'_>) -> anyhow::Result<()> {
+        #[cfg(not(target_os = "android"))]
+        let _scope = living_telemetry::scope!("navigation", "select_chat");
+        #[cfg(not(target_os = "android"))]
+        let loaded_before = cx.model.chats.contains_key(id);
+        #[cfg(not(target_os = "android"))]
+        let source_rows = self.chat.transcript.rows.len();
+        #[cfg(not(target_os = "android"))]
+        let source_layout_rows = self.chat.transcript.placed.len();
         self.chat.transcript.save(cx)?;
         let same = cx.model.account.selected.as_deref() == Some(id);
         let topic = cx
@@ -113,6 +123,25 @@ impl Workspace {
             .is_none_or(|s| s.project_id == cx.model.account.selected_project);
         if !same || !topic {
             cx.model.select(id)?;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let chat = cx.model.chats.get(id);
+            living_telemetry::event("navigation", "chat_selected", vec![
+                living_telemetry::Field::new("chat_key", crate::telemetry::chat_key(id)),
+                living_telemetry::Field::new("same_chat", same),
+                living_telemetry::Field::new("loaded_before", loaded_before),
+                living_telemetry::Field::new("source_rows", source_rows),
+                living_telemetry::Field::new("source_layout_rows", source_layout_rows),
+                living_telemetry::Field::new("feed_messages", chat.map_or(0, |chat| chat.feed.order.len())),
+                living_telemetry::Field::new("feed_events", chat.map_or(0, |chat| chat.feed.events.len())),
+                living_telemetry::Field::new("feed_bodies", chat.map_or(0, |chat| chat.feed.bodies.len())),
+                living_telemetry::Field::new("feed_incomplete", chat.map_or(0, |chat| chat.feed.incomplete.len())),
+                living_telemetry::Field::new("queue_items", chat.map_or(0, |chat| chat.feed.queue.requests.len())),
+                living_telemetry::Field::new("local_pending", chat.map_or(0, |chat| chat.local.pending.len())),
+                living_telemetry::Field::new("synchronized", chat.is_some_and(|chat| chat.feed.synchronized)),
+                living_telemetry::Field::new("opening", chat.is_some_and(|chat| chat.feed.opening)),
+            ]);
         }
         self.chat.code.close_code(cx);
         self.sync_navigation(cx);

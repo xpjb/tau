@@ -31,6 +31,13 @@ pub(crate) fn shutdown() {
     living_telemetry::shutdown();
 }
 
+pub(crate) fn chat_key(id: &str) -> u64 {
+    let digest = blake3::hash(id.as_bytes());
+    let mut key = [0; 8];
+    key.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(key)
+}
+
 pub(crate) fn set_refresh_rate_millihertz(refresh_rate: Option<u32>) {
     let refresh_rate = refresh_rate.filter(|value| (20_000..=500_000).contains(value)).unwrap_or(60_000);
     let nanos = 1_000_000_000_000u64 / u64::from(refresh_rate);
@@ -59,6 +66,7 @@ pub(crate) fn update_app_state(controller: &Controller, window_focused: bool, wi
         .map(|session| format!("{:?}", session.status))
         .unwrap_or_else(|| "none".to_string());
     let metrics = &controller.native_metrics;
+    let selected = controller.selected();
     living_telemetry::set_state(vec![
         Field::new("connection_phase", phase),
         Field::new("connected", controller.epoch.is_some()),
@@ -66,6 +74,19 @@ pub(crate) fn update_app_state(controller: &Controller, window_focused: bool, wi
         Field::new("loaded_chats", controller.chats.len()),
         Field::new("running_sessions", running_sessions),
         Field::new("selected_status", selected_status),
+        Field::new("selected_chat_key", controller.account.selected.as_deref().map_or(0, chat_key)),
+        Field::new("selected_loaded", selected.is_some()),
+        Field::new("selected_feed_messages", selected.map_or(0, |chat| chat.feed.order.len())),
+        Field::new("selected_feed_events", selected.map_or(0, |chat| chat.feed.events.len())),
+        Field::new("selected_feed_bodies", selected.map_or(0, |chat| chat.feed.bodies.len())),
+        Field::new("selected_feed_incomplete", selected.map_or(0, |chat| chat.feed.incomplete.len())),
+        Field::new("selected_queue_items", selected.map_or(0, |chat| chat.feed.queue.requests.len())),
+        Field::new("selected_local_pending", selected.map_or(0, |chat| chat.local.pending.len())),
+        Field::new("selected_synchronized", selected.is_some_and(|chat| chat.feed.synchronized)),
+        Field::new("selected_loading", selected.is_some_and(|chat| chat.feed.loading)),
+        Field::new("selected_opening", selected.is_some_and(|chat| chat.feed.opening)),
+        Field::new("selected_has_before", selected.is_some_and(|chat| chat.feed.before.is_some())),
+        Field::new("selected_has_after", selected.is_some_and(|chat| chat.feed.after)),
         Field::new("pending_messages", pending_messages),
         Field::new("pending_controls", controller.account.pending_controls.len()),
         Field::new("restore_reviews", controller.restore_reviews.len()),

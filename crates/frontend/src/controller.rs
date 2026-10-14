@@ -46,7 +46,11 @@ pub struct Chat {
     pub feed: Feed,
 }
 impl Chat {
-    pub fn reconcile(&mut self) { self.feed.reconcile(&self.local); }
+    pub fn reconcile(&mut self) {
+        #[cfg(not(target_os = "android"))]
+        let _scope = living_telemetry::scope!("chat", "reconcile_feed");
+        self.feed.reconcile(&self.local);
+    }
 }
 #[derive(Default)]
 struct Catalog {
@@ -235,6 +239,8 @@ impl Controller {
     }
     pub fn ensure_chat(&mut self, id: &str) -> Result<()> {
         if !self.chats.contains_key(id) {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("chat_load", "local_state");
             let local = self.store.load_chat(&self.identity, id)?;
             self.chats.insert(
                 id.to_owned(),
@@ -246,6 +252,8 @@ impl Controller {
             self.chats.get_mut(id).unwrap().reconcile();
         }
         if self.chats[id].feed.generation.is_empty() {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("chat_load", "cached_view");
             let resume = self.remote.resume_viewport(id,&self.chats[id].local)?;
             if let Some(view) = self.remote.preview(id,resume.as_ref())? {
                 let feed = &mut self.chats.get_mut(id).unwrap().feed;
@@ -277,11 +285,17 @@ impl Controller {
         Ok(())
     }
     pub fn select(&mut self, id: &str) -> Result<()> {
+        #[cfg(not(target_os = "android"))]
+        let _scope = living_telemetry::scope!("navigation", "select_model");
         self.plan_dirty.set(true);
         self.ensure_chat(id)?;
         self.account.selected = Some(id.into());
         self.account.remember_chat(id,crate::clock::now_ms().unwrap_or(0));
-        self.trim_chat_views(32*1024*1024);
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("navigation", "trim_chat_views");
+            self.trim_chat_views(32*1024*1024);
+        }
         for (old,chat) in &mut self.chats {
             // Selection cancels the old history watch. A retained view must not
             // keep its loading latch when that chat is opened again.
@@ -294,8 +308,14 @@ impl Controller {
                 .read_at
                 .insert(id.into(), session.updated_at_ms);
         }
-        self.store.put(&self.identity, "account", &self.account)?;
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("navigation", "persist_selection");
+            self.store.put(&self.identity, "account", &self.account)?;
+        }
         if self.epoch.is_some() && !self.is_creating(id) && !self.account.missing_chats.contains(id) {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("navigation", "open_chat");
             self.open(id)?;
         }
         Ok(())
@@ -1134,13 +1154,17 @@ impl Controller {
     }
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        for _ in 0..256 {
-            let Some(event) = self.network.as_mut().and_then(|n| n.events.try_recv().ok()) else {
-                break;
-            };
-            changed = true;
-            if let Err(error) = self.network_event(event) {
-                self.report_error(error);
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("controller_poll", "network_events");
+            for _ in 0..256 {
+                let Some(event) = self.network.as_mut().and_then(|n| n.events.try_recv().ok()) else {
+                    break;
+                };
+                changed = true;
+                if let Err(error) = self.network_event(event) {
+                    self.report_error(error);
+                }
             }
         }
         if let Some(network)=&mut self.network && network.files.has_changed().unwrap_or(false) {
@@ -1175,21 +1199,37 @@ impl Controller {
                 }
             }
         }
-        for scope in scopes {
-            // Disk-only chats still need their body interests advanced when
-            // headers arrive. Fetching does not require constructing a UI Feed.
-            self.plan_dirty.set(true);
-            self.background_dirty.insert(scope.clone());
-            if self.chats.get(&scope).is_some_and(|chat| !chat.feed.generation.is_empty() || !chat.local.pending.is_empty())
-                || self.account.selected.as_ref()==Some(&scope) {
-                if let Err(error) = self.refresh_blocks(&scope) { self.report_error(error); }
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("controller_poll", "refresh_replicas");
+            for scope in scopes {
+                // Disk-only chats still need their body interests advanced when
+                // headers arrive. Fetching does not require constructing a UI Feed.
+                self.plan_dirty.set(true);
+                self.background_dirty.insert(scope.clone());
+                if self.chats.get(&scope).is_some_and(|chat| !chat.feed.generation.is_empty() || !chat.local.pending.is_empty())
+                    || self.account.selected.as_ref()==Some(&scope) {
+                    if let Err(error) = self.refresh_blocks(&scope) { self.report_error(error); }
+                }
             }
         }
         if let Err(error) = self.watch_blocks() { self.report_error(error); }
-        if let Err(error) = self.reconcile_controls() {self.report_error(error);}
-        if let Err(error) = self.reconcile_receipts() {self.report_error(error);}
-        let mut waiting=self.chats.keys().cloned().collect::<Vec<_>>();waiting.sort_by_key(|id|self.account.selected.as_ref()!=Some(id));
-        for id in waiting {if let Err(e)=self.send_waiting(&id) {self.report_error(e);}}
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("controller_poll", "reconcile_controls");
+            if let Err(error) = self.reconcile_controls() {self.report_error(error);}
+        }
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("controller_poll", "reconcile_receipts");
+            if let Err(error) = self.reconcile_receipts() {self.report_error(error);}
+        }
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("controller_poll", "send_waiting");
+            let mut waiting=self.chats.keys().cloned().collect::<Vec<_>>();waiting.sort_by_key(|id|self.account.selected.as_ref()!=Some(id));
+            for id in waiting {if let Err(e)=self.send_waiting(&id) {self.report_error(e);}}
+        }
         changed
     }
     fn remember_local_body(&mut self, scope: &str) {
@@ -1202,6 +1242,8 @@ impl Controller {
         }
     }
     fn refresh_blocks(&mut self, scope: &str) -> Result<()> {
+        #[cfg(not(target_os = "android"))]
+        let _scope = living_telemetry::scope!("replica", "refresh_blocks");
         self.plan_dirty.set(true);
         self.remember_local_body(scope);
         let full=self.chats.get(scope).is_none_or(|chat|chat.feed.generation.is_empty());
@@ -1212,7 +1254,14 @@ impl Controller {
             self.chats.get(scope).map(|chat|self.remote.resume_viewport(scope,&chat.local)).transpose()?.flatten()
         } else {None};
         let anchor=viewport.and_then(|viewport|(!viewport.window.is_empty()).then_some(&viewport.window)).or(resume.as_ref());
-        if let Some(view) = self.remote.changes_window(scope,viewport.map(|viewport|&viewport.visible),anchor,&loaded,tail,full)? {
+        let view = {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("replica", "read_window");
+            self.remote.changes_window(scope,viewport.map(|viewport|&viewport.visible),anchor,&loaded,tail,full)?
+        };
+        if let Some(view) = view {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("replica", "install_window");
             let chat = self.chats.get_mut(scope).context("Unknown cached chat")?;
             let delivered=chat.feed.native_view(view)?;
             chat.feed.synchronized = chat.feed.queue.available;
@@ -1286,6 +1335,8 @@ impl Controller {
         }
     }
     fn watch_blocks(&mut self) -> Result<()> {
+        #[cfg(not(target_os = "android"))]
+        let _scope = living_telemetry::scope!("controller_poll", "watch_blocks");
         if !self.plan_dirty.replace(false) {return Ok(());}
         if self.copy.as_ref().is_some_and(|(scope,_)|self.account.selected.as_ref()!=Some(scope)) {self.cancel_copy();}
         if let Some((scope,ids))=&self.copy {
@@ -1297,20 +1348,28 @@ impl Controller {
         }
         let scopes = self.sync_scopes();
         self.remote.retain_background(&scopes);
-        self.trim_chat_views(32*1024*1024);
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("block_plan", "trim_chat_views");
+            self.trim_chat_views(32*1024*1024);
+        }
         let mut next = Vec::new();
         let old_plans=self.block_plan.iter().enumerate().filter(|(_,plan)|plan.background)
             .map(|(index,plan)|(plan.scope.clone(),index)).collect::<HashMap<_,_>>();
-        for id in scopes {
-            let plan = if self.account.selected.as_ref() == Some(&id) {
-                self.ensure_chat(&id)?;
-                self.remote.plan_active(&id, &self.chats[&id].local,
-                    self.copy.as_ref().map_or(&[],|(_,ids)|ids.as_slice()),
-                    self.viewport.as_ref().filter(|viewport|viewport.scope==id).map(|viewport|&viewport.visible))?
-            } else if !self.background_dirty.contains(&id) && let Some(index)=old_plans.get(&id) {
-                self.block_plan[*index].clone()
-            } else { self.remote.plan_background(&id)? };
-            next.push(plan);
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("block_plan", "build_plans");
+            for id in scopes {
+                let plan = if self.account.selected.as_ref() == Some(&id) {
+                    self.ensure_chat(&id)?;
+                    self.remote.plan_active(&id, &self.chats[&id].local,
+                        self.copy.as_ref().map_or(&[],|(_,ids)|ids.as_slice()),
+                        self.viewport.as_ref().filter(|viewport|viewport.scope==id).map(|viewport|&viewport.visible))?
+                } else if !self.background_dirty.contains(&id) && let Some(index)=old_plans.get(&id) {
+                    self.block_plan[*index].clone()
+                } else { self.remote.plan_background(&id)? };
+                next.push(plan);
+            }
         }
         if next != self.block_plan && let Some(network) = &self.network {
             if let Err(error)=network.plan(next.clone()) {

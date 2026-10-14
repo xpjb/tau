@@ -83,35 +83,75 @@ impl Transcript {
         let next =
             (cx.model.identity.clone(), cx.model.account.source_lineage.clone(), cx.model.account.selected.clone());
         if self.binding.as_ref() != Some(&next) {
-            let result = self.save(cx);
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("transcript", "bind");
+            let result = {
+                #[cfg(not(target_os = "android"))]
+                let _scope = living_telemetry::scope!("transcript_bind", "save_previous");
+                self.save(cx)
+            };
             cx.report(result);
-            cx.ui.detach(self.selection.scope);
-            for row in &mut self.rows {
-                row.detach(cx);
-            }
-            cx.services.renderer.selection = None;
-            cx.services.renderer.clear_scenes();
-            let same_source = self.binding.as_ref().is_some_and(|(identity, lineage, _)|
-                identity == &next.0 && lineage == &next.1);
-            let mut cached = std::mem::take(&mut self.cached);
-            if same_source {
-                if let (Some((_, _, Some(session))), Some(measured)) = (&self.binding, self.measured) {
-                    cached.put(session.clone(), cache::Layout { measured, placed: std::mem::take(&mut self.placed) });
+            {
+                #[cfg(not(target_os = "android"))]
+                let _scope = living_telemetry::scope!("transcript_bind", "detach_previous");
+                cx.ui.detach(self.selection.scope);
+                for row in &mut self.rows {
+                    row.detach(cx);
                 }
-            } else {
-                cached = cache::Cache::default();
-                cx.services.renderer.retain_messages(&HashSet::new());
+                cx.services.renderer.selection = None;
+                cx.services.renderer.clear_scenes();
             }
-            let restored = next.2.as_deref().and_then(|session| cached.take(session));
-            *self = Self::new();
-            self.cached = cached;
-            if let Some(layout) = restored {
-                self.measured = Some(layout.measured);
-                self.placed = layout.placed;
+            let (_same_source, cached, restored) = {
+                #[cfg(not(target_os = "android"))]
+                let _scope = living_telemetry::scope!("transcript_bind", "layout_cache");
+                let same_source = self.binding.as_ref().is_some_and(|(identity, lineage, _)|
+                    identity == &next.0 && lineage == &next.1);
+                let mut cached = std::mem::take(&mut self.cached);
+                if same_source {
+                    if let (Some((_, _, Some(session))), Some(measured)) = (&self.binding, self.measured) {
+                        cached.put(session.clone(), cache::Layout { measured, placed: std::mem::take(&mut self.placed) });
+                    }
+                } else {
+                    cached = cache::Cache::default();
+                    cx.services.renderer.retain_messages(&HashSet::new());
+                }
+                let restored = next.2.as_deref().and_then(|session| cached.take(session));
+                (same_source, cached, restored)
+            };
+            #[cfg(not(target_os = "android"))]
+            let layout_cache_hit = restored.is_some();
+            #[cfg(not(target_os = "android"))]
+            let restored_layout_rows = restored.as_ref().map_or(0, |layout| layout.placed.len());
+            {
+                #[cfg(not(target_os = "android"))]
+                let _scope = living_telemetry::scope!("transcript_bind", "reset_transcript");
+                *self = Self::new();
+                self.cached = cached;
+                if let Some(layout) = restored {
+                    self.measured = Some(layout.measured);
+                    self.placed = layout.placed;
+                }
+                self.cached.trim(self.placed.len());
+                if let Some(chat) = cx.model.selected() {
+                    self.reading = Reading::Position(chat.local.position.clone());
+                }
             }
-            self.cached.trim(self.placed.len());
-            if let Some(chat) = cx.model.selected() {
-                self.reading = Reading::Position(chat.local.position.clone());
+            #[cfg(not(target_os = "android"))]
+            {
+                let chat = next.2.as_ref().and_then(|session| cx.model.chats.get(session));
+                living_telemetry::event("transcript", "chat_bound", vec![
+                    living_telemetry::Field::new("chat_key", next.2.as_deref().map_or(0, crate::telemetry::chat_key)),
+                    living_telemetry::Field::new("has_chat", chat.is_some()),
+                    living_telemetry::Field::new("same_source", _same_source),
+                    living_telemetry::Field::new("layout_cache_hit", layout_cache_hit),
+                    living_telemetry::Field::new("restored_layout_rows", restored_layout_rows),
+                    living_telemetry::Field::new("feed_messages", chat.map_or(0, |chat| chat.feed.order.len())),
+                    living_telemetry::Field::new("feed_events", chat.map_or(0, |chat| chat.feed.events.len())),
+                    living_telemetry::Field::new("feed_bodies", chat.map_or(0, |chat| chat.feed.bodies.len())),
+                    living_telemetry::Field::new("feed_incomplete", chat.map_or(0, |chat| chat.feed.incomplete.len())),
+                    living_telemetry::Field::new("queue_items", chat.map_or(0, |chat| chat.feed.queue.requests.len())),
+                    living_telemetry::Field::new("local_pending", chat.map_or(0, |chat| chat.local.pending.len())),
+                ]);
             }
             // Always reconcile identities/stamps on a return, even if a dropped
             // and reloaded Feed happens to reuse the same numeric revision.
@@ -375,6 +415,8 @@ impl Widget for Transcript {
         let signature = (cx.model.chats[&session].feed.revision, bubble_width.to_bits(), s.to_bits());
         let mut owners = std::mem::take(&mut self.rows).into_iter().map(|row| (row.key.clone(), row)).collect::<HashMap<_, _>>();
         if self.reconcile || self.measured != Some(signature) || self.generation != cx.model.chats[&session].feed.generation {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("transcript_layout", "reconcile_rows");
             // Presentation owns only ordered child identities. The feed already
             // decided local/queue/history ownership; no body/action descriptions
             // are assembled here. Details headers and each native tool are
@@ -419,30 +461,34 @@ impl Widget for Transcript {
         // height: one tall reasoning message can fill the window, so do not
         // eagerly shape the other rows a provisional height put nearby.
         let old_scroll = self.scroll.value;
-        loop {
-            self.place_window(&session, quick_top + quick_h, quick_models, &owners, cx);
-            let top = self.scroll.value - 2. * viewport.height;
-            let bottom = self.scroll.value + 3. * viewport.height;
-            let follow = matches!(&self.reading, Reading::Position(p) if p.follow);
-            let focus = self.scroll.value + if follow { viewport.height } else { 0. };
-            // A saved offset may lie thousands of pixels into an unmeasured
-            // row. Refine that identity first, even if its provisional extent
-            // currently places it outside the estimated viewport.
-            let anchor = match &self.reading {
-                Reading::Position(p) if !p.follow => p.key.as_ref().and_then(|key|
-                    self.placed.iter().position(|row| &row.key == key)),
-                Reading::Disclosure(p) => p.key.as_ref().and_then(|key|
-                    self.placed.iter().position(|row| owners.get(&row.key).is_some_and(|owner| owner.anchor(key).is_some()))),
-                _ => None,
-            }.filter(|&i| !self.placed[i].exact);
-            let candidate = anchor.or_else(|| self.placed.iter().enumerate()
-                .filter(|(_, p)| !p.exact && p.top + p.height >= top && p.top <= bottom)
-                .min_by(|(a, p), (b, q)| {
-                    let distance = |p: &Placed| (p.top - focus).max(focus - p.top - p.height).max(0.);
-                    distance(p).total_cmp(&distance(q)).then_with(|| if follow { b.cmp(a) } else { a.cmp(b) })
-                }).map(|(i, _)| i));
-            let Some(index) = candidate else { break; };
-            self.measure_row(index, bubble_width, &session, &mut owners, cx);
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("transcript_layout", "measure_window");
+            loop {
+                self.place_window(&session, quick_top + quick_h, quick_models, &owners, cx);
+                let top = self.scroll.value - 2. * viewport.height;
+                let bottom = self.scroll.value + 3. * viewport.height;
+                let follow = matches!(&self.reading, Reading::Position(p) if p.follow);
+                let focus = self.scroll.value + if follow { viewport.height } else { 0. };
+                // A saved offset may lie thousands of pixels into an unmeasured
+                // row. Refine that identity first, even if its provisional extent
+                // currently places it outside the estimated viewport.
+                let anchor = match &self.reading {
+                    Reading::Position(p) if !p.follow => p.key.as_ref().and_then(|key|
+                        self.placed.iter().position(|row| &row.key == key)),
+                    Reading::Disclosure(p) => p.key.as_ref().and_then(|key|
+                        self.placed.iter().position(|row| owners.get(&row.key).is_some_and(|owner| owner.anchor(key).is_some()))),
+                    _ => None,
+                }.filter(|&i| !self.placed[i].exact);
+                let candidate = anchor.or_else(|| self.placed.iter().enumerate()
+                    .filter(|(_, p)| !p.exact && p.top + p.height >= top && p.top <= bottom)
+                    .min_by(|(a, p), (b, q)| {
+                        let distance = |p: &Placed| (p.top - focus).max(focus - p.top - p.height).max(0.);
+                        distance(p).total_cmp(&distance(q)).then_with(|| if follow { b.cmp(a) } else { a.cmp(b) })
+                    }).map(|(i, _)| i));
+                let Some(index) = candidate else { break; };
+                self.measure_row(index, bubble_width, &session, &mut owners, cx);
+            }
         }
         // Provisional extents may temporarily clamp the viewport. Only the
         // final anchor adjustment may shift/clamp an in-flight wheel target.
@@ -453,41 +499,45 @@ impl Widget for Transcript {
         let top = self.scroll.value - 2. * viewport.height;
         let bottom = self.scroll.value + 3. * viewport.height;
         self.history_near_edge(&session, self.locating_download() || self.scroll.value <= 2. * viewport.height, cx);
-        if quick_models { self.models.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x, viewport.y + quick_top - self.scroll.value, width, quick_h), clip: viewport }, cx); }
-        for (index, p) in self.placed.iter().enumerate() {
-            // A pinned disclosure survives a temporarily tiny viewport, like capture.
-            // Keep a saved row interested even when its unloaded placeholder
-            // is shorter than the saved offset. Otherwise it can fall outside
-            // overscan and never receive the body needed to resolve that offset.
-            let reading_anchor = matches!(&self.reading, Reading::Position(position)
-                if !position.follow && position.key.as_ref() == Some(&p.key));
-            let active = reading_anchor || owners.get(&p.key).is_some_and(|row| {
-                cx.ui.capture.is_some_and(|c| c.target.scope == row.control.target.scope
-                    || row.attachment.as_ref().is_some_and(|a| a.controls.id == c.target.scope))
-                    || matches!(&self.reading, Reading::Disclosure(position)
-                        if position.key.as_ref().is_some_and(|key| row.anchor(key).is_some()))
-            });
-            if !active && (p.top + p.height < top || p.top > bottom) { continue; }
-            if let Some(id)=p.item.root(&cx.model.chats[&session]) {self.window.insert(id.to_owned());}
-            let mut row = if let Some(owner) = owners.remove(&p.key) { owner } else {
-                let mut owner = MessageRow::new(p.item.clone(), &session); owner.measure(bubble_width, &session, cx); owner
-            };
-            row.item = p.item.clone(); row.hide(); row.horizontal = self.horizontal.value;
-            let upper = if index > 0 && self.placed[index - 1].sender == p.sender { 0. } else { 12. * s };
-            let lower = if self.placed.get(index + 1).is_some_and(|next| next.sender == p.sender) { 0. } else { 12. * s };
-            row.corners = [upper, upper, lower, lower];
-            if let Some(id) = row.interest(&cx.model.chats[&session]) { self.interests.insert(id); }
-            let screen_top = viewport.y + p.top - self.scroll.value;
-            if screen_top + p.height >= viewport.y && screen_top <= viewport.y + viewport.height {
-                row.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x + if p.sender == tau_net::EventRole::User { width - bubble_width } else { 0. }, screen_top, bubble_width, p.height), clip: viewport }, cx);
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("transcript_layout", "mount_rows");
+            if quick_models { self.models.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x, viewport.y + quick_top - self.scroll.value, width, quick_h), clip: viewport }, cx); }
+            for (index, p) in self.placed.iter().enumerate() {
+                // A pinned disclosure survives a temporarily tiny viewport, like capture.
+                // Keep a saved row interested even when its unloaded placeholder
+                // is shorter than the saved offset. Otherwise it can fall outside
+                // overscan and never receive the body needed to resolve that offset.
+                let reading_anchor = matches!(&self.reading, Reading::Position(position)
+                    if !position.follow && position.key.as_ref() == Some(&p.key));
+                let active = reading_anchor || owners.get(&p.key).is_some_and(|row| {
+                    cx.ui.capture.is_some_and(|c| c.target.scope == row.control.target.scope
+                        || row.attachment.as_ref().is_some_and(|a| a.controls.id == c.target.scope))
+                        || matches!(&self.reading, Reading::Disclosure(position)
+                            if position.key.as_ref().is_some_and(|key| row.anchor(key).is_some()))
+                });
+                if !active && (p.top + p.height < top || p.top > bottom) { continue; }
+                if let Some(id)=p.item.root(&cx.model.chats[&session]) {self.window.insert(id.to_owned());}
+                let mut row = if let Some(owner) = owners.remove(&p.key) { owner } else {
+                    let mut owner = MessageRow::new(p.item.clone(), &session); owner.measure(bubble_width, &session, cx); owner
+                };
+                row.item = p.item.clone(); row.hide(); row.horizontal = self.horizontal.value;
+                let upper = if index > 0 && self.placed[index - 1].sender == p.sender { 0. } else { 12. * s };
+                let lower = if self.placed.get(index + 1).is_some_and(|next| next.sender == p.sender) { 0. } else { 12. * s };
+                row.corners = [upper, upper, lower, lower];
+                if let Some(id) = row.interest(&cx.model.chats[&session]) { self.interests.insert(id); }
+                let screen_top = viewport.y + p.top - self.scroll.value;
+                if screen_top + p.height >= viewport.y && screen_top <= viewport.y + viewport.height {
+                    row.visit_perframe(&mut Frame { layer: frame.layer, bounds: Rect::new(x + if p.sender == tau_net::EventRole::User { width - bubble_width } else { 0. }, screen_top, bubble_width, p.height), clip: viewport }, cx);
+                }
+                self.rows.push(row);
             }
-            self.rows.push(row);
+            for mut removed in owners.into_values() { removed.detach(cx); }
+            // New owners may have touched existing text caches after order was set.
+            cx.services.renderer.order_messages(self.placed.iter().flat_map(|p| p.text_keys.iter().cloned()));
+            let pinned = self.rows.iter().flat_map(|row| row.text_keys(&session)).collect();
+            cx.services.renderer.trim_messages(&pinned);
         }
-        for mut removed in owners.into_values() { removed.detach(cx); }
-        // New owners may have touched existing text caches after order was set.
-        cx.services.renderer.order_messages(self.placed.iter().flat_map(|p| p.text_keys.iter().cloned()));
-        let pinned = self.rows.iter().flat_map(|row| row.text_keys(&session)).collect();
-        cx.services.renderer.trim_messages(&pinned);
         // Tick/reflow can move text under a stationary held pointer. Resolve
         // against the new scenes, not only when the host sends pointer motion.
         if self.selecting

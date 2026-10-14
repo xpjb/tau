@@ -17,7 +17,11 @@ impl App {
         self.reconcile_targets();
         self.ui.covered = self.root.dialog.is_some() || self.root.viewer.is_some();
         self.ui.composing = self.composing();
-        self.with_ui(|root, cx| root.update(dt, cx));
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("widgets", "root_update");
+            self.with_ui(|root, cx| root.update(dt, cx));
+        }
         if let Err(error) = self.finish_ui_requests() { self.report(Err(error)); }
         self.reconcile_targets();
     }

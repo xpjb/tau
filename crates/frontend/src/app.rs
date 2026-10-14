@@ -156,7 +156,11 @@ impl App {
             self.controller.report_error(error);
         }
         let poll_started = self.trace_started();
-        self.ui.dirty |= self.controller.poll();
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("app_tick", "controller_poll");
+            self.ui.dirty |= self.controller.poll();
+        }
         let poll_us = poll_started.map_or(0, |s| s.elapsed().as_micros() as u64);
         if self.services.transfers.download_identity != self.controller.identity {
             self.services.transfers.download_identity = self.controller.identity.clone();
@@ -167,8 +171,16 @@ impl App {
             self.services.platform.push(PlatformAction::Copy(text));
             self.ui.dirty = true;
         }
-        self.sync_navigation();
-        self.update_widgets(dt);
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("app_tick", "sync_navigation");
+            self.sync_navigation();
+        }
+        {
+            #[cfg(not(target_os = "android"))]
+            let _scope = living_telemetry::scope!("app_tick", "update_widgets");
+            self.update_widgets(dt);
+        }
         self.with_ui(|root, cx| root.timers(cx));
         let waiting = self.ui.capture.is_some_and(|c| c.touch && !c.dragged && c.started.elapsed().as_millis() < 450);
         let wants_redraw = std::mem::take(&mut self.ui.dirty) || waiting;
