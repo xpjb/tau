@@ -817,7 +817,7 @@ dependencies = [
 [[package]]
 name = "chad"
 version = "0.2.0"
-source = "git+https://github.com/xpjb/chad?rev=a0f465e06eeb5e498bd45b0b4b23305a69778a40#a0f465e06eeb5e498bd45b0b4b23305a69778a40"
+source = "git+https://github.com/xpjb/chad?rev=ec1ea76e6fdb1ee675d017a8a1c83bc54b20841f#ec1ea76e6fdb1ee675d017a8a1c83bc54b20841f"
 dependencies = [
  "console_error_panic_hook",
  "console_log",

@@ -25,7 +25,7 @@ tempfile = "3"
 tau-block-store = { path = "../block-store" }
 tau-net = { path = "../net", features = ["native"] }
 barkdown = { git = "https://github.com/xpjb/barkdown", rev = "9dc5dd99164585876c38aba76dfa09a34a2ae2eb" }
-chad = { git = "https://github.com/xpjb/chad", rev = "a0f465e06eeb5e498bd45b0b4b23305a69778a40" }
+chad = { git = "https://github.com/xpjb/chad", rev = "ec1ea76e6fdb1ee675d017a8a1c83bc54b20841f" }
 sanscale = { workspace = true }
 anyhow = "1"
 blake3 = "1.8"
