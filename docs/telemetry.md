@@ -1,6 +1,6 @@
 # Desktop telemetry
 
-Tau 2 desktop clients use `living-telemetry` to record slow frames, blocked UI callbacks, Rust panics, native Windows crashes, and unclean exits. Reports use the same Tailnet-only collector as Compendium and remain in a bounded local spool while the collector is unavailable.
+Tau 2 desktop clients use `living-telemetry` to record slow frames, blocked UI callbacks, Rust panics, native Windows crashes, and unclean exits. Reports use the same Tailnet-only collector as Compendium and remain in a bounded local spool while the collector is unavailable. Frame and UI-callback timing is active only while the desktop window is focused and visible. Focus loss, Alt-Tab, minimization, and occlusion invalidate open timing intervals; foreground timing resumes from a clean baseline instead of reporting operating-system background throttling as an app stall.
 
 The normal report state contains connection state, counts, durations, frame phases, native transport counters, and selected-chat size/state counts. Chat navigation records use a hashed content-free chat key so repeated selections can be correlated. Slow navigation is split into controller polling, model selection, transcript binding, layout reconciliation, window measurement, and visible-row mounting phases. Reports do not contain raw chat IDs, prompts, responses, chat titles, message text, credentials, clipboard data, provider names, or full paths. Windows minidumps and panic details can contain process data and stay inside the trusted Tailnet collector.
 

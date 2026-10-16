@@ -83,6 +83,7 @@ impl ChadApp for Desktop {
         #[cfg(windows)]
         app.enable_desktop_diagnostics(ctx);
         app.ui.window_focused = ctx.window.has_focus();
+        living_telemetry::set_ui_active(app.ui.window_focused && app.ui.visible);
         ctx.window.set_ime_allowed(true);
         let (tx, rx) = mpsc::channel();
         let attention_identity = app.controller.identity.clone();
@@ -104,6 +105,15 @@ impl ChadApp for Desktop {
     }
     fn event(&mut self, ctx: &mut Ctx, event: &WindowEvent) {
         let _busy = living_telemetry::busy!("ui", "window_event");
+        match event {
+            WindowEvent::Focused(focused) => {
+                living_telemetry::set_ui_active(*focused && self.app.ui.visible);
+            }
+            WindowEvent::Occluded(occluded) => {
+                living_telemetry::set_ui_active(self.app.ui.window_focused && !*occluded);
+            }
+            _ => {}
+        }
         let recorded_input = match event {
             WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::KeyboardInput { .. }
             | WindowEvent::MouseWheel { .. } | WindowEvent::Ime(_) | WindowEvent::DroppedFile(_) => living_telemetry::input_received(),

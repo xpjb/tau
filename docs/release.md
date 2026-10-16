@@ -36,8 +36,8 @@ Start from a clean `tau2` branch that already contains the intended work. The re
 command does not merge feature branches or run tests implicitly.
 
 ```sh
-scripts/release-clients.sh --plan --version 0.7.20
-scripts/release-clients.sh --version 0.7.20
+scripts/release-clients.sh --plan --version 0.7.21
+scripts/release-clients.sh --version 0.7.21
 ```
 
 The command performs this fixed order:
