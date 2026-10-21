@@ -55,7 +55,7 @@ arboard = "3"
 open = "5"
 png = "0.18"
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
-living-telemetry = { git = "https://github.com/xpjb/living-telemetry", rev = "4389454cbc953dfedda481e4e2ceb49d4f3ded37" }
+living-telemetry = { git = "https://github.com/xpjb/living-telemetry", rev = "59e5fcf03f4fdab38d3cc829d7741f3008e65743" }
 
 [target.'cfg(windows)'.dependencies]
 # Existing thread-local counters distinguish encoded text/emoji draws from

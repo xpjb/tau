@@ -11,7 +11,7 @@ Android does not start the same-executable watchdog and is outside this change.
 
 ## Watchdog backlog hotfix (0.7.22)
 
-The shared client is pinned to `4389454`. It measures UI inactivity inside the
+The shared client is pinned to `59e5fcf`. It measures UI inactivity inside the
 sampled heartbeat, not the time spent queued in IPC/spool work. Routine callback
 wake-ups are coalesced to 100 ms, and offline spool budgeting caches the small
 immutable envelope index. Old installed clients need replacement/restart; a
@@ -20,3 +20,9 @@ collector update alone cannot change their watchdogs.
 `TAU_TELEMETRY_ENDPOINT=off` (also empty, `0`, or `none`, case-insensitive) now
 returns before client initialization: no local recorder, reporter, watchdog,
 spool or upload. Previously it disabled upload only. Restart after changing it.
+
+Automatic hang dumps have two attempts/run with a ten-minute cooldown. Additional
+hangs still send lightweight session/sequence deltas with capture status; failures
+consume the dump budget too. Explicit repro and fatal-crash reports retain full
+bounded context. Checkpoints retain 256 recent records, every 15 seconds busy or
+30 seconds idle. These changes do not alter daemon protocol or deploy a daemon.

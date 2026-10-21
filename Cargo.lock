@@ -2903,7 +2903,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "living-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/xpjb/living-telemetry?rev=4389454cbc953dfedda481e4e2ceb49d4f3ded37#4389454cbc953dfedda481e4e2ceb49d4f3ded37"
+source = "git+https://github.com/xpjb/living-telemetry?rev=59e5fcf03f4fdab38d3cc829d7741f3008e65743#59e5fcf03f4fdab38d3cc829d7741f3008e65743"
 dependencies = [
  "arrayvec",
  "serde",
