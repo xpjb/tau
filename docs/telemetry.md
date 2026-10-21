@@ -26,3 +26,15 @@ hangs still send lightweight session/sequence deltas with capture status; failur
 consume the dump budget too. Explicit repro and fatal-crash reports retain full
 bounded context. Checkpoints retain 256 recent records, every 15 seconds busy or
 30 seconds idle. These changes do not alter daemon protocol or deploy a daemon.
+
+
+### Desktop hotfix validation and delivery
+
+Source `a750c39` pins shared client `59e5fcf`. The focused endpoint/off test passed
+(nextest `c5f6f5df-2048-4e9e-a3a1-0a59b4e9c2c4`, one test; unrelated tests not run).
+The shared watchdog/session/spool suite passed 19 focused tests separately.
+`scripts/build-windows.sh` built Tau Beta 0.7.22 and verified the installer's
+embedded application and launcher payloads. The Windows installer was delivered.
+Android package metadata follows the shared version, but no Android build/release
+or daemon deployment was performed. Protocol and installed daemon are unchanged.
+Real laptop power and interaction acceptance remain to be measured after restart.
