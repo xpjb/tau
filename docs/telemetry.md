@@ -7,3 +7,16 @@ The normal report state contains connection state, counts, durations, frame phas
 Set `TAU_TELEMETRY_ENDPOINT=off` to disable uploads. Set it to an `http://` report endpoint to use another collector. The default is `http://vibe.tail8689b0.ts.net:4318/v1/report`.
 
 Android does not start the same-executable watchdog and is outside this change.
+
+
+## Watchdog backlog hotfix (0.7.22)
+
+The shared client is pinned to `4389454`. It measures UI inactivity inside the
+sampled heartbeat, not the time spent queued in IPC/spool work. Routine callback
+wake-ups are coalesced to 100 ms, and offline spool budgeting caches the small
+immutable envelope index. Old installed clients need replacement/restart; a
+collector update alone cannot change their watchdogs.
+
+`TAU_TELEMETRY_ENDPOINT=off` (also empty, `0`, or `none`, case-insensitive) now
+returns before client initialization: no local recorder, reporter, watchdog,
+spool or upload. Previously it disabled upload only. Restart after changing it.

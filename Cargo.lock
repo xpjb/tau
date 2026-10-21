@@ -2903,7 +2903,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "living-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/xpjb/living-telemetry?rev=773918c552561b6a1171a73d33122720e54a7bec#773918c552561b6a1171a73d33122720e54a7bec"
+source = "git+https://github.com/xpjb/living-telemetry?rev=4389454cbc953dfedda481e4e2ceb49d4f3ded37#4389454cbc953dfedda481e4e2ceb49d4f3ded37"
 dependencies = [
  "arrayvec",
  "serde",
@@ -5395,7 +5395,7 @@ dependencies = [
 
 [[package]]
 name = "tau-frontend"
-version = "0.7.21"
+version = "0.7.22"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5458,7 +5458,7 @@ dependencies = [
 
 [[package]]
 name = "taud"
-version = "0.7.21"
+version = "0.7.22"
 dependencies = [
  "anyhow",
  "axum",

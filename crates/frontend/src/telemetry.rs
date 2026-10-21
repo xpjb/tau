@@ -17,13 +17,11 @@ pub use living_telemetry::run_watchdog_from_args;
 pub(crate) use living_telemetry::report_panic;
 
 pub(crate) fn init(data_dir: PathBuf) -> Result<(), String> {
-    let endpoint = match std::env::var("TAU_TELEMETRY_ENDPOINT") {
-        Ok(value) if ["", "0", "off", "none"].iter().any(|disabled| value.trim().eq_ignore_ascii_case(disabled)) => None,
-        Ok(value) => Some(value.trim().to_string()),
-        Err(_) => Some(DEFAULT_ENDPOINT.to_string()),
-    };
+    let value = std::env::var("TAU_TELEMETRY_ENDPOINT").ok();
+    // Explicitly off means no reporter, sidecar, spool or upload work.
+    let Some(endpoint) = endpoint(value.as_deref()) else { return Ok(()); };
     let mut config = Config::new("tau2", env!("CARGO_PKG_VERSION"), data_dir);
-    config.endpoint = endpoint;
+    config.endpoint = Some(endpoint);
     living_telemetry::init(config)
 }
 
@@ -98,4 +96,28 @@ pub(crate) fn update_app_state(controller: &Controller, window_focused: bool, wi
         Field::new("window_visible", window_visible),
         Field::new("frame_budget_us", living_telemetry::frame_budget().as_micros() as u64),
     ]);
+}
+
+
+fn endpoint(value: Option<&str>) -> Option<String> {
+    match value.map(str::trim) {
+        Some(value) if ["", "0", "off", "none"].iter().any(|off| value.eq_ignore_ascii_case(off)) => None,
+        Some(value) => Some(value.to_owned()),
+        None => Some(DEFAULT_ENDPOINT.to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_off_does_not_start_a_local_only_watchdog() {
+        for value in ["", " ", "0", "off", "OFF", " None "] {
+            assert_eq!(endpoint(Some(value)), None);
+        }
+        assert_eq!(endpoint(None).as_deref(), Some(DEFAULT_ENDPOINT));
+        assert_eq!(endpoint(Some(" http://127.0.0.1:4318/v1/report ")).as_deref(),
+            Some("http://127.0.0.1:4318/v1/report"));
+    }
 }
