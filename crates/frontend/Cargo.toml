@@ -1,6 +1,6 @@
 [package]
 name = "tau-frontend"
-version = "0.7.22"
+version = "0.7.23"
 edition = "2024"
 autotests = false
 
