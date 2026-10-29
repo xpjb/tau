@@ -61,6 +61,9 @@ impl TooltipHost {
             }
             Info::Connection => {
                 let mut content = cx.model.health.tooltip(&cx.model.connection, Instant::now());
+                if let Some(detail) = &cx.model.sync_error {
+                    content.line().dim("Content sync failed: ").push(detail, false, crate::tooltip::WARNING);
+                }
                 if let Some(detail) = &cx.model.transport_error {
                     content.line().dim("Last transport issue: ").push(detail, false, crate::tooltip::WARNING);
                 }

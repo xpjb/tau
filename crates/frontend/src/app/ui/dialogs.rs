@@ -396,7 +396,7 @@ impl Widget for ConnectionDialog {
         let configured = !cx.model.settings.token.is_empty();
         let connection_error = (!matches!(cx.model.connection.as_str(), "Connected" | "Connecting…" | "Not connected"))
             .then_some(cx.model.connection.as_str());
-        let error = cx.model.notice.as_deref().or(connection_error).map(str::to_owned);
+        let error = cx.model.notice.as_deref().or(cx.model.sync_error.as_deref()).or(connection_error).map(str::to_owned);
         let width = (b.width - 48. * s).min(520. * s).max(240. * s);
         let inner_w = width - 48. * s;
         let intro = "Connect directly to the Tau daemon over your Tailnet.";

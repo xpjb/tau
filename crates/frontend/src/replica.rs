@@ -12,6 +12,15 @@ use tokio::sync::watch;
 pub const QUEUE: &str = "@queue";
 const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const VIEW_ROOTS: usize = 256;
+
+pub(crate) fn capacity_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.downcast_ref::<rusqlite::Error>().is_some_and(|error| match error {
+        rusqlite::Error::SqliteFailure(code, message) => code.code == rusqlite::ErrorCode::DiskFull
+            || message.as_deref().is_some_and(|message| message.starts_with("Block metadata quota reached")
+                || message.starts_with("Replica tombstone quota reached")),
+        _ => false,
+    }))
+}
 const VIEW_BEFORE: usize = VIEW_ROOTS / 2;
 pub(crate) const VIEW_BODY_BYTES: usize = 8*1024*1024;
 pub struct View {

@@ -9,22 +9,48 @@ c.report_error(net::ConnectionUnavailable.into());
 assert!(c.notice.is_none());assert!(c.transport_error.is_some());
 c.not_sent("background-read","Connection changed",true).unwrap();assert!(c.notice.is_none());
 let timeout=tokio::time::timeout(std::time::Duration::ZERO,std::future::pending::<()>()).await.unwrap_err();
-c.report_sync_error(anyhow::Error::from(timeout).context("Content sync"));
+c.report_sync_error(anyhow::Error::from(timeout).context("Content sync"),None);
 assert!(c.notice.is_none());assert!(c.diagnostics().contains("Content sync"));
 let error=c.download("unavailable-chat","unavailable-file",1024).unwrap_err();
 c.report_error(error);assert!(c.notice.is_none());assert!(c.transport_error.as_deref().unwrap().contains("not authorized"));
-c.report_sync_error(anyhow::anyhow!("Unknown block").context("Content sync"));
+c.report_sync_error(anyhow::anyhow!("Unknown block").context("Content sync"),None);
 assert_eq!(c.notice.as_deref(),Some("Content sync: Unknown block"));
 c.notice=None;c.report_error(anyhow::anyhow!("Local database is full"));
 assert_eq!(c.notice.as_deref(),Some("Local database is full"));
-c.notice=None;c.report_sync_error(anyhow::anyhow!("Block content integrity check failed"));
+c.notice=None;c.report_sync_error(anyhow::anyhow!("Block content integrity check failed"),None);
 assert_eq!(c.notice.as_deref(),Some("Block content integrity check failed"));
-c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context("Write replica"));
+c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context("Write replica"),None);
 assert!(c.notice.as_deref().unwrap().starts_with("Write replica:"),"A storage IO error is not connection loss");
 // A decoder's InvalidData IO error must remain a content failure. The native
 // transport tests exercise actual malformed compressed frames at that boundary.
-c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"invalid decoder payload")).context("Content sync"));
+c.notice=None;c.report_sync_error(anyhow::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"invalid decoder payload")).context("Content sync"),None);
 assert_eq!(c.notice.as_deref(),Some("Content sync: invalid decoder payload"),"A decoder IO error must not be mistaken for a network error");
+assert_eq!(c.sync_error.as_deref(),Some("Content sync: invalid decoder payload"));
+}
+
+#[test]
+fn replica_clear_capacity_recovery_and_global_resync_restart_a_stuck_catalogue() {
+let root=tempfile::tempdir().unwrap();
+let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
+let mailbox=c.test_mailbox(Arc::new(||{}));c.epoch=Some(1);c.connection="Connected".into();
+let stuck=c.request(ClientCommand::ListSessions).unwrap();
+c.clear_replica().unwrap();
+let cleared=c.catalog.as_ref().unwrap().id.clone();assert_ne!(cleared,stuck,"Clear must abandon the request that failed before its descriptor arrived");
+c.message(ServerMessage::SessionPage {catalog_id:cleared.clone(),revision:1,after:None,next:None,sessions:vec![],states:Default::default()}).unwrap();
+c.message(ServerMessage::ProjectPage {catalog_id:cleared,revision:1,after:None,next:None,projects:vec![Project::general()]}).unwrap();
+assert!(!c.replica_reset_attempted);
+let failed=c.request(ClientCommand::ListSessions).unwrap();
+mailbox.send(NetworkEvent::ContentFailed {detail:"database or disk is full".into(),capacity:true,connection:false});
+assert!(c.poll());
+let recovered=c.catalog.as_ref().unwrap().id.clone();assert_ne!(recovered,failed);
+assert_eq!(c.sync_error.as_deref(),Some("Replica cache filled. Tau cleared it and is resynchronizing."));
+let new_chat=SessionSummary {id:"new-conversation".into(),project_id:GENERAL_PROJECT_ID.into(),title:"Visible after recovery".into(),starter:false,status:SessionStatus::Idle,detail:None,context_usage:None,model:None,thinking_level:None,parent_id:None,created_at_ms:1,updated_at_ms:2};
+c.message(ServerMessage::SessionPage {catalog_id:recovered.clone(),revision:2,after:None,next:None,sessions:vec![new_chat],states:Default::default()}).unwrap();
+c.message(ServerMessage::ProjectPage {catalog_id:recovered,revision:2,after:None,next:None,projects:vec![Project::general()]}).unwrap();
+assert!(c.account.sessions.iter().any(|session|session.id=="new-conversation"));assert!(c.sync_error.is_none());
+let complete=c.catalog.as_ref().unwrap().id.clone();
+c.message(ServerMessage::ResyncRequired {session_id:None}).unwrap();
+assert_ne!(c.catalog.as_ref().unwrap().id,complete,"A global resync must not coalesce into a completed or failed catalogue walk");
 }
 
 #[test]

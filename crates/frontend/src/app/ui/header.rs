@@ -119,6 +119,7 @@ impl Widget for Header {
             _ => "Working",
         };
         let failed = summary.as_ref().is_some_and(|s| s.status == SessionStatus::Error);
+        let sync_failed = cx.model.sync_error.is_some();
         let connected = cx.model.epoch.is_some();
         let title_width = (b.x + b.width - if running || paused { 152. * s } else { 108. * s } - title_x).max(1.);
         self.title.rect = Some(Rect::new(title_x, b.y, title_width, header.height));
@@ -148,10 +149,12 @@ impl Widget for Header {
             chrome,
             if cx.model.create_needs_retry(&session) {
                 "Needs attention"
-            } else if cx.model.quick_start(&session) && !failed && !running && !paused {
-                ""
             } else if cx.model.epoch.is_none() {
                 "Offline"
+            } else if sync_failed {
+                "Sync error · open Settings"
+            } else if cx.model.quick_start(&session) && !failed && !running && !paused {
+                ""
             } else if failed {
                 summary.as_ref().and_then(|s| s.detail.as_deref()).unwrap_or("Error · tap for details")
             } else if running {
@@ -163,7 +166,7 @@ impl Widget for Header {
             },
             Rect::new(title_x, b.y + 30. * s, title_width, 18. * s),
             12. * s,
-            color(if !connected { cx.model.health.color(std::time::Instant::now()) } else if failed { 0xf87171 } else if paused && !running { 0xfbbf24 } else { 0x4ade80 }),
+            color(if !connected { cx.model.health.color(std::time::Instant::now()) } else if sync_failed || failed { 0xf87171 } else if paused && !running { 0xfbbf24 } else { 0x4ade80 }),
             false,
         );
         self.controls.icon(

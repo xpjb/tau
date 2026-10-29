@@ -143,7 +143,7 @@ impl Widget for Sidebar {
         layer.rounded_rect(
             Rect::new(b.x + 82. * s, b.y + 35. * s, 8. * s, 8. * s),
             4. * s,
-            color(cx.model.health.color(Instant::now())),
+            color(if cx.model.sync_error.is_some() {0xf87171} else {cx.model.health.color(Instant::now())}),
         );
         cx.services.renderer.label(
             layer,

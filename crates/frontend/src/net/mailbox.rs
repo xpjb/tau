@@ -29,7 +29,7 @@ fn key(event:&Event)->Option<String> {
 }
 impl EventSender {
     pub fn send(&self,event:Event)->bool {
-        let bytes=match &event {Event::Prepared {result,..}=>match result {Ok(text)=>text.len(),Err(error)=>error.len()},Event::Message(_,message)=>serde_json::to_vec(message).map_or(4096,|v|v.len()),_=>1024};
+        let bytes=match &event {Event::Prepared {result,..}=>match result {Ok(text)=>text.len(),Err(error)=>error.len()},Event::ContentFailed {detail,..}=>detail.len(),Event::Message(_,message)=>serde_json::to_vec(message).map_or(4096,|v|v.len()),_=>1024};
         self.send_sized(event,bytes)
     }
     // Descriptor size is mailbox accounting, not another kind of public event.
