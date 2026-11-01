@@ -4,6 +4,30 @@ use rusqlite::Connection;
 use std::sync::{Arc,Mutex};
 use serde_json::json;
 
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn control_descriptors_are_verified_without_entering_the_persistent_replica() {
+    use tau_net::native::{Backend,Client,Server};
+    struct Source {db:Arc<Mutex<Connection>>,changes:watch::Receiver<u64>}
+    impl Backend for Source {
+        fn feed(&self,_:FeedRequest)->futures_util::future::BoxFuture<'static,Result<FeedPage>> {Box::pin(async {anyhow::bail!("Unexpected feed")})}
+        fn read(&self,request:BlockRequest)->futures_util::future::BoxFuture<'static,Result<Option<ContentRange>>> {
+            let db=self.db.clone();Box::pin(async move {tau_block_store::read(&db.lock().unwrap(),&request)})
+        }
+        fn changes(&self)->watch::Receiver<u64> {self.changes.clone()}
+    }
+    let Fixture {mut source,cache,_root,lineage}=Fixture::new();
+    let message=tau_net::ServerMessage::Notice {session_id:"catalogue".into(),message:"x".repeat(BLOCK_CHUNK_BYTES*3)};
+    let bytes=serde_json::to_vec(&message).unwrap();let hash=blake3::hash(&bytes).to_hex().to_string();
+    let tx=source.transaction().unwrap();tau_block_store::put(&tx,CONTROL_SCOPE,BlockHeader {id:hash.clone(),parent:None,order:0,kind:BlockKind::State,meta:json!({"descriptor":true}),version:0,length:0,sealed:true,revision:0},&bytes).unwrap();tx.commit().unwrap();
+    let (_changes,changes)=watch::channel(0);let server=Server::bind("127.0.0.1:0".parse().unwrap(),Arc::new(Source {db:Arc::new(Mutex::new(source)),changes})).await.unwrap();
+    let client=Client::bind().await.unwrap();let peer=client.configure(&server.authorize(&client.node_id(),lineage.clone()).unwrap(),"127.0.0.1").await.unwrap();
+    let (_ready,ready)=watch::channel(Some(peer));let (events,_received)=super::super::mailbox::channel(Arc::new(||{}));
+    let result=Transfers {cache:cache.clone(),ready,events}.descriptor(ContentRef {lineage,scope:CONTROL_SCOPE.into(),id:hash.clone(),length:bytes.len() as u64,hash:hash.clone()}).await.unwrap();
+    assert!(matches!(result,tau_net::ServerMessage::Notice {message,..} if message.len()==BLOCK_CHUNK_BYTES*3));
+    assert!(cache.cached_header(CONTROL_SCOPE,&hash).unwrap().is_none(),"Control discovery must not consume persistent transcript-cache quota");
+    client.shutdown().await;server.shutdown().await;
+}
+
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn file_reconnect_does_not_retry_missing_or_corrupt_content() {
     use std::sync::atomic::{AtomicUsize,Ordering};

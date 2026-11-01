@@ -62,7 +62,7 @@ pub enum Event {
     Disconnected(String),
     Fatal(String),
     NotSent(String, String),
-    ContentFailed { detail: String, capacity: bool, connection: bool },
+    ContentFailed { detail: String, connection: bool },
     Prepared {
         epoch: u64,
         id: String,
@@ -281,9 +281,8 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
                             match result {
                                 Ok(message)=>{if !events.send_sized(Event::Message(epoch,Box::new(message)),bytes) {return Ok(());}}
                                 Err(error)=>{
-                                    let capacity=crate::replica::capacity_error(&error);
                                     let connection=tau_net::native::is_connection_error(&error);
-                                    events.send(Event::ContentFailed {detail:format!("{error:#}"),capacity,connection});
+                                    events.send(Event::ContentFailed {detail:format!("{error:#}"),connection});
                                 }
                             }
                             if key.starts_with("receipt:") {generations.remove(&key);}

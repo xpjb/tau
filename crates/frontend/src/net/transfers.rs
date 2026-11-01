@@ -187,22 +187,24 @@ impl Transfers {
     pub(crate) async fn descriptor(mut self, reference: ContentRef) -> Result<tau_net::ServerMessage> {
         ensure!(reference.scope == CONTROL_SCOPE && reference.length <= MAX_BLOCK_BYTES,"Invalid data descriptor");
         let peer=self.connection().await?;
-        let lineage=peer.lineage();
-        ensure!(reference.lineage == lineage,"Descriptor belongs to an old data source");
-        let epoch=self.cache.epoch();
-        let mut request = self.cache.block_request(&reference.scope,&reference.id)?;
-        request.follow = false;
-        let mut reader=peer.read(BlockWatch::Block(request),Priority::Descriptor).await?;
+        ensure!(reference.lineage == peer.lineage(),"Descriptor belongs to an old data source");
+        let mut reader=peer.read(BlockWatch::Block(BlockRequest {scope:reference.scope.clone(),id:reference.id.clone(),version:0,offset:0,follow:false}),Priority::Descriptor).await?;
+        let mut bytes=Vec::with_capacity(reference.length as usize);
         while let Some(update)=reader.next().await? {
-            match &update {
-                Update::Block {block,..}=>ensure!(block.length==reference.length && block.sealed && block.version==1,"Descriptor changed"),
+            match update {
+                Update::Block {scope,block}=>ensure!(scope==reference.scope && block.id==reference.id && block.length==reference.length && block.sealed && block.version==1,"Descriptor changed"),
+                Update::Range {scope,range}=>{
+                    ensure!(scope==reference.scope && range.header.id==reference.id && range.offset==bytes.len() as u64,"Descriptor range changed");
+                    bytes.extend_from_slice(&range.bytes);
+                }
                 Update::Absent {..}=>anyhow::bail!("Descriptor no longer exists"),
-                _=>{}
+                Update::Page {..}=>anyhow::bail!("Unexpected descriptor page"),
             }
-            self.cache.apply(&lineage,update,epoch).await?;
         }
-        let cache=self.cache.clone();
-        tokio::task::spawn_blocking(move || cache.descriptor(&reference,epoch)).await?
+        ensure!(bytes.len() as u64==reference.length && blake3::hash(&bytes).to_hex().as_str()==reference.hash,"Descriptor integrity check failed");
+        let message=serde_json::from_slice(&bytes)?;
+        ensure!(!matches!(message,tau_net::ServerMessage::Data {..}|tau_net::ServerMessage::BlockConnection {..}),"Recursive descriptor");
+        Ok(message)
     }
 }
 

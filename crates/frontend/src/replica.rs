@@ -12,15 +12,6 @@ use tokio::sync::watch;
 pub const QUEUE: &str = "@queue";
 const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const VIEW_ROOTS: usize = 256;
-
-pub(crate) fn capacity_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| cause.downcast_ref::<rusqlite::Error>().is_some_and(|error| match error {
-        rusqlite::Error::SqliteFailure(code, message) => code.code == rusqlite::ErrorCode::DiskFull
-            || message.as_deref().is_some_and(|message| message.starts_with("Block metadata quota reached")
-                || message.starts_with("Replica tombstone quota reached")),
-        _ => false,
-    }))
-}
 const VIEW_BEFORE: usize = VIEW_ROOTS / 2;
 pub(crate) const VIEW_BODY_BYTES: usize = 8*1024*1024;
 pub struct View {
@@ -104,17 +95,6 @@ impl Cache {
         let h = tau_block_store::header(&db,scope,id).ok()??;
         Some(((h.version,h.length,h.sealed),tau_block_store::cached_prefix(&db,scope,id).ok()?))
     }
-    pub(crate) fn descriptor(&self, reference: &ContentRef, epoch: u64) -> Result<tau_net::ServerMessage> {
-        let db = self.writer();
-        ensure!(replica_epoch(&db)?==epoch && tau_block_store::cursor(&db)?.lineage==reference.lineage,"Descriptor source changed");
-        let bytes = tau_block_store::cached_content(&db,&reference.scope,&reference.id)?;
-        drop(db);
-        ensure!(bytes.len() as u64==reference.length && blake3::hash(&bytes).to_hex().as_str()==reference.hash,"Descriptor integrity check failed");
-        let message=serde_json::from_slice(&bytes)?;
-        ensure!(!matches!(message,tau_net::ServerMessage::Data {..}|tau_net::ServerMessage::BlockConnection {..}),"Recursive descriptor");
-        Ok(message)
-    }
-
     #[cfg(not(target_os = "android"))]
     pub(crate) fn seed_preview(&self, scope: &str, events: Vec<Event>, mut queue: QueueState, before: Option<u64>) -> Result<View> {
         let ids = events.iter().map(|e| e.id.clone()).collect::<BTreeSet<_>>();

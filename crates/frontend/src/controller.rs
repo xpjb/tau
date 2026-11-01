@@ -107,7 +107,6 @@ pub struct Controller {
     requests: HashMap<String, ClientCommand>,
     project_deletions: HashMap<String, Vec<String>>,
     create_failed_epoch: Option<u64>,
-    replica_reset_attempted: bool,
     retry_after: Option<std::time::Instant>,
     control_check:Option<std::time::Instant>,
     control_cursor:usize,
@@ -164,7 +163,6 @@ impl Controller {
             requests: HashMap::new(),
             project_deletions: HashMap::new(),
             create_failed_epoch: None,
-            replica_reset_attempted: false,
             retry_after: None,
             receipt_queue:Default::default(),receipt_inflight:None,control_check:None,control_cursor:0,catalog:None,state_versions:HashMap::new(),restore_reviews:Default::default(),
             wake,
@@ -191,7 +189,6 @@ impl Controller {
         self.transport_error = None;
         self.sync_error = None;
         self.sync_error_scope = None;
-        self.replica_reset_attempted = false;
         self.epoch = None;
         self.connection = "Connecting…".into();
         self.health = crate::net::health::Health::connecting();
@@ -653,29 +650,16 @@ impl Controller {
         for id in self.chats.keys().cloned().collect::<Vec<_>>() {self.open(&id)?;}
         Ok(())
     }
-    fn reset_replica(&mut self)->Result<()> {
+    pub fn diagnostics(&self)->String {
+        let n=&self.native_metrics;
+        format!("{}\nLast transport issue: {}\nLast sync issue: {}\nCatalogue: {} installed; revision {}; session pages {}; project pages {}; refresh pending {}.\n\nNative: {} connects / {} attempts; {} streams ({} active).\nSlots: metadata {}, foreground {}, bulk {}, descriptors {}.\nContent bytes ↑{} ↓{}; Tau frame bytes ↑{} ↓{}.\nResume offsets requested: {}; stream cancels: {}; integrity failures: {}.\nCurrent QUIC: UDP bytes ↑{} ↓{}; lost sent packets {}; RTT {} ms.\nControl RTT includes writer queue time; QUIC counters include retransmissions. Native samples update every five seconds.",self.health.details(&self.connection,std::time::Instant::now()),self.transport_error.as_deref().unwrap_or("No pending transport error"),self.sync_error.as_deref().unwrap_or("No pending sync error"),self.account.sessions.len(),self.catalog.as_ref().and_then(|c|c.revision).map_or_else(||"unavailable".into(),|r|r.to_string()),self.catalog.as_ref().is_some_and(|c|c.sessions_done),self.catalog.as_ref().is_some_and(|c|c.projects_done),self.catalog.as_ref().is_some_and(|c|c.refresh),n.connections,n.connection_attempts,n.streams,n.active_streams,n.metadata_slots,n.foreground_slots,n.bulk_slots,n.descriptor_slots,n.content_tx_bytes,n.content_rx_bytes,n.frame_tx_bytes,n.frame_rx_bytes,n.resumed_bytes,n.cancelled_streams,n.integrity_failures,n.quic_tx_bytes,n.quic_rx_bytes,n.quic_lost_packets,n.quic_rtt_ms)
+    }
+    pub fn clear_replica(&mut self)->Result<()> {
+        self.sync_error=None;self.sync_error_scope=None;
         self.remote.clear()?;self.block_plan.clear();self.plan_dirty.set(true);self.copy=None;
         if let Some(network)=&self.network {network.reset_replica()?;}
         for chat in self.chats.values_mut() {chat.feed=Feed::default();chat.reconcile();}
         self.restart_control_sync()?;self.watch_blocks()?;Ok(())
-    }
-    fn recover_replica_capacity(&mut self, detail:String)->Result<()> {
-        if self.replica_reset_attempted {
-            self.record_sync_error(format!("Replica cache is still full after reset: {detail}"),false,None);
-            return Ok(());
-        }
-        self.replica_reset_attempted=true;
-        self.record_sync_error(detail,false,None);
-        self.reset_replica()?;
-        let message="Replica cache filled. Tau cleared it and is resynchronizing.".to_owned();
-        self.sync_error=Some(message.clone());self.sync_error_scope=None;self.notice=Some(message.into());Ok(())
-    }
-    pub fn diagnostics(&self)->String {
-        let n=&self.native_metrics;
-        format!("{}\nLast transport issue: {}\nLast sync issue: {}\n\nNative: {} connects / {} attempts; {} streams ({} active).\nSlots: metadata {}, foreground {}, bulk {}, descriptors {}.\nContent bytes ↑{} ↓{}; Tau frame bytes ↑{} ↓{}.\nResume offsets requested: {}; stream cancels: {}; integrity failures: {}.\nCurrent QUIC: UDP bytes ↑{} ↓{}; lost sent packets {}; RTT {} ms.\nControl RTT includes writer queue time; QUIC counters include retransmissions. Native samples update every five seconds.",self.health.details(&self.connection,std::time::Instant::now()),self.transport_error.as_deref().unwrap_or("No pending transport error"),self.sync_error.as_deref().unwrap_or("No pending sync error"),n.connections,n.connection_attempts,n.streams,n.active_streams,n.metadata_slots,n.foreground_slots,n.bulk_slots,n.descriptor_slots,n.content_tx_bytes,n.content_rx_bytes,n.frame_tx_bytes,n.frame_rx_bytes,n.resumed_bytes,n.cancelled_streams,n.integrity_failures,n.quic_tx_bytes,n.quic_rx_bytes,n.quic_lost_packets,n.quic_rtt_ms)
-    }
-    pub fn clear_replica(&mut self)->Result<()> {
-        self.replica_reset_attempted=true;self.sync_error=None;self.sync_error_scope=None;self.reset_replica()
     }
     pub fn check_control(&mut self,id:&str)->Result<()> {
         ensure!(self.account.pending_controls.contains_key(id),"Saved action no longer exists");
@@ -1223,11 +1207,7 @@ impl Controller {
                 net::ReplicaNotice::Failed {scope,error} => {
                     changed=true;
                     if let Some(chat)=self.chats.get_mut(&scope) {chat.feed.loading=false;}
-                    let capacity=crate::replica::capacity_error(&error);
-                    if capacity {
-                        let detail=format!("{error:#}");
-                        if let Err(error)=self.recover_replica_capacity(detail) {self.report_error(error);}
-                    } else {self.report_sync_error(error,Some(scope));}
+                    self.report_sync_error(error,Some(scope));
                 }
                 net::ReplicaNotice::Changed(scope) => {
                     if self.sync_error_scope.as_deref()==Some(scope.as_str()) {self.sync_error=None;self.sync_error_scope=None;}
@@ -1495,9 +1475,8 @@ impl Controller {
                     self.transport_error = Some(detail);
                 } else { self.not_sent(&id, &detail, true)?; }
             },
-            net::Event::ContentFailed {detail,capacity,connection} => {
-                if capacity {self.recover_replica_capacity(detail)?;}
-                else {self.record_sync_error(detail,connection,None);self.restart_control_sync()?;}
+            net::Event::ContentFailed {detail,connection} => {
+                self.record_sync_error(detail,connection,None);self.restart_control_sync()?;
             }
             net::Event::Prepared { epoch, id, result, retryable } => {
                 let session = self
@@ -1786,7 +1765,10 @@ impl Controller {
                         self.requests.retain(|_,command|!matches!(command,ClientCommand::GetSession {session_id} if session_id==&id));
                         if let Some(chat)=self.chats.get_mut(&id) {chat.feed.opening=false;}
                         self.open(&id)?;
-                    } else {self.restart_control_sync()?;}
+                    } else {
+                        self.request(ClientCommand::ListSessions)?;
+                        for id in self.chats.keys().cloned().collect::<Vec<_>>() {self.open(&id)?;}
+                    }
                 }
             }
             ServerMessage::Response {
@@ -1939,10 +1921,7 @@ impl Controller {
         }
         let catalog_complete=self.catalog.as_ref().is_some_and(|c|c.sessions_done && c.projects_done);
         if catalog_complete && self.catalog.as_ref().is_some_and(|c|c.refresh) {self.catalog=None;self.request(ClientCommand::ListSessions)?;}
-        else if catalog_complete {
-            self.replica_reset_attempted=false;
-            if self.sync_error_scope.is_none() {self.sync_error=None;}
-        }
+        else if catalog_complete && self.sync_error_scope.is_none() {self.sync_error=None;}
         Ok(())
     }
 }

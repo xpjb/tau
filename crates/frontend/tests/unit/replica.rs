@@ -190,7 +190,7 @@ fn sqlite_full_and_cross_handle_reset_never_advance_a_verified_prefix() {
     let mut f=Fixture::new();f.put("body",None,0,BlockKind::Text,event("body",0,"text"),&vec![7;BLOCK_CHUNK_BYTES*2]);f.page(None,None);
     let req=f.cache.block_request("chat","body").unwrap();let range=tau_block_store::read(&f.source,&req).unwrap().unwrap();
     {let db=f.cache.db.lock().unwrap();let pages:u64=db.query_row("PRAGMA page_count",[],|r|r.get(0)).unwrap();db.pragma_update(None,"max_page_count",pages).unwrap();}
-    let error=f.cache.range(&f.lineage,"chat",&range).unwrap_err();assert!(error.to_string().contains("full"),"{error:#}");assert!(capacity_error(&error));
+    let error=f.cache.range(&f.lineage,"chat",&range).unwrap_err();assert!(error.to_string().contains("full"),"{error:#}");
     assert_eq!(f.cache.block_request("chat","body").unwrap().offset,0);
     let old=f.cache.epoch();let second=Cache::open(&f._root.path().join("cache.db")).unwrap();second.clear().unwrap();
     assert!(f.cache.header_at(&f.lineage,"chat",&range.header,old).is_err());assert!(f.cache.range_at(&f.lineage,"chat",&range,old).is_err());

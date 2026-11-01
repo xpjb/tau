@@ -29,7 +29,7 @@ assert_eq!(c.sync_error.as_deref(),Some("Content sync: invalid decoder payload")
 }
 
 #[test]
-fn replica_clear_capacity_recovery_and_global_resync_restart_a_stuck_catalogue() {
+fn replica_clear_descriptor_failure_and_global_resync_restart_a_stuck_catalogue() {
 let root=tempfile::tempdir().unwrap();
 let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
 let mailbox=c.test_mailbox(Arc::new(||{}));c.epoch=Some(1);c.connection="Connected".into();
@@ -38,12 +38,11 @@ c.clear_replica().unwrap();
 let cleared=c.catalog.as_ref().unwrap().id.clone();assert_ne!(cleared,stuck,"Clear must abandon the request that failed before its descriptor arrived");
 c.message(ServerMessage::SessionPage {catalog_id:cleared.clone(),revision:1,after:None,next:None,sessions:vec![],states:Default::default()}).unwrap();
 c.message(ServerMessage::ProjectPage {catalog_id:cleared,revision:1,after:None,next:None,projects:vec![Project::general()]}).unwrap();
-assert!(!c.replica_reset_attempted);
 let failed=c.request(ClientCommand::ListSessions).unwrap();
-mailbox.send(NetworkEvent::ContentFailed {detail:"database or disk is full".into(),capacity:true,connection:false});
+mailbox.send(NetworkEvent::ContentFailed {detail:"Descriptor integrity check failed".into(),connection:false});
 assert!(c.poll());
-let recovered=c.catalog.as_ref().unwrap().id.clone();assert_ne!(recovered,failed);
-assert_eq!(c.sync_error.as_deref(),Some("Replica cache filled. Tau cleared it and is resynchronizing."));
+let recovered=c.catalog.as_ref().unwrap().id.clone();assert_ne!(recovered,failed,"An actual failed descriptor must abandon its incomplete walk");
+assert_eq!(c.sync_error.as_deref(),Some("Descriptor integrity check failed"));
 let new_chat=SessionSummary {id:"new-conversation".into(),project_id:GENERAL_PROJECT_ID.into(),title:"Visible after recovery".into(),starter:false,status:SessionStatus::Idle,detail:None,context_usage:None,model:None,thinking_level:None,parent_id:None,created_at_ms:1,updated_at_ms:2};
 c.message(ServerMessage::SessionPage {catalog_id:recovered.clone(),revision:2,after:None,next:None,sessions:vec![new_chat],states:Default::default()}).unwrap();
 c.message(ServerMessage::ProjectPage {catalog_id:recovered,revision:2,after:None,next:None,projects:vec![Project::general()]}).unwrap();
@@ -167,11 +166,21 @@ legacy.age_recent_chats(100+crate::store::RECENT_CHAT_MS+1);assert!(legacy.recen
 #[test]
 fn list_resyncs_coalesce_without_starving_an_in_progress_traversal() {
 let root=tempfile::tempdir().unwrap();let mut c=Controller::new(Store::open(root.path().into()).unwrap(),Arc::new(||{})).unwrap();
-c.catalog=Some(Catalog {id:"in-progress".into(),..Default::default()});c.epoch=Some(1);
-for _ in 0..100 {assert_eq!(c.request(ClientCommand::ListSessions).unwrap(),"in-progress");}
-assert!(c.catalog.as_ref().unwrap().refresh);assert!(c.requests.is_empty());
-c.epoch=None;c.message(ServerMessage::SessionPage {catalog_id:"in-progress".into(),revision:1,after:None,next:None,sessions:vec![],states:Default::default()}).unwrap();assert!(c.catalog.is_some());
-assert!(c.message(ServerMessage::ProjectPage {catalog_id:"in-progress".into(),revision:1,after:None,next:None,projects:vec![Project::general()]}).is_err());assert!(c.catalog.is_none());
+let _mailbox=c.test_mailbox(Arc::new(||{}));c.epoch=Some(1);
+let walk=c.request(ClientCommand::ListSessions).unwrap();
+let sessions=(0..205).map(|n|{let mut session=Controller::creating_summary(&format!("session-{n:03}"),GENERAL_PROJECT_ID,n);session.starter=false;session.updated_at_ms=n;session}).collect::<Vec<_>>();
+let mut after=None;
+for chunk in sessions.chunks(64) {
+    let next=(chunk.len()==64).then(||chunk.last().unwrap().id.clone());
+    c.message(ServerMessage::SessionPage {catalog_id:walk.clone(),revision:762,after:after.clone(),next:next.clone(),sessions:chunk.to_vec(),states:Default::default()}).unwrap();
+    c.message(ServerMessage::ResyncRequired {session_id:None}).unwrap();
+    assert_eq!(c.catalog.as_ref().unwrap().id,walk,"Ordinary invalidation must finish the current atomic walk");
+    after=next;
+}
+assert_eq!(c.account.sessions.len(),205);assert!(c.account.sessions.iter().any(|session|session.id=="session-204"));
+c.message(ServerMessage::ProjectPage {catalog_id:walk.clone(),revision:762,after:None,next:None,projects:vec![Project::general()]}).unwrap();
+assert_ne!(c.catalog.as_ref().unwrap().id,walk,"One queued refresh starts after the complete catalogue is installed");
+assert_eq!(c.account.sessions.len(),205);
 }
 
 #[cfg(not(target_os = "android"))]
