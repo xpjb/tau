@@ -22,7 +22,15 @@ fn native_progress_stream_is_a_message_and_updates_markdown_before_sealing() {
     app.tick(0.); app.frame(&ctx, ctx.view());
     assert_eq!(app.services.renderer.messages[key].source, thinking.text);
     assert_eq!(app.services.renderer.messages[key].doc.blocks().len(), 2);
+    let (row_height,text_width) = {
+        let transcript=&app.root.workspace.chat.transcript;
+        let row=transcript.placed.iter().find(|row|row.key==key).unwrap();
+        let mounted=transcript.rows.iter().find(|row|row.key==key).unwrap();
+        (row.height,mounted.control.rect.unwrap().width-28.)
+    };
     let height = app.services.renderer.messages[key].view.height;
+    let expected = app.services.renderer.message_height("thinking-size-reference",&thinking.text,text_width,12.);
+    assert!((height-expected).abs()<0.1);assert!((row_height-height-6.).abs()<0.1,"Thinking keeps its compact font and spacing");
     thinking.text.push_str("ond step**");
     app.controller.preview("demo", vec![thinking.clone()], QueueState::default(), None).unwrap();
     app.tick(0.); app.frame(&ctx, ctx.view());

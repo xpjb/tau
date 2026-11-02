@@ -26,6 +26,10 @@ impl ItemId {
             Self::Details { first, .. } => Some(first), Self::Tool(id) => Some(id),
         }
     }
+    fn thinking(&self, chat: &Chat) -> bool {
+        let Self::Message(id) = self else { return false; };
+        chat.feed.messages[id].event.as_deref().and_then(|id|chat.feed.event(id)).is_some_and(|e|e.kind == EventKind::Thinking)
+    }
     pub fn sender(&self, chat: &Chat) -> EventRole {
         let Self::Message(id) = self else { return EventRole::Assistant; };
         let m = &chat.feed.messages[id];
@@ -248,6 +252,7 @@ impl MessageRow {
         let ItemId::Message(id) = &self.item else { unreachable!() };
         let m = &chat.feed.messages[id];
         let event = m.event.as_deref().and_then(|id| chat.feed.event(id));
+        let thinking = self.item.thinking(chat);
         let header = event.is_none_or(|e| e.role == EventRole::System || e.is_error || e.error_message.is_some());
         let mut source = match &m.body { MessageBody::Remote(id) => display_body(chat, id, self.item.sender(chat) == EventRole::User), MessageBody::Queue(id) if chat.feed.bodies.get(&format!("queued:{id}")).is_some_and(|b| b.missing()) => "Loading…".into(), _ => literal(m.text(&chat.feed, &chat.local)) };
         if m.event.is_none() && m.queue.is_none() && let Some(p) = m.intent.as_ref().and_then(|id| chat.local.pending.iter().find(|p| &p.request.id == id)) && let Some(detail) = &p.detail { source = literal(&format!("{}\n{detail}", m.text(&chat.feed, &chat.local))); }
@@ -259,8 +264,8 @@ impl MessageRow {
             }
             self.attachment.as_mut().unwrap().bind_file(&file, cx);
         } else if let Some(old) = self.attachment.take() { cx.ui.detach(old.controls.id); }
-        let height = cx.services.renderer.message_height(&self.key, &source, text_width, 16. * s);
-        (if header { 62. } else { 40. }) * s + if source.is_empty() { 0. } else { height }
+        let height = cx.services.renderer.message_height(&self.key, &source, text_width, if thinking { 12. * s } else { 16. * s });
+        (if thinking { 6. } else if header { 62. } else { 40. }) * s + if source.is_empty() { 0. } else { height }
             + self.attachment.as_ref().map_or(0., |c| attachments::card_height(&c.file) * s)
     }
     fn menu(&self, point: Vec2, cx: &mut Context<'_>) {
@@ -330,14 +335,15 @@ impl Widget for MessageRow {
             if t.open { t.input.paint(frame, x + 16. * s, r.y, width - 16. * s, &session, self.horizontal, cx); t.output.paint(frame, x + 16. * s, r.y, width - 16. * s, &session, self.horizontal, cx); }
             return;
         }
+        let thinking = self.item.thinking(chat);
         let (timestamp, title, error) = match &self.item {
             ItemId::Message(id) => message_heading(chat, id),
             ItemId::Details { .. } => (self.timestamp.clone(), None, false),
             ItemId::Tool(_) => unreachable!(),
         };
-        cx.services.renderer.clipped_label(frame.layer, &timestamp, Rect::new(x, r.y + 8. * s, width, 16. * s), 11. * s, color(if user { 0xa7bdc9 } else { 0x82909f }), false, frame.clip);
+        if !thinking { cx.services.renderer.clipped_label(frame.layer, &timestamp, Rect::new(x, r.y + 8. * s, width, 16. * s), 11. * s, color(if user { 0xa7bdc9 } else { 0x82909f }), false, frame.clip); }
         if let Some(d) = &mut self.disclosure { d.paint(frame, x, r.y, width, cx); return; }
-        let text_top = r.y + if title.is_some() { 50. * s } else { 28. * s };
+        let text_top = r.y + if thinking { 0. } else if title.is_some() { 50. * s } else { 28. * s };
         if let Some(title) = title { cx.services.renderer.clipped_label(frame.layer, &title, Rect::new(x, r.y + 28. * s, width, 20. * s), 12. * s, color(if error { 0xffb4ab } else if user { 0x67d4ff } else { 0xa5b4fc }), true, frame.clip); }
         cx.services.renderer.message(frame.layer, &self.key, Vec2::new(x, text_top), crate::render::intersect(frame.clip, Rect::new(x, frame.clip.y, width, frame.clip.height)), self.horizontal);
         if let Some(card) = &mut self.attachment { card.visit_perframe(frame, cx); }
