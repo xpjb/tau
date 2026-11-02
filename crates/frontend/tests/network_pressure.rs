@@ -271,7 +271,7 @@ async fn run(profile:Profile,default_seed:u64,outage:bool) {
         }
         if toggles<8 && toggle_at.elapsed()>Duration::from_millis(100+draw(seed,toggles)%160) {
             let c=&mut f.clients[(draw(seed^0x4040,toggles)&1) as usize];let chat=c.chats.get_mut(&session).unwrap();
-            chat.local.details_default=true;
+            chat.local.expansion.insert("details:read-pressure".into(),true);
             chat.local.expansion.insert("tool:read-pressure".into(),toggles%2==0);
             chat.local.expansion.insert("tool:read-pressure:Output".into(),toggles%2==0);
             c.save_chat(&session).unwrap();trace.push(format!("{}ms: tool interest toggle {toggles}",started.elapsed().as_millis()));toggles+=1;toggle_at=Instant::now();

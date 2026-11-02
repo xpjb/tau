@@ -12,19 +12,18 @@ pub(in crate::app) enum ItemId {
     Message(MessageId),
     Details { key: String, first: String },
     Tool(String),
-    Thinking(String),
 }
 impl ItemId {
     pub fn key(&self, session: &str) -> String {
         match self {
             Self::Message(id) => id.key(session), Self::Details { key, .. } => format!("{session}/{key}"),
-            Self::Tool(id) => format!("{session}/tool:{id}"), Self::Thinking(id) => format!("{session}/thinking:{id}"),
+            Self::Tool(id) => format!("{session}/tool:{id}"),
         }
     }
     pub fn root<'a>(&'a self, chat: &'a Chat) -> Option<&'a str> {
         match self {
             Self::Message(id) => chat.feed.messages.get(id)?.event.as_deref(),
-            Self::Details { first, .. } => Some(first), Self::Tool(id) | Self::Thinking(id) => Some(id),
+            Self::Details { first, .. } => Some(first), Self::Tool(id) => Some(id),
         }
     }
     pub fn sender(&self, chat: &Chat) -> EventRole {
@@ -69,8 +68,7 @@ impl ItemId {
     }
 }
 pub(in crate::app) fn is_detail(chat: &Chat, id: &MessageId) -> bool {
-    chat.feed.messages[id].event.as_deref().and_then(|id| chat.feed.event(id)).is_some_and(|e|
-        e.attachment.is_none() && (matches!(e.kind, EventKind::Thinking | EventKind::Tool) || e.role == EventRole::Tool))
+    chat.feed.messages[id].event.as_deref().and_then(|id| chat.feed.event(id)).is_some_and(crate::feed::is_detail_event)
 }
 
 struct Disclosure {
@@ -247,18 +245,13 @@ impl MessageRow {
             return 62. * s;
         }
         let chat = &cx.model.chats[session];
-        let (source, header, file) = match &self.item {
-            ItemId::Thinking(id) => (display_body(chat, id, false), false, None),
-            ItemId::Message(id) => {
-                let m = &chat.feed.messages[id];
-                let event = m.event.as_deref().and_then(|id| chat.feed.event(id));
-                let header = event.is_none_or(|e| e.role == EventRole::System || e.is_error || e.error_message.is_some());
-                let mut source = match &m.body { MessageBody::Remote(id) => display_body(chat, id, self.item.sender(chat) == EventRole::User), MessageBody::Queue(id) if chat.feed.bodies.get(&format!("queued:{id}")).is_some_and(|b| b.missing()) => "Loading…".into(), _ => literal(m.text(&chat.feed, &chat.local)) };
-                if m.event.is_none() && m.queue.is_none() && let Some(p) = m.intent.as_ref().and_then(|id| chat.local.pending.iter().find(|p| &p.request.id == id)) && let Some(detail) = &p.detail { source = literal(&format!("{}\n{detail}", m.text(&chat.feed, &chat.local))); }
-                (source, header, event.and_then(|e| e.attachment.as_ref().map(|a| (e.entry_id.clone(), a.clone()))))
-            }
-            _ => unreachable!(),
-        };
+        let ItemId::Message(id) = &self.item else { unreachable!() };
+        let m = &chat.feed.messages[id];
+        let event = m.event.as_deref().and_then(|id| chat.feed.event(id));
+        let header = event.is_none_or(|e| e.role == EventRole::System || e.is_error || e.error_message.is_some());
+        let mut source = match &m.body { MessageBody::Remote(id) => display_body(chat, id, self.item.sender(chat) == EventRole::User), MessageBody::Queue(id) if chat.feed.bodies.get(&format!("queued:{id}")).is_some_and(|b| b.missing()) => "Loading…".into(), _ => literal(m.text(&chat.feed, &chat.local)) };
+        if m.event.is_none() && m.queue.is_none() && let Some(p) = m.intent.as_ref().and_then(|id| chat.local.pending.iter().find(|p| &p.request.id == id)) && let Some(detail) = &p.detail { source = literal(&format!("{}\n{detail}", m.text(&chat.feed, &chat.local))); }
+        let file = event.and_then(|e| e.attachment.as_ref().map(|a| (e.entry_id.clone(), a.clone())));
         if let Some((entry, file)) = file {
             if self.attachment.as_ref().is_none_or(|card| card.target.entry != entry) {
                 if let Some(old) = self.attachment.take() { cx.ui.detach(old.controls.id); }
@@ -266,9 +259,8 @@ impl MessageRow {
             }
             self.attachment.as_mut().unwrap().bind_file(&file, cx);
         } else if let Some(old) = self.attachment.take() { cx.ui.detach(old.controls.id); }
-        let thinking = matches!(self.item, ItemId::Thinking(_));
-        let height = cx.services.renderer.message_height(&self.key, &source, text_width, if thinking { 12. * s } else { 16. * s });
-        (if thinking { 6. } else if header { 62. } else { 40. }) * s + if source.is_empty() { 0. } else { height }
+        let height = cx.services.renderer.message_height(&self.key, &source, text_width, 16. * s);
+        (if header { 62. } else { 40. }) * s + if source.is_empty() { 0. } else { height }
             + self.attachment.as_ref().map_or(0., |c| attachments::card_height(&c.file) * s)
     }
     fn menu(&self, point: Vec2, cx: &mut Context<'_>) {
@@ -338,15 +330,14 @@ impl Widget for MessageRow {
             if t.open { t.input.paint(frame, x + 16. * s, r.y, width - 16. * s, &session, self.horizontal, cx); t.output.paint(frame, x + 16. * s, r.y, width - 16. * s, &session, self.horizontal, cx); }
             return;
         }
-        let thinking = matches!(self.item, ItemId::Thinking(_));
         let (timestamp, title, error) = match &self.item {
             ItemId::Message(id) => message_heading(chat, id),
             ItemId::Details { .. } => (self.timestamp.clone(), None, false),
-            _ => (String::new(), None, false),
+            ItemId::Tool(_) => unreachable!(),
         };
-        if !thinking { cx.services.renderer.clipped_label(frame.layer, &timestamp, Rect::new(x, r.y + 8. * s, width, 16. * s), 11. * s, color(if user { 0xa7bdc9 } else { 0x82909f }), false, frame.clip); }
+        cx.services.renderer.clipped_label(frame.layer, &timestamp, Rect::new(x, r.y + 8. * s, width, 16. * s), 11. * s, color(if user { 0xa7bdc9 } else { 0x82909f }), false, frame.clip);
         if let Some(d) = &mut self.disclosure { d.paint(frame, x, r.y, width, cx); return; }
-        let text_top = r.y + if thinking { 0. } else if title.is_some() { 50. * s } else { 28. * s };
+        let text_top = r.y + if title.is_some() { 50. * s } else { 28. * s };
         if let Some(title) = title { cx.services.renderer.clipped_label(frame.layer, &title, Rect::new(x, r.y + 28. * s, width, 20. * s), 12. * s, color(if error { 0xffb4ab } else if user { 0x67d4ff } else { 0xa5b4fc }), true, frame.clip); }
         cx.services.renderer.message(frame.layer, &self.key, Vec2::new(x, text_top), crate::render::intersect(frame.clip, Rect::new(x, frame.clip.y, width, frame.clip.height)), self.horizontal);
         if let Some(card) = &mut self.attachment { card.visit_perframe(frame, cx); }

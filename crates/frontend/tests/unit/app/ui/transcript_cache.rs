@@ -1,9 +1,10 @@
 use super::*;
 use super::super::ItemId;
+use crate::feed::MessageId;
 
 fn layout(rows: usize) -> Layout {
     Layout { measured: (1, 1, 1), placed: (0..rows).map(|i| Placed {
-        key: i.to_string(), item: ItemId::Thinking(i.to_string()), stamp: 0, exact: true,
+        key: i.to_string(), item: ItemId::Message(MessageId::Event(i.to_string())), stamp: 0, exact: true,
         top: 0., height: 20., sender: tau_net::EventRole::Assistant, text_keys: vec![], overflow: 0.,
     }).collect() }
 }

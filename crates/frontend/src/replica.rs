@@ -489,10 +489,17 @@ impl Cache {
             let mut query = db.prepare("SELECT header FROM blocks WHERE scope=?1 AND parent='' AND id!=?2 ORDER BY position DESC,id DESC LIMIT 32")?;
             let roots = query.query_map(rusqlite::params![scope,QUEUE], |r| r.get::<_,String>(0))?
                 .map(|raw| Ok(serde_json::from_str::<BlockHeader>(&raw?)?)).collect::<Result<Vec<_>>>()?;
-            Ok(roots.into_iter().filter(|h|
-                h.kind == BlockKind::Text && h.meta.pointer("/event/role").and_then(|v|v.as_str()) != Some("tool")
-                || h.meta.pointer("/event/attachment").is_some_and(|v|v.is_object()))
-                .take(8).map(|h| h.id).collect())
+            let mut viewport = BTreeSet::new();
+            for h in roots {
+                let Some(value) = h.meta.get("event") else { continue; };
+                let event: Event = serde_json::from_value(value.clone())?;
+                if (event.role != EventRole::Tool && matches!(event.kind, EventKind::Text | EventKind::Thinking) || event.attachment.is_some())
+                    && !crate::feed::is_detail_event(&event) {
+                    viewport.insert(h.id);
+                    if viewport.len() == 8 { break; }
+                }
+            }
+            Ok(viewport)
         })?;
         let mut plan = self.plan_visible(scope, &LocalChat::default(), &[], Some(&viewport))?;
         plan.background = true;
@@ -561,8 +568,11 @@ impl Cache {
             Ok(event)
         }).collect::<Result<Vec<_>>>()?;
         events.sort_by_key(|e|e.order);
+        let details=events.iter().filter(|event|crate::feed::is_detail_event(event)).map(|event|event.id.clone()).collect::<BTreeSet<_>>();
+        let messages=events.iter().filter(|event|event.role!=EventRole::Tool && (matches!(event.kind,EventKind::Text|EventKind::Thinking) || event.attachment.is_some())
+            && !details.contains(&event.id)).map(|event|event.id.clone()).collect::<BTreeSet<_>>();
         let visible = viewport.filter(|_|rendered).map(|ids|ids.iter().cloned().collect()).unwrap_or_else(||crate::feed::expanded_details(&events,local));
-        let recent=roots.iter().rev().filter(|h|h.kind==BlockKind::Text && h.meta.pointer("/event/role").and_then(|v|v.as_str())!=Some("tool") && h.length>0)
+        let recent=roots.iter().rev().filter(|h|messages.contains(&h.id) && h.length>0)
             .take(2).map(|h|h.id.clone()).collect::<BTreeSet<_>>();
         // Bootstrap without a renderer is a bounded recent window. Once the
         // renderer owns interests, only viewport + two-screen overscan is read.
@@ -614,7 +624,7 @@ impl Cache {
                     if copy.contains(&h.id) || visible.contains(&h.id) && local.expansion.get(&key).copied().unwrap_or(false)
                         && (h.length <= 1200 || local.expansion.get(&format!("{key}:{label}")).copied().unwrap_or(false)) {required.insert(h.id.clone());}
                 } else if h.meta.pointer("/event/role").and_then(|v|v.as_str()) != Some("tool")
-                    && (copy.contains(&h.id) || h.kind != BlockKind::Thinking || visible.contains(&h.id)) {required.insert(h.id.clone());}
+                    && (copy.contains(&h.id) || !details.contains(&h.id) || visible.contains(&h.id)) {required.insert(h.id.clone());}
             }
             for member in &members {
                 if let Some(id) = metadata_body(member, required.contains(&member.id) || parent.as_ref() == Some(&member.id))? {

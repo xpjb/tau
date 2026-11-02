@@ -245,8 +245,8 @@ fn remote_browser_yields_to_chat_and_download_navigation_without_retargeting_dra
 fn reading_checkpoint_survives_cold_pages_prepend_resize_and_a_late_release() {
     let mut h = Harness::new((1000, 800), 1., false);
     let mut events = h.app.controller.chats["demo"].feed.events.values().cloned().collect::<Vec<_>>();
-    events[30].kind = EventKind::Thinking;
-    events[30].text = "A growing thought.\n\n".repeat(40);
+    events[30].kind = EventKind::Tool;
+    events[30].text = "A growing tool input.\n\n".repeat(40);
     h.app.controller.preview("demo", events[10..].to_vec(), QueueState::default(), Some(10)).unwrap();
     h.frame();
     h.app.with_ui(|root, cx| {

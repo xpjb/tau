@@ -484,8 +484,7 @@ fn tool_body_keeps_its_native_interest_when_heading_leaves_overscan() {
     h.app.controller.account.source_lineage = Some(source.lineage.clone());
     let chat = h.app.controller.chats.get_mut("chat").unwrap();
     chat.feed.native_view(source.cache.preview("chat", None).unwrap().unwrap()).unwrap();
-    chat.local.details_default = true;
-    chat.local.expansion.extend([("tool:native-tool".into(), true), ("tool:native-tool:Input".into(), true)]);
+    chat.local.expansion.extend([("details:native-tool".into(), true), ("tool:native-tool".into(), true), ("tool:native-tool:Input".into(), true)]);
     chat.reconcile();
     h.frame();
     h.app.with_ui(|root, cx| {

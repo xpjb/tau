@@ -185,7 +185,6 @@ pub struct LocalChat {
     pub pending: Vec<Pending>,
     pub expanded: BTreeSet<String>, // Legacy flat details preferences.
     pub expansion: BTreeMap<String, bool>,
-    pub details_default: bool,
     pub position: Position,
 }
 impl Default for LocalChat {
@@ -198,7 +197,6 @@ impl Default for LocalChat {
             pending: vec![],
             expanded: BTreeSet::new(),
             expansion: BTreeMap::new(),
-            details_default: false,
             position: Position {
                 follow: true,
                 ..Default::default()
@@ -341,6 +339,9 @@ impl Store {
         let size:Option<u64>=self.db.query_row("SELECT length(CAST(value AS BLOB)) FROM local WHERE account=?1 AND key=?2",params![account,format!("chat:{session}")],|r|r.get(0)).optional()?;
         ensure!(size.unwrap_or(0)<=32*1024*1024,"Local chat exceeds 32 MiB; preserve/export the authored store before repair");
         let mut chat: LocalChat = self.get(account, &format!("chat:{session}"))?;
+        if let Some(key) = &mut chat.position.key && let Some(at) = key.find("/thinking:") {
+            key.replace_range(at..at + "/thinking:".len(), "/");
+        }
         for p in &mut chat.pending {
             if matches!(p.status, Delivery::Sending | Delivery::Preparing) {
                 p.status = if matches!(&p.request.command, ClientCommand::Prompt { text, .. } if !text.starts_with('/')) {

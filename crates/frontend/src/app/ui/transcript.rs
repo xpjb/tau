@@ -2,6 +2,7 @@ use super::{Context, Controller, Event, Frame, Id, Request, Target, UiState, Wid
 use super::{composer::QuickModels, message_row::{MessageRow, ItemId, is_detail}, scroll::ScrollState};
 use crate::{
     app::{Autoscroll, PlatformAction, attachments},
+    feed::MessageId,
     store::Position,
     render::{color, contains},
 };
@@ -247,7 +248,6 @@ impl Transcript {
             });
         }
         if let Some(chat) = cx.model.account.selected.as_ref().and_then(|s| cx.model.chats.get_mut(s)) {
-            if key.starts_with("details:") { chat.local.details_default = open; }
             chat.local.expansion.insert(key, open);
             let result = self.save(cx);
             cx.report(result);
@@ -432,9 +432,9 @@ impl Widget for Transcript {
                 i += group.len();
                 let (key, open) = crate::feed::detail_group_state(&group, &chat.local);
                 items.push(ItemId::Details { key, first: group[0].id.clone() });
-                if open { for e in group { items.push(if e.kind == tau_net::EventKind::Thinking && e.role != tau_net::EventRole::Tool {
-                    ItemId::Thinking(e.id.clone())
-                } else { ItemId::Tool(e.id.clone()) }); } }
+                if open { for e in group { items.push(if e.kind == tau_net::EventKind::Tool || e.role == tau_net::EventRole::Tool {
+                    ItemId::Tool(e.id.clone())
+                } else { ItemId::Message(MessageId::Event(e.id.clone())) }); } }
             }
             let mut previous = std::mem::take(&mut self.placed).into_iter().map(|p| (p.key.clone(), p)).collect::<HashMap<_, _>>();
             for item in items {
@@ -449,7 +449,7 @@ impl Widget for Transcript {
                 // cheap provisional extents until the reading window reaches
                 // them. Exact heights are retained across chat switches.
                 let height = match item { ItemId::Details { .. } => 62., ItemId::Tool(_) => 36., _ => 80. } * s;
-                let text_keys = if matches!(item, ItemId::Message(_) | ItemId::Thinking(_)) { vec![key.clone()] } else { vec![] };
+                let text_keys = if matches!(item, ItemId::Message(_)) { vec![key.clone()] } else { vec![] };
                 self.placed.push(Placed { key, item, stamp, exact: false, top: 0., height, sender, text_keys, overflow: 0. });
             }
             self.measured = Some(signature);

@@ -61,8 +61,9 @@ async fn native_loss_delay_bandwidth_upload_cancel_resume_and_two_client_control
     let attachment=ar.path().join("input.bin");std::fs::write(&attachment,&bytes[..256*1024]).unwrap();a.attach(&attachment,None).unwrap();a.draft("Inspect this owned upload and send both fixture files".into()).unwrap();a.send_prompt().unwrap();
     until(&mut a,&mut b,|a,b|[a,b].iter().all(|c|c.selected().is_some_and(|chat|chat.feed.events.values().any(|e|e.text==code)))).await;
     {
-        let chat=a.chats.get_mut(&session).unwrap();chat.local.details_default=true;
+        let chat=a.chats.get_mut(&session).unwrap();
         for event in chat.feed.events.values().filter(|e|e.kind==tau_net::EventKind::Tool) {
+            chat.local.expansion.insert(format!("details:{}",event.id),true);
             for suffix in ["", ":Output", ":Input"] {chat.local.expansion.insert(format!("tool:{}{suffix}",event.id),true);}
         }
     }

@@ -36,9 +36,9 @@ impl Harness {
             }).collect();
             app.controller.preview(session, events, QueueState::default(), None).unwrap();
             let chat = app.controller.chats.get_mut(session).unwrap();
-            chat.local.details_default = true;
             chat.local.position.follow = true;
             for order in (2..80).step_by(4) {
+                chat.local.expansion.insert(format!("details:event-{order}"), true);
                 chat.local.expansion.insert(format!("tool:event-{order}"), true);
                 chat.local.expansion.insert(format!("tool:event-{order}:Input"), true);
             }
@@ -73,7 +73,7 @@ fn cold_expanded_transcript_shapes_the_reading_window_not_all_loaded_details() {
         let work = sanscale::profiling::work_counters();
         assert!(work.shape_calls > 0);
         assert!(h.app.services.renderer.message_measurements < 20, "cold layout must not visit all 80 bodies");
-        assert!(!h.app.services.renderer.messages.contains_key("demo/thinking:event-1"));
+        assert!(!h.app.services.renderer.messages.contains_key("demo/event-1"));
         assert!(h.app.services.renderer.messages.contains_key("demo/event-79"));
         assert!(h.app.services.renderer.messages.contains_key("demo/tool:event-78:Input:text"));
         assert_eq!(h.app.root.workspace.chat.transcript.scroll.value, h.app.root.workspace.chat.transcript.scroll.max);
@@ -117,7 +117,7 @@ fn returning_layout_revalidates_background_edits_even_with_a_reused_feed_revisio
     h.navigate("demo", false); h.settle();
     assert_eq!(h.app.services.renderer.messages["demo/event-79"].source, "A changed answer.\n\n".repeat(8));
     assert_eq!(h.app.root.workspace.chat.transcript.scroll.value, h.app.root.workspace.chat.transcript.scroll.max);
-    assert!(!h.app.services.renderer.messages.contains_key("demo/thinking:event-1"));
+    assert!(!h.app.services.renderer.messages.contains_key("demo/event-1"));
 }
 
 #[test]
@@ -125,10 +125,10 @@ fn disclosure_collapse_is_not_document_eviction_and_source_changes_are() {
     let mut h = Harness::new(false); h.settle();
     let key = "demo/tool:event-78:Input:text";
     let identity = h.app.services.renderer.messages[key].doc.identity();
-    h.app.with_ui(|root, cx| root.workspace.chat.transcript.toggle("details:event-77".into(), false, cx));
+    h.app.with_ui(|root, cx| root.workspace.chat.transcript.toggle("details:event-78".into(), false, cx));
     h.settle();
     assert_eq!(h.app.services.renderer.messages[key].doc.identity(), identity);
-    h.app.with_ui(|root, cx| root.workspace.chat.transcript.toggle("details:event-77".into(), true, cx));
+    h.app.with_ui(|root, cx| root.workspace.chat.transcript.toggle("details:event-78".into(), true, cx));
     h.settle();
     assert_eq!(h.app.services.renderer.messages[key].doc.identity(), identity);
     h.navigate("two", false); h.settle();
@@ -157,7 +157,7 @@ fn cached_geometry_survives_document_eviction_and_reflows_after_width_change() {
     h.app.resize((820, 700), 1.25, Vec2::new(0., 0.));
     h.navigate("demo", false); h.settle();
     assert_eq!(h.app.root.workspace.chat.transcript.scroll.value, h.app.root.workspace.chat.transcript.scroll.max);
-    assert!(!h.app.services.renderer.messages.contains_key("demo/thinking:event-1"));
+    assert!(!h.app.services.renderer.messages.contains_key("demo/event-1"));
     assert!(h.app.services.renderer.messages["demo/event-79"].view.height > 0.);
 }
 
@@ -171,19 +171,19 @@ fn cold_reading_anchor_is_measured_before_applying_its_deep_saved_offset() {
             assert!(h.app.controller.chats["demo"].feed.bodies["event-1"].missing());
         }
         h.app.controller.chats.get_mut("demo").unwrap().local.position = crate::store::Position {
-            follow: false, key: Some("demo/thinking:event-1".into()), offset: 1200.,
+            follow: false, key: Some("demo/event-1".into()), offset: 1200.,
         };
         h.settle();
         let t = &h.app.root.workspace.chat.transcript;
-        let row = t.placed.iter().find(|p| p.key == "demo/thinking:event-1").unwrap();
+        let row = t.placed.iter().find(|p| p.key == "demo/event-1").unwrap();
         assert!(row.height > 1200.);
         assert!((t.scroll.value - row.top - 1200.).abs() < 0.1);
-        assert!(h.app.services.renderer.messages.contains_key("demo/thinking:event-1"));
-        assert!(!h.app.services.renderer.messages.contains_key("demo/thinking:event-73"));
+        assert!(h.app.services.renderer.messages.contains_key("demo/event-1"));
+        assert!(!h.app.services.renderer.messages.contains_key("demo/event-73"));
         h.navigate("two", false); h.settle();
         h.navigate("demo", false); h.settle();
         let t = &h.app.root.workspace.chat.transcript;
-        let row = t.placed.iter().find(|p| p.key == "demo/thinking:event-1").unwrap();
+        let row = t.placed.iter().find(|p| p.key == "demo/event-1").unwrap();
         assert!((t.scroll.value - row.top - 1200.).abs() < 0.1);
     }
 }

@@ -99,6 +99,22 @@ fn disclosure_interests_are_per_group_and_large_input_is_explicit() {
 }
 
 #[test]
+fn progress_is_a_message_interest_and_failed_diagnostic_stays_disclosed() {
+    let mut f=Fixture::new();
+    let mut progress=event("progress",0,"thinking");progress["event"]["stopReason"]=json!("toolUse");
+    let mut retry=event("retry",1,"thinking");retry["event"]["stopReason"]=json!("error");
+    f.put("progress",None,0,BlockKind::Thinking,progress,b"Inspecting the current implementation");
+    f.put("retry",None,1,BlockKind::Thinking,retry,b"Retrying automatically");f.page(None,None);
+    let ids=|plan:Plan|plan.blocks.into_iter().map(|(id,_)|id).collect::<BTreeSet<_>>();
+    let closed=ids(f.cache.plan("chat",&LocalChat::default(),&[]).unwrap());
+    assert!(closed.contains("progress"));assert!(!closed.contains("retry"));
+    let background=ids(f.cache.plan_background("chat").unwrap());
+    assert!(background.contains("progress"));assert!(!background.contains("retry"));
+    let mut local=LocalChat::default();local.expansion.insert("details:retry".into(),true);
+    assert!(ids(f.cache.plan("chat",&local,&[]).unwrap()).contains("retry"));
+}
+
+#[test]
 fn text_prefix_handles_split_utf8_and_old_connections_cannot_pollute_new_cache() {
     let mut f=Fixture::new();let text=format!("{}😀","x".repeat(BLOCK_CHUNK_BYTES-1));
     f.put("text",None,0,BlockKind::Text,event("text",0,"text"),text.as_bytes());f.page(None,None);
@@ -236,7 +252,7 @@ fn giant_previews_stop_prefetching_and_copy_can_target_a_closed_child() {
     let mut meta=event("result",1,"text");meta["event"]["role"]=json!("tool");f.put("result",Some("tool"),1,BlockKind::Code,meta,&bytes);
     f.page(None,None);f.page(Some("tool"),None);
     let plan=f.cache.plan_visible("chat",&LocalChat::default(),&["result".into()],Some(&BTreeSet::new())).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="result"));
-    let mut local=LocalChat {details_default:true,..Default::default()};local.expansion.insert("tool:tool".into(),true);local.expansion.insert("tool:tool:Output".into(),true);
+    let mut local=LocalChat::default();local.expansion.insert("details:tool".into(),true);local.expansion.insert("tool:tool".into(),true);local.expansion.insert("tool:tool:Output".into(),true);
     for _ in 0..16 {let req=f.cache.block_request("chat","result").unwrap();let range=tau_block_store::read(&f.source,&req).unwrap().unwrap();f.cache.range(&f.lineage,"chat",&range).unwrap();}
     let plan=f.cache.plan("chat",&local,&[]).unwrap();assert!(!plan.blocks.iter().any(|(id,_)|id=="result"));
     let plan=f.cache.plan("chat",&local,&["result".into()]).unwrap();assert!(plan.blocks.iter().any(|(id,_)|id=="result"));f.body("result");let text=f.cache.copy_ready("chat",&["result".into()]).unwrap().unwrap();assert_eq!(text.bytes().filter(|b|*b==b'x').count(),bytes.len());assert!(!text.contains("Preview limited"));
@@ -286,8 +302,8 @@ fn native_tool_membership_preserves_provider_ids_for_display_copy_and_demand() {
     let view=f.cache.snapshot("chat").unwrap().unwrap();
     assert!(view.events.iter().all(|e|e.tool_call_id.as_deref()==Some("provider-reused")),
         "Native membership must not rewrite provider metadata");
-    let mut local=LocalChat {details_default:true,..Default::default()};
-    local.expansion.extend([("tool:a".into(),true),("tool:b".into(),true),("tool:a:Error".into(),true),("tool:b:Output".into(),true)]);
+    let mut local=LocalChat::default();
+    local.expansion.extend([("details:a".into(),true),("details:b".into(),true),("tool:a".into(),true),("tool:b".into(),true),("tool:a:Error".into(),true),("tool:b:Output".into(),true)]);
     let copied=f.cache.copy_ready("chat",&["a".into()]).unwrap().unwrap();
     assert!(copied.contains("Output\nfirst") && copied.contains("Error\nfailure"));
     assert!(!copied.contains("second") && !copied.contains("alone"));
@@ -657,10 +673,10 @@ fn foreground_projection_hydrates_only_the_visible_byte_bounded_window() {
 }
 
 #[test]
-fn background_plans_only_fetch_a_bounded_text_tail_and_queue_not_hidden_details_or_files() {
+fn background_plans_only_fetch_a_bounded_message_tail_and_queue_not_tools_or_files() {
     let mut f=Fixture::new();
     for n in 0..40 {let id=format!("e{n:03}");f.put(&id,None,n,BlockKind::Text,event(&id,n,"text"),b"answer");}
-    f.put("thinking",None,40,BlockKind::Thinking,event("thinking",40,"thinking"),b"hidden thought");
+    f.put("thinking",None,40,BlockKind::Thinking,event("thinking",40,"thinking"),b"visible progress");
     f.put("tool",None,41,BlockKind::Tool,event("tool",41,"tool"),b"");
     f.put("tool/input",Some("tool"),0,BlockKind::Code,json!({"inputFor":"tool"}),b"hidden input");
     f.put("file:unread",Some("tool"),1,BlockKind::File,json!({"attachment":{}}),b"unread file");
@@ -669,8 +685,8 @@ fn background_plans_only_fetch_a_bounded_text_tail_and_queue_not_hidden_details_
     assert!(plan.background);assert!(plan.foreground.is_empty());
     assert_eq!(plan.parents,BTreeSet::from([None,Some(QUEUE.into())]));
     let ids=plan.blocks.iter().map(|(id,_)|id.as_str()).collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(),9);assert!(ids.contains("e039"));assert!(ids.contains("e032"));
-    for id in ["e031","thinking","tool/input","file:unread"] {assert!(!ids.contains(id));}
+    assert_eq!(ids.len(),9);assert!(ids.contains("thinking"));assert!(ids.contains("e039"));assert!(ids.contains("e033"));
+    for id in ["e032","tool/input","file:unread"] {assert!(!ids.contains(id));}
     assert!(plan.older.is_empty(),"background work doesn't walk root history");
     let visible=BTreeSet::from(["e020".into()]);
     let active=f.cache.plan_active("chat",&LocalChat::default(),&[],Some(&visible)).unwrap();
