@@ -1,149 +1,47 @@
 # Tau
+Tau is a client-server agent harness. The server (daemon) runs on a remote host ie. tailnet. The client (frontend) runs on android or windows. Originally it was based on bridging into pi, but now the frontend, daemon and agent execution are all Rust.
 
-Tau is a private, Tailnet-native client for independent Pi coding-agent sessions. It runs beside the existing Telegram gateway without sharing processes or chat history. Both use Pi's global settings. A model chosen in Tau becomes Pi's default for new chats; existing chats keep their saved model. Tau does not override Pi with a separate model default.
+The `tau2` mainline deploys to a beta identity separate from stable Tau.
 
-## Components
+## Build
 
-- `daemon/`: `taud`, the Linux service that owns Tau's Pi RPC processes and session files.
-- `app/`: one Compose Multiplatform client for Android and desktop JVM targets.
-- `windows/`: the portable launcher and version-aware self-extracting Windows setup.
+Rust workspace members live under `crates/`. Run from the repository root:
 
-Tau starts a Pi RPC process when needed and stops it after one idle hour, while preserving held queue work. Pi's JSONL remains the transcript source of truth. The daemon projects ordered content events; clients keep remote history in memory only. SQLite preserves drafts, pending sends/controls, attached files, preferences and session metadata across client restarts. Cold chats can be read without starting Pi. Loaded history and chat feeds stay in memory across selection changes. Running, unread and recent chats warm in the background; older events also load on demand. Reconnect checks the retained event windows. Thinking and tools remain collapsible across fetch boundaries. New chats use `/root` as their working directory.
-
-Tau 0.5.14 clients and daemon use protocol 10 and must be updated together. This release adds shared Rust QUIC downloads with verified resume, the reusable New Chat starter with its actual model, and clear New/Unnamed chat labels. The Android streamed-viewport hotfix uses versionCode 36. `TauClientVersion` in `Platform.kt` supplies the version for Settings, crash reports and both client installers. Client cache schema 5 preserves local work while remote history remains memory-only. Pi JSONL history and the existing Pi installation remain intact.
-
-New Chat reuses one daemon-owned starter and starts Pi before returning it, so the real model appears above the composer before the first message. A client with a draft, files or a pending send/control keeps that chat and gets a fresh starter. The existing one-hour idle timeout stops workers without deleting chats. Existing chats remain intact.
-
-## Current client operations
-
-- List, create, rename, and permanently delete chats.
-- Stream assistant text and tool activity.
-- Render completed assistant and system messages as selectable Markdown with clickable links and width-wrapped tables.
-- Discover Pi extension, prompt-template, and skill commands when `/` is entered, with command and supported built-in argument completion.
-- Run extension dialogs inside Tau and expose extension notices, status text, widgets, and composer updates.
-- Send prompts, steer an active run, and abort.
-- Delete queued messages or run the inclusive prefix through a selected message at a safe boundary; later messages stay held until another prefix or explicit Resume.
-- Show a circular context-usage estimate beside the composer, with token counts on Windows hover or Android tap.
-- Show sent prompts immediately, keep unconfirmed sends visible across reconnects, and never automatically resend them.
-- Keep loaded history across chat switches and warm running, unread and recent chats without starting Pi.
-- Bump chats on assistant replies and stops; preserve unread markers across app restarts.
-- Detect failed connections and restore retained chat feeds without replaying sends or controls.
-- Fork from any visible user message.
-- Attach local files for Pi to inspect, view supported images from Pi inline, download files through Pi's `send_file` tool, and create inline images through `generate_image`. File delivery stages files itself and identifies inline images by content.
-- Save viewed images privately for offline inline/full-screen viewing. Export a saved original without downloading it again.
-- Zoom and pan full-screen images with pinch or mouse wheel/drag, plus minus/plus/Fit controls.
-- Edit the entire shared title prompt in Settings, with exact whitespace and empty overrides.
-- Use the connection indicator for routine reconnect failures; keep actionable errors visible.
-- On Windows, drop files onto the chat, paste clipboard images as attachments, use Enter to send, Shift+Enter for a newline, and Escape to interrupt Pi.
-- Use the same chats from Android and Windows.
-
-## OpenAI image generation
-
-Tau's `generate_image` tool sends one prompt through OpenAI's native Codex
-`image_generation` tool with `gpt-image-2` and PNG output. It uses Pi's existing
-ChatGPT OAuth login; no separate image API key or provider registry is needed.
-Only the tool prompt enters this separate request. A confirmed PNG is written to
-a private unique directory under Tau's outbox and returned through the normal
-inline attachment path.
-
-Generation has no automatic request retry because an interrupted request may
-still consume image allowance. Responses are bounded, and generated images must
-be valid PNG files no larger than 10 MB. `send_file` remains the single tool for
-delivering existing files.
-
-## Selection and crash diagnostics
-
-Protocol 10 requires matched client and daemon updates.
-
-A build-time patch fixes the top/bottom edge mismatch in current stable Compose
-1.12.0. Long horizontal selection drags retain scrolling and copying. The same
-checked patch reaches desktop and Android; see `app/patches/README.md`.
-
-Crash reporting keeps the latest full local trace, including messages, causes
-and suppressed exceptions, in `client-crash.log`. It is capped at 64K characters
-(under 256 KiB plus a truncation marker). On Windows it is in
-`%LOCALAPPDATA%\Tau\data`; on Linux, `$XDG_DATA_HOME/Tau` or
-`~/.local/share/Tau`; on Android, in the app's private files directory. This file
-can contain private text or tokens: review it before sharing. Uploading a report
-does not delete it. A later crash replaces this local trace.
-
-The first pending remote report remains in `client-crash.pending.json` until its
-successful upload. A reply for an older report cannot clear a newer one.
-Report schema 2 adds up to three cause stacks and numeric
-`selectionRange` details (`start`, `end`, `textLength`) for the known text-range
-error. Arbitrary messages and the full local trace are never uploaded. Reports
-stay under 24 KiB; the daemon also accepts old schema 1 pending reports. Failed
-report writes are printed to stderr instead of silently discarded. The patch
-prevents this selection defect; it adds no blanket UI catch-and-continue policy.
-
-## Daemon installation
-
-Build and install the independent systemd service:
-
-```bash
-cargo build --release --package taud
-sudo ./scripts/install-daemon.sh
+```sh
+cargo build --locked --workspace
+cargo nextest run --locked --workspace
 ```
 
-The installer generates `/etc/tau.env` once with a random bearer token, binds `taud` to `127.0.0.1:8787`, and publishes that loopback listener through Tailscale Serve on Tailnet port 8787. It prints the URL and token required by the clients. Tailnet traffic is already encrypted; no public listener is created. This works with both kernel and userspace Tailscale networking.
+Windows launcher and installer crates use a separate workspace at
+`crates/windows/Cargo.toml`. Packaging entry points are
+`scripts/build-windows.sh` and `scripts/build-android.sh`.
 
-The title helper needs both `scripts/title_gen.py` and its adjacent `scripts/title_prompt.txt`.
+## Source and tests
 
-Tau state is stored under `/var/lib/tau`. Client uploads are isolated by chat under `/root/.local/share/tau/uploads` and deleted with the chat. Pi's `send_file` tool copies outgoing files into unique directories under `/root/.local/share/tau/outbox`, preserving their names; files already there are reused. `taud` independently canonicalizes and validates every requested file before streaming it through an authenticated endpoint. Client crash reports are bounded, omit chat content and exception messages, and are appended to `/var/lib/tau/client-crashes.jsonl`. Each accepted report also appears in `journalctl -u tau.service`.
+Shared messages and native streams live in `crates/net`; SQLite block storage
+lives in `crates/block-store`. Endpoint-specific networking belongs in each
+application's `net` module, not in another transport crate.
 
-## Native file transfers
+Each crate keeps test code in `tests/`: public integration tests at the top level,
+private unit tests in `tests/unit/`. Unit modules use a test-only `#[path]` from
+the implementation they exercise, so testing does not widen production APIs.
+Examples are diagnostic programs, not a second regression suite. Release-script
+tests run with `python tests/release.py`; the Android harness is under
+`crates/frontend/tests/android/` and requires a disposable emulator.
 
-New clients request a file grant through the existing bearer-authenticated HTTP
-endpoint, then download verified blocks over QUIC/UDP using the shared Rust
-`tau-transfer` engine. There is no automatic TCP fallback. Partial data stays
-beside the account/chat/entry-scoped private cache across retries and restarts;
-complete files are verified, synced and atomically published. Existing saved
-files and exports remain usable.
+## Current beta features
 
-`TAU_TRANSFER_BIND` defaults to `127.0.0.1:8788` (UDP). The installed userspace
-Tailscale stack forwards Tailnet UDP to this loopback port. On a kernel-mode
-Tailscale server, set this value to the server's Tailnet IPv4 address and port.
-Allow that UDP port in Tailnet policy. Tailscale Serve remains the HTTP/chat
-proxy and needs no UDP configuration. Iroh discovery and relays are disabled.
-The setup response supplies the UDP port and pinned QUIC identity; clients use
-the hostname from their existing Tau connection settings.
+Markdown rendering uses the external Barkdown repository, pinned to
+`9bc7163193c5e1764e5c20a7119b5318673aa6b9`, including its delimiter-scanning fix.
+The native-network refactor, client-first model selection, Codex device sign-in,
+and encrypted reasoning checkpoint recovery are integrated on this mainline.
 
-A grant covers one open, validated file and one client QUIC identity for up to
-one hour. The daemon retains at most 128 recent grants and evicts the oldest
-when full. It retains file handles and small BLAKE3 outboards, not duplicate
-file bodies. A source modified after granting fails integrity checks.
+See [Codex sign-in](docs/codex-signin.md),
+[reasoning recovery](docs/codex-reasoning-recovery.md), and
+[desktop telemetry](docs/telemetry.md) for behavior and ownership.
+The [release process](docs/release.md) builds and delivers Windows before Android,
+then stops. Daemon build and deployment are a separate, explicitly approved final
+operation.
 
-The shared library ships for Windows x64 and all four existing Android ABIs.
-Kotlin uses generated UniFFI bindings for setup, progress and cancellation; file
-blocks stay in Rust. The Linux build supports local client acceptance. Build
-through `scripts/build-transfers.sh` and the mandatory shared Cargo wrapper.
-
-## Android
-
-```bash
-cd app
-./gradlew :androidApp:assembleDebug
-```
-
-The APK is written below `app/androidApp/build/outputs/apk/debug`. Release builds use a private signing key configured through ignored `app/local.properties`.
-
-## Windows self-extractor
-
-```bash
-./scripts/build-windows-sfx.sh
-```
-
-The build runs on Linux and produces `dist/Tau-<version>-windows-x64.exe`. The EXE contains the app and its Windows Compose native runtime.
-
-On first launch, Tau downloads a checksum-pinned private Temurin Java 21 runtime into `%LOCALAPPDATA%\Tau\runtimes` and reuses it across later client updates. The launcher verifies the exact archive size and SHA-256 before atomically installing it. Tau requires no system JVM, but its first launch requires internet access.
-
-On Windows it installs without UAC under `%LOCALAPPDATA%\Tau\versions`, writes a stable `%LOCALAPPDATA%\Tau\Tau.exe` launcher, and adds Tau directly to the user's Start Menu. Running the same setup again performs no extraction and reports that the version is already installed. A newer setup installs beside the old version and switches `current.txt` only after extraction completes.
-
-## Verification
-
-```bash
-cargo nextest run --workspace
-cargo build --workspace --release
-cd app
-./gradlew :composeApp:desktopTest :androidApp:assembleDebug
-```
+The [Bash launcher](docs/bash-launcher.md) keeps tool scripts out of process
+arguments while preserving independent standard input.

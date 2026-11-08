@@ -1,0 +1,304 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+#[cfg(windows)]
+#[path = "../../channel.rs"]
+mod channel;
+
+#[cfg(windows)]
+static PAYLOAD: &[u8] = include_bytes!(env!("TAU_PAYLOAD_ARCHIVE"));
+#[cfg(windows)]
+static LAUNCHER: &[u8] = include_bytes!(env!("TAU_LAUNCHER_EXE"));
+#[cfg(windows)]
+const VERSION: &str = env!("TAU_VERSION");
+
+#[cfg(windows)]
+fn main() {
+    let quiet = std::env::args().any(|arg| arg == "--quiet");
+    let launch = !std::env::args().any(|arg| arg == "--no-launch");
+    let result = install();
+    match result {
+        Ok(message) => {
+            if !quiet {
+                show_message(&message, false);
+            }
+            if launch && let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                let _ = std::process::Command::new(
+                    std::path::PathBuf::from(local)
+                        .join(channel::NAME)
+                        .join(channel::EXE),
+                )
+                .spawn();
+            }
+        }
+        Err(error) => {
+            if !quiet {
+                show_message(&format!("{} setup failed.\n\n{error}", channel::NAME), true);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn install() -> Result<String, Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::io::{BufReader, BufWriter, Cursor, Write};
+    use std::path::{Component, PathBuf};
+
+    use semver::Version;
+    use sha2::{Digest, Sha256};
+
+    let bundled_version = Version::parse(VERSION)?;
+    let local = std::env::var_os("LOCALAPPDATA").ok_or("Windows did not provide LOCALAPPDATA")?;
+    let root = PathBuf::from(local).join(channel::NAME);
+    let versions = root.join("versions");
+    fs::create_dir_all(&versions)?;
+
+    let payload_hash = Sha256::digest(PAYLOAD)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let version_key = format!("{VERSION}-{}", &payload_hash[..12]);
+    if version_key
+        .chars()
+        .any(|character| !character.is_ascii_alphanumeric() && !matches!(character, '.' | '-'))
+    {
+        return Err("Tau's build version cannot be used as an install key".into());
+    }
+
+    let current_key = fs::read_to_string(root.join("current.txt"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '-')
+                })
+        });
+    let current_version = current_key.as_ref().and_then(|key| {
+        fs::read_to_string(versions.join(key).join("version.txt"))
+            .ok()
+            .and_then(|value| Version::parse(value.trim()).ok())
+    });
+    if let Some(current) = current_version.as_ref()
+        && current > &bundled_version
+    {
+        return Ok(format!(
+            "{} {current} is already installed, which is newer than this {bundled_version} setup.",
+            channel::NAME,
+        ));
+    }
+
+    let target = versions.join(&version_key);
+    let target_is_complete = target.is_dir()
+        && fs::read_to_string(target.join("version.txt"))
+            .is_ok_and(|value| value.trim() == VERSION)
+        && fs::read_to_string(target.join("payload.sha256"))
+            .is_ok_and(|value| value.trim() == payload_hash);
+    let launcher_is_current =
+        fs::read(root.join(channel::EXE)).is_ok_and(|bytes| bytes == LAUNCHER);
+    let menu_is_current = std::env::var_os("APPDATA").is_some_and(|roaming| {
+        fs::read(
+            PathBuf::from(roaming)
+                .join("Microsoft/Windows/Start Menu/Programs")
+                .join(channel::EXE),
+        )
+        .is_ok_and(|bytes| bytes == LAUNCHER)
+    });
+    if current_key.as_deref() == Some(version_key.as_str())
+        && target_is_complete
+        && launcher_is_current
+        && menu_is_current
+    {
+        return Ok(format!("{} {VERSION} is already installed.", channel::NAME));
+    }
+
+    if !target_is_complete {
+        if target.exists() {
+            return Err(format!(
+                "{} exists but is incomplete; remove it and run setup again",
+                target.display()
+            )
+            .into());
+        }
+        let staging = versions.join(format!(".{version_key}.install-{}", std::process::id()));
+        if staging.exists() {
+            fs::remove_dir_all(&staging)?;
+        }
+        fs::create_dir_all(&staging)?;
+        let extraction = (|| {
+            let tar_path = staging.join(".payload.tar");
+            {
+                let mut input = BufReader::new(Cursor::new(PAYLOAD));
+                let mut output = BufWriter::new(fs::File::create(&tar_path)?);
+                lzma_rs::lzma_decompress(&mut input, &mut output)?;
+                output.flush()?;
+            }
+            let mut archive = tar::Archive::new(fs::File::open(&tar_path)?);
+            let mut expanded_bytes = 0_u64;
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                let relative = entry.path()?.into_owned();
+                if relative.is_absolute()
+                    || relative
+                        .components()
+                        .any(|component| !matches!(component, Component::Normal(_)))
+                {
+                    return Err(format!("unsafe payload path: {}", relative.display()).into());
+                }
+                let entry_type = entry.header().entry_type();
+                if !entry_type.is_file() && !entry_type.is_dir() {
+                    return Err(format!(
+                        "payload contains unsupported entry: {}",
+                        relative.display()
+                    )
+                    .into());
+                }
+                expanded_bytes = expanded_bytes.saturating_add(entry.size());
+                if expanded_bytes > 512 * 1024 * 1024 {
+                    return Err("Tau payload exceeds its extraction limit".into());
+                }
+                let output = staging.join(relative);
+                if entry_type.is_dir() {
+                    fs::create_dir_all(&output)?;
+                    continue;
+                }
+                if let Some(parent) = output.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut file = fs::File::create(&output)?;
+                std::io::copy(&mut entry, &mut file)?;
+                file.flush()?;
+            }
+            drop(archive);
+            fs::remove_file(tar_path)?;
+            if !staging.join("app").join(channel::EXE).is_file() {
+                return Err("Tau Beta payload has no native application".into());
+            }
+            fs::write(staging.join("version.txt"), format!("{VERSION}\n"))?;
+            fs::write(staging.join("payload.sha256"), format!("{payload_hash}\n"))?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })();
+        if let Err(error) = extraction {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&staging, &target) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error.into());
+        }
+    }
+
+    fs::create_dir_all(&root)?;
+    write_atomic(&root.join(channel::EXE), LAUNCHER)?;
+    if let Some(roaming) = std::env::var_os("APPDATA") {
+        let programs = PathBuf::from(roaming)
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs");
+        fs::create_dir_all(&programs)?;
+        write_atomic(&programs.join(channel::EXE), LAUNCHER)?;
+    }
+    write_atomic(
+        &root.join("current.txt"),
+        format!("{version_key}\n").as_bytes(),
+    )?;
+
+    let message = match current_version {
+        Some(previous) if previous < bundled_version => {
+            format!(
+                "{} was updated from {previous} to {bundled_version}.",
+                channel::NAME
+            )
+        }
+        Some(_) => format!(
+            "{} {bundled_version} was repaired and activated.",
+            channel::NAME
+        ),
+        None => format!("{} {bundled_version} was installed.", channel::NAME),
+    };
+    Ok(message)
+}
+
+#[cfg(windows)]
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let temporary = path.with_file_name(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("tau"),
+        std::process::id(),
+    ));
+    let mut file = std::fs::File::create(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    let source = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = std::fs::remove_file(temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn show_message(message: &str, error: bool) {
+    use std::ptr::null_mut;
+
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
+    };
+
+    let message = message
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let title = format!("{} Setup", channel::NAME)
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MessageBoxW(
+            null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK
+                | if error {
+                    MB_ICONERROR
+                } else {
+                    MB_ICONINFORMATION
+                },
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("Tau setup targets Windows");
+}

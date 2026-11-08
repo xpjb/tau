@@ -1,4 +1,7 @@
 [workspace]
-members = ["daemon", "transfer"]
-exclude = ["windows"]
+members = ["crates/daemon", "crates/net", "crates/block-store", "crates/frontend", "crates/code-viewer"]
+exclude = ["crates/windows"]
 resolver = "2"
+
+[workspace.dependencies]
+sanscale = { git = "https://github.com/xpjb/sanscale", rev = "15ad1f03e17a368e2ff4f1b269f60bad13483638" }

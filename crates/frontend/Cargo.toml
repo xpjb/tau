@@ -1,0 +1,72 @@
+[package]
+name = "tau-frontend"
+version = "0.7.26"
+edition = "2024"
+autotests = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "tau"
+path = "src/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }
+
+[dependencies]
+tau-code-viewer = { path = "../code-viewer", features = ["syntax"] }
+libc = "0.2"
+tempfile = "3"
+tau-block-store = { path = "../block-store" }
+tau-net = { path = "../net", features = ["native"] }
+barkdown = { git = "https://github.com/xpjb/barkdown", rev = "9dc5dd99164585876c38aba76dfa09a34a2ae2eb" }
+chad = { git = "https://github.com/xpjb/chad", rev = "f31e792c959ae6521916524f92ff99fb9fa92211" }
+sanscale = { workspace = true }
+anyhow = "1"
+blake3 = "1.8"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "fs"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+url = "2"
+log = "0.4"
+unicode-segmentation = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.15"
+arboard = "3"
+open = "5"
+png = "0.18"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+living-telemetry = { git = "https://github.com/xpjb/living-telemetry", rev = "59e5fcf03f4fdab38d3cc829d7741f3008e65743" }
+
+[target.'cfg(windows)'.dependencies]
+# Existing thread-local counters distinguish encoded text/emoji draws from
+# nonempty inputs. No GPU queries/readback or timing instrumentation is enabled.
+sanscale = { workspace = true, features = ["perf-counters"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+
+[dev-dependencies]
+sanscale = { workspace = true, features = ["perf-counters"] }
+tempfile = "3"
+axum = { version = "0.8", features = ["ws"] }
+taud = { path = "../daemon" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }

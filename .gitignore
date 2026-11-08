@@ -1,14 +1,6 @@
 /target/
-/windows/target/
+/crates/windows/target/
 /dist/
-/app/.gradle/
-/app/.kotlin/
-/app/build/
-/app/buildSrc/.gradle/
-/app/buildSrc/build/
-/app/androidApp/build/
-/app/composeApp/build/
-/app/local.properties
 *.jks
 *.keystore
 *.apk
@@ -17,3 +9,5 @@
 *.msi
 *.tmp
 .DS_Store
+
+__pycache__/

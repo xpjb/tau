@@ -1,0 +1,41 @@
+pub mod replica;
+pub mod feed;
+pub mod store;
+pub mod net;
+
+#[cfg(target_os = "android")]
+mod android;
+mod app;
+mod cache_ttl;
+mod clock;
+mod codex_usage;
+mod crash;
+pub mod controller;
+#[cfg(not(target_os = "android"))]
+mod demo;
+#[cfg(not(target_os = "android"))]
+mod desktop;
+mod daemon_settings;
+mod editor;
+mod keyboard;
+mod fonts;
+mod icons;
+mod models;
+pub mod notice;
+mod render;
+mod scroll;
+mod tooltip;
+#[cfg(not(target_os = "android"))]
+mod telemetry;
+#[cfg(not(target_os = "android"))]
+pub use desktop::run;
+#[cfg(not(target_os = "android"))]
+pub use telemetry::run_watchdog_from_args;
+
+mod disk;
+#[cfg(not(target_os = "android"))]
+mod downloads;
+
+#[cfg(all(test, not(target_os = "android")))]
+#[path = "../tests/unit/end_to_end.rs"]
+mod end_to_end;

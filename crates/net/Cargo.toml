@@ -1,0 +1,28 @@
+[package]
+name = "tau-net"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+native = ["dep:futures-util", "dep:zstd", "dep:blake3", "dep:iroh", "dep:tokio"]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = { version = "0.3", optional = true }
+zstd = { version = "0.13", default-features = false, optional = true }
+blake3 = { version = "1.8", optional = true }
+iroh = { version = "=0.35.0", default-features = false, optional = true }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"], optional = true }
+
+[dev-dependencies]
+tau-block-store = { path = "../block-store" }
+rand = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tempfile = "3"
+
+[[test]]
+name = "native"
+required-features = ["native"]

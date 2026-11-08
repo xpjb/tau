@@ -1,0 +1,190 @@
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::sync::CancellationToken;
+use crate::config::Config;
+use crate::settings::Settings;
+use crate::transcript::IMAGE_LIMIT;
+use crate::attachments::{image_mime, regular_file};
+
+pub fn definitions(image_bridge: bool) -> Vec<Value> {
+    [
+        ("read", "Read text or an image. Text is bounded to 2000 lines / 50 KB; use offset/limit to continue.", json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}}), vec!["path"]),
+        ("bash", "Execute bash in the working directory. Output is bounded; full output is saved to a file. Timeout is optional, in seconds.", json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1}}), vec!["command"]),
+        ("write", "Write a file, creating parent directories. Replaces existing contents.", json!({"path":{"type":"string"},"content":{"type":"string"}}), vec!["path","content"]),
+        ("edit", "Apply exact replacements against the original file. Each oldText must be unique; edits must not overlap.", json!({"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}}), vec!["path","edits"]),
+        ("send_file", "Send a local file to the user through Tau. Files are staged automatically; PNG, JPEG, and WebP files up to 10 MB appear inline.", json!({"path":{"type":"string","minLength":1},"caption":{"type":"string","maxLength":1024}}), vec!["path"]),
+        ("generate_image", "Generate or edit one image through the configured Codex account (gpt-image-2). It is delivered automatically. Optional imagePaths are local PNG/JPEG/WebP references, at most four, 10 MB each.", json!({"prompt":{"type":"string","minLength":1,"maxLength":32000},"imagePaths":{"type":"array","maxItems":4,"items":{"type":"string"}}}), vec!["prompt"]),
+        ("web_search", "Search the web.", json!({"query":{"type":"string"}}), vec!["query"]),
+    ].into_iter().filter(|(name,_,_,_)| *name != "generate_image" || image_bridge).map(|(name, description, properties, required)| json!({"name":name,
+        "description":description,
+        "parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect()
+}
+
+pub fn text_result(text: impl Into<String>) -> Value { json!({"content":[{"type":"text","text":text.into()}]}) }
+fn path(config: &Config, input: &str) -> PathBuf {
+    let input = input.strip_prefix('@').unwrap_or(input);
+    if let Some(rest) = input.strip_prefix("~/") { PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest) }
+    else { config.cwd.join(input) }
+}
+fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> { value[field].as_str().with_context(|| format!("{field} must be a string")) }
+
+// Keep script text out of argv (pgrep/pkill -f), without sharing stdin with the
+// script's commands. The returned guard must outlive the spawned shell.
+#[cfg(unix)]
+fn shell_script(process: &mut tokio::process::Command, source: &str) -> Result<std::fs::File> {
+    use std::io::{Seek, Write};
+    use std::os::fd::AsRawFd;
+    if source.contains('\0') { bail!("Shell script contains a NUL byte"); }
+    let mut script = tempfile::tempfile().context("Could not create shell script")?;
+    // Bash opens its own script-reading FD before executing this first line.
+    // Close our transport FD so commands neither inherit it nor consume it.
+    write!(script, "exec 3<&-\n{source}").context("Could not write shell script")?;
+    script.rewind()?;
+    let fd = script.as_raw_fd();
+    process.arg("/dev/fd/3");
+    // SAFETY: the caller retains script until the child exits. Only async-signal-
+    // safe syscalls run after fork; CLOEXEC remains set in the parent, so other
+    // concurrently spawned tools cannot inherit this script across exec.
+    unsafe {
+        process.pre_exec(move || {
+            if libc::dup2(fd, 3) == -1 || libc::fcntl(3, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(script)
+}
+
+#[cfg(not(unix))]
+fn shell_script(process: &mut tokio::process::Command, source: &str) -> Result<tempfile::TempPath> {
+    use std::io::Write;
+    if source.contains('\0') { bail!("Shell script contains a NUL byte"); }
+    let mut script = tempfile::NamedTempFile::new().context("Could not create shell script")?;
+    script.write_all(source.as_bytes()).context("Could not write shell script")?;
+    let path = script.into_temp_path();
+    process.arg(&path);
+    Ok(path)
+}
+
+#[cfg(all(test, unix))]
+#[path = "../../tests/unit/agent/tools.rs"]
+mod tests;
+
+pub async fn execute(config: &Config, settings: &Settings, name: &str, args: &Value, cancel: &CancellationToken) -> Result<Value> {
+    if cancel.is_cancelled() { bail!("Tool cancelled"); }
+    match name {
+        "read" => {
+            let path = path(config, string(args, "path")?);
+            let mut file = regular_file(&path).await?;
+            if !file.metadata().await?.is_file() { bail!("Path is not a regular file"); }
+            let mut header = [0; 12]; let length = file.read(&mut header).await?;
+            file.seek(std::io::SeekFrom::Start(0)).await?;
+            if let Some(mime) = image_mime(&header[..length]) {
+                let mut bytes = Vec::new(); file.take(IMAGE_LIMIT + 1).read_to_end(&mut bytes).await?;
+                if bytes.len() as u64 > IMAGE_LIMIT { bail!("Image exceeds 10 MB"); }
+                return Ok(json!({"content":[{"type":"image", "mimeType":mime, "data":STANDARD.encode(bytes)}]}));
+            }
+            use tokio::io::AsyncBufReadExt;
+            let offset = args.get("offset").map(|v| v.as_u64().filter(|v| *v > 0).context("offset must be positive")).transpose()?.unwrap_or(1);
+            let limit = args.get("limit").map(|v| v.as_u64().filter(|v| *v > 0).context("limit must be positive")).transpose()?.unwrap_or(2000).min(2000);
+            let mut reader = tokio::io::BufReader::new(file); let mut line = Vec::new(); let mut output = String::new();
+            let mut index = 0; let mut truncated = false;
+            loop {
+                line.clear();
+                // A single giant line must not allocate an unbounded buffer.
+                let count = (&mut reader).take(50 * 1024 + 1).read_until(b'\n', &mut line).await?;
+                if count == 0 { break; }
+                index += 1;
+                if count > 50 * 1024 { bail!("Line {index} exceeds 50 KB; use bash for a bounded byte range"); }
+                if index < offset { continue; }
+                if index >= offset + limit || output.len() + count > 50 * 1024 { truncated = true; break; }
+                output.push_str(&String::from_utf8(line.clone()).context("File is not UTF-8 text or a supported image")?);
+            }
+            if truncated { output.push_str(&format!("\n[Truncated; continue with offset {index}]") ); }
+            Ok(text_result(output))
+        }
+        "write" | "edit" => {
+            let input = path(config, string(args, "path")?);
+            let path = match tokio::fs::canonicalize(&input).await { Ok(path) => path, Err(e) if e.kind() == std::io::ErrorKind::NotFound && name == "write" => input, Err(e) => return Err(e.into()) };
+            let text = if name == "write" { string(args, "content")?.to_owned() } else {
+                let file = regular_file(&path).await?;
+                if !file.metadata().await?.is_file() { bail!("Edit requires a regular file"); }
+                let mut original = String::new(); file.take(16 * 1024 * 1024 + 1).read_to_string(&mut original).await?;
+                if original.len() > 16 * 1024 * 1024 { bail!("Edit is limited to 16 MB files; use bash for larger files"); }
+                let edits = args["edits"].as_array().filter(|v| !v.is_empty()).context("edits must be a nonempty array")?;
+                let mut ranges = Vec::new();
+                for edit in edits {
+                    let old = string(edit, "oldText")?; let new = string(edit, "newText")?;
+                    if old.is_empty() { bail!("oldText cannot be empty"); }
+                    let start = original.find(old).context("oldText was not found")?;
+                    if original.rfind(old) != Some(start) { bail!("oldText must match exactly once"); }
+                    ranges.push((start, start + old.len(), new));
+                }
+                ranges.sort_by_key(|range| range.0);
+                if ranges.windows(2).any(|w| w[0].1 > w[1].0) { bail!("Edits overlap; combine them"); }
+                let mut text = original;
+                for (start, end, new) in ranges.into_iter().rev() { text.replace_range(start..end, new); }
+                text
+            };
+            let permissions = tokio::fs::metadata(&path).await.ok().map(|m| m.permissions());
+            crate::settings::atomic_write(&path, text.as_bytes()).await?;
+            let file = tokio::fs::OpenOptions::new().write(true).open(&path).await?;
+            if let Some(permissions) = permissions { file.set_permissions(permissions).await?; }
+            file.sync_all().await?;
+            Ok(text_result(format!("{} {}", if name == "write" { "Wrote" } else { "Edited" }, path.display())))
+        }
+        "bash" => {
+            let command = string(args, "command")?;
+            let seconds = args.get("timeout").map(|value| value.as_u64().filter(|v| *v > 0).context("timeout must be positive seconds")).transpose()?;
+            let directory = config.database_path.parent().unwrap_or(Path::new(".")).join("tool-output");
+            tokio::fs::create_dir_all(&directory).await?;
+            let output_path = directory.join(format!("{}.log", uuid::Uuid::new_v4()));
+            let mut options = std::fs::OpenOptions::new(); options.write(true).create_new(true);
+            #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+            let output = options.open(&output_path)?;
+            let mut process = tokio::process::Command::new(&settings.agent.shell_path);
+            let _script = shell_script(&mut process, &format!("{}\n{command}", settings.agent.shell_command_prefix))?;
+            process.current_dir(&config.cwd)
+                .stdin(Stdio::null()).stdout(output.try_clone()?).stderr(output).kill_on_drop(true)
+                .env_remove("TAU_TOKEN").env_remove("TAU_FLAG_TOKEN");
+            #[cfg(unix)] process.process_group(0);
+            let mut child = process.spawn().context("Could not start bash")?;
+            struct Group(u32);
+            impl Drop for Group {
+                fn drop(&mut self) { #[cfg(unix)] if self.0 != 0 { unsafe { libc::kill(-(self.0 as i32), libc::SIGKILL); } } }
+            }
+            let mut group = Group(child.id().context("Shell has no process ID")?);
+            let timeout = async { match seconds { Some(seconds) => tokio::time::sleep(std::time::Duration::from_secs(seconds)).await, None => std::future::pending::<()>().await } };
+            let status = tokio::select! {
+                result = child.wait() => { let status = result?; group.0 = 0; format!("Exit status: {status}") },
+                _ = cancel.cancelled() => "Cancelled".into(),
+                _ = timeout => "Timed out".into(),
+            };
+            drop(group);
+            if child.try_wait()?.is_none() { let _ = child.kill().await; let _ = child.wait().await; }
+            let mut file = tokio::fs::File::open(&output_path).await?;
+            let length = file.metadata().await?.len();
+            let start = length.saturating_sub(settings.agent.max_tool_output_bytes as u64);
+            file.seek(std::io::SeekFrom::Start(start)).await?;
+            let mut bytes = Vec::new(); file.take(settings.agent.max_tool_output_bytes as u64).read_to_end(&mut bytes).await?;
+            let text = String::from_utf8_lossy(&bytes);
+            let lines = text.lines().collect::<Vec<_>>();
+            let visible = lines[lines.len().saturating_sub(2000)..].join("\n");
+            let truncated = start > 0 || lines.len() > 2000;
+            if !truncated { tokio::fs::remove_file(&output_path).await?; }
+            Ok(text_result(format!("{visible}\n\n{status}{}", if truncated { format!("\nOutput truncated. Full output: {}", output_path.display()) } else { String::new() })))
+        }
+        "send_file" => {
+            let input = string(args, "path")?;
+            if input.is_empty() { bail!("Attachment path must not be empty"); }
+            let caption = args.get("caption").map(|_| string(args, "caption")).transpose()?;
+            crate::attachments::send_file(&config.attachment_root, &path(config, input), caption, cancel).await
+        }
+        _ => bail!("Unknown tool {name}"),
+    }
+}

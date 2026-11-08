@@ -1,0 +1,53 @@
+use std::process::ExitCode;
+
+use tracing::error;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .compact()
+        .init();
+
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.len()==2 && args[0]=="--rotate-lineage" {
+        return match taud::maintenance::rotate_lineage(std::path::Path::new(&args[1])).await {
+            Ok(lineage)=>{tracing::info!(%lineage,"Restored database fenced; interrupted effects require reconciliation");ExitCode::SUCCESS}
+            Err(error)=>{error!(%error,"Lineage rotation failed");ExitCode::FAILURE}
+        };
+    }
+    if args == ["--login-codex"] {
+        return match taud::login_codex().await { Ok(()) => ExitCode::SUCCESS, Err(error) => { error!(%error, "Codex login failed"); ExitCode::FAILURE } };
+    }
+    if args.len() == 3 && args[0] == "--export-session" {
+        return match async { taud::export_history(taud::Config::from_env()?,&args[1],std::path::Path::new(&args[2])).await }.await {
+            Ok(()) => ExitCode::SUCCESS, Err(error) => { error!(%error,"History export failed"); ExitCode::FAILURE }
+        };
+    }
+    if !args.is_empty() && !(args.len() == 2 && args[0] == "--import-state") { error!("Usage: taud [--login-codex | --import-state PATH | --export-session ID PATH | --rotate-lineage DATABASE]"); return ExitCode::FAILURE; }
+
+    let config = match taud::Config::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            error!(%error, "Tau configuration is invalid");
+            return ExitCode::FAILURE;
+        }
+    };
+    if args.len() == 2 {
+        return match taud::import_state(config,args[1].clone().into()).await {
+            Ok(count) => { tracing::info!(count,"Imported legacy sessions into SQLite"); ExitCode::SUCCESS }
+            Err(error) => { error!(%error,"Legacy import failed"); ExitCode::FAILURE }
+        };
+    }
+    match taud::run(config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!(error = %error, "Tau daemon stopped");
+            ExitCode::FAILURE
+        }
+    }
+}

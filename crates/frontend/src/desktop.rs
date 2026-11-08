@@ -1,0 +1,553 @@
+use crate::{
+    app::{App, ConnectionPreview, PlatformAction, SavedAction},
+    notice::DownloadTarget,
+    store::{SavedDownload, Settings, Store},
+};
+use chad::winit::{
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{ElementState, Ime, MouseButton, WindowEvent},
+    keyboard::{Key, ModifiersState, NamedKey},
+    window::{CursorIcon, UserAttentionType},
+};
+use chad::{ChadApp, Config, Ctx, wgpu};
+use sanscale::Vec2;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, mpsc},
+    time::Instant,
+};
+use tau_net::SessionStatus;
+mod scroll;
+pub(crate) mod wake;
+use scroll::WheelDecoder;
+use wake::WakeGate;
+use crate::render::trace::Stage;
+
+// Account/session are captured when the document picker is opened.
+enum DesktopEvent {
+    Pick(Result<(String, String, Vec<PathBuf>), String>),
+    Saved(String, Result<SavedDownload, String>),
+    Extracted(DownloadTarget, Result<(), String>),
+}
+struct Desktop {
+    app: App,
+    wake: Arc<WakeGate>,
+    cursor: Vec2,
+    cursor_icon: CursorIcon,
+    modifiers: ModifiersState,
+    scroll: WheelDecoder,
+    clipboard: Option<arboard::Clipboard>,
+    rx: mpsc::Receiver<DesktopEvent>,
+    tx: mpsc::Sender<DesktopEvent>,
+    attention_identity: String,
+    seen_finished: HashMap<String, u64>,
+    attention_requested: bool,
+}
+fn root() -> PathBuf {
+    if let Some(path) = std::env::var_os("TAU2_DATA_DIR") {
+        return path.into();
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_DATA_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Tau2")
+}
+impl ChadApp for Desktop {
+    fn init(ctx: &mut Ctx) -> Result<Self, String> {
+        let _busy = living_telemetry::busy!("ui", "init");
+        crate::telemetry::set_refresh_rate_millihertz(ctx.window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz()));
+        #[cfg(windows)]
+        {
+            use chad::winit::{
+                platform::windows::{IconExtWindows, WindowExtWindows},
+                window::Icon,
+            };
+            let icon = Icon::from_resource(1, None).map_err(|e| e.to_string())?;
+            ctx.window.set_taskbar_icon(Some(icon));
+        }
+        let store = Store::open(root()).map_err(|e| e.to_string())?;
+        if let (Ok(server_url), Ok(token)) =
+            (std::env::var("TAU2_SERVER"), std::env::var("TAU2_TOKEN"))
+        {
+            store
+                .put("", "settings", &Settings { server_url, token })
+                .map_err(|e| e.to_string())?;
+        }
+        let waker = ctx.waker();
+        let wake = WakeGate::new(Arc::new(move || waker.wake()));
+        let mut app = App::new(ctx, store, wake.callback(), false)
+            .map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        app.enable_desktop_diagnostics(ctx);
+        app.ui.window_focused = ctx.window.has_focus();
+        living_telemetry::set_ui_active(app.ui.window_focused && app.ui.visible);
+        ctx.window.set_ime_allowed(true);
+        let (tx, rx) = mpsc::channel();
+        let attention_identity = app.controller.identity.clone();
+        crate::telemetry::update_app_state(&app.controller, app.ui.window_focused, app.ui.visible, true);
+        Ok(Self {
+            app,
+            wake,
+            cursor: Vec2::new(0., 0.),
+            cursor_icon: CursorIcon::Default,
+            modifiers: ModifiersState::empty(),
+            scroll: WheelDecoder::default(),
+            clipboard: arboard::Clipboard::new().ok(),
+            rx,
+            tx,
+            attention_identity,
+            seen_finished: HashMap::new(),
+            attention_requested: false,
+        })
+    }
+    fn event(&mut self, ctx: &mut Ctx, event: &WindowEvent) {
+        let _busy = living_telemetry::busy!("ui", "window_event");
+        match event {
+            WindowEvent::Focused(focused) => {
+                living_telemetry::set_ui_active(*focused && self.app.ui.visible);
+            }
+            WindowEvent::Occluded(occluded) => {
+                living_telemetry::set_ui_active(self.app.ui.window_focused && !*occluded);
+            }
+            _ => {}
+        }
+        let recorded_input = match event {
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::KeyboardInput { .. }
+            | WindowEvent::MouseWheel { .. } | WindowEvent::Ime(_) | WindowEvent::DroppedFile(_) => living_telemetry::input_received(),
+            _ => false,
+        };
+        let force_state = matches!(event, WindowEvent::Focused(_) | WindowEvent::Occluded(_));
+        let started = self.app.trace_started();
+        let event_scope = living_telemetry::scope!("ui", "dispatch_event");
+        let stage = match event {
+            WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => Some(Stage::Hover),
+            WindowEvent::MouseInput { .. } => Some(Stage::Pointer),
+            WindowEvent::KeyboardInput { .. } => Some(Stage::Key),
+            WindowEvent::MouseWheel { .. } => Some(Stage::Wheel),
+            WindowEvent::Ime(_) => Some(Stage::Ime),
+            WindowEvent::Focused(_) => Some(Stage::Focus),
+            WindowEvent::Occluded(_) => Some(Stage::Visibility),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => Some(Stage::Resize),
+            WindowEvent::DroppedFile(_) => Some(Stage::FileDrop),
+            _ => None,
+        };
+        match event {
+            WindowEvent::CloseRequested => {
+                let result = self.app.save();
+                if result.is_ok() {
+                    ctx.exit();
+                } else {
+                    self.app.report(result);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = Vec2::new(position.x as f32, position.y as f32);
+                self.app.hover(Some(self.cursor));
+                self.app.motion(0, self.cursor);
+            }
+            WindowEvent::CursorLeft { .. } => self.app.hover(None),
+            WindowEvent::Occluded(occluded) => {
+                self.app.set_connection_visible(!occluded);
+                if *occluded { living_telemetry::clear_pending_frame(); }
+            }
+            WindowEvent::Moved(_) => crate::telemetry::set_refresh_rate_millihertz(
+                ctx.window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz())),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                living_telemetry::redraw_requested();
+                ctx.request_redraw();
+            }
+            WindowEvent::Focused(true) => {
+                self.app.ui.window_focused = true;
+                if self.attention_requested {
+                    ctx.window.request_user_attention(None);
+                    self.attention_requested = false;
+                }
+                living_telemetry::redraw_requested();
+                ctx.request_redraw();
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if *state == ElementState::Pressed {
+                    if !self.app.cancel_autoscroll() {
+                        self.app.press(0, self.cursor, false);
+                    }
+                } else {
+                    self.app.release(0, self.cursor);
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => self
+                .app
+                .middle(*state == ElementState::Pressed, self.cursor),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.app.context_at(self.cursor);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (amount, horizontal, precise) = self.scroll.decode(delta, ctx.scale_factor() as f32, self.modifiers.shift_key(), Instant::now());
+                self.app.scroll(amount, horizontal, self.cursor, precise);
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                self.modifiers = m.state();
+                self.app.ui.pointer_shift = self.modifiers.shift_key();
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => self.app.input(text),
+            WindowEvent::Ime(Ime::Disabled) => self.app.cancel_preedit(),
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => self.app.preedit(text.clone(), *cursor),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if !event.repeat && event.logical_key == Key::Named(NamedKey::F12)
+                    && self.modifiers.control_key() && self.modifiers.shift_key()
+                    && self.app.save_render_trace()
+                {
+                    living_telemetry::redraw_requested();
+                    ctx.request_redraw();
+                    return;
+                }
+                let cancelled = self.app.cancel_autoscroll();
+                if cancelled && event.logical_key == Key::Named(NamedKey::Escape) {
+                    self.sync_cursor(ctx);
+                    living_telemetry::redraw_requested();
+                    ctx.request_redraw();
+                    return;
+                }
+                let control = (self.modifiers.control_key() && !self.modifiers.alt_key())
+                    || self.modifiers.super_key();
+                let shift = self.modifiers.shift_key();
+                if let Some(key) = crate::keyboard::named(&event.logical_key) {
+                    self.app.key(key, control, shift);
+                } else if control {
+                    if let Some(key) = crate::keyboard::shortcut(event) {
+                        self.app.key(key, true, shift);
+                    }
+                } else if !self.app.composing()
+                    && let Some(text) = &event.text
+                    && !text.chars().any(char::is_control)
+                {
+                    self.app.input(text);
+                }
+            }
+            WindowEvent::DroppedFile(path) => {
+                let result = self.app.controller.attach(path, None);
+                self.app.report(result);
+            }
+            WindowEvent::Focused(false) => {
+                self.app.ui.window_focused = false;
+                self.modifiers = ModifiersState::empty();
+                self.app.ui.pointer_shift = false;
+                self.scroll = WheelDecoder::default();
+                self.app.cancel_preedit();
+                self.app.cancel_pointer();
+                let result = self.app.save();
+                self.app.report(result);
+            }
+            _ => {}
+        }
+        drop(event_scope);
+        let actions_scope = living_telemetry::scope!("ui", "platform_actions");
+        self.actions();
+        drop(actions_scope);
+        self.sync_cursor(ctx);
+        if let Some(stage) = stage { self.app.trace_stage(stage, ctx.frame_index, started); }
+        // Desktop OnDemand forwards input but does not schedule a frame for it.
+        // Waiting until update() to request redraw deadlocks visible input feedback.
+        crate::telemetry::update_app_state(&self.app.controller, self.app.ui.window_focused, self.app.ui.visible, force_state);
+        if self.app.needs_redraw() {
+            living_telemetry::redraw_requested();
+            ctx.request_redraw();
+        } else if recorded_input {
+            living_telemetry::clear_pending_input();
+        }
+    }
+    fn update(&mut self, ctx: &mut Ctx) {
+        let _busy = living_telemetry::busy!("ui", "update");
+        let started = self.app.trace_started();
+        let (received, posted) = self.wake.begin_update();
+        self.app.trace_wakes(received, posted);
+        self.app
+            .resize(ctx.size(), ctx.scale_factor() as f32, Vec2::new(0., 0.));
+        while let Ok(event) = self.rx.try_recv() {
+            match event {
+                DesktopEvent::Pick(Ok((identity, session, paths))) => {
+                    for path in paths {
+                        let result = self
+                            .app
+                            .controller
+                            .attach_to(&identity, &session, &path, None);
+                        self.app.report(result);
+                    }
+                }
+                DesktopEvent::Pick(Err(error)) => self.app.report(Err(anyhow::anyhow!(error))),
+                DesktopEvent::Saved(key, result) => self.app.complete_save(&key,result),
+                DesktopEvent::Extracted(target, result) => self.app.complete_extraction(&target, result),
+            }
+        }
+        if self.app.tick(ctx.dt) {
+            living_telemetry::redraw_requested();
+            ctx.request_redraw();
+        }
+        self.actions();
+        if self.attention_identity != self.app.controller.identity {
+            self.attention_identity = self.app.controller.identity.clone();
+            self.seen_finished.clear();
+        }
+        let finished = self.app.controller.account.sessions.iter()
+            .filter(|s| !self.app.controller.is_creating(&s.id)
+                && s.status != SessionStatus::Running && self.app.controller.unread(s))
+            .map(|s| (s.id.clone(), s.updated_at_ms))
+            .collect::<HashMap<_, _>>();
+        let new_delivery = finished.iter().any(|(id, at)|
+            self.seen_finished.get(id).is_none_or(|seen| seen < at));
+        self.seen_finished = finished;
+        if self.app.ui.window_focused {
+            if self.attention_requested {
+                ctx.window.request_user_attention(None);
+                self.attention_requested = false;
+            }
+        } else if new_delivery {
+            ctx.window.request_user_attention(Some(UserAttentionType::Informational));
+            self.attention_requested = true;
+        } else if self.attention_requested && self.seen_finished.is_empty() {
+            ctx.window.request_user_attention(None);
+            self.attention_requested = false;
+        }
+        self.app.trace_stage(Stage::Update, ctx.frame_index, started);
+        crate::telemetry::update_app_state(&self.app.controller, self.app.ui.window_focused, self.app.ui.visible, false);
+    }
+    fn frame(&mut self, ctx: &mut Ctx, view: &wgpu::TextureView) {
+        let _busy = living_telemetry::busy!("ui", "frame");
+        let mut telemetry_frame = living_telemetry::Frame::start();
+        telemetry_frame.phase("app");
+        let started = self.app.trace_started();
+        self.app.frame(ctx, view);
+        telemetry_frame.field("frame_index", ctx.frame_index);
+        telemetry_frame.field("width", ctx.size().0);
+        telemetry_frame.field("height", ctx.size().1);
+        telemetry_frame.field("connected", self.app.controller.epoch.is_some());
+        telemetry_frame.phase("platform");
+        if let Some(rect) = self.app.ime_rect() {
+            ctx.window.set_ime_cursor_area(
+                PhysicalPosition::new(rect.x as f64, rect.y as f64),
+                PhysicalSize::new(rect.width.ceil() as u32, rect.height.ceil() as u32),
+            );
+        }
+        self.sync_cursor(ctx);
+        self.app.trace_stage(Stage::Paint, ctx.frame_index, started);
+        if self.app.needs_redraw() {
+            living_telemetry::redraw_requested();
+            ctx.request_redraw();
+        }
+        telemetry_frame.finish();
+        crate::telemetry::update_app_state(&self.app.controller, self.app.ui.window_focused, self.app.ui.visible, false);
+    }
+}
+impl Desktop {
+    fn sync_cursor(&mut self, ctx: &Ctx) {
+        let icon = self.app.cursor();
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            ctx.window.set_cursor(icon);
+        }
+    }
+    fn actions(&mut self) {
+        for action in self.app.actions() {
+            match action {
+                PlatformAction::Copy(text) => {
+                    let result = (|| -> anyhow::Result<()> {
+                        if self.clipboard.is_none() { self.clipboard = Some(arboard::Clipboard::new()?); }
+                        self.clipboard.as_mut().unwrap().set_text(text)?;
+                        Ok(())
+                    })();
+                    self.app.report(result);
+                }
+                PlatformAction::Paste { token } => {
+                    if let Some(c) = &mut self.clipboard {
+                        if let Ok(text) = c.get_text() {
+                            self.app.paste(token, text);
+                        } else if self.app.can_paste_files(token) && let Ok(image) = c.get_image() {
+                            let path = self.app.controller.store.root.join("clipboard.png");
+                            let result = image::save_buffer(
+                                &path,
+                                &image.bytes,
+                                image.width as u32,
+                                image.height as u32,
+                                image::ColorType::Rgba8,
+                            )
+                            .map_err(anyhow::Error::from)
+                            .and_then(|_| self.app.controller.attach(&path, Some("clipboard.png")));
+                            self.app.report(result);
+                        }
+                    }
+                }
+                PlatformAction::PickFile { identity, session } => {
+                    let tx = self.tx.clone();
+                    let waker = self.wake.clone();
+                    std::thread::spawn(move || {
+                        if let Some(files) = rfd::FileDialog::new().pick_files() {
+                            let _ = tx.send(DesktopEvent::Pick(Ok((identity, session, files))));
+                            waker.wake();
+                        }
+                    });
+                }
+                PlatformAction::SaveDownload {key,source,name} => {
+                    let tx = self.tx.clone();
+                    let waker = self.wake.clone();
+                    std::thread::spawn(move || {
+                        let result=crate::downloads::default_directory()
+                            .and_then(|root|crate::downloads::save_into(&root,&source,&name))
+                            .map_err(|e|e.to_string());
+                        let _=tx.send(DesktopEvent::Saved(key,result));waker.wake();
+                    });
+                }
+                PlatformAction::UseDownload(saved, action, target) => {
+                    let path=PathBuf::from(saved.reference);
+                    if !path.is_file() {
+                        let result = self.app.controller.forget_download_for(
+                            &target.identity, &target.lineage, &target.session, &target.entry,
+                        ).and_then(|_| Err(anyhow::anyhow!("The downloaded file no longer exists. Download it again.")));
+                        if matches!(action, SavedAction::Extract) {
+                            self.app.complete_extraction(&target, result.map_err(|e| e.to_string()));
+                        } else {
+                            self.app.report(result);
+                        }
+                    } else if matches!(action, SavedAction::Extract) {
+                        let tx = self.tx.clone();
+                        let waker = self.wake.clone();
+                        let completion_target = target.clone();
+                        let worker = std::thread::Builder::new().name("tau-extract".into()).spawn(move || {
+                            // Busy includes opening the folder, not only writing its files.
+                            let result = crate::downloads::use_saved(&path, action).map_err(|e| e.to_string());
+                            let _ = tx.send(DesktopEvent::Extracted(target, result));
+                            waker.wake();
+                        });
+                        if let Err(error) = worker {
+                            self.app.complete_extraction(&completion_target, Err(error.to_string()));
+                        }
+                    } else {
+                        self.app.report(crate::downloads::use_saved(&path,action));
+                    }
+                }
+                PlatformAction::OpenUrl(url) => {
+                    if let Err(e) = open::that(url) {
+                        self.app.report(Err(e.into()));
+                    }
+                }
+                PlatformAction::Background | PlatformAction::Haptic => {}
+                PlatformAction::InputMenu => {}
+            }
+        }
+    }
+}
+pub fn run() -> Result<(), String> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().map(String::as_str) == Some("--screenshot") {
+        let preview = args.iter().position(|a| a == "--connection-preview")
+            .map(|i| match args.get(i + 1).map(String::as_str) {
+                Some("received") => Ok(ConnectionPreview::Received),
+                Some("disconnected") => Ok(ConnectionPreview::Disconnected),
+                Some("unconfigured") => Ok(ConnectionPreview::Unconfigured),
+                Some("waiting" | "--phone") | None => Ok(ConnectionPreview::Waiting),
+                Some(mode) => Err(format!("Unknown connection preview: {mode}")),
+            }).transpose()?;
+        return screenshot(
+            Path::new(args.get(1).ok_or("Missing output path")?),
+            args.iter().any(|a| a == "--phone"),
+            preview,
+            args.iter().any(|a| a == "--downloads-preview"),
+        );
+    }
+    let data_root = root();
+    if let Err(error) = crate::telemetry::init(data_root.clone()) {
+        eprintln!("Tau telemetry initialization failed: {error}");
+    }
+    crate::crash::install(data_root.clone());
+    let result = (|| {
+        #[cfg(windows)]
+        {
+            // Keep beta taskbar grouping/pins separate from the stable Tau launcher.
+            // SAFETY: the application ID is a static, null-terminated UTF-16 string.
+            let result = unsafe {
+                windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+                    windows_sys::core::w!("app.tau.beta"),
+                )
+            };
+            if result < 0 {
+                return Err(format!(
+                    "Could not set Tau Beta application identity: {result:#x}"
+                ));
+            }
+        }
+        let icon = image::load_from_memory(include_bytes!("../assets/tau-beta.png"))
+            .map_err(|e| e.to_string())?
+            .to_rgba8();
+        chad::run::<Desktop>(Config {
+            title: "Tau Beta".into(),
+            icon: Some(chad::AppIcon {
+                width: icon.width(),
+                height: icon.height(),
+                rgba: icon.into_raw(),
+            }),
+            size: (1100, 760),
+            redraw: chad::RedrawMode::OnDemand,
+            device_limits: limits(),
+            ..Default::default()
+        })
+    })();
+    if let Err(error) = &result { crate::crash::record_error(&data_root, error); }
+    crate::telemetry::shutdown();
+    result
+}
+pub fn limits() -> wgpu::Limits {
+    wgpu::Limits {
+        max_texture_dimension_2d: 4096,
+        ..wgpu::Limits::downlevel_defaults()
+    }
+}
+pub fn screenshot(path: &Path, phone: bool, connection_preview: Option<ConnectionPreview>, downloads_preview: bool) -> Result<(), String> {
+    let size = if phone { (1080, 2160) } else { (1280, 900) };
+    let ctx = chad::HeadlessCtx::new(&Config {
+        size,
+        device_limits: limits(),
+        ..Default::default()
+    })?;
+    let root = std::env::temp_dir().join(format!("tau-preview-{}", uuid::Uuid::new_v4()));
+    let store = Store::open(root.clone()).map_err(|e| e.to_string())?;
+    let mut app = App::new(&ctx, store, Arc::new(|| {}), phone).map_err(|e| e.to_string())?;
+    app.back(); // The offline fixture bypasses first-run connection setup.
+    crate::demo::populate(&mut app.controller).map_err(|e| e.to_string())?;
+    if downloads_preview {
+        crate::demo::populate_downloads(&mut app.controller).map_err(|e| e.to_string())?;
+        app.preview_attachments();
+    }
+    app.resize(size, if phone { 2.5 } else { 1. }, Vec2::new(0., 0.));
+    app.tick(0.);
+    if let Some(preview) = connection_preview { app.preview_connection(preview); }
+    app.frame(&ctx, ctx.view());
+    let rgba = ctx.read_rgba8()?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut encoder = png::Encoder::new(file, size.0, size.1);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .map_err(|e| e.to_string())?
+        .write_image_data(&rgba)
+        .map_err(|e| e.to_string())?;
+    drop(app);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
