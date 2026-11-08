@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::{App, Store};
-use chad::{Config, HeadlessCtx};
+use chad::{Config, HeadlessCtx, Selection, TextInputEvent, TextSplice};
 use sanscale::{Rect, Vec2};
 use std::sync::Arc;
 
@@ -149,19 +149,20 @@ fn code_search_inline_session_survives_insets_but_not_detachment() {
     h.frame();
     h.app.key("Space", true, false);
     h.frame();
-    let input = h.app.native_input().unwrap();
+    let input = {
+        let (state, _) = h.app.native_input().unwrap();
+        (state.id, state.generation, state.text.len())
+    };
     h.app.resize((360, 360), 1., Vec2::new(0., 0.));
     h.frame();
-    let resized = h.app.native_input().unwrap();
-    assert_eq!(input.id, resized.id);
-    let edit = || crate::mobile_input::Edit {
-        id: input.id,
-        revision: input.revision,
-        text: "main.rs".into(),
-        start: 7,
-        end: 7,
-        composing_start: -1,
-        composing_end: -1,
+    let resized = h.app.native_input().unwrap().0.id;
+    assert_eq!(input.0, resized);
+    let edit = || TextInputEvent {
+        id: input.0,
+        generation: input.1,
+        splice: Some(TextSplice { range: 0..input.2, replacement: "main.rs".into() }),
+        selection: Selection::new(7, 7),
+        composition: None,
     };
     h.app.native_edit(edit());
     assert_eq!(h.app.root.workspace.chat.code.view.as_ref().unwrap().search.as_ref().unwrap().editor.value, "main.rs");

@@ -2,7 +2,7 @@ use super::*;
 use super::super::controls::ButtonStyle;
 use crate::app::{App, PlatformAction, ui};
 use crate::store::Store;
-use chad::{Config, HeadlessCtx};
+use chad::{Config, HeadlessCtx, Selection, TextInputEvent, TextSplice};
 use sanscale::Vec2;
 use std::sync::Arc;
 
@@ -88,12 +88,15 @@ fn modal_scope_blocks_background_pointer_wheel_middle_and_context() {
 fn native_editor_and_clipboard_callbacks_cannot_write_a_new_field_or_source() {
     let mut h = Harness::new(true); h.app.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::New)).unwrap(); h.frame();
     h.click(center(h.dialog().fields()[0].control.rect.unwrap()));
-    let token = h.app.native_input().unwrap();
+    let token = {
+        let (state, _) = h.app.native_input().unwrap();
+        (state.id, state.generation, state.text.len())
+    };
     // IME insets and backgrounding cancel gestures, not the inline field binding.
     h.app.ui.window_focused = false; h.app.cancel_pointer(); h.app.resize((360, 740), 1., Vec2::new(0., 1.));
-    h.app.native_edit(snapshot(&token, "Native topic")); assert_eq!(h.dialog().fields()[0].editor.value, "Native topic");
+    h.app.native_edit(snapshot(token, "Native topic")); assert_eq!(h.dialog().fields()[0].editor.value, "Native topic");
     h.app.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::Rename("second".into()))).unwrap();
-    h.app.native_edit(snapshot(&token, "Stale replacement")); assert_eq!(h.dialog().fields()[0].editor.value, "Second");
+    h.app.native_edit(snapshot(token, "Stale replacement")); assert_eq!(h.dialog().fields()[0].editor.value, "Second");
     h.app.open_ui(ui::DialogSpec::Topic(ui::TopicEdit::New)).unwrap();
     h.app.key("v", true, false);
     let token = h.app.actions().into_iter().find_map(|action| match action { PlatformAction::Paste { token } => Some(token), _ => None }).unwrap();
@@ -103,10 +106,13 @@ fn native_editor_and_clipboard_callbacks_cannot_write_a_new_field_or_source() {
     let token = h.app.actions().into_iter().find_map(|action| match action { PlatformAction::Paste { token } => Some(token), _ => None }).unwrap();
     h.app.paste(token, "Right prompt".into()); assert_eq!(h.dialog().fields()[1].editor.value, "Right prompt");
     h.frame(); h.click(center(h.dialog().fields()[0].control.rect.unwrap()));
-    let token = h.app.native_input().unwrap();
+    let token = {
+        let (state, _) = h.app.native_input().unwrap();
+        (state.id, state.generation, state.text.len())
+    };
     let draft = h.app.controller.selected().unwrap().local.draft.clone();
     h.app.controller.identity = "replacement-account".into();
-    h.app.native_edit(snapshot(&token, "Wrong account")); assert!(h.dialog().fields()[0].editor.value.is_empty());
+    h.app.native_edit(snapshot(token, "Wrong account")); assert!(h.dialog().fields()[0].editor.value.is_empty());
     h.app.input("still stale"); assert!(h.app.root.dialog.is_none());
     assert_eq!(h.app.controller.selected().unwrap().local.draft, draft);
 }
@@ -205,9 +211,9 @@ fn retained_forms_settle_idle_and_reuse_real_editor_geometry_on_desktop_and_phon
             h.dump("topic-compact.png");
             let point = center(h.dialog().fields()[1].control.rect.unwrap());
             h.click(point);
-            let input = h.app.native_input().unwrap();
+            let (input, _) = h.app.native_input().unwrap();
             assert_eq!(input.text, "Kept prompt");
-            assert!(input.rect[1] + input.rect[3] <= 250., "The actual editor stays above the IME");
+            assert!(input.field_rect.y + input.field_rect.height <= 250., "The actual editor stays above the IME");
             h.click(h.button("Save"));
             assert!(h.app.controller.notice.is_some(), "An explicit offline submission must show its error");
             h.frame();
@@ -247,17 +253,25 @@ fn shared_control_clip_governs_hover_press_and_paint_with_the_same_bounds() {
 fn native_composer_session_survives_blur_but_not_a_navigation_round_trip() {
     let mut h = Harness::new(true);
     h.frame(); h.click(center(h.app.root.workspace.chat.composer.field.control.rect.unwrap()));
-    let token = h.app.native_input().unwrap();
-    h.app.cancel_pointer(); h.app.native_edit(snapshot(&token, "Owned native draft"));
+    let token = {
+        let (state, _) = h.app.native_input().unwrap();
+        (state.id, state.generation, state.text.len())
+    };
+    h.app.cancel_pointer(); h.app.native_edit(snapshot(token, "Owned native draft"));
     assert_eq!(h.app.controller.selected().unwrap().local.draft, "Owned native draft");
     h.app.controller.select("two").unwrap(); h.app.sync_navigation();
     h.app.controller.select("demo").unwrap(); h.app.sync_navigation();
-    h.app.native_edit(snapshot(&token, "Stale after remount"));
+    h.app.native_edit(snapshot(token, "Stale after remount"));
     assert_eq!(h.app.controller.selected().unwrap().local.draft, "Owned native draft",
         "Equal account/chat strings do not revive a detached editing session");
 }
 
-fn snapshot(input: &crate::mobile_input::Input, text: &str) -> crate::mobile_input::Edit {
-    crate::mobile_input::Edit { id: input.id, revision: input.revision, text: text.into(),
-        start: text.encode_utf16().count() as i32, end: text.encode_utf16().count() as i32, composing_start: -1, composing_end: -1 }
+fn snapshot(input: (u64, u64, usize), text: &str) -> TextInputEvent {
+    TextInputEvent {
+        id: input.0,
+        generation: input.1,
+        splice: Some(TextSplice { range: 0..input.2, replacement: text.into() }),
+        selection: Selection::new(text.len(), text.len()),
+        composition: None,
+    }
 }

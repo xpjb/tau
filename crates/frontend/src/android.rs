@@ -4,7 +4,7 @@ use crate::{
 };
 use chad::android::{AndroidApp, Config, Ctx};
 use chad::{
-    wgpu,
+    MobileEvent, wgpu,
     winit::{
         event::{ElementState, TouchPhase, WindowEvent},
         keyboard::{Key, NamedKey, ModifiersState},
@@ -14,21 +14,17 @@ use chad::{
 use jni::{
     JNIEnv, JavaVM,
     objects::{JClass, JObject, JString, JValue},
-    sys::{jboolean, jint, jlong},
+    sys::{jboolean, jint},
 };
 use sanscale::Vec2;
 use std::{
     path::PathBuf,
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicI32, Ordering},
-    },
+    sync::{Arc, Mutex, Weak},
     time::Instant,
 };
 
 enum NativeEvent {
     Back,
-    Edit(crate::mobile_input::Edit),
     File(PathBuf, String),
     Paste(u64, String),
     Saved(String, Result<crate::store::SavedDownload,String>),
@@ -40,21 +36,10 @@ struct Runtime {
     events: Vec<NativeEvent>,
 }
 static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
-static LEFT: AtomicI32 = AtomicI32::new(0);
-static TOP: AtomicI32 = AtomicI32::new(0);
-static RIGHT: AtomicI32 = AtomicI32::new(0);
-static BOTTOM: AtomicI32 = AtomicI32::new(0);
 fn queue(event: NativeEvent) {
     if let Ok(mut guard) = RUNTIME.lock()
         && let Some(rt) = guard.as_mut()
     {
-        // IME full-text updates are snapshots, not deltas; coalesce a busy keyboard.
-        if let NativeEvent::Edit(edit) = &event
-            && let Some(NativeEvent::Edit(previous)) = rt.events.last()
-            && edit.id == previous.id && edit.revision == previous.revision
-        {
-            rt.events.pop();
-        }
         rt.events.push(event);
         if let Some(w) = rt.window.upgrade() {
             w.request_redraw();
@@ -66,52 +51,50 @@ struct Android {
     startup: Option<Instant>,
     import_scope: Option<(String, String)>,
     modifiers: ModifiersState,
-    input: Option<crate::mobile_input::Input>,
+    input: Option<(u64, u64)>,
     input_menu: bool,
 }
 impl Android {
-    fn java(&mut self, ctx: &Ctx, method: &str, payload: Option<&str>) -> Result<(), String> {
-        let vm = unsafe { JavaVM::from_raw(ctx.app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
-        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        env.with_local_frame(8, |env| {
-            let activity = unsafe { JObject::from_raw(ctx.app.activity_as_ptr().cast()) };
-            if let Some(payload) = payload {
-                let payload = env.new_string(payload)?;
-                env.call_method(&activity, method, "(Ljava/lang/String;)V", &[JValue::Object(&payload)])?;
-            } else { env.call_method(&activity, method, "()V", &[])?; }
-            Ok::<_, jni::errors::Error>(())
-        }).map_err(|_| { let _ = env.exception_clear(); "Android input action failed".into() })
-    }
-    fn sync_input(&mut self, ctx: &Ctx) {
-        let input = self.app.native_input();
-        let same = match (&self.input, &input) {
-            (Some(a), Some(b)) => a.same_configuration(b),
-            (None, None) => true,
-            _ => false,
+    fn sync_input(&mut self, ctx: &mut Ctx) {
+        let (next, result) = match self.app.native_input() {
+            Some((input, request)) => {
+                let next = Some((input.id, request));
+                let show = self.input != next;
+                let result = ctx.set_text_input(input)
+                    .and_then(|_| if show { ctx.show_keyboard() } else { Ok(()) });
+                (next, result)
+            }
+            None if self.input.is_some() => (None, ctx.clear_text_input()),
+            None => (None, Ok(())),
         };
-        if !same {
-            let result = serde_json::to_string(&input).map_err(|e| e.to_string())
-                .and_then(|json| self.java(ctx, "syncInput", Some(&json)));
-            if result.is_ok() { self.input = input; }
-            self.app.report(result.map_err(anyhow::Error::msg));
+        match result {
+            Ok(()) => self.input = next,
+            Err(error) => self.app.report(Err(anyhow::Error::msg(error))),
         }
     }
     fn back(&mut self, ctx: &Ctx) {
-        let result = self.java(ctx, "back", None);
+        let result = (|| -> Result<(), String> {
+            let vm = unsafe { JavaVM::from_raw(ctx.app.vm_as_ptr().cast()) }
+                .map_err(|error| error.to_string())?;
+            let mut env = vm.attach_current_thread().map_err(|error| error.to_string())?;
+            env.with_local_frame(4, |env| {
+                let activity = unsafe { JObject::from_raw(ctx.app.activity_as_ptr().cast()) };
+                env.call_method(&activity, "back", "()V", &[])?;
+                Ok::<_, jni::errors::Error>(())
+            }).map_err(|_| {
+                let _ = env.exception_clear();
+                "Android Back action failed".to_owned()
+            })
+        })();
         self.app.report(result.map_err(anyhow::Error::msg));
     }
     fn layout(&mut self, ctx: &Ctx) {
-        let (width, height) = ctx.size();
-        let rect = ctx.app.content_rect();
-        let [left, top, right, bottom] = crate::mobile_input::viewport((width, height),
-            [rect.left, rect.top, rect.right, rect.bottom],
-            [LEFT.load(Ordering::Relaxed), TOP.load(Ordering::Relaxed),
-             RIGHT.load(Ordering::Relaxed), BOTTOM.load(Ordering::Relaxed)]);
-        if right > left && bottom > top {
+        let visible = ctx.mobile_viewport().visible;
+        if visible.width > 0. && visible.height > 0. {
             self.app.resize(
-                (right - left, bottom - top),
-                ctx.window.scale_factor() as f32,
-                Vec2::new(left as f32, top as f32),
+                (visible.width as u32, visible.height as u32),
+                ctx.scale_factor() as f32,
+                Vec2::new(visible.x, visible.y),
             );
         }
     }
@@ -124,7 +107,6 @@ impl Android {
         for event in events {
             match event {
                 NativeEvent::Back => self.app.back(),
-                NativeEvent::Edit(edit) => self.app.native_edit(edit),
                 NativeEvent::Paste(token, text) => self.app.paste(token, text),
                 NativeEvent::File(path, name) => {
                     let result = if let Some((identity, session)) = self.import_scope.take() {
@@ -306,6 +288,12 @@ impl chad::android::App for Android {
         }
         self.actions(ctx);
     }
+    fn mobile_event(&mut self, ctx: &mut Ctx, event: MobileEvent) {
+        match event {
+            MobileEvent::TextInput(edit) => self.app.native_edit(edit),
+            MobileEvent::ViewportChanged(_) => self.layout(ctx),
+        }
+    }
     fn update(&mut self, ctx: &mut Ctx) {
         self.layout(ctx);
         self.native_events();
@@ -333,7 +321,7 @@ impl chad::android::App for Android {
         }
         self.sync_input(ctx);
         if std::mem::take(&mut self.input_menu) && self.input.is_some() {
-            let result = self.java(ctx, "inputMenu", None);
+            let result = ctx.show_text_menu();
             self.app.report(result.map_err(anyhow::Error::msg));
         }
     }
@@ -367,35 +355,6 @@ pub extern "system" fn Java_app_tau_rust_MainActivity_nativeResult(
         },
         _ => NativeEvent::Error(a),
     });
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_app_tau_rust_MainActivity_nativeEdit(
-    mut env: JNIEnv, _: JClass, id: jlong, revision: jlong, text: JString,
-    start: jint, end: jint, composing_start: jint, composing_end: jint,
-) {
-    if let Ok(text) = env.get_string(&text) {
-        queue(NativeEvent::Edit(crate::mobile_input::Edit { id: id as u64, revision: revision as u64,
-            text: String::from(text), start, end, composing_start, composing_end }));
-    }
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_app_tau_rust_MainActivity_nativeViewport(
-    _: JNIEnv,
-    _: JClass,
-    left: jint,
-    top: jint,
-    right: jint,
-    bottom: jint,
-) {
-    LEFT.store(left, Ordering::Relaxed);
-    TOP.store(top, Ordering::Relaxed);
-    RIGHT.store(right, Ordering::Relaxed);
-    BOTTOM.store(bottom, Ordering::Relaxed);
-    if let Ok(g) = RUNTIME.lock()
-        && let Some(w) = g.as_ref().and_then(|r| r.window.upgrade())
-    {
-        w.request_redraw();
-    }
 }
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
