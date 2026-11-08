@@ -5,6 +5,7 @@ set -euo pipefail
 [[ $ANDROID_SERIAL == emulator-* ]] || { echo 'Emulator only' >&2; exit 1; }
 tests=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$tests/../../android" && pwd)
+repo=$(cd "$tests/../../../.." && pwd)
 sdk=${ANDROID_SDK_ROOT:-$HOME/android-sdk}
 tools=$sdk/build-tools/35.0.0
 jar=$sdk/platforms/android-35/android.jar
@@ -22,7 +23,12 @@ cat > "$out/AndroidManifest.xml" <<'XML'
 </manifest>
 XML
 "$clang" -shared -fPIC -std=c11 "$tests/native-input-stub.c" -landroid -o "$out/libtau_frontend.so"
+chad=$(cd "$repo" && cargo metadata --locked --format-version 1 --config net.git-fetch-with-cli=true | python3 -c '
+import json,sys
+print(next(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"] == "chad").rsplit("/",1)[0])
+')
 javac -source 8 -target 8 -Xlint:-options -classpath "$jar" -d "$out/classes" \
+    "$chad/android/java/io/github/xpjb/chad/ChadActivity.java" \
     "$root/java/app/tau/rust/MainActivity.java" "$tests/SelectionBridgeTest.java"
 mapfile -t classes < <(find "$out/classes" -name '*.class' | sort)
 "$tools/d8" --min-api 29 --lib "$jar" --output "$out/dex" "${classes[@]}"
@@ -40,4 +46,4 @@ PY
     --ks-pass pass:android --key-pass pass:android --out "$out/signed.apk" "$out/aligned.apk"
 "$sdk/platform-tools/adb" install -r "$out/signed.apk"
 timeout 60 "$sdk/platform-tools/adb" shell am instrument -w app.tau.selectiontest/app.tau.rust.SelectionBridgeTest | tee "$out/result"
-grep -q 'PASS: floating toolbar' "$out/result"
+grep -q 'PASS: inherited floating toolbar' "$out/result"

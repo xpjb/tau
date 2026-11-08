@@ -43,9 +43,15 @@ printf '[android] build Tau Beta %s for %s\n' "$version" "$abi"
 mkdir -p "$out/classes" "$out/dex" "$root/dist"
 cp "$target/$triple/release/libtau_frontend.so" "$out/libtau_frontend.so"
 "$llvm/llvm-strip" --strip-unneeded "$out/libtau_frontend.so"
+chad=$("$cargo" metadata --locked --format-version 1 --config net.git-fetch-with-cli=true | python3 -c '
+import json,sys
+print(next(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"] == "chad").rsplit("/",1)[0])
+')
+chad_java=$chad/android/java/io/github/xpjb/chad/ChadActivity.java
+test -f "$chad_java" || { echo "Chad Android activity not found: $chad_java" >&2; exit 1; }
 find "$out/classes" "$out/dex" -type f -delete
 javac -encoding UTF-8 -source 8 -target 8 -Xlint:-options -classpath "$jar" \
-    -d "$out/classes" "$app/android/java/app/tau/rust/MainActivity.java"
+    -d "$out/classes" "$chad_java" "$app/android/java/app/tau/rust/MainActivity.java"
 mapfile -t classes < <(find "$out/classes" -name '*.class' | sort)
 "$tools/d8" --release --min-api 29 --lib "$jar" --output "$out/dex" "${classes[@]}"
 rm -f "$out/resources.zip" "$out/unsigned.apk" "$out/aligned.apk" \
