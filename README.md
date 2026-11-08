@@ -1,7 +1,7 @@
 # Tau
 Tau is a client-server agent harness. The server (daemon) runs on a remote host ie. tailnet. The client (frontend) runs on android or windows. Originally it was based on bridging into pi, but now the frontend, daemon and agent execution are all Rust.
 
-The `tau2` mainline deploys to a beta identity separate from stable Tau.
+The `master` mainline deploys to a beta identity separate from stable Tau.
 
 ## Build
 
@@ -26,8 +26,7 @@ Each crate keeps test code in `tests/`: public integration tests at the top leve
 private unit tests in `tests/unit/`. Unit modules use a test-only `#[path]` from
 the implementation they exercise, so testing does not widen production APIs.
 Examples are diagnostic programs, not a second regression suite. Release-script
-tests run with `python tests/release.py`; the Android harness is under
-`crates/frontend/tests/android/` and requires a disposable emulator.
+tests run with `python tests/release.py`.
 
 ## Current beta features
 

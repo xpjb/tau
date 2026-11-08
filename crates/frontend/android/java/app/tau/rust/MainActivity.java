@@ -15,7 +15,6 @@ import org.json.JSONObject;
 /** Tau-specific clipboard, document, haptic, URL and task bridges. Chad owns
  * the NativeActivity text input, UTF conversion, generation fences and insets. */
 public final class MainActivity extends ChadActivity {
-    static { System.loadLibrary("tau_frontend"); }
     private static native boolean nativeBack();
     private static native void nativeResult(int kind, String first, String second);
 

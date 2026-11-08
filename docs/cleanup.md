@@ -22,8 +22,7 @@ migration, dependency-version upgrade, or compatibility forwarding modules.
   timing and the operation journal belong to `state`; slash commands to `agent`.
 - Each crate's `tests/` owns its regression sources and fixtures. Private unit
   modules use test-only `#[path]` mounts to retain private access without widening
-  production APIs. Android harness sources are in `frontend/tests/android`;
-  release-script tests are in the repository's `tests/`.
+  production APIs. Release-script tests are in the repository's `tests/`.
 
 ## Audit decisions
 

@@ -12,7 +12,8 @@ use chad::{
     },
 };
 use jni::{
-    JNIEnv, JavaVM,
+    EnvUnowned, JavaVM,
+    errors::ThrowRuntimeExAndDefault,
     objects::{JClass, JObject, JString, JValue},
     sys::{jboolean, jint},
 };
@@ -46,6 +47,20 @@ fn queue(event: NativeEvent) {
         }
     }
 }
+fn java(
+    ctx: &Ctx,
+    call: impl for<'local> FnOnce(
+        &mut jni::Env<'local>,
+        &JObject<'local>,
+    ) -> jni::errors::Result<()>,
+) -> Result<(), String> {
+    let vm = unsafe { JavaVM::from_raw(ctx.app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| {
+        let activity = unsafe { JObject::from_raw(env, ctx.app.activity_as_ptr().cast()) };
+        call(env, &activity)
+    })
+    .map_err(|error| format!("Android action: {error}"))
+}
 struct Android {
     app: App,
     startup: Option<Instant>,
@@ -73,19 +88,15 @@ impl Android {
         }
     }
     fn back(&mut self, ctx: &Ctx) {
-        let result = (|| -> Result<(), String> {
-            let vm = unsafe { JavaVM::from_raw(ctx.app.vm_as_ptr().cast()) }
-                .map_err(|error| error.to_string())?;
-            let mut env = vm.attach_current_thread().map_err(|error| error.to_string())?;
-            env.with_local_frame(4, |env| {
-                let activity = unsafe { JObject::from_raw(ctx.app.activity_as_ptr().cast()) };
-                env.call_method(&activity, "back", "()V", &[])?;
-                Ok::<_, jni::errors::Error>(())
-            }).map_err(|_| {
-                let _ = env.exception_clear();
-                "Android Back action failed".to_owned()
-            })
-        })();
+        let result = java(ctx, |env, activity| {
+            env.call_method(
+                activity,
+                jni::jni_str!("back"),
+                jni::jni_sig!("()V"),
+                &[],
+            )?;
+            Ok(())
+        });
         self.app.report(result.map_err(anyhow::Error::msg));
     }
     fn layout(&mut self, ctx: &Ctx) {
@@ -133,75 +144,62 @@ impl Android {
     fn actions(&mut self, ctx: &Ctx) {
         for action in self.app.actions() {
             let save_key=match &action {PlatformAction::SaveDownload {key,..}=>Some(key.clone()),_=>None};
-            let result = (|| -> Result<(), String> {
-                let vm = unsafe { JavaVM::from_raw(ctx.app.vm_as_ptr().cast()) }
-                    .map_err(|e| e.to_string())?;
-                let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-                env.with_local_frame(16, |env| {
-                    let activity = unsafe { JObject::from_raw(ctx.app.activity_as_ptr().cast()) };
-                    match action {
-                        PlatformAction::InputMenu => self.input_menu = true,
-                        PlatformAction::Haptic => { env.call_method(&activity, "selectionHaptic", "()V", &[])?; }
-                        PlatformAction::Background => {
-                            env.call_method(&activity, "background", "()V", &[])?;
-                        }
-                        PlatformAction::PickFile { identity, session } => {
-                            self.import_scope = Some((identity, session));
-                            env.call_method(&activity, "pickFile", "()V", &[])?;
-                        }
-                        PlatformAction::Paste { token } => {
-                            env.call_method(&activity, "paste", "(J)V", &[JValue::Long(token as i64)])?;
-                        }
-                        PlatformAction::Copy(text) => {
-                            let text = env.new_string(text)?;
-                            env.call_method(
-                                &activity,
-                                "copy",
-                                "(Ljava/lang/String;)V",
-                                &[JValue::Object(&text)],
-                            )?;
-                        }
-                        PlatformAction::OpenUrl(url) => {
-                            let url = env.new_string(url)?;
-                            env.call_method(
-                                &activity,
-                                "openUrl",
-                                "(Ljava/lang/String;)V",
-                                &[JValue::Object(&url)],
-                            )?;
-                        }
-                        PlatformAction::SaveDownload {key,source,name} => {
-                            let key = env.new_string(key)?;
-                            let source = env.new_string(source.to_string_lossy())?;
-                            let name = env.new_string(name)?;
-                            env.call_method(
-                                &activity,
-                                "exportFile",
-                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                                &[JValue::Object(&key),JValue::Object(&source),JValue::Object(&name)],
-                            )?;
-                        }
-                        PlatformAction::UseDownload(saved, action, target) => {
-                            debug_assert!(matches!(action, crate::app::SavedAction::Open));
-                            let reference=env.new_string(saved.reference)?;
-                            let mime=env.new_string(saved.mime_type)?;
-                            let identity=env.new_string(target.identity)?;
-                            let lineage=env.new_string(target.lineage)?;
-                            let session=env.new_string(target.session)?;
-                            let entry=env.new_string(target.entry)?;
-                            env.call_method(&activity,"openSaved",
-                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                                &[JValue::Object(&reference),JValue::Object(&mime),JValue::Object(&identity),
-                                  JValue::Object(&lineage),JValue::Object(&session),JValue::Object(&entry)])?;
-                        }
+            let result = java(ctx, |env, activity| {
+                match action {
+                    PlatformAction::InputMenu => self.input_menu = true,
+                    PlatformAction::Haptic => {
+                        env.call_method(activity, jni::jni_str!("selectionHaptic"),
+                            jni::jni_sig!("()V"), &[])?;
                     }
-                    Ok::<_, jni::errors::Error>(())
-                })
-                .map_err(|_| {
-                    let _ = env.exception_clear();
-                    "Android action failed".to_owned()
-                })
-            })();
+                    PlatformAction::Background => {
+                        env.call_method(activity, jni::jni_str!("background"),
+                            jni::jni_sig!("()V"), &[])?;
+                    }
+                    PlatformAction::PickFile { identity, session } => {
+                        self.import_scope = Some((identity, session));
+                        env.call_method(activity, jni::jni_str!("pickFile"),
+                            jni::jni_sig!("()V"), &[])?;
+                    }
+                    PlatformAction::Paste { token } => {
+                        env.call_method(activity, jni::jni_str!("paste"),
+                            jni::jni_sig!("(J)V"), &[JValue::Long(token as i64)])?;
+                    }
+                    PlatformAction::Copy(text) => {
+                        let text = env.new_string(text)?;
+                        env.call_method(activity, jni::jni_str!("copy"),
+                            jni::jni_sig!("(Ljava/lang/String;)V"),
+                            &[JValue::Object(&text)])?;
+                    }
+                    PlatformAction::OpenUrl(url) => {
+                        let url = env.new_string(url)?;
+                        env.call_method(activity, jni::jni_str!("openUrl"),
+                            jni::jni_sig!("(Ljava/lang/String;)V"),
+                            &[JValue::Object(&url)])?;
+                    }
+                    PlatformAction::SaveDownload {key,source,name} => {
+                        let key = env.new_string(key)?;
+                        let source = env.new_string(source.to_string_lossy())?;
+                        let name = env.new_string(name)?;
+                        env.call_method(activity, jni::jni_str!("exportFile"),
+                            jni::jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                            &[JValue::Object(&key),JValue::Object(&source),JValue::Object(&name)])?;
+                    }
+                    PlatformAction::UseDownload(saved, action, target) => {
+                        debug_assert!(matches!(action, crate::app::SavedAction::Open));
+                        let reference=env.new_string(saved.reference)?;
+                        let mime=env.new_string(saved.mime_type)?;
+                        let identity=env.new_string(target.identity)?;
+                        let lineage=env.new_string(target.lineage)?;
+                        let session=env.new_string(target.session)?;
+                        let entry=env.new_string(target.entry)?;
+                        env.call_method(activity,jni::jni_str!("openSaved"),
+                            jni::jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                            &[JValue::Object(&reference),JValue::Object(&mime),JValue::Object(&identity),
+                              JValue::Object(&lineage),JValue::Object(&session),JValue::Object(&entry)])?;
+                    }
+                }
+                Ok(())
+            });
             if let (Some(key),Err(error))=(&save_key,&result) {
                 self.app.complete_save(key,Err(error.clone()));
             } else {
@@ -327,34 +325,35 @@ impl chad::android::App for Android {
     }
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_tau_rust_MainActivity_nativeBack(_: JNIEnv, _: JClass) -> jboolean {
+pub extern "system" fn Java_app_tau_rust_MainActivity_nativeBack(_: EnvUnowned, _: JClass) -> jboolean {
     queue(NativeEvent::Back);
-    1
+    true
 }
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_tau_rust_MainActivity_nativeResult(
-    mut env: JNIEnv,
+    mut env: EnvUnowned,
     _: JClass,
     kind: jint,
     first: JString,
     second: JString,
 ) {
-    let a = env.get_string(&first).map(String::from).unwrap_or_default();
-    let b = env
-        .get_string(&second)
-        .map(String::from)
-        .unwrap_or_default();
-    queue(match kind {
-        1 => NativeEvent::File(a.into(), b),
-        2 => NativeEvent::Paste(b.parse().unwrap_or(0), a),
-        4 => NativeEvent::Saved(a,serde_json::from_str(&b).map_err(|e|e.to_string())),
-        5 => NativeEvent::Saved(a,Err(b)),
-        6 => match serde_json::from_str::<(String,String,String)>(&b) {
-            Ok((lineage,session,entry))=>NativeEvent::Missing(a,lineage,session,entry),
-            Err(_) =>NativeEvent::Error("Invalid missing-download response".into()),
-        },
-        _ => NativeEvent::Error(a),
-    });
+    env.with_env(|env| {
+        let a = first.try_to_string(env)?;
+        let b = second.try_to_string(env)?;
+        queue(match kind {
+            1 => NativeEvent::File(a.into(), b),
+            2 => NativeEvent::Paste(b.parse().unwrap_or(0), a),
+            4 => NativeEvent::Saved(a,serde_json::from_str(&b).map_err(|e|e.to_string())),
+            5 => NativeEvent::Saved(a,Err(b)),
+            6 => match serde_json::from_str::<(String,String,String)>(&b) {
+                Ok((lineage,session,entry))=>NativeEvent::Missing(a,lineage,session,entry),
+                Err(_) =>NativeEvent::Error("Invalid missing-download response".into()),
+            },
+            _ => NativeEvent::Error(a),
+        });
+        Ok::<_, jni::errors::Error>(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>();
 }
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {

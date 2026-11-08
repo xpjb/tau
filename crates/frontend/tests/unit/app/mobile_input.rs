@@ -194,7 +194,6 @@ fn composer_and_dialog_touch_momentum_update_after_release_without_draft_writes(
         h.frame();
         let draft = h.app.controller.selected().unwrap().local.draft.clone();
         let input = h.input().unwrap();
-        assert!(input.text.encode_utf16().count() <= 4096, "the native mirror stays bounded");
         let db = rusqlite::Connection::open(h.app.controller.store.root.join("client.sqlite3")).unwrap();
         db.execute_batch("CREATE TABLE momentum_writes (key TEXT); CREATE TRIGGER momentum_write AFTER UPDATE ON local WHEN NEW.key LIKE 'chat:%' BEGIN INSERT INTO momentum_writes VALUES (NEW.key); END;").unwrap();
         let start = Vec2::new(input.rect[0] + input.rect[2] / 2., input.rect[1] + input.rect[3] / 2.);

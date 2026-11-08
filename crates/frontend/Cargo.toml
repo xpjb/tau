@@ -25,7 +25,7 @@ tempfile = "3"
 tau-block-store = { path = "../block-store" }
 tau-net = { path = "../net", features = ["native"] }
 barkdown = { git = "https://github.com/xpjb/barkdown", rev = "9dc5dd99164585876c38aba76dfa09a34a2ae2eb" }
-chad = { git = "https://github.com/xpjb/chad", rev = "f31e792c959ae6521916524f92ff99fb9fa92211" }
+chad = { git = "https://github.com/xpjb/chad", rev = "535fd065761b75ea7a399f9e34084445fdbebb96" }
 sanscale = { workspace = true }
 anyhow = "1"
 blake3 = "1.8"
@@ -47,7 +47,7 @@ tiny-skia = { version = "0.11", default-features = false, features = ["std", "si
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
+jni = "0.22"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
