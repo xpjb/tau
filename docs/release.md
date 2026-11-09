@@ -1,6 +1,6 @@
 # Tau release process
 
-The `tau2` branch ships the isolated **Tau Beta** install identity. “Beta” names the
+The `master` branch ships the isolated **Tau Beta** install identity. “Beta” names the
 installed channel: its clients, service, ports and state remain separate from stable Tau.
 
 ## Commands
@@ -8,7 +8,7 @@ installed channel: its clients, service, ports and state remain separate from st
 - `scripts/build-windows.sh` builds and verifies the Windows x64 installer.
 - `scripts/build-android.sh` builds, signs and verifies one Android ABI.
 - `scripts/release-clients.sh` bumps the version, commits, calls those two builds in
-  Windows-then-Android order, pushes `tau2`, and prepares or performs delivery.
+  Windows-then-Android order, pushes `master`, and prepares or performs delivery.
 - `scripts/deploy-daemon.sh` builds and deploys the daemon. It is always a separate,
   explicitly approved final operation.
 
@@ -32,7 +32,7 @@ compiler, archiver and linker configuration.
 
 ## Client release
 
-Start from a clean `tau2` branch that already contains the intended work. The release
+Start from a clean `master` branch that already contains the intended work. The release
 command does not merge feature branches or run tests implicitly.
 
 ```sh
@@ -42,7 +42,7 @@ scripts/release-clients.sh --version 0.7.21
 
 The command performs this fixed order:
 
-1. Validate that local `tau2` contains `origin/tau2`.
+1. Validate that local `master` contains `origin/master`.
 2. Bump shared package metadata and Android version code, then commit.
 3. Build and verify Windows.
 4. Build, sign and verify Android ARM64.

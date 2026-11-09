@@ -11,11 +11,11 @@ if grep -Fq '/tau2-beta.service' /proc/$$/cgroup; then
     exec systemd-run --quiet --scope --collect --same-dir --expand-environment=no "$root/scripts/deploy-daemon.sh"
 fi
 [[ $EUID == 0 ]] || { echo 'Daemon deployment requires root.' >&2; exit 1; }
-[[ $(git branch --show-current) == tau2 ]] || { echo 'Run from the tau2 worktree.' >&2; exit 1; }
+[[ $(git branch --show-current) == master ]] || { echo 'Run from the master worktree.' >&2; exit 1; }
 [[ -z $(git status --porcelain) ]] || { echo 'Commit or reconcile local changes first.' >&2; exit 1; }
 head=$(git rev-parse HEAD)
-remote=$(git ls-remote origin refs/heads/tau2 | cut -f1)
-[[ "$head" == "$remote" ]] || { echo 'Deploy only a published origin/tau2 commit.' >&2; exit 1; }
+remote=$(git ls-remote origin refs/heads/master | cut -f1)
+[[ "$head" == "$remote" ]] || { echo 'Deploy only a published origin/master commit.' >&2; exit 1; }
 read -r version protocol _ < <(python3 scripts/beta-release.py meta)
 mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}" dist
 exec 9>"${XDG_CACHE_HOME:-$HOME/.cache}/tau-daemon-deploy.lock"

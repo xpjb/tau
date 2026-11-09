@@ -15,8 +15,8 @@ Usage: scripts/release-clients.sh [options]
   --send-command PATH    Executable accepting one absolute path; Windows then Android.
   --retry-delivery       Retry a previously interrupted or uncertain sender invocation.
 
-The command requires an already integrated clean tau2 branch. It builds and verifies
-Windows first, then Android, pushes tau2, and prepares or performs client delivery.
+The command requires an already integrated clean master branch. It builds and verifies
+Windows first, then Android, pushes master, and prepares or performs client delivery.
 It never builds, installs, stops or restarts the daemon.
 HELP
 }
@@ -38,11 +38,11 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 read -r current protocol code < <(python3 "$helper" meta)
 if "$plan"; then
     printf 'Current: %s / protocol %s; requested version: %s\n' "$current" "$protocol" "${version_request:-unchanged}"
-    echo 'Order: validate integrated tau2 -> version commit -> Windows -> Android -> push -> delivery -> stop.'
+    echo 'Order: validate integrated master -> version commit -> Windows -> Android -> push -> delivery -> stop.'
     echo 'Daemon build and deployment are separate and always later.'
     exit 0
 fi
-[[ $(git branch --show-current) == tau2 ]] || die 'Run from the tau2 worktree.'
+[[ $(git branch --show-current) == master ]] || die 'Run from the master worktree.'
 [[ -z $(git status --porcelain) ]] || die 'Commit or reconcile local changes first.'
 [[ -z "$sender" || "$sender" == /* && -f "$sender" && -x "$sender" ]] || die '--send-command must be an absolute executable path.'
 umask 077
@@ -53,8 +53,8 @@ export CARGO_NET_OFFLINE=true
 "$online" && export CARGO_NET_OFFLINE=false
 unset CARGO_TARGET_DIR
 
-git fetch origin tau2
-git merge-base --is-ancestor origin/tau2 HEAD || die 'Local tau2 does not contain origin/tau2; integrate it before release.'
+git fetch origin master
+git merge-base --is-ancestor origin/master HEAD || die 'Local master does not contain origin/master; integrate it before release.'
 if [[ -n "$version_request" ]]; then
     python3 "$helper" bump "$version_request"
     if ! git diff --quiet; then
@@ -130,7 +130,7 @@ PY
     python3 "$helper" stamp "$state/clients.json" "$release_key" "$win" "$apk" "$sums" "$delivery"
 fi
 [[ -z $(git status --porcelain) && $(git rev-parse HEAD) == "$head" ]] || die 'Checkout changed before publication.'
-git push origin HEAD:refs/heads/tau2
+git push origin HEAD:refs/heads/master
 if [[ -n "$sender" ]]; then
     for file in "$win" "$apk"; do
         name=$(basename "$file")
