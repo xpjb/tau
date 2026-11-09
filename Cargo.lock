@@ -5374,7 +5374,7 @@ dependencies = [
 
 [[package]]
 name = "tau-frontend"
-version = "0.7.26"
+version = "0.7.27"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5437,7 +5437,7 @@ dependencies = [
 
 [[package]]
 name = "taud"
-version = "0.7.26"
+version = "0.7.27"
 dependencies = [
  "anyhow",
  "axum",
