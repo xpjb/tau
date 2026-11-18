@@ -48,7 +48,7 @@ impl Dialog {
     fn for_each_field(&mut self, mut run: impl FnMut(&mut TextField)) {
         match self {
             Self::CodexLogin(_) => {},
-            Self::Connection(d) => { run(&mut d.url); run(&mut d.token); }
+            Self::Connection(d) => run(&mut d.url),
             Self::Topic(d) => { for field in d.fields() { run(field); } }
             Self::Models(d) => { run(&mut d.models); run(&mut d.search); }
             Self::Daemon(d) => { if let Some(field) = &mut d.value { run(field); } }
@@ -69,11 +69,7 @@ impl Dialog {
     pub fn field(&mut self, target: Target) -> Option<&mut TextField> {
         match self {
             Self::CodexLogin(_) => None,
-            Self::Connection(d) => (!d.tools)
-                .then_some([&mut d.url, &mut d.token])
-                .into_iter()
-                .flatten()
-                .find(|f| f.control.target == target),
+            Self::Connection(d) => (!d.tools && d.url.control.target == target).then_some(&mut d.url),
             Self::Topic(d) => d.fields().into_iter().find(|f| f.control.target == target),
             Self::Models(d) => [&mut d.models, &mut d.search].into_iter().find(|f| f.control.target == target),
             Self::Daemon(d) => d.value.iter_mut().find(|f| f.control.target == target),
@@ -83,9 +79,7 @@ impl Dialog {
     pub fn field_ref(&self, target: Target) -> Option<&TextField> {
         match self {
             Self::CodexLogin(_) => None,
-            Self::Connection(d) => {
-                (!d.tools).then_some([&d.url, &d.token]).into_iter().flatten().find(|f| f.control.target == target)
-            }
+            Self::Connection(d) => (!d.tools && d.url.control.target == target).then_some(&d.url),
             Self::Topic(d) => d.name.iter().chain(d.prompt.iter()).find(|f| f.control.target == target),
             Self::Models(d) => [&d.models, &d.search].into_iter().find(|f| f.control.target == target),
             Self::Daemon(d) => d.value.iter().find(|f| f.control.target == target),
@@ -96,7 +90,7 @@ impl Dialog {
     pub fn fields(&self) -> Vec<&TextField> {
         match self {
             Self::CodexLogin(_) => vec![],
-            Self::Connection(d) => vec![&d.url, &d.token],
+            Self::Connection(d) => vec![&d.url],
             Self::Topic(d) => d.name.iter().chain(d.prompt.iter()).collect(),
             Self::Models(d) => vec![&d.models, &d.search],
             Self::Daemon(d) => d.value.iter().collect(),
@@ -199,7 +193,6 @@ enum ConnectionChoice {
 pub(in crate::app) struct ConnectionDialog {
     form: Controls<ConnectionChoice>,
     url: TextField,
-    token: TextField,
     attempt: Option<String>,
     tools: bool,
 }
@@ -207,12 +200,8 @@ impl ConnectionDialog {
     fn new(cx: &mut Context<'_>) -> Self {
         let id = Id::new();
         let mut url = TextField::new(id, "Server URL", Editor::line(cx.model.settings.server_url.clone()));
-        url.placeholder = "http://vibe:8787".into();
+        url.placeholder = "http://vibe:8789".into();
         url.size = 16.;
-        let mut token = TextField::new(id, "Access token", Editor::line(cx.model.settings.token.clone()));
-        token.secret = true;
-        token.placeholder = "Access token".into();
-        token.size = 16.;
         cx.ui.focus = Some(url.control.target);
         Self {
             form: Controls::declared(
@@ -232,7 +221,6 @@ impl ConnectionDialog {
                 ],
             ),
             url,
-            token,
             attempt: None,
             tools: false,
         }
@@ -243,11 +231,9 @@ impl ConnectionDialog {
         }
         cx.model.configure(Settings {
             server_url: self.url.editor.value.clone(),
-            token: self.token.editor.value.clone(),
         })?;
         self.attempt = Some(cx.model.identity.clone());
         self.url.control.enabled = false;
-        self.token.control.enabled = false;
         cx.ui.focus = None;
         Ok(())
     }
@@ -265,21 +251,18 @@ impl Widget for ConnectionDialog {
             }
             if self.attempt.is_none() {
                 self.url.control.enabled = true;
-                self.token.control.enabled = true;
                 cx.ui.dirty = true;
             }
         }
     }
     fn owns(&self, target: Target, _model: &Controller, _ui: &UiState) -> bool {
-        self.form.owns(target)
-            || !self.tools && (self.url.control.target == target || self.token.control.target == target)
+        self.form.owns(target) || !self.tools && self.url.control.target == target
     }
 
     fn handle_event(&mut self, event: &Event<'_>, cx: &mut Context<'_>) -> bool {
-        let composing = self.url.editor.composing() || self.token.editor.composing();
+        let composing = self.url.editor.composing();
         if matches!(event, Event::Back) && composing {
             self.url.editor.preedit(String::new(), None);
-            self.token.editor.preedit(String::new(), None);
             cx.ui.dirty = true;
             return true;
         }
@@ -292,7 +275,7 @@ impl Widget for ConnectionDialog {
                 Some(ConnectionChoice::Connect)
             }
             _ if self.tools => self.form.event_fields(event, std::iter::empty(), cx).1,
-            _ => self.form.event_fields(event, [&mut self.url, &mut self.token].into_iter(), cx).1,
+            _ => self.form.event_fields(event, std::iter::once(&mut self.url), cx).1,
         };
         match choice {
             Some(ConnectionChoice::Connect) => {
@@ -304,7 +287,6 @@ impl Widget for ConnectionDialog {
                 self.tools = !self.tools;
                 self.form.begin();
                 self.url.control.rect = None;
-                self.token.control.rect = None;
                 cx.ui.focus = if self.tools { None } else { Some(self.url.control.target) };
                 cx.ui.dirty = true;
             }
@@ -341,9 +323,7 @@ impl Widget for ConnectionDialog {
         self.form.begin();
         if self.tools {
             self.url.control.rect = None;
-            self.token.control.rect = None;
             self.url.editor.hide();
-            self.token.editor.hide();
             let area = self.form.page(520., "Connection tools", frame, cx);
             self.form.stack(
                 &[
@@ -369,11 +349,8 @@ impl Widget for ConnectionDialog {
                 if self.attempt.is_some() { "Connecting…" } else { "" },
                 cx,
             );
-            let h = ((b.height - 86. * s - feedback) / 2.).clamp(24. * s, 48. * s);
-            for (i, field) in [&mut self.url, &mut self.token].into_iter().enumerate() {
-                let y = b.y + 20. * s + i as f32 * (h + 18. * s);
-                field.labeled(Rect::new(x, y - 20. * s, w, h + 20. * s), frame, cx);
-            }
+            let h = (b.height - 86. * s - feedback).clamp(24. * s, 48. * s);
+            self.url.labeled(Rect::new(x, b.y, w, h + 20. * s), frame, cx);
             if cx.model.epoch.is_some() && b.height / s >= 280. {
                 self.form.paint(ConnectionChoice::CodexLogin, Rect::new(x, b.y + b.height - 84. * s - feedback, w, 32. * s), ButtonStyle::Primary, frame, cx);
             }
@@ -391,9 +368,8 @@ impl Widget for ConnectionDialog {
         self.form.items.iter_mut().find(|(_, _, c)| *c == ConnectionChoice::Connect).unwrap().1.control.enabled =
             self.attempt.is_none();
         let connected = cx.model.epoch.is_some()
-            && self.url.editor.value.trim().trim_end_matches('/') == cx.model.settings.server_url
-            && self.token.editor.value.trim() == cx.model.settings.token;
-        let configured = !cx.model.settings.token.is_empty();
+            && self.url.editor.value.trim().trim_end_matches('/') == cx.model.settings.server_url;
+        let configured = !cx.model.settings.server_url.is_empty();
         let connection_error = (!matches!(cx.model.connection.as_str(), "Connected" | "Connecting…" | "Not connected"))
             .then_some(cx.model.connection.as_str());
         let error = cx.model.notice.as_deref().or(cx.model.sync_error.as_deref()).or(connection_error).map(str::to_owned);
@@ -402,7 +378,7 @@ impl Widget for ConnectionDialog {
         let intro = "Connect directly to the Tau daemon over your Tailnet.";
         let intro_h = cx.services.renderer.label_height(intro, inner_w, 16. * s, false).max(42. * s);
         let field_offset = 102. * s + intro_h + 18. * s;
-        let height = (416. + if configured { 134. } else { 0. } + if error.is_some() { 84. } else { 0. }) * s
+        let height = (336. + if configured { 134. } else { 0. } + if error.is_some() { 84. } else { 0. }) * s
             + field_offset
             - 146. * s;
         let card =
@@ -435,11 +411,9 @@ impl Widget for ConnectionDialog {
             false,
         );
         let field_y = card.y + field_offset;
-        for (i, field) in [&mut self.url, &mut self.token].into_iter().enumerate() {
-            let rect = Rect::new(x, field_y + i as f32 * 80. * s, inner_w, 56. * s);
-            field.labeled(Rect::new(rect.x, rect.y - 20. * s, rect.width, rect.height + 20. * s), frame, cx);
-        }
-        let y = field_y + 158. * s;
+        let rect = Rect::new(x, field_y, inner_w, 56. * s);
+        self.url.labeled(Rect::new(rect.x, rect.y - 20. * s, rect.width, rect.height + 20. * s), frame, cx);
+        let y = field_y + 78. * s;
         if self.attempt.is_none() || cx.model.connection != "Connecting…" {
             self.form.paint(
                 ConnectionChoice::Connect,

@@ -13,12 +13,10 @@ use tau_net::*;
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Settings {
     pub server_url: String,
-    pub token: String,
 }
 impl Settings {
     pub fn normalized(mut self) -> Self {
         self.server_url = self.server_url.trim().trim_end_matches('/').to_owned();
-        self.token = self.token.trim().to_owned();
         self
     }
     pub fn url(&self) -> Result<url::Url> {
@@ -35,18 +33,10 @@ impl Settings {
                 && url.fragment().is_none(),
             "URL must not contain credentials, a query, or a fragment"
         );
-        ensure!(
-            !self.token.is_empty() && self.token.bytes().all(|b| (33..=126).contains(&b)),
-            "Enter the Tau bearer token (without spaces)"
-        );
         Ok(url)
     }
     pub fn identity(&self) -> String {
-        hash(&format!(
-            "{}\0{}",
-            self.server_url.trim().trim_end_matches('/'),
-            self.token
-        ))
+        hash(self.server_url.trim().trim_end_matches('/'))
     }
 }
 pub fn hash(value: &str) -> String {
@@ -261,6 +251,18 @@ impl Store {
             tx.execute_batch("CREATE TABLE IF NOT EXISTS local (account TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(account,key)); CREATE TABLE IF NOT EXISTS chat_aliases(account TEXT NOT NULL,old TEXT NOT NULL,new TEXT NOT NULL,PRIMARY KEY(account,old)); PRAGMA user_version=2;")?;
             tx.commit()?;
         }
+        // Remove obsolete connection credentials before any client network task starts.
+        // Current stores stay read-only here so an unrelated writer cannot delay startup.
+        if let Some(raw) = db.query_row("SELECT value FROM local WHERE account='' AND key='settings'", [], |row| row.get::<_,String>(0)).optional()? {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(settings) = value.as_object_mut() {
+                    let changed = settings.remove("token").is_some()
+                        | settings.remove("access_token").is_some()
+                        | settings.remove("accessToken").is_some();
+                    if changed { db.execute("UPDATE local SET value=?1 WHERE account='' AND key='settings'", [serde_json::to_string(&value)?])?; }
+                }
+            }
+        }
         let page_size:u64=db.query_row("PRAGMA page_size",[],|r|r.get(0))?;db.pragma_update(None,"max_page_count",512u64*1024*1024/page_size)?;
         Ok(Self { db, root })
     }
@@ -284,6 +286,47 @@ impl Store {
     pub fn put<T: Serialize>(&self, account: &str, key: &str, value: &T) -> Result<()> {
         self.db.execute("INSERT INTO local VALUES(?,?,?) ON CONFLICT(account,key) DO UPDATE SET value=excluded.value", params![account,key,serde_json::to_string(value)?])?;
         Ok(())
+    }
+    /// Move authored state from an old connection identity after the daemon proves
+    /// it is the same persistent source. Verified replica data remains disposable.
+    pub(crate) fn adopt_source(&self, account: &str, lineage: &str) -> Result<bool> {
+        ensure!(!account.is_empty() && !lineage.is_empty(), "Invalid remote identity");
+        let target_rows: u64 = self.db.query_row("SELECT count(*) FROM local WHERE account=?1", [account], |r| r.get(0))?;
+        let target_aliases: u64 = self.db.query_row("SELECT count(*) FROM chat_aliases WHERE account=?1", [account], |r| r.get(0))?;
+        if target_rows != 0 || target_aliases != 0 { return Ok(false); }
+        let candidates = self.db.prepare("SELECT account FROM local WHERE key='account' AND account<>?1 AND json_extract(value,'$.source_lineage')=?2")?
+            .query_map(params![account,lineage], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let [old] = candidates.as_slice() else { return Ok(false); };
+        let old_files = self.root.join("files").join(hash(old));
+        let new_files = self.root.join("files").join(hash(account));
+        let moved_files = if old_files.exists() {
+            if new_files.exists() { return Ok(false); }
+            std::fs::create_dir_all(new_files.parent().context("Invalid attachment root")?)?;
+            std::fs::rename(&old_files, &new_files)?;
+            true
+        } else { false };
+        let migration = (|| -> Result<()> {
+            let tx = self.db.unchecked_transaction()?;
+            let chats = {
+                let mut statement = tx.prepare("SELECT key,value FROM local WHERE account=?1 AND key LIKE 'chat:%'")?;
+                statement.query_map([old], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (key, raw) in chats {
+                let mut chat: LocalChat = serde_json::from_str(&raw).context("Local chat could not be migrated")?;
+                for file in chat.files.iter_mut().chain(chat.pending.iter_mut().flat_map(|pending|pending.files.iter_mut())) {
+                    if let Ok(relative) = file.path.strip_prefix(&old_files) { file.path = new_files.join(relative); }
+                }
+                tx.execute("UPDATE local SET value=?3 WHERE account=?1 AND key=?2",params![old,key,serde_json::to_string(&chat)?])?;
+            }
+            tx.execute("UPDATE local SET account=?1 WHERE account=?2",params![account,old])?;
+            tx.execute("UPDATE chat_aliases SET account=?1 WHERE account=?2",params![account,old])?;
+            tx.commit()?;
+            Ok(())
+        })();
+        if migration.is_err() && moved_files { let _ = std::fs::rename(&new_files, &old_files); }
+        migration?;
+        Ok(true)
     }
     pub fn save_model_choice(&self, identity: &str, session: &str, chat: &LocalChat, account: &Account) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;

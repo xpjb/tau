@@ -128,7 +128,7 @@ async fn quota_refreshes_without_opening_a_tooltip_and_stops_when_hidden_or_non_
     let server = tokio::spawn(async move { axum::serve(listener,router).await.unwrap(); });
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path().into()).unwrap();
-    store.put("", "settings", &Settings { server_url: format!("http://{addr}"), token: "fixture".into() }).unwrap();
+    store.put("", "settings", &Settings { server_url: format!("http://{addr}"), }).unwrap();
     let ctx = HeadlessCtx::new(&Config { size: (1000,700), device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
     let mut app = App::new(&ctx,store,Arc::new(|| {}),false).unwrap();
     app.back(); app.resize(ctx.size(),1.,Vec2::new(0.,0.));

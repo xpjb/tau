@@ -1,4 +1,4 @@
-//! Bounded authenticated WebSocket control + one shared native data connection. Requests carry a
+//! Bounded Tailnet WebSocket control + one shared native data connection. Requests carry a
 //! connection epoch: commands queued for a dead socket can never run on its successor.
 use crate::{
     store::{LocalFile, Settings},
@@ -175,12 +175,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
         url.set_scheme(scheme)
             .map_err(|_| anyhow::anyhow!("Invalid WebSocket URL"))?;
-        let mut request = url.as_str().into_client_request()?;
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {}", settings.token).parse()?,
-        );
-        Ok(request)
+        Ok(url.as_str().into_client_request()?)
     })();
     let request = match setup {
         Ok(setup) => setup,
@@ -407,7 +402,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
         if outcome.is_ok() {
             break;
         }
-        // Classify without printing headers, request bodies, or token-bearing URLs.
+        // Classify without printing headers, request bodies, or credential-bearing URLs.
         let error = outcome.unwrap_err();
         let detail = if error.is::<HeartbeatTimeout>() {
             "Ping timed out"
@@ -415,7 +410,7 @@ async fn run(settings: Settings, mut commands: mpsc::Receiver<Command>, events: 
             use tokio_tungstenite::tungstenite::Error;
             match error {
                 Error::Http(response) => match response.status().as_u16() {
-                    401 | 403 => "Access denied. Check the access token in Settings.",
+                    401 | 403 => "Access denied. Check Tailnet permissions and the daemon URL.",
                     404 => "Tau's WebSocket endpoint was not found. Check the daemon URL.",
                     _ => {
                         "The server refused the connection. Check the daemon URL and server status."

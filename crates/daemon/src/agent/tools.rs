@@ -151,7 +151,7 @@ pub async fn execute(config: &Config, settings: &Settings, name: &str, args: &Va
             let _script = shell_script(&mut process, &format!("{}\n{command}", settings.agent.shell_command_prefix))?;
             process.current_dir(&config.cwd)
                 .stdin(Stdio::null()).stdout(output.try_clone()?).stderr(output).kill_on_drop(true)
-                .env_remove("TAU_TOKEN").env_remove("TAU_FLAG_TOKEN");
+                .env_remove("TAU_FLAG_TOKEN");
             #[cfg(unix)] process.process_group(0);
             let mut child = process.spawn().context("Could not start bash")?;
             struct Group(u32);

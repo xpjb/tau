@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 use super::*;
 
@@ -13,7 +12,7 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let config = Config {
             bind: "127.0.0.1:0".parse().unwrap(), transfer_bind: "127.0.0.1:0".parse().unwrap(), transfer_bind_v6: None,
-            token: Arc::from("isolated-tool-test"), settings_path: root.path().join("settings.json"),
+            settings_path: root.path().join("settings.json"),
             import_pi_dir: None, codex_auth_source: None, cwd: root.path().into(), database_path: root.path().join("tau.sqlite3"),
             telemetry_path: root.path().join("crashes.jsonl"), attachment_root: root.path().join("outbox"), upload_root: root.path().join("uploads"),
         };
@@ -45,8 +44,8 @@ async fn script_keeps_stdin_null_and_supports_heredocs_and_pipelines() {
 async fn script_preserves_prefix_cwd_environment_and_file_mode_identity() {
     let mut fixture = Fixture::new().await;
     fixture.settings.agent.shell_command_prefix = "set -eu\nvalue='prefix value'\nprintf 'prefix\\n'".into();
-    let output = fixture.output("printf '%s\\n' \"$value\" \"$PWD\" \"$0\" \"${BASH_SOURCE[0]}\" \"$#\" \"${TAU_TOKEN-unset}\" \"${TAU_FLAG_TOKEN-unset}\"\nprintf 'stderr\\n' >&2").await;
-    assert_eq!(output, format!("prefix\nprefix value\n{}\n/dev/fd/3\n/dev/fd/3\n0\nunset\nunset\nstderr\n\nExit status: exit status: 0", fixture.config.cwd.display()));
+    let output = fixture.output("printf '%s\\n' \"$value\" \"$PWD\" \"$0\" \"${BASH_SOURCE[0]}\" \"$#\" \"${TAU_FLAG_TOKEN-unset}\"\nprintf 'stderr\\n' >&2").await;
+    assert_eq!(output, format!("prefix\nprefix value\n{}\n/dev/fd/3\n/dev/fd/3\n0\nunset\nstderr\n\nExit status: exit status: 0", fixture.config.cwd.display()));
 }
 
 #[tokio::test]

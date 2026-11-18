@@ -63,7 +63,9 @@ scripts/deploy-daemon.sh
 
 This builds the daemon last, verifies that the source commit is published, preserves
 stable Tau, installs only the isolated Tau Beta service, and checks the running binary,
-version, protocol and health response.
+version, protocol and health response. The daemon accepts Tailnet connections directly;
+deployment removes any obsolete `TAU_TOKEN` entry while preserving other optional
+environment settings.
 
 The command may be invoked from a Tau session served by the daemon being replaced. In
 that case it first moves itself into a transient systemd scope outside

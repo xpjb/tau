@@ -1,4 +1,4 @@
-//! Authenticated control requests and the daemon native-stream backend.
+//! Tailnet control requests and the daemon native-stream backend.
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,7 +6,7 @@ use anyhow::{Context, Result, ensure};
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -105,12 +105,8 @@ pub async fn serve(config: Config, manager: AgentManager, listener: tokio::net::
 
 async fn websocket(
     State(state): State<AppState>,
-    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !authorized(&headers, &state.config.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     upgrade
         .max_message_size(MAX_CONTROL_BYTES).max_frame_size(MAX_CONTROL_BYTES)
         .on_upgrade(move |socket| serve_socket(socket, state))
@@ -293,12 +289,8 @@ async fn serve_socket(socket: WebSocket, state: AppState) {
 
 async fn crash_report(
     State(state): State<AppState>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !authorized(&headers, &state.config.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     let report = match serde_json::from_slice::<CrashReport>(&body) {
         Ok(report) => report,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
@@ -400,27 +392,6 @@ async fn queue_server(outbound: &Outbound, message: &ServerMessage) -> bool {
         if outbound.tx.send(Message::Text(encoded.into())).await.is_err() {return false;}
     }
     true
-}
-
-fn authorized(headers: &HeaderMap, expected: &str) -> bool {
-    let Some(actual) = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
-        return false;
-    };
-    let actual = actual.as_bytes();
-    let expected = expected.as_bytes();
-    let mut difference = actual.len() ^ expected.len();
-    let length = actual.len().max(expected.len());
-    for index in 0..length {
-        difference |= usize::from(
-            actual.get(index).copied().unwrap_or_default()
-                ^ expected.get(index).copied().unwrap_or_default(),
-        );
-    }
-    difference == 0
 }
 
 #[cfg(test)]

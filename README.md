@@ -1,5 +1,5 @@
 # Tau
-Tau is a client-server agent harness. The server (daemon) runs on a remote host ie. tailnet. The client (frontend) runs on android or windows. Originally it was based on bridging into pi, but now the frontend, daemon and agent execution are all Rust.
+Tau is a client-server agent harness. The server (daemon) runs on a remote Tailnet host. The client (frontend) runs on Android or Windows. Tailnet policy controls daemon reachability; Tau does not add a separate access token. Originally it was based on bridging into pi, but now the frontend, daemon and agent execution are all Rust.
 
 The `master` mainline deploys to a beta identity separate from stable Tau.
 

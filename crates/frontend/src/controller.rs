@@ -1403,6 +1403,17 @@ impl Controller {
     /// fence cannot leave the previous socket epoch enabled for saved actions.
     fn bind_source(&mut self,lineage:String)->Result<()> {
         self.epoch=None;
+        if self.store.adopt_source(&self.identity,&lineage)? {
+            self.account=self.store.get(&self.identity,"account")?;
+            self.account.age_recent_chats(crate::clock::now_ms().unwrap_or(0));
+            self.model_preferences=self.store.get(&self.identity,"quick-models")?;
+            self.model_catalog=self.store.get(&self.identity,"model-catalog")?;
+            self.local_activity=self.store.chat_activity(&self.identity)?;
+            self.saved_downloads.clear();self.downloads.clear();self.chats.clear();
+            self.sort_sessions();
+            if let Some(id)=self.account.selected.clone() {self.ensure_chat(&id)?;}
+            self.notice=Some("Local work for this remote was restored under its URL-only connection identity.".into());
+        }
         if self.store.bind_source(&self.identity,&lineage)? {
             self.saved_downloads.clear();
             self.model_catalog = Default::default();

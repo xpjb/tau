@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value,json};
 use tau_net::blocks::*;
 use tau_net::native::{Client as DataClient, Peer, Priority, Update};
-use tokio_tungstenite::{connect_async,tungstenite::{Message,client::IntoClientRequest}};
+use tokio_tungstenite::{connect_async,tungstenite::Message};
 
 pub struct Client {
     pub socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
@@ -13,12 +13,8 @@ pub struct Client {
     pub peer: Option<Peer>,
 }
 impl Client {
-    #[allow(dead_code)]
-    pub async fn connect(url: &str) -> Self {Self::connect_token(url,"isolated-test-token").await}
-    pub async fn connect_token(url: &str, token: &str) -> Self {
-        let mut request=url.into_client_request().unwrap();
-        request.headers_mut().insert("authorization",format!("Bearer {token}").parse().unwrap());
-        let (socket,_)=connect_async(request).await.unwrap();
+    pub async fn connect(url: &str) -> Self {
+        let (socket,_)=connect_async(url).await.unwrap();
         let mut client=Self {socket,seen:vec![],data:DataClient::bind().await.unwrap(),peer:None};
         let hello=client.until(|m|m["type"]=="hello").await;
         assert_eq!(hello["protocolVersion"],tau_net::PROTOCOL_VERSION);

@@ -62,13 +62,12 @@ async fn manual_quick_model_refreshes_catalog_and_keeps_reported_tokens_visible(
         "windows":{"gpt-6-astra":200000}
     }]}).to_string()).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-    let token = "isolated-catalog-test-token";
     let daemon = tokio::spawn(taud::run(taud::Config {bind:port, transfer_bind:"127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None,
-        token:Arc::from(token), settings_path:root.join("settings.json"), import_pi_dir:None, codex_auth_source:None,
+        settings_path:root.join("settings.json"), import_pi_dir:None, codex_auth_source:None,
         cwd:root.into(), database_path:root.join("tau.sqlite3"), telemetry_path:root.join("crash.jsonl"),
         attachment_root:root.join("outbox"), upload_root:root.join("uploads")}));
     let local = tempfile::tempdir().unwrap(); let store = Store::open(local.path().into()).unwrap();
-    store.put("", "settings", &Settings {server_url:format!("http://{port}"),token:token.into()}).unwrap();
+    store.put("", "settings", &Settings {server_url:format!("http://{port}"),}).unwrap();
     let mut c = Controller::new(store, Arc::new(|| {})).unwrap();
     until(&mut c, |c| c.epoch.is_some()).await;
     c.new_chat().unwrap(); let session = c.account.selected.clone().unwrap();

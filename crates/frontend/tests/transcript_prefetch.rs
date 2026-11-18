@@ -58,13 +58,12 @@ async fn active_recent_chats_fetch_replies_without_selection_and_survive_client_
     {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(server.path().join("auth.json"),std::fs::Permissions::from_mode(0o600)).unwrap();}
     let address=std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let daemon=tokio::spawn(taud::run(taud::Config {
-        bind:address,transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,token:Arc::from("prefetch-fixture"),
-        settings_path:server.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,cwd:server.path().into(),
+        bind:address,transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,settings_path:server.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,cwd:server.path().into(),
         database_path:server.path().join("tau.sqlite3"),telemetry_path:server.path().join("crash.jsonl"),
         attachment_root:server.path().join("outbox"),upload_root:server.path().join("uploads"),
     }));
     let store=Store::open(local.path().into()).unwrap();
-    store.put("","settings",&Settings {server_url:format!("http://{address}"),token:"prefetch-fixture".into()}).unwrap();
+    store.put("","settings",&Settings {server_url:format!("http://{address}"),}).unwrap();
     let mut c=Controller::new(store,Arc::new(||{})).unwrap();
     until(&mut c,|c|c.epoch.is_some()).await;
     c.new_chat().unwrap();c.draft("hold background reply".into()).unwrap();c.send_prompt().unwrap();
@@ -133,12 +132,11 @@ async fn twelve_recent_chats_and_six_live_replies_sync_without_materializing_bac
     {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(server.path().join("auth.json"),std::fs::Permissions::from_mode(0o600)).unwrap();}
     let address=std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let daemon=tokio::spawn(taud::run(taud::Config {
-        bind:address,transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,token:Arc::from("many-prefetch-fixture"),
-        settings_path:server.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,cwd:server.path().into(),
+        bind:address,transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,settings_path:server.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,cwd:server.path().into(),
         database_path:server.path().join("tau.sqlite3"),telemetry_path:server.path().join("crash.jsonl"),
         attachment_root:server.path().join("outbox"),upload_root:server.path().join("uploads"),
     }));
-    let client_settings=Settings {server_url:format!("http://{address}"),token:"many-prefetch-fixture".into()};
+    let client_settings=Settings {server_url:format!("http://{address}"),};
     let connect=|root:&std::path::Path| {
         let store=Store::open(root.into()).unwrap();store.put("","settings",&client_settings).unwrap();
         Controller::new(store,Arc::new(||{})).unwrap()

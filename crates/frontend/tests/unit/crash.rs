@@ -44,7 +44,7 @@ async fn private_diagnostics_survive_bounded_restart_upload_retries() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-    let settings = Settings { server_url:format!("http://{address}"), token:"test-token".into() };
+    let settings = Settings { server_url:format!("http://{address}"), };
 
     assert!(upload_pending(root.path(), &settings).await.is_err());
     assert_eq!(std::fs::read(&pending).unwrap(), first, "A failed upload must remain pending");
@@ -54,7 +54,7 @@ async fn private_diagnostics_survive_bounded_restart_upload_retries() {
     let received = received.lock().unwrap();
     assert_eq!(received.len(), 2);
     for (authorization, body) in received.iter() {
-        assert_eq!(authorization.as_deref(), Some("Bearer test-token"));
+        assert!(authorization.is_none());
         let uploaded: CrashReport = serde_json::from_slice(body).unwrap();
         assert_eq!(uploaded.report_id, report.report_id);
         assert!(!String::from_utf8_lossy(body).contains(first_secret));

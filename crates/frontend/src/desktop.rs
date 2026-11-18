@@ -69,11 +69,9 @@ impl ChadApp for Desktop {
             ctx.window.set_taskbar_icon(Some(icon));
         }
         let store = Store::open(root()).map_err(|e| e.to_string())?;
-        if let (Ok(server_url), Ok(token)) =
-            (std::env::var("TAU2_SERVER"), std::env::var("TAU2_TOKEN"))
-        {
+        if let Ok(server_url) = std::env::var("TAU2_SERVER") {
             store
-                .put("", "settings", &Settings { server_url, token })
+                .put("", "settings", &Settings { server_url })
                 .map_err(|e| e.to_string())?;
         }
         let waker = ctx.waker();

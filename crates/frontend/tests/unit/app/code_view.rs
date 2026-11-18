@@ -310,12 +310,12 @@ async fn remote_picker_results_wake_and_repaint_without_input_or_polling_frames(
     std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
     let mut daemon = tokio::spawn(taud::run(taud::Config {
         bind: tcp, transfer_bind: match udp { std::net::SocketAddr::V4(a) => a, _ => unreachable!() }, transfer_bind_v6: None,
-        token: Arc::from("picker-wake-fixture"), settings_path, import_pi_dir: None, codex_auth_source: None, cwd,
+        settings_path, import_pi_dir: None, codex_auth_source: None, cwd,
         database_path: root.path().join("daemon.sqlite3"), telemetry_path: root.path().join("crashes.jsonl"),
         attachment_root: root.path().join("outbox"), upload_root: root.path().join("uploads"),
     }));
     let store = Store::open(root.path().join("client")).unwrap();
-    store.put("", "settings", &crate::store::Settings { server_url: format!("http://{tcp}"), token: "picker-wake-fixture".into() }).unwrap();
+    store.put("", "settings", &crate::store::Settings { server_url: format!("http://{tcp}"), }).unwrap();
     let ctx = HeadlessCtx::new(&Config { size: (1000, 800), device_limits: crate::desktop::limits(), ..Default::default() }).unwrap();
     let (wake, mut wakes) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(&ctx, store, Arc::new(move || { let _ = wake.send(()); }), false).unwrap();

@@ -22,7 +22,7 @@ Environment=TAU_TELEMETRY_PATH=/var/lib/tau2-beta/client-crashes.jsonl
 Environment=TAU_SETTINGS_PATH=/var/lib/tau2-beta/settings.json
 Environment=TAU_ATTACHMENT_ROOT=/root/.local/share/tau2-beta/outbox
 Environment=TAU_UPLOAD_ROOT=/root/.local/share/tau2-beta/uploads
-EnvironmentFile=/etc/tau2-beta.env
+EnvironmentFile=-/etc/tau2-beta.env
 ExecStart=/usr/local/lib/tau2-beta/taud
 Restart=on-failure
 RestartSec=5s

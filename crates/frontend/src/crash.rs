@@ -210,7 +210,6 @@ pub(crate) async fn upload_pending(root: &Path, settings: &Settings) -> Result<(
         .timeout(Duration::from_secs(10))
         .build()?
         .post(crate::net::endpoint(settings, &["v1", "telemetry", "crash"])?)
-        .bearer_auth(&settings.token)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(encoded)
         .send().await?;

@@ -29,10 +29,10 @@ async fn remote_files_stream_live_updates_search_parent_traversal_and_cancel_wit
     // No shell is executed, but this loopback daemon validates native absolute paths.
     #[cfg(windows)] { settings.agent.shell_path=std::env::current_exe().unwrap(); }
     std::fs::write(&settings_path,serde_json::to_vec(&settings).unwrap()).unwrap();
-    let config=taud::Config {bind:tcp,transfer_bind:match udp {std::net::SocketAddr::V4(a)=>a,_=>unreachable!()},transfer_bind_v6:None,token:Arc::from("file-fixture"),settings_path,import_pi_dir:None,codex_auth_source:None,cwd:cwd.clone(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
+    let config=taud::Config {bind:tcp,transfer_bind:match udp {std::net::SocketAddr::V4(a)=>a,_=>unreachable!()},transfer_bind_v6:None,settings_path,import_pi_dir:None,codex_auth_source:None,cwd:cwd.clone(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
     let mut daemon=tokio::spawn(taud::run(config));
     let client_root=tempfile::tempdir().unwrap();let store=Store::open(client_root.path().into()).unwrap();
-    store.put("","settings",&Settings {server_url:format!("http://{tcp}"),token:"file-fixture".into()}).unwrap();
+    store.put("","settings",&Settings {server_url:format!("http://{tcp}"),}).unwrap();
     let mut c=Controller::new(store,Arc::new(||{})).unwrap();
     tokio::select! {
         result=&mut daemon=>panic!("Fixture daemon stopped during startup: {result:?}"),

@@ -53,8 +53,7 @@ async fn fixture(reply: bool) -> (Settings, tokio::task::JoinHandle<()>) {
     (
         Settings {
             server_url: format!("http://{address}"),
-            token: "fixture-token".into(),
-        },
+            },
         server,
     )
 }
@@ -174,7 +173,7 @@ async fn oversized_legacy_frame_is_rejected_before_reading_its_body() {
             }
         }
     });
-    let settings = Settings { server_url:format!("http://{address}"), token:"audit-fixture".into() };
+    let settings = Settings { server_url:format!("http://{address}"), };
     let mut network = Network::start(settings, Arc::new(|| {}));
     assert!(matches!(event(&mut network).await, Event::Connecting { attempt: 1, .. }));
     assert!(matches!(event(&mut network).await, Event::Ready {epoch:1,lineage,..} if !lineage.is_empty()));
@@ -205,7 +204,7 @@ async fn paused_ui_coalesces_state_without_blocking_heartbeats_or_losing_receipt
         while let Some(Ok(frame))=socket.next().await {if let Message::Ping(payload)=frame {seen.fetch_add(1,Ordering::SeqCst);if socket.send(Message::Pong(payload)).await.is_err() {break;}}}
     })}}));
     let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
-    let mut network=Network::start(Settings {server_url:format!("http://{address}"),token:"fixture".into()},Arc::new(||{}));
+    let mut network=Network::start(Settings {server_url:format!("http://{address}"),},Arc::new(||{}));
     // Deliberately no UI reads for longer than the old heartbeat deadline.
     tokio::time::sleep(HEARTBEAT_INTERVAL+HEARTBEAT_TIMEOUT+Duration::from_millis(200)).await;
     assert!(pings.load(Ordering::SeqCst)>=3,"UI backpressure blocked control probes");
@@ -225,7 +224,7 @@ async fn immediate_refusals_use_fixed_start_spacing_not_exponential_backoff() {
     let server = tokio::spawn(async move {
         axum::serve(listener, Router::new().route("/v1/ws", get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }))).await.unwrap();
     });
-    let mut network = Network::start(Settings { server_url: format!("http://{address}"), token: "fixture".into() }, Arc::new(|| {}));
+    let mut network = Network::start(Settings { server_url: format!("http://{address}"), }, Arc::new(|| {}));
     let mut last = None;
     for expected in 1..=4 {
         let at = match event(&mut network).await {
@@ -256,7 +255,7 @@ async fn upgrade_and_hello_share_one_deadline_and_slow_failure_retries_immediate
         let _ws = tokio_tungstenite::accept_async(socket).await.unwrap();
         tokio::time::sleep(Duration::from_secs(10)).await; // Never send Tau hello.
     });
-    let mut network = Network::start(Settings { server_url: format!("http://{address}"), token: "fixture".into() }, Arc::new(|| {}));
+    let mut network = Network::start(Settings { server_url: format!("http://{address}"), }, Arc::new(|| {}));
     let started = match event(&mut network).await {
         Event::Connecting { at, .. } => at, _ => panic!("expected acquisition"),
     };

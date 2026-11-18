@@ -180,9 +180,9 @@ fn connection_completion_and_focus_restoration_validate_their_owner() {
     assert_eq!(h.dialog().topic_key(), Some(("rename", "first")), "Old connection success cannot close a different dialog");
     h.app.back(); assert_eq!(h.app.ui.focus, Some(h.app.root.workspace.chat.composer.field.control.target));
     h.app.open_ui(ui::DialogSpec::Connection).unwrap(); h.app.update_widgets(0.); assert!(h.app.root.dialog.is_some(), "Already connected is not a new submission completion");
-    h.app.controller.epoch = None; h.app.controller.connection = "Authentication failed".into();
+    h.app.controller.epoch = None; h.app.controller.connection = "Connection failed".into();
     let Dialog::Connection(dialog) = h.app.root.dialog.as_mut().unwrap() else { unreachable!() };
-    dialog.attempt = Some(h.app.controller.identity.clone()); dialog.url.control.enabled = false; dialog.token.control.enabled = false;
+    dialog.attempt = Some(h.app.controller.identity.clone()); dialog.url.control.enabled = false;
     h.app.update_widgets(0.);
     assert!(h.dialog().fields().iter().all(|field| field.control.enabled), "Failure restores editable fields without dropping their draft");
     h.app.controller.epoch = Some(9);

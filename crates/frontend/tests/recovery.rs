@@ -205,8 +205,7 @@ async fn lost_ack_survives_restart_without_replay_and_reconciles_by_id() {
             "settings",
             &Settings {
                 server_url: format!("http://{address}"),
-                token: "fixture-token".into(),
-            },
+                },
         )
         .unwrap();
     let mut c = Controller::new(store, Arc::new(|| {})).unwrap();
@@ -274,8 +273,7 @@ async fn protocol_mismatch_and_wrong_epoch_cannot_send() {
     let mut n = Network::start(
         Settings {
             server_url: format!("http://{address}"),
-            token: "fixture".into(),
-        },
+            },
         Arc::new(|| {}),
     );
     n.send(Command::Request {
@@ -329,8 +327,7 @@ async fn stale_socket_epoch_is_rejected_after_a_successful_handshake() {
     let mut n = Network::start(
         Settings {
             server_url: format!("http://{address}"),
-            token: "fixture".into(),
-        },
+            },
         Arc::new(|| {}),
     );
     assert!(matches!(tokio::time::timeout(Duration::from_secs(3),n.events.recv()).await.unwrap(),Some(NetworkEvent::Connecting { attempt: 1, .. })));
@@ -423,7 +420,7 @@ async fn generic_control_outbox_recovers_original_outcome_without_reexecuting_af
     })}}));
     let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
     let root=tempfile::tempdir().unwrap();let store=Store::open(root.path().into()).unwrap();
-    store.put("","settings",&Settings {server_url:format!("http://{address}"),token:"fixture".into()}).unwrap();
+    store.put("","settings",&Settings {server_url:format!("http://{address}"),}).unwrap();
     let mut c=Controller::new(store,Arc::new(||{})).unwrap();
     tokio::time::timeout(Duration::from_secs(5),async {loop {c.poll();if c.epoch.is_some() {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
     let id=c.request(ClientCommand::RenameSession {session_id:"chat".into(),title:"durable title".into()}).unwrap();
@@ -504,7 +501,7 @@ async fn missing_receipt_retries_original_intent_in_order_after_restart_in_anoth
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path().into()).unwrap();
-    store.put("", "settings", &Settings { server_url: format!("http://{address}"), token: "fixture".into() }).unwrap();
+    store.put("", "settings", &Settings { server_url: format!("http://{address}"), }).unwrap();
     let mut c = Controller::new(store, Arc::new(|| {})).unwrap();
     async fn wait(c: &mut Controller, ready: impl Fn(&Controller) -> bool) {
         tokio::time::timeout(Duration::from_secs(8), async {
@@ -556,7 +553,7 @@ async fn first_prompt_and_local_selection_do_not_wait_for_any_create_or_catalog_
     }));
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let root = tempfile::tempdir().unwrap(); let store = Store::open(root.path().into()).unwrap();
-    store.put("", "settings", &Settings { server_url: format!("http://{address}"), token: "fixture".into() }).unwrap();
+    store.put("", "settings", &Settings { server_url: format!("http://{address}"), }).unwrap();
     let mut c = Controller::new(store, Arc::new(|| {})).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop { c.poll(); if c.epoch.is_some() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }

@@ -152,6 +152,8 @@ else:r.main()
         build = source.index('/usr/local/bin/cargo build')
         self.assertLess(escape, build)
         self.assertIn('systemd-run --quiet --scope --collect', source)
+        self.assertIn("not line.startswith('TAU_TOKEN=')", source)
+        self.assertNotIn('secrets.token_hex', source)
 
 
 if __name__ == '__main__':

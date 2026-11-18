@@ -10,13 +10,12 @@ use serde_json::{Value,json};
 use tau_frontend::{controller::Controller,store::{Settings,Store}};
 use tau_net::*;
 use tokio::net::{TcpListener,TcpStream};
-use tokio_tungstenite::{connect_async,tungstenite::{Message,client::IntoClientRequest}};
+use tokio_tungstenite::{connect_async,tungstenite::Message};
 #[path="support/pressure_link.rs"] #[allow(dead_code)] mod pressure_link;
 #[path="support/pressure_metrics.rs"] mod pressure_metrics;
 #[path="support/native_trace.rs"] #[allow(dead_code)] mod native_trace;
 use pressure_link::{Link,Profile,Proxy,draw};
 use pressure_metrics::{Recorder,distribution};
-const TOKEN:&str="isolated-network-pressure-fixture-only";
 const FILE_BYTES:usize=1024*1024;
 const DB_HOLD_MS:u64=400;
 
@@ -69,7 +68,7 @@ impl Fixture {
         let tcp=std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let udp=std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let config=taud::Config {bind:tcp,transfer_bind:match udp {SocketAddr::V4(a)=>a,_=>unreachable!()},transfer_bind_v6:None,
-            token:Arc::from(TOKEN),settings_path:source.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
+            settings_path:source.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
             cwd:source.path().into(),database_path:source.path().join("tau.sqlite3"),telemetry_path:source.path().join("crashes.jsonl"),
             attachment_root:source.path().join("outbox"),upload_root:source.path().join("uploads")};
         let daemon=tokio::spawn(async move {taud::run(config).await.unwrap()});
@@ -79,7 +78,7 @@ impl Fixture {
         let locals=[tempfile::tempdir().unwrap(),tempfile::tempdir().unwrap()];
         let clients=std::array::from_fn(|n| {
             let store=Store::open(locals[n].path().into()).unwrap();
-            store.put("","settings",&Settings {server_url:format!("http://{}",proxies[n].address),token:TOKEN.into()}).unwrap();
+            store.put("","settings",&Settings {server_url:format!("http://{}",proxies[n].address),}).unwrap();
             Controller::new(store,Arc::new(||{})).unwrap()
         });
         Self {clients,_locals:locals,source,proxies,link,model,bytes,tasks:vec![daemon,provider]}
@@ -159,9 +158,7 @@ async fn recover_bulk(f:&mut Fixture,o:&mut Observed,recorder:&Recorder,restored
 #[derive(Default)]
 struct Probe {latencies:Vec<u64>,errors:Vec<String>}
 async fn probe(address:SocketAddr,session:String,count:u64,spacing_ms:u64)->Probe {
-    let mut request=format!("ws://{address}/v1/ws").into_client_request().unwrap();
-    request.headers_mut().insert("authorization",format!("Bearer {TOKEN}").parse().unwrap());
-    let (mut socket,_)=connect_async(request).await.unwrap();
+    let (mut socket,_)=connect_async(format!("ws://{address}/v1/ws")).await.unwrap();
     let mut timer=tokio::time::interval(Duration::from_millis(spacing_ms));timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending=BTreeMap::new();let mut sent=0;let mut result=Probe::default();
     tokio::time::timeout(Duration::from_secs(30),async {

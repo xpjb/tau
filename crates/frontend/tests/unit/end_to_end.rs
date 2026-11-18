@@ -119,11 +119,9 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
         .unwrap()
         .local_addr()
         .unwrap();
-    let token = "fixture-bearer-with-at-least-thirty-two-characters";
     let config = taud::Config {
         bind: port,
         transfer_bind: "127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None,
-        token: Arc::from(token),
         settings_path: root.join("settings.json"),
         import_pi_dir: None, codex_auth_source:None,
         cwd: root.into(),
@@ -141,8 +139,7 @@ async fn real_native_daemon_chat_queue_upload_settings_fork_and_client_restart()
             "settings",
             &Settings {
                 server_url: format!("http://{port}"),
-                token: token.into(),
-            },
+                },
         )
         .unwrap();
     let mut c = Controller::new(store, Arc::new(|| {})).unwrap();
@@ -448,7 +445,7 @@ async fn files_share_native_blocks_authorization_and_verified_offline_cache() {
     let bulk=Arc::new(Server::bind("127.0.0.1:0".parse().unwrap(),data.clone()).await.unwrap());
     #[derive(Clone)] struct Peer {bulk:Arc<Server>,lineage:String,grants:Arc<AtomicUsize>,http:Arc<AtomicUsize>}
     async fn ws(State(peer):State<Peer>, headers:HeaderMap, ws:WebSocketUpgrade) -> impl axum::response::IntoResponse {
-        assert_eq!(headers["authorization"],"Bearer fixture-token");
+        assert!(headers.get("authorization").is_none());
         ws.on_upgrade(move |mut ws|async move {
             ws.send(axum::extract::ws::Message::Text(serde_json::to_string(&ServerMessage::Hello {protocol_version:PROTOCOL_VERSION,daemon_version:"fixture".into(),lineage:Some("fixture".into())}).unwrap().into())).await.unwrap();
             while let Some(Ok(frame))=ws.recv().await {
@@ -468,7 +465,7 @@ async fn files_share_native_blocks_authorization_and_verified_offline_cache() {
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
     let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
     let store=Store::open(root.path().join("local")).unwrap();
-    store.put("","settings",&Settings {server_url:format!("http://{address}"),token:"fixture-token".into()}).unwrap();
+    store.put("","settings",&Settings {server_url:format!("http://{address}"),}).unwrap();
     let mut c=Controller::new(store,Arc::new(||{})).unwrap();
     until(&mut c,|c|c.epoch.is_some() && c.content_authorized()).await;
     assert_eq!(data.reads.load(Ordering::SeqCst),0,"Authorization alone must not read a file");
@@ -499,14 +496,13 @@ async fn projects_sync_between_real_clients_preserve_drafts_and_recover_selectio
     let server = tempfile::tempdir().unwrap();
     let root = server.path();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-    let config = taud::Config { bind:port, transfer_bind:"127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None, token:Arc::from("local-project-fixture"),
-        settings_path:root.join("settings.json"), import_pi_dir:None, codex_auth_source:None, cwd:root.into(), database_path:root.join("tau.sqlite3"),
+    let config = taud::Config { bind:port, transfer_bind:"127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None, settings_path:root.join("settings.json"), import_pi_dir:None, codex_auth_source:None, cwd:root.into(), database_path:root.join("tau.sqlite3"),
         telemetry_path:root.join("crashes.jsonl"), attachment_root:root.join("outbox"), upload_root:root.join("uploads") };
     let task = tokio::spawn(taud::run(config));
     let a_root = tempfile::tempdir().unwrap(); let b_root = tempfile::tempdir().unwrap();
     let connect = |path: &std::path::Path| {
         let store = Store::open(path.into()).unwrap();
-        store.put("","settings",&Settings { server_url:format!("http://{port}"),token:"local-project-fixture".into() }).unwrap();
+        store.put("","settings",&Settings { server_url:format!("http://{port}"),}).unwrap();
         Controller::new(store,Arc::new(|| {})).unwrap()
     };
     let mut a = connect(a_root.path()); let mut b = connect(b_root.path());

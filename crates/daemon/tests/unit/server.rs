@@ -1,16 +1,13 @@
-use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
-
-use super::authorized;
 use crate::manager::safe_file_name;
 
 #[tokio::test]
-async fn authenticated_quota_control_is_read_only_and_returns_an_explicit_unavailable_state() {
+async fn quota_control_is_read_only_and_returns_an_explicit_unavailable_state() {
     use super::*;
     use crate::state::StateStore;
-    use tokio_tungstenite::{connect_async, tungstenite::{Message as ClientMessage, client::IntoClientRequest}};
+    use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     let root=tempfile::tempdir().unwrap();
     let config=Config {bind:"127.0.0.1:0".parse().unwrap(),transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,
-        token:Arc::from("fixture-token"),settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
+        settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
         cwd:root.path().into(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),
         attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
     let manager=AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
@@ -19,9 +16,7 @@ async fn authenticated_quota_control_is_read_only_and_returns_an_explicit_unavai
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url=format!("ws://{}/v1/ws",listener.local_addr().unwrap());
     let server=tokio::spawn(async move {axum::serve(listener,Router::new().route("/v1/ws",get(websocket)).with_state(state)).await.unwrap();});
-    assert!(connect_async(&url).await.is_err(),"Unauthenticated clients cannot see account quota");
-    let mut request=url.into_client_request().unwrap();request.headers_mut().insert("Authorization","Bearer fixture-token".parse().unwrap());
-    let (mut client,_)=connect_async(request).await.unwrap();
+    let (mut client,_)=connect_async(&url).await.unwrap();
     client.send(ClientMessage::Text(serde_json::json!({"id":"quota-1","type":"get_codex_usage","force":true}).to_string().into())).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5),async {
         loop {
@@ -29,8 +24,7 @@ async fn authenticated_quota_control_is_read_only_and_returns_an_explicit_unavai
             let value:serde_json::Value=serde_json::from_str(message.to_text().unwrap()).unwrap();
             if value["requestId"]!="quota-1" {continue;}
             assert_eq!(value["type"],"codex_usage");assert!(value["report"].is_null());
-            assert!(value["error"].as_str().unwrap().contains("sign in"));
-            assert!(!value.to_string().contains("fixture-token"));break;
+            assert!(value["error"].as_str().unwrap().contains("sign in"));break;
         }
     }).await.unwrap();
     server.abort();
@@ -60,7 +54,7 @@ async fn persists_bounded_crash_reports_with_safe_diagnostics() {
     let log = root.join("crashes.jsonl");
     let config = Config {
         transfer_bind: "127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None,
-        bind: address, token: Arc::from("test-token"), settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None, cwd: root.clone(), database_path: root.join("tau.sqlite3"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
+        bind: address, settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None, cwd: root.clone(), database_path: root.join("tau.sqlite3"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
         upload_root: root.join("uploads"),
     };
     let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
@@ -78,33 +72,33 @@ async fn persists_bounded_crash_reports_with_safe_diagnostics() {
     modern["reportId"] = json!("modern");
     modern["causes"] = json!([cause]);
     modern["ignoredMessage"] = json!("private exception message must not be retained");
-    let mut cases = vec![(legacy.clone(), "wrong-token", 401), (legacy, "test-token", 204), (modern.clone(), "test-token", 204)];
+    let mut cases = vec![(legacy, 204), (modern.clone(), 204)];
     for (field, value) in [("schema", json!(3)), ("schema", json!(1)), ("causes", json!(vec![cause.clone(); 4])),
         ("stack", json!(vec![frame.clone(); 65]))] {
         let mut invalid = modern.clone();
         invalid[field] = value;
-        cases.push((invalid, "test-token", 400));
+        cases.push((invalid, 400));
     }
     let mut unicode = modern.clone();
     unicode["stack"][0]["fileName"] = json!("界".repeat(192));
-    cases.push((unicode.clone(), "test-token", 204));
+    cases.push((unicode.clone(), 204));
     unicode["stack"][0]["fileName"] = json!("界".repeat(193));
-    cases.push((unicode, "test-token", 400));
+    cases.push((unicode, 400));
     let mut too_many_frames = modern.clone();
     too_many_frames["causes"][0]["stack"] = json!(vec![frame; 13]);
-    cases.push((too_many_frames, "test-token", 400));
+    cases.push((too_many_frames, 400));
     for range in [json!({"start":0,"end":10,"textLength":710}), json!({"start":5,"end":0,"textLength":-1})] {
         let mut invalid = modern.clone();
         invalid["causes"][0]["selectionRange"] = range;
-        cases.push((invalid, "test-token", 400));
+        cases.push((invalid, 400));
     }
-    cases.push((json!("x".repeat(MAX_CRASH_BYTES)), "test-token", 413));
+    cases.push((json!("x".repeat(MAX_CRASH_BYTES)), 413));
     let mut accepted = Vec::new();
-    for (mut body, token, expected) in cases {
+    for (mut body, expected) in cases {
         let payload = body.to_string();
         let status = tokio::time::timeout(Duration::from_secs(5), async {
             let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-            stream.write_all(format!("POST /v1/telemetry/crash HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).as_bytes()).await.unwrap();
+            stream.write_all(format!("POST /v1/telemetry/crash HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).as_bytes()).await.unwrap();
             let mut reply = String::new();
             stream.read_to_string(&mut reply).await.unwrap();
             reply.split_whitespace().nth(1).unwrap().parse::<u16>().unwrap()
@@ -135,8 +129,7 @@ async fn pings_clients_and_reaps_missing_pongs_without_waiting_for_commands() {
     fs::create_dir_all(&root).await.unwrap();
     let config = Config {
         transfer_bind: "127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None,
-        bind: "127.0.0.1:0".parse().unwrap(), token: Arc::from("test-token"),
-        settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None,
+        bind: "127.0.0.1:0".parse().unwrap(), settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None,
         cwd: root.clone(), database_path: root.join("tau.sqlite3"),
         telemetry_path: root.join("crashes.jsonl"),
         attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
@@ -273,26 +266,15 @@ fn bounds_file_names_and_resource_keys() {
 }
 
 
-#[test]
-fn accepts_only_the_complete_bearer_token() {
-    let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer abcdef"));
-    assert!(authorized(&headers, "abcdef"));
-    assert!(!authorized(&headers, "abcdeg"));
-    assert!(!authorized(&headers, "abcdef0"));
-    headers.insert(AUTHORIZATION, HeaderValue::from_static("abcdef"));
-    assert!(!authorized(&headers, "abcdef"));
-}
-
 #[tokio::test]
-async fn device_signin_control_requires_tau_auth_and_keeps_tokens_off_the_wire() {
+async fn device_signin_control_keeps_provider_tokens_off_the_wire() {
     use super::*;
     use crate::state::StateStore;
-    use tokio_tungstenite::{connect_async, tungstenite::{Message as ClientMessage, client::IntoClientRequest}};
+    use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     let (issuer, oauth, _) = crate::agent::auth::device_login_tests::fixture(false, 30).await;
     let root=tempfile::tempdir().unwrap();
     let config=Config {bind:"127.0.0.1:0".parse().unwrap(),transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,
-        token:Arc::from("fixture-token"),settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
+        settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
         cwd:root.path().into(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),
         attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
     let mut manager=AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
@@ -303,9 +285,7 @@ async fn device_signin_control_requires_tau_auth_and_keeps_tokens_off_the_wire()
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url=format!("ws://{}/v1/ws",listener.local_addr().unwrap());
     let server=tokio::spawn(async move {axum::serve(listener,Router::new().route("/v1/ws",get(websocket)).with_state(state)).await.unwrap();});
-    assert!(connect_async(&url).await.is_err());
-    let mut request=url.into_client_request().unwrap();request.headers_mut().insert("Authorization","Bearer fixture-token".parse().unwrap());
-    let (mut client,_)=connect_async(request).await.unwrap();
+    let (mut client,_)=connect_async(&url).await.unwrap();
     client.send(ClientMessage::Text(json!({"id":"signin","type":"start_codex_login"}).to_string().into())).await.unwrap();
     let id=tokio::time::timeout(Duration::from_secs(5),async {
         loop {

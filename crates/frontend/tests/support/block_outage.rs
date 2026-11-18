@@ -125,7 +125,7 @@ async fn outage(duration: Duration, progress_budget: Duration, downloads: bool) 
     let link = Link::new();
     let proxy = Proxy::new("127.0.0.2",tcp,format!("127.0.0.1:{udp_port}").parse().unwrap(),link.clone()).await;
     let local = tempfile::tempdir().unwrap(); let store = Store::open(local.path().into()).unwrap();
-    store.put("","settings",&Settings { server_url:format!("http://{}",proxy.address), token:"read-only-block-outage-fixture".into() }).unwrap();
+    store.put("","settings",&Settings { server_url:format!("http://{}",proxy.address), }).unwrap();
     let mut c = Controller::new(store,Arc::new(||{})).unwrap();
     tokio::time::timeout(Duration::from_secs(10),async {
         loop { c.poll(); if c.account.sessions.len()==2 { break; } tokio::time::sleep(Duration::from_millis(10)).await; }

@@ -1,6 +1,5 @@
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
@@ -9,7 +8,6 @@ pub struct Config {
     pub bind: SocketAddr,
     pub transfer_bind: SocketAddrV4,
     pub transfer_bind_v6: Option<SocketAddrV6>,
-    pub token: Arc<str>,
     pub settings_path: PathBuf,
     pub import_pi_dir: Option<PathBuf>,
     /// Optional shared Codex credential source; renewal uses the primary Pi file lock.
@@ -26,14 +24,6 @@ impl Config {
         if std::env::var_os("TAU_STATE_PATH").is_some() || std::env::var_os("TAU_SESSION_DIR").is_some() {
             bail!("Tau 2 uses TAU_DATABASE_PATH, not TAU_STATE_PATH/TAU_SESSION_DIR. Remove those variables; use --import-state PATH for legacy Tau 1 history.");
         }
-        let token = std::env::var("TAU_TOKEN").context("TAU_TOKEN is required")?;
-        if token.chars().count() < 32 {
-            bail!("TAU_TOKEN must contain at least 32 characters");
-        }
-        if token.chars().any(char::is_whitespace) {
-            bail!("TAU_TOKEN cannot contain whitespace");
-        }
-
         let bind = std::env::var("TAU_BIND")
             .unwrap_or_else(|_| "127.0.0.1:8787".to_owned())
             .parse()
@@ -80,7 +70,6 @@ impl Config {
             bind,
             transfer_bind,
             transfer_bind_v6,
-            token: Arc::from(token),
             settings_path,
             import_pi_dir,
             codex_auth_source,

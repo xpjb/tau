@@ -5,9 +5,8 @@ use std::time::Duration;
 use axum::{Router, Json, body::Body, response::Response, routing::post};
 use futures_util::SinkExt;
 use serde_json::{Value, json};
-use tokio_tungstenite::{connect_async, tungstenite::{Message, client::IntoClientRequest}};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const TOKEN: &str = "isolated-tau-sqlite-crash-test-token";
 mod support;
 use support::Client;
 async fn boot(root: &Path) -> (tokio::process::Child, Client) {
@@ -15,7 +14,7 @@ async fn boot(root: &Path) -> (tokio::process::Child, Client) {
     let address = listener.local_addr().unwrap(); drop(listener);
     let log = std::fs::OpenOptions::new().create(true).append(true).open(root.join("daemon.log")).unwrap();
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_taud"))
-        .env("TAU_BIND",address.to_string()).env("TAU_TRANSFER_BIND","127.0.0.1:0").env("TAU_TOKEN",TOKEN)
+        .env("TAU_BIND",address.to_string()).env("TAU_TRANSFER_BIND","127.0.0.1:0")
         .env("TAU_DATABASE_PATH",root.join("tau.sqlite3")).env("TAU_SETTINGS_PATH",root.join("settings.json"))
         .env("TAU_CWD",root).env("TAU_ATTACHMENT_ROOT",root.join("outbox")).env("TAU_UPLOAD_ROOT",root.join("uploads"))
         .env("TAU_TELEMETRY_PATH",root.join("crashes.jsonl")).env("RUST_LOG","info")
@@ -25,14 +24,12 @@ async fn boot(root: &Path) -> (tokio::process::Child, Client) {
     let socket = tokio::time::timeout(Duration::from_secs(10),async {
         loop {
             assert!(child.try_wait().unwrap().is_none(),"Daemon exited: {}",std::fs::read_to_string(root.join("daemon.log")).unwrap());
-            let mut request = format!("ws://{address}/v1/ws").into_client_request().unwrap();
-            request.headers_mut().insert("authorization",format!("Bearer {TOKEN}").parse().unwrap());
-            if let Ok((socket,_)) = connect_async(request).await { break socket; }
+            if let Ok((socket,_)) = connect_async(format!("ws://{address}/v1/ws")).await { break socket; }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }).await.unwrap();
     drop(socket);
-    let client = Client::connect_token(&format!("ws://{address}/v1/ws"),TOKEN).await;
+    let client = Client::connect(&format!("ws://{address}/v1/ws")).await;
     (child,client)
 }
 

@@ -47,13 +47,13 @@ async fn native_loss_delay_bandwidth_upload_cancel_resume_and_two_client_control
     std::fs::write(source.path().join("auth.json"),r#"{"openai-codex":{"type":"api_key","key":"local-fixture"}}"#).unwrap();
     {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(source.path().join("auth.json"),std::fs::Permissions::from_mode(0o600)).unwrap();}
     let tcp=std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();let udp=std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-    let config=taud::Config {bind:tcp,transfer_bind:match udp {SocketAddr::V4(a)=>a,_=>unreachable!()},transfer_bind_v6:None,token:Arc::from("native-link-fixture"),settings_path:source.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,cwd:source.path().into(),database_path:source.path().join("tau.sqlite3"),telemetry_path:source.path().join("crashes.jsonl"),attachment_root:source.path().join("outbox"),upload_root:source.path().join("uploads")};
+    let config=taud::Config {bind:tcp,transfer_bind:match udp {SocketAddr::V4(a)=>a,_=>unreachable!()},transfer_bind_v6:None,settings_path:source.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,cwd:source.path().into(),database_path:source.path().join("tau.sqlite3"),telemetry_path:source.path().join("crashes.jsonl"),attachment_root:source.path().join("outbox"),upload_root:source.path().join("uploads")};
     let daemon=tokio::spawn(taud::run(config));
     // Wait for the listener before starting transparent proxies.
     for _ in 0..200 {if TcpStream::connect(tcp).await.is_ok() {break;}tokio::time::sleep(Duration::from_millis(10)).await;}
     let link=Link::new();let pa=Proxy::new("127.0.0.2",tcp,udp,link.clone()).await;let pb=Proxy::new("127.0.0.3",tcp,udp,link.clone()).await;
     let ar=tempfile::tempdir().unwrap();let br=tempfile::tempdir().unwrap();
-    let connect=|root:&std::path::Path,address:SocketAddr| {let store=Store::open(root.into()).unwrap();store.put("","settings",&Settings {server_url:format!("http://{address}"),token:"native-link-fixture".into()}).unwrap();Controller::new(store,Arc::new(||{})).unwrap()};
+    let connect=|root:&std::path::Path,address:SocketAddr| {let store=Store::open(root.into()).unwrap();store.put("","settings",&Settings {server_url:format!("http://{address}"),}).unwrap();Controller::new(store,Arc::new(||{})).unwrap()};
     let mut a=connect(ar.path(),pa.address);let mut b=connect(br.path(),pb.address);
     until(&mut a,&mut b,|a,b|a.epoch.is_some()&&b.epoch.is_some()).await;
     a.new_chat().unwrap();until(&mut a,&mut b,|a,_|a.selected().is_some_and(|c|c.feed.synchronized)).await;

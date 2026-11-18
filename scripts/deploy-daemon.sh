@@ -34,26 +34,21 @@ printf '[daemon] build complete in %dm%02ds\n' "$(((SECONDS-start)/60))" "$(((SE
 
 install -d -m 0700 /var/lib/tau2-beta /root/.local/share/tau2-beta/outbox /root/.local/share/tau2-beta/uploads
 install -d -m 0755 /usr/local/lib/tau2-beta
-if [[ ! -f /etc/tau2-beta.env ]]; then
+if [[ -f /etc/tau2-beta.env ]]; then
     python3 - <<'PY'
-import os, secrets, shlex
+import os
 from pathlib import Path
-source = Path('/etc/tau.env')
-token = None
-if source.is_file():
-    for line in source.read_text().splitlines():
-        if line.startswith('TAU_TOKEN='):
-            values = shlex.split(line.split('=', 1)[1])
-            token = values[0] if len(values) == 1 else None
-if not token:
-    token = secrets.token_hex(32)
-assert len(token) >= 32 and not any(character.isspace() for character in token)
-fd = os.open('/etc/tau2-beta.env', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, 'w') as output:
-    output.write('TAU_TOKEN=' + shlex.quote(token) + '\n')
+path = Path('/etc/tau2-beta.env')
+kept = [line for line in path.read_text().splitlines() if not line.startswith('TAU_TOKEN=')]
+if kept:
+    temporary = path.with_suffix('.env.new')
+    temporary.write_text('\n'.join(kept) + '\n')
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+else:
+    path.unlink()
 PY
 fi
-chmod 0600 /etc/tau2-beta.env
 v4=$(tailscale ip -4)
 v6=$(tailscale ip -6)
 read -r bind4 bind6 < <(V4="$v4" V6="$v6" python3 - <<'PY'
@@ -92,5 +87,6 @@ tailscale serve --bg --yes --http=8789 http://127.0.0.1:8791 >/dev/null
 stable_after=$(systemctl show tau.service -p MainPID -p ActiveState -p ExecMainStartTimestampMonotonic; sha256sum /usr/local/bin/taud)
 [[ "$stable_after" == "$stable_before" ]] || { echo 'Stable Tau identity changed during deployment.' >&2; exit 1; }
 systemctl --no-pager --full status tau2-beta.service | sed -n '1,12p'
-echo "Tau daemon $version / protocol $protocol deployed at http://vibe:8789."
+name=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+echo "Tau daemon $version / protocol $protocol deployed at http://$name:8789."
 echo 'Stable Tau was not modified.'
