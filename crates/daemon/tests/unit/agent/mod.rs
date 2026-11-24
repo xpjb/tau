@@ -55,7 +55,7 @@ fn completion(text: &str, calls: Vec<Value>) -> Reply {
 fn call(id: &str, name: &str, arguments: Value) -> Value { json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}}) }
 async fn fixture(model: &ModelServer, api: Api) -> (tempfile::TempDir, AgentManager, String, tokio::task::JoinHandle<()>) {
     let root = tempfile::tempdir().unwrap(); let root_path = root.path().to_owned();
-    let config = Config { bind:"127.0.0.1:0".parse().unwrap(), transfer_bind:"127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None, settings_path:root_path.join("settings.json"), import_pi_dir:None, codex_auth_source:None, cwd:root_path.clone(), database_path:root_path.join("tau.sqlite3"),
+    let config = Config { bind:"127.0.0.1:0".parse().unwrap(), transfer_bind:"127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None, settings_path:root_path.join("settings.json"), import_pi_dir:None, codex_auth_source:None, antigravity_bin:None, antigravity_home:None, cwd:root_path.clone(), database_path:root_path.join("tau.sqlite3"),
         telemetry_path:root_path.join("crashes.jsonl"), attachment_root:root_path.join("outbox"), upload_root:root_path.join("uploads") };
     tokio::fs::create_dir_all(&config.attachment_root).await.unwrap();
     let mut settings = Settings::default();
@@ -1246,3 +1246,6 @@ async fn has_saved_events(manager: &AgentManager, session: &str) -> bool {
     let session=session.to_owned();
     manager.inner.state.read(move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE session_id=?1)", [&session], |r|r.get(0))?)).await.unwrap()
 }
+
+#[cfg(unix)]
+mod antigravity;

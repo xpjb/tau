@@ -13,7 +13,7 @@ impl Fixture {
         let config = Config {
             bind: "127.0.0.1:0".parse().unwrap(), transfer_bind: "127.0.0.1:0".parse().unwrap(), transfer_bind_v6: None,
             settings_path: root.path().join("settings.json"),
-            import_pi_dir: None, codex_auth_source: None, cwd: root.path().into(), database_path: root.path().join("tau.sqlite3"),
+            import_pi_dir: None, codex_auth_source: None, antigravity_bin: None, antigravity_home: None, cwd: root.path().into(), database_path: root.path().join("tau.sqlite3"),
             telemetry_path: root.path().join("crashes.jsonl"), attachment_root: root.path().join("outbox"), upload_root: root.path().join("uploads"),
         };
         Self { _root: root, config, settings: Settings::default() }

@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use crate::agent::antigravity;
 use crate::state::SessionModel;
 
 pub use tau_net::settings::*;
@@ -20,7 +21,7 @@ impl SettingsExt for Settings {
         let slug = format!("{}/{}", selected.provider, selected.model_id);
         let parsed: SessionModel = slug.parse().map_err(anyhow::Error::msg)?;
         if parsed != *selected { bail!("Invalid provider/model"); }
-        if !self.providers.contains_key(&selected.provider) { bail!("Configure provider {} in daemon settings", selected.provider); }
+        if selected.provider != antigravity::PROVIDER && !self.providers.contains_key(&selected.provider) { bail!("Configure provider {} in daemon settings", selected.provider); }
         Ok(match self.models.iter().find(|model| model.provider == selected.provider && model.id == selected.model_id) {
             Some(model) => Cow::Borrowed(model),
             None => Cow::Owned(ModelSettings { provider: selected.provider.clone(), id: selected.model_id.clone(), ..ModelSettings::default() }),
@@ -30,13 +31,17 @@ impl SettingsExt for Settings {
         if self.schema != 2 { bail!("Unsupported settings schema {}", self.schema); }
         if self.models.len() > 4096 { bail!("Configure at most 4096 model metadata records"); }
         self.model(&self.agent.model)?;
-        if let Some(model) = &self.daemon.title_model { self.model(model)?; }
+        if self.providers.contains_key(antigravity::PROVIDER) { bail!("Antigravity is a daemon backend, not an HTTP provider"); }
+        if let Some(model) = &self.daemon.title_model {
+            if model.provider == antigravity::PROVIDER { bail!("Use an HTTP provider for automatic titles; Antigravity runs tools"); }
+            self.model(model)?;
+        }
         let mut ids = std::collections::HashSet::new();
         for model in &self.models {
             let slug = format!("{}/{}", model.provider, model.id);
             let parsed: SessionModel = slug.parse().map_err(anyhow::Error::msg)?;
             if parsed.provider != model.provider || model.context_window.is_some_and(|n| !(1024..=100_000_000).contains(&n))
-                || !self.providers.contains_key(&model.provider) || !ids.insert((&model.provider, &model.id)) {
+                || model.provider != antigravity::PROVIDER && !self.providers.contains_key(&model.provider) || !ids.insert((&model.provider, &model.id)) {
                 bail!("Invalid or duplicate model {}", model.id);
             }
         }

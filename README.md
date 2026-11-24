@@ -43,4 +43,5 @@ then stops. Daemon build and deployment are a separate, explicitly approved fina
 operation.
 
 The [Bash launcher](docs/bash-launcher.md) keeps tool scripts out of process
-arguments while preserving independent standard input.
+arguments while preserving independent standard input. See
+[Antigravity CLI](docs/antigravity.md) to opt into the daemon's ACP backend.

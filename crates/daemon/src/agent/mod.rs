@@ -1,4 +1,5 @@
 use crate::settings::SettingsExt;
+pub(crate) mod antigravity;
 pub mod auth;
 mod auth_lock;
 pub mod history;
@@ -39,6 +40,14 @@ impl AgentSession {
     }
 }
 pub fn now_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().try_into().unwrap_or(u64::MAX) }
+
+struct ProcessGroup(Option<u32>);
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)] if let Some(pid) = self.0 { unsafe { libc::kill(-(pid as i32), libc::SIGKILL); } }
+        #[cfg(not(unix))] let _ = self.0;
+    }
+}
 
 impl SessionContent {
     pub async fn append(&mut self, id: &str, value: Value) -> Result<()> { self.commit(id, vec![value], None, None).await }
@@ -186,7 +195,7 @@ impl AgentManager {
         let mut stream_retries = 0u32;
         loop {
             let settings = self.inner.settings.get();
-            let (selected, thinking, cancel, store, tokens) = {
+            let (selected, thinking, cancel, store, tokens, external) = {
                 let mut content = runtime.content.lock().await;
                 if content.agent.as_ref().unwrap().cancel.is_cancelled() { return Ok(()); }
                 let mut queue = content.transcript.as_ref().unwrap().queue.clone();
@@ -204,6 +213,16 @@ impl AgentManager {
                     control.requests.len()
                 } else if settings.agent.steering_mode == SteeringMode::All { queue.requests.len() } else { queue.requests.len().min(1) };
                 let requests = queue.requests.drain(..count).collect::<Vec<_>>();
+                let agent = content.agent.as_ref().unwrap();
+                let transcript = content.transcript.as_ref().unwrap();
+                let external = if agent.model.provider == antigravity::PROVIDER {
+                    anyhow::ensure!(requests.iter().map(|request| request.text.len()).sum::<usize>() <= antigravity::TEXT_LIMIT,
+                        "Queued Antigravity input exceeds 2 MiB; run a smaller queue prefix");
+                    Some(antigravity::Start {
+                        owner: transcript.generation.clone(), previous: transcript.head.clone(), pending: agent.needs_turn,
+                        prompts: requests.iter().map(|request| request.text.clone()).collect(),
+                    })
+                } else { None };
                 let entries = requests.into_iter().map(|request| json!({"type":"message","origin":{"requestId":request.request_id,"requestRevision":request.revision},
                     "message":{"role":"user","content":request.text,"timestamp":request.timestamp_ms}})).collect::<Vec<_>>();
                 if project_prompt.is_none() || !entries.is_empty() {
@@ -216,8 +235,13 @@ impl AgentManager {
                 // Consuming queued messages and saving their user entries is one transaction.
                 content.commit(id,entries,Some(queue),None).await?;
                 let agent = content.agent.as_ref().unwrap();
-                (agent.model.clone(),agent.thinking.clone(),agent.cancel.clone(),agent.store.clone(),agent.tokens)
+                (agent.model.clone(),agent.thinking.clone(),agent.cancel.clone(),agent.store.clone(),agent.tokens,external)
             };
+            if let Some(start) = external {
+                antigravity::execute(self, id, runtime, &store, &settings, &selected, &thinking,
+                    project_prompt.as_deref().unwrap_or_default(), start, &cancel).await?;
+                continue;
+            }
             self.schedule_catalog(&selected);
             // Preparing a provider request cannot own the queue/content mutex.
             // New intents and aborts remain independently durable while this runs.
@@ -242,7 +266,7 @@ impl AgentManager {
             let recovery = provider::Recovery::default();
             let generation = provider::generate(&self.inner.http, &self.inner.auth, provider::Request {
                 settings:&settings, selected:&selected, thinking:&thinking, messages:&messages, session_id:id,
-                definitions:tools::definitions(settings.providers[&selected.provider].api != crate::settings::Api::Codex && settings.models.iter().any(|m|settings.providers[&m.provider].api == crate::settings::Api::Codex)), mode:provider::Mode::Chat, recovery:Some(&recovery),
+                definitions:tools::definitions(settings.providers[&selected.provider].api != crate::settings::Api::Codex && settings.models.iter().any(|m|settings.providers.get(&m.provider).is_some_and(|p|p.api == crate::settings::Api::Codex))), mode:provider::Mode::Chat, recovery:Some(&recovery),
             }, updates);
             tokio::pin!(generation);
             let mut partial = json!({"role":"assistant","content":""});
@@ -356,8 +380,9 @@ impl AgentManager {
         use tokio::io::AsyncReadExt;
         use base64::Engine as _;
         let prompt=args["prompt"].as_str().filter(|p|!p.trim().is_empty() && p.chars().count()<=32000).context("Image prompt must contain 1–32000 characters")?;
-        let selected=settings.models.iter().find(|m|m.provider == settings.agent.model.provider && m.id == settings.agent.model.model_id && settings.providers[&m.provider].api == crate::settings::Api::Codex)
-            .or_else(||settings.models.iter().find(|m|settings.providers[&m.provider].api == crate::settings::Api::Codex)).context("Configure a Codex model/account for image generation")?;
+        let mut codex_models=settings.models.iter().filter(|m|settings.providers.get(&m.provider).is_some_and(|p|p.api == crate::settings::Api::Codex));
+        let selected=codex_models.clone().find(|m|m.provider == settings.agent.model.provider && m.id == settings.agent.model.model_id)
+            .or_else(||codex_models.next()).context("Configure a Codex model/account for image generation")?;
         let selected=SessionModel { provider:selected.provider.clone(),model_id:selected.id.clone() };
         let mut parts=vec![json!({"type":"text","text":prompt})];
         if let Some(paths)=args.get("imagePaths") {
@@ -393,6 +418,7 @@ impl AgentManager {
             let content=runtime.content.lock().await;let agent=content.agent.as_ref().unwrap();
             (agent.model.clone(),agent.thinking.clone(),agent.cancel.clone(),agent.store.clone(),agent.tokens)
         };
+        anyhow::ensure!(selected.provider != antigravity::PROVIDER, "Antigravity manages its own context; Tau /compact does not apply");
         let entries=tokio::select! {_=cancel.cancelled()=>bail!("Compaction cancelled"),result=store.context(id,&selected)=>result?};
         let (first_kept,prefix)={
             let cut = history::compaction_cut(&entries, settings.agent.compaction.keep_recent_tokens)?;
@@ -448,13 +474,14 @@ impl AgentManager {
         if stored.title != "New chat" { return; }
         let settings=self.inner.settings.get();
         let permit=self.inner.title_requests.try_acquire();
-        let generated=if settings.daemon.generate_titles && permit.is_ok() {
+        let title_model = settings.daemon.title_model.as_ref().unwrap_or(&stored.model);
+        let generated=if settings.daemon.generate_titles && permit.is_ok() && title_model.provider != antigravity::PROVIDER {
             let text=bounded(text,8000);
             let messages=vec![json!({"role":"system","content":"Return only a short literal session title, no quotes or commentary."}),
                 json!({"role":"user","content":settings.daemon.title_prompt.replace("{text}",&text)})];
             let (updates,_receiver)=mpsc::channel(1);
             tokio::time::timeout(std::time::Duration::from_secs(30),provider::generate(&self.inner.http,&self.inner.auth,provider::Request {
-                settings:&settings,selected:settings.daemon.title_model.as_ref().unwrap_or(&stored.model),thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Summary,recovery:None,
+                settings:&settings,selected:title_model,thinking:"minimal",messages:&messages,session_id:id,definitions:vec![],mode:provider::Mode::Summary,recovery:None,
             },updates)).await.ok().and_then(Result::ok).and_then(|completion|completion.message["content"].as_str().map(str::to_owned))
                 .map(|title|title.trim().to_owned()).filter(|title|title.chars().count()>1 && title.chars().count()<=tau_net::MAX_TITLE_CHARS && !title.contains(['\n','\r']))
         } else { None };
@@ -468,9 +495,16 @@ impl AgentManager {
     pub fn model_catalog(&self) -> tau_net::ModelCatalog {
         let revision = self.inner.state_clock.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
         let settings = self.inner.settings.get();
-        let mut models = settings.models.iter().map(|m| (format!("{}/{}",m.provider,m.id), Some(m.name.clone())))
-            .collect::<BTreeMap<_,_>>();
+        let enabled = self.inner.config.antigravity_bin.is_some();
+        let mut models = settings.models.iter().filter(|m| enabled || m.provider != antigravity::PROVIDER)
+            .map(|m| (format!("{}/{}",m.provider,m.id), Some(m.name.clone()))).collect::<BTreeMap<_,_>>();
         let mut unresolved_providers = Vec::new();
+        if enabled {
+            models.insert(format!("{}/default", antigravity::PROVIDER), Some("Antigravity CLI default".into()));
+            let available = self.inner.antigravity_models.read().unwrap_or_else(|error| error.into_inner());
+            if let Some(available) = available.as_ref() { models.extend(available.iter().cloned()); }
+            else { unresolved_providers.push(antigravity::PROVIDER.into()); }
+        }
         for provider in settings.providers.keys() {
             let Some(available) = self.inner.catalog.available_models(&settings, provider) else {
                 unresolved_providers.push(provider.clone()); continue;
@@ -491,6 +525,7 @@ impl AgentManager {
         let notice = match name {
             "model" => {
                 let model: SessionModel = arguments.parse().map_err(anyhow::Error::msg)?;
+                anyhow::ensure!(model.provider != antigravity::PROVIDER || self.inner.config.antigravity_bin.is_some(), "Set TAU_ANTIGRAVITY_BIN to enable Antigravity on the daemon");
                 let mut settings = self.inner.settings.get(); settings.model(&model)?;
                 settings.agent.model = model.clone();
                 self.set_settings(settings.revision, settings).await?;

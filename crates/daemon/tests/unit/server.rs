@@ -7,7 +7,7 @@ async fn quota_control_is_read_only_and_returns_an_explicit_unavailable_state() 
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     let root=tempfile::tempdir().unwrap();
     let config=Config {bind:"127.0.0.1:0".parse().unwrap(),transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,
-        settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
+        settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None, antigravity_bin:None, antigravity_home:None,
         cwd:root.path().into(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),
         attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
     let manager=AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
@@ -54,7 +54,7 @@ async fn persists_bounded_crash_reports_with_safe_diagnostics() {
     let log = root.join("crashes.jsonl");
     let config = Config {
         transfer_bind: "127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None,
-        bind: address, settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None, cwd: root.clone(), database_path: root.join("tau.sqlite3"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
+        bind: address, settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None, antigravity_bin:None, antigravity_home:None, cwd: root.clone(), database_path: root.join("tau.sqlite3"), telemetry_path: log.clone(), attachment_root: root.join("outbox"),
         upload_root: root.join("uploads"),
     };
     let manager = AgentManager::new(config.clone(), StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();
@@ -129,7 +129,7 @@ async fn pings_clients_and_reaps_missing_pongs_without_waiting_for_commands() {
     fs::create_dir_all(&root).await.unwrap();
     let config = Config {
         transfer_bind: "127.0.0.1:0".parse().unwrap(), transfer_bind_v6:None,
-        bind: "127.0.0.1:0".parse().unwrap(), settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None,
+        bind: "127.0.0.1:0".parse().unwrap(), settings_path: root.join("settings.json"), import_pi_dir: None, codex_auth_source:None, antigravity_bin:None, antigravity_home:None,
         cwd: root.clone(), database_path: root.join("tau.sqlite3"),
         telemetry_path: root.join("crashes.jsonl"),
         attachment_root: root.join("outbox"), upload_root: root.join("uploads"),
@@ -274,7 +274,7 @@ async fn device_signin_control_keeps_provider_tokens_off_the_wire() {
     let (issuer, oauth, _) = crate::agent::auth::device_login_tests::fixture(false, 30).await;
     let root=tempfile::tempdir().unwrap();
     let config=Config {bind:"127.0.0.1:0".parse().unwrap(),transfer_bind:"127.0.0.1:0".parse().unwrap(),transfer_bind_v6:None,
-        settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None,
+        settings_path:root.path().join("settings.json"),import_pi_dir:None,codex_auth_source:None, antigravity_bin:None, antigravity_home:None,
         cwd:root.path().into(),database_path:root.path().join("tau.sqlite3"),telemetry_path:root.path().join("crashes.jsonl"),
         attachment_root:root.path().join("outbox"),upload_root:root.path().join("uploads")};
     let mut manager=AgentManager::new(config.clone(),StateStore::load(config.database_path.clone()).await.unwrap()).await.unwrap();

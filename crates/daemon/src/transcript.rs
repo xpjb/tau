@@ -168,7 +168,7 @@ impl EventProjection for Event {
         self.kind = match block.get("type").and_then(Value::as_str) {
             Some("text") => { self.text = block.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(); EventKind::Text }
             Some("thinking") => { self.text = block.get("thinking").and_then(Value::as_str).unwrap_or_default().to_owned(); EventKind::Thinking }
-            Some("toolCall") => {
+            Some("toolCall" | "externalTool") => {
                 self.text = block.get("partialArguments").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| match block.get("arguments") {
                     Some(Value::String(text)) => text.clone(), Some(value) => serde_json::to_string_pretty(value).unwrap_or_default(), None => String::new(),
                 });

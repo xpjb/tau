@@ -550,7 +550,8 @@ fn apply_entry(session: &mut StoredSession, entry: &Value) -> Result<()> {
                 Some("assistant") => {
                     session.needs_turn = matches!(message["stopReason"].as_str(),Some("error" | "aborted" | "toolUse"))
                         || message["content"].as_array().is_some_and(|parts| parts.iter().any(|part| part["type"] == "toolCall"));
-                    session.tokens = message["tauModelMessage"]["usage"]["total_tokens"].as_u64();
+                    session.tokens = message["tauModelMessage"]["usage"]["total_tokens"].as_u64()
+                        .or_else(|| message["tauContextTokens"].as_u64());
                 }
                 _ => {},
             }

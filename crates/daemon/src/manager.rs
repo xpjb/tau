@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 use tracing::warn;
 
-use crate::agent::{AgentSession, auth::AuthStore};
+use crate::agent::{AgentSession, antigravity, auth::AuthStore};
 use crate::config::Config;
 use crate::catalog::ModelCatalog;
 use tau_net::{ContextUsage, PromptDisposition, QueueOperation, ServerMessage, SessionStatus, MAX_PROMPT_CHARS, MAX_TITLE_CHARS};
@@ -31,6 +31,7 @@ pub(crate) struct ManagerInner {
     pub auth: AuthStore,
     pub projects: Mutex<()>,
     pub catalog: ModelCatalog,
+    pub antigravity_models: StdRwLock<Option<Vec<(String, Option<String>)>>>,
     pub usage: UsageReader,
     pub catalog_requests: Semaphore,
     pub agent_runs:Semaphore,
@@ -73,7 +74,7 @@ impl AgentManager {
         let catalog = ModelCatalog::load(config.settings_path.with_file_name("model-catalog.json")).await;
         let files = Arc::new(tau_code_viewer::filesystem::FileSystem::new(config.cwd.clone()));
         Ok(Self { inner: Arc::new(ManagerInner { files, config, state, settings, http, auth,
-            projects: Mutex::new(()), catalog, usage:UsageReader::default(), catalog_requests: Semaphore::new(2), agent_runs:Semaphore::new(8), title_requests:Semaphore::new(2), block_imports: Arc::new(Semaphore::new(2)), upload_finishes:Mutex::new(HashMap::new()),upload_publication:Mutex::new(()),
+            projects: Mutex::new(()), catalog, antigravity_models: StdRwLock::new(None), usage:UsageReader::default(), catalog_requests: Semaphore::new(2), agent_runs:Semaphore::new(8), title_requests:Semaphore::new(2), block_imports: Arc::new(Semaphore::new(2)), upload_finishes:Mutex::new(HashMap::new()),upload_publication:Mutex::new(()),
             runtimes: Mutex::new(HashMap::new()), events: broadcast::channel(EVENT_BUFFER).0, shutting_down: AtomicBool::new(false),state_clock:std::sync::atomic::AtomicU64::new(0),#[cfg(test)] settle_gate:std::sync::Mutex::new(None),deleting:std::sync::Mutex::new(HashSet::new()) }) })
     }
     pub(crate) fn context_window(&self, settings: &Settings, model: &SessionModel) -> Option<u64> {
@@ -147,8 +148,39 @@ impl AgentManager {
             let _ = self.inner.events.send(message);
         }
     }
+    pub(crate) fn publish_antigravity_models(&self, session: &serde_json::Value) -> usize {
+        let Some(options) = session["configOptions"].as_array().into_iter().flatten().find(|option| option["category"] == "model")
+            .and_then(|option| option["options"].as_array()) else { return 0; };
+        let mut models = options.iter().take(512).filter_map(|option| {
+            let id = option["value"].as_str().filter(|id| *id != "default")?;
+            let value = format!("{}/{id}", antigravity::PROVIDER);
+            value.parse::<SessionModel>().ok()?;
+            Some((value, option["name"].as_str().map(|name| bounded(name, 160))))
+        }).collect::<Vec<_>>();
+        models.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        models.dedup_by(|a, b| a.0 == b.0);
+        let count = models.len();
+        let mut available = self.inner.antigravity_models.write().unwrap_or_else(|error| error.into_inner());
+        if available.as_ref() != Some(&models) {
+            *available = Some(models);
+            drop(available);
+            let _ = self.inner.events.send(ServerMessage::ModelCatalog { catalog: self.model_catalog() });
+        }
+        count
+    }
     pub async fn refresh_model_catalog(&self, provider: &str) -> Result<String> {
         let settings = self.inner.settings.get();
+        if provider == antigravity::PROVIDER {
+            let _permit = self.inner.catalog_requests.try_acquire().context("Too many model catalog requests in progress")?;
+            anyhow::ensure!(!self.inner.shutting_down.load(Ordering::Acquire), "Tau is shutting down");
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let config = &self.inner.config;
+            let mut client = antigravity::Client::connect(config, Duration::from_secs(settings.agent.http_idle_timeout_seconds), &cancel).await?;
+            let (id, session, _) = client.session(config, None, &cancel).await?;
+            let count = self.publish_antigravity_models(&session);
+            client.close(&id, &cancel).await;
+            return Ok(format!("Refreshed {provider} model catalog: {count} models"));
+        }
         let config = settings.providers.get(provider).context("Configure this provider in daemon settings first")?.clone();
         if !self.inner.catalog.begin(provider, &config, None, true) { bail!("Model catalog refresh is already in progress"); }
         let count = self.resolve_catalog(provider, &config, None, true).await?;
@@ -279,7 +311,11 @@ impl AgentManager {
             anyhow::ensure!(model.is_none(), "Slash commands cannot carry a starting model");
             let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             if tau_net::BUILTIN_COMMANDS.contains(&name) {
-                if name=="compact" && content.agent.as_ref().unwrap().running {bail!("Stop the current run before compacting");}
+                if name == "compact" {
+                    let agent = content.agent.as_ref().unwrap();
+                    if agent.running { bail!("Stop the current run before compacting"); }
+                    if agent.model.provider == antigravity::PROVIDER { bail!("Antigravity manages its own context; Tau /compact does not apply"); }
+                }
                 let receipt = Receipt { model:None, id:request_id.into(),command:Some("builtin".into()),text:text.into(),disposition:PromptDisposition::Handled,finished:false,notice:None,error:None };
                 content.commit(id,Vec::new(),None,Some(receipt.clone())).await?;
                 self.broadcast_sessions().await;
@@ -312,6 +348,7 @@ impl AgentManager {
         }
         let mut model_change = Vec::new();
         if let Some(model) = model {
+            anyhow::ensure!(model.provider != antigravity::PROVIDER || self.inner.config.antigravity_bin.is_some(), "Set TAU_ANTIGRAVITY_BIN to enable Antigravity on the daemon");
             let settings = self.inner.settings.get();
             settings.model(model)?;
             let stored = self.inner.state.get(id).await?.context("Unknown session")?;

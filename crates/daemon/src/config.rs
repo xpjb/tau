@@ -12,6 +12,8 @@ pub struct Config {
     pub import_pi_dir: Option<PathBuf>,
     /// Optional shared Codex credential source; renewal uses the primary Pi file lock.
     pub codex_auth_source: Option<PathBuf>,
+    pub antigravity_bin: Option<PathBuf>,
+    pub antigravity_home: Option<PathBuf>,
     pub cwd: PathBuf,
     pub database_path: PathBuf,
     pub telemetry_path: PathBuf,
@@ -38,6 +40,8 @@ impl Config {
             .unwrap_or_else(|| "/var/lib/tau/settings.json".into());
         let import_pi_dir = std::env::var_os("TAU_IMPORT_PI_DIR").map(PathBuf::from);
         let codex_auth_source = std::env::var_os("TAU_CODEX_AUTH_SOURCE").map(PathBuf::from);
+        let antigravity_bin = std::env::var_os("TAU_ANTIGRAVITY_BIN").map(PathBuf::from);
+        let antigravity_home = std::env::var_os("TAU_ANTIGRAVITY_HOME").map(PathBuf::from);
         let cwd = std::env::var_os("TAU_CWD")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/root".into());
@@ -60,6 +64,8 @@ impl Config {
             || !settings_path.is_absolute()
             || import_pi_dir.as_ref().is_some_and(|path| !path.is_absolute())
             || codex_auth_source.as_ref().is_some_and(|path| !path.is_absolute())
+            || antigravity_bin.as_ref().is_some_and(|path| !path.is_absolute())
+            || antigravity_home.as_ref().is_some_and(|path| !path.is_absolute())
             || !attachment_root.is_absolute()
             || !upload_root.is_absolute()
         {
@@ -73,6 +79,8 @@ impl Config {
             settings_path,
             import_pi_dir,
             codex_auth_source,
+            antigravity_bin,
+            antigravity_home,
             cwd,
             database_path,
             telemetry_path,

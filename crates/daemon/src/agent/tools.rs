@@ -154,14 +154,10 @@ pub async fn execute(config: &Config, settings: &Settings, name: &str, args: &Va
                 .env_remove("TAU_FLAG_TOKEN");
             #[cfg(unix)] process.process_group(0);
             let mut child = process.spawn().context("Could not start bash")?;
-            struct Group(u32);
-            impl Drop for Group {
-                fn drop(&mut self) { #[cfg(unix)] if self.0 != 0 { unsafe { libc::kill(-(self.0 as i32), libc::SIGKILL); } } }
-            }
-            let mut group = Group(child.id().context("Shell has no process ID")?);
+            let mut group = super::ProcessGroup(Some(child.id().context("Shell has no process ID")?));
             let timeout = async { match seconds { Some(seconds) => tokio::time::sleep(std::time::Duration::from_secs(seconds)).await, None => std::future::pending::<()>().await } };
             let status = tokio::select! {
-                result = child.wait() => { let status = result?; group.0 = 0; format!("Exit status: {status}") },
+                result = child.wait() => { let status = result?; group.0 = None; format!("Exit status: {status}") },
                 _ = cancel.cancelled() => "Cancelled".into(),
                 _ = timeout => "Timed out".into(),
             };

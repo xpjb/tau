@@ -262,7 +262,7 @@ pub async fn generate(http: &reqwest::Client, auth: &AuthStore, request: Request
 async fn generate_request(http: &reqwest::Client, auth: &AuthStore, request: Request<'_>, updates: mpsc::Sender<Value>) -> Result<Completion> {
     let Request { settings, selected, thinking, messages, session_id, definitions, mode, recovery } = request;
     let model = settings.model(selected)?;
-    let provider = &settings.providers[&selected.provider];
+    let provider = settings.providers.get(&selected.provider).context("Selected backend is not an HTTP provider")?;
     let decoder: &dyn Decoder = match provider.api { Api::Codex => &codex::Codex, Api::ChatCompletions => &completions::Completions };
     let effort = model.thinking_level_map.get(thinking).cloned().unwrap_or_else(|| match thinking {
         "off" => None, "minimal" => Some("low".into()),
